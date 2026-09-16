@@ -1,0 +1,60 @@
+{
+  "tests_run": 12,
+  "incompatibilities": [
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_alias_matching_is_case_insensitive_and_accepts_shorthand (raw='L')",
+      "kind": "error",
+      "exception": "AttributeError: module 'claude_provision' has no attribute '_resolve_model_alias'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_alias_matching_is_case_insensitive_and_accepts_shorthand (raw='Medium')",
+      "kind": "error",
+      "exception": "AttributeError: module 'claude_provision' has no attribute '_resolve_model_alias'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_alias_matching_is_case_insensitive_and_accepts_shorthand (raw='SMALL')",
+      "kind": "error",
+      "exception": "AttributeError: module 'claude_provision' has no attribute '_resolve_model_alias'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_alias_matching_is_case_insensitive_and_accepts_shorthand (raw='XL')",
+      "kind": "error",
+      "exception": "AttributeError: module 'claude_provision' has no attribute '_resolve_model_alias'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_alias_matching_is_case_insensitive_and_accepts_shorthand (raw='extra-large')",
+      "kind": "error",
+      "exception": "AttributeError: module 'claude_provision' has no attribute '_resolve_model_alias'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_custom_non_tier_alias_keys_are_ignored",
+      "kind": "error",
+      "exception": "AttributeError: module 'claude_provision' has no attribute '_resolve_model_alias'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_no_warning_when_preset_matches_resolved_model",
+      "kind": "failure",
+      "exception": "AssertionError: Lists differ: [\"ANTHROPIC_MODEL='sonnet' is set in the c[205 chars]ly.\"] != []"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_preset_anthropic_model_is_reported_but_not_overwritten",
+      "kind": "failure",
+      "exception": "AssertionError: 'medium' != 'sonnet'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_shorthand_set_matches_go_normalize_model_alias",
+      "kind": "error",
+      "exception": "AttributeError: module 'claude_provision' has no attribute 'MODEL_ALIAS_SHORTHAND'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_size_alias_resolves_through_config_model_aliases",
+      "kind": "failure",
+      "exception": "AssertionError: 'medium' != 'sonnet'"
+    },
+    {
+      "test": "branchyard_scion_test.ModelResolutionTest.test_unmapped_alias_falls_back_to_the_tier_name",
+      "kind": "error",
+      "exception": "AttributeError: module 'claude_provision' has no attribute '_resolve_model_alias'"
+    }
+  ]
+}

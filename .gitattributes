@@ -1,0 +1,5 @@
+* text=auto
+# Preserve upstream bytes across platforms and keep language stats meaningful.
+vendor/** -text -whitespace linguist-vendored
+# Unified patches retain whitespace-only context lines intentionally.
+patches/** whitespace=-blank-at-eol

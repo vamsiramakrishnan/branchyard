@@ -1,0 +1,123 @@
+--- vendor/herdr/src/agent_resume.rs
++++ crates/branchyard-controls/src/resume.rs
+@@ -1,6 +1,11 @@
++// Derived from herdrdev/herdr src/agent_resume.rs, Apache-2.0.
++// Upstream revision: 5f3763dda88e0fefbce14afab7cc2c7232a5e2a8.
++// Modified for Branchyard: removed serialization dependencies; agent kind is
++// a string; plan validates public fields and rejects flag-shaped session IDs.
++// Original source and license are retained in vendor/herdr/.
++// These source labels classify upstream recipes; they do NOT authenticate input.
++
+ use std::path::Path;
+-
+-use serde::{Deserialize, Serialize};
+ 
+ const MAX_SESSION_ID_LEN: usize = 512;
+ const MAX_SESSION_PATH_LEN: usize = 4096;
+@@ -11,8 +16,7 @@
+     pub value: String,
+ }
+ 
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+-#[serde(rename_all = "snake_case")]
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum AgentSessionRefKind {
+     Id,
+     Path,
+@@ -70,13 +74,13 @@
+ }
+ 
+ pub fn persisted_session_from_launch_args(
+-    agent: crate::detect::Agent,
++    agent: &str,
+     args: &[String],
+ ) -> Option<PersistedAgentSession> {
+     let [command, session_id] = args else {
+         return None;
+     };
+-    if agent != crate::detect::Agent::Codex || command != "resume" || session_id.starts_with('-') {
++    if agent != "codex" || command != "resume" || session_id.starts_with('-') {
+         return None;
+     }
+ 
+@@ -134,6 +138,16 @@
+ }
+ 
+ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<AgentResumePlan> {
++    // Public fields can bypass constructors: validate again at the boundary.
++    match session_ref.kind {
++        AgentSessionRefKind::Id
++            if !valid_session_id(&session_ref.value) || session_ref.value.starts_with('-') =>
++        {
++            return None
++        }
++        AgentSessionRefKind::Path if !valid_session_path(&session_ref.value) => return None,
++        _ => {}
++    }
+     if !is_official_agent_source(source, agent) {
+         return None;
+     }
+@@ -324,27 +338,23 @@
+     #[test]
+     fn codex_noncanonical_resume_launch_has_no_explicit_session() {
+         assert_eq!(
+-            persisted_session_from_launch_args(
+-                crate::detect::Agent::Codex,
+-                &["resume".into(), "codex-session".into()]
+-            )
+-            .unwrap()
+-            .session_ref
+-            .value,
++            persisted_session_from_launch_args("codex", &["resume".into(), "codex-session".into()])
++                .unwrap()
++                .session_ref
++                .value,
+             "codex-session"
+         );
++        assert!(
++            persisted_session_from_launch_args("codex", &["resume".into(), "--last".into()])
++                .is_none()
++        );
+         assert!(persisted_session_from_launch_args(
+-            crate::detect::Agent::Codex,
+-            &["resume".into(), "--last".into()]
++            "codex",
++            &["resume".into(), "not-a-session".into(), "--last".into()]
+         )
+         .is_none());
+         assert!(persisted_session_from_launch_args(
+-            crate::detect::Agent::Codex,
+-            &["resume".into(), "not-a-session".into(), "--last".into()]
+-        )
+-        .is_none());
+-        assert!(persisted_session_from_launch_args(
+-            crate::detect::Agent::Codex,
++            "codex",
+             &[
+                 "--remote".into(),
+                 "ws://example.test".into(),
+@@ -857,3 +867,24 @@
+         .is_none());
+     }
+ }
++
++#[cfg(test)]
++mod boundary_tests {
++    use super::*;
++
++    #[test]
++    fn rejects_flag_shaped_ids_and_bypassed_constructors() {
++        for value in ["--last", "", "line\nfeed"] {
++            let session = AgentSessionRef {
++                kind: AgentSessionRefKind::Id,
++                value: value.into(),
++            };
++            assert!(plan("herdr:codex", "codex", &session).is_none());
++        }
++        let session = AgentSessionRef {
++            kind: AgentSessionRefKind::Path,
++            value: "relative.jsonl".into(),
++        };
++        assert!(plan("herdr:pi", "pi", &session).is_none());
++    }
++}

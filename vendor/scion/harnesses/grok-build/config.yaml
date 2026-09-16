@@ -1,0 +1,115 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+harness: grok-build
+image: scion-grok-build:latest
+user: scion
+
+provisioner:
+  type: container-script
+  interface_version: 1
+  lib: vendored
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
+  timeout: 30s
+  lifecycle_events:
+    - pre-start
+  required_image_tools:
+    - python3
+
+config_dir: .grok
+skills_dir: .grok/skills
+interrupt_key: C-c
+instructions_file: .grok/AGENTS.md
+system_prompt_file: .grok/system-prompt.md
+system_prompt_mode: native
+
+model_aliases:
+  small: grok-3-mini
+  medium: grok-4.5
+  large: grok-4.6
+  extra-large: grok-4.6
+
+command:
+  base: ["grok", "--yolo", "--sandbox", "off", "--no-ask-user"]
+  resume_flag: "-c"
+  task_position: after_base_args
+  system_prompt_flag: "--system-prompt-override"
+
+env_template:
+  SCION_AGENT_NAME: "{{ .AgentName }}"
+  NO_COLOR: "1"
+
+capabilities:
+  limits:
+    max_turns: { support: "yes" }
+    max_model_calls: { support: "no", reason: "Grok hooks do not expose model-call start/end events" }
+    max_duration: { support: "yes" }
+  telemetry:
+    enabled: { support: "yes" }
+    native_emitter: { support: "yes" }
+  prompts:
+    system_prompt: { support: "yes" }
+    agent_instructions: { support: "yes" }
+  auth:
+    api_key: { support: "yes" }
+    auth_file: { support: "yes" }
+    oauth_token: { support: "no" }
+    vertex_ai: { support: "yes" }
+  mcp:
+    stdio: { support: "yes" }
+    sse: { support: "yes" }
+    streamable_http: { support: "yes" }
+    project_scope: { support: "no", reason: "Project-scoped MCP not implemented; entries demoted to global" }
+
+no_auth:
+  behavior: drop-to-shell
+  command: grok login --device-auth
+  message: |
+    This agent started without credentials.
+    Run: grok login --device-auth
+    Then run: python3 /home/scion/.scion/harness/capture_auth.py
+
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["XAI_API_KEY"]
+    auth-file:
+      required_files:
+        - name: GROK_AUTH
+          type: file
+          target_suffix: "/.grok/auth.json"
+          field: GrokAuthFile
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT", "SCION_METADATA_PROJECT_ID"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication"
+          field: GoogleAppCredentials
+          target_suffix: "/.config/gcloud/application_default_credentials.json"
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      XAI_API_KEY: api-key
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+      SCION_METADATA_PROJECT_ID: vertex-ai
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
+    files:
+      GROK_AUTH: auth-file
+      gcloud-adc: vertex-ai
