@@ -1,6 +1,6 @@
 # Contributing
 
-Start with [the implementation plan](docs/implementation-plan.md). The next deliverables are durable admission behind the implemented SDK contract and sandbox qualification, followed by one complete remote task. Read [the SDK guide](docs/sdk.md) and [control API obligations](docs/control-api.md).
+Start with [the implementation plan](docs/implementation-plan.md). Durable admission is implemented. The next deliverables are sandbox qualification, fenced execution ownership and one complete remote task. Read [the SDK guide](docs/sdk.md) and [control API obligations](docs/control-api.md).
 
 ## Boundaries to preserve
 

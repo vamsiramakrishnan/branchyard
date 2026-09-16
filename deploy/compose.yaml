@@ -1,0 +1,39 @@
+# Development admission service only. No execution worker or microVM is started.
+services:
+  database:
+    image: ghcr.io/pgmq/pg17-pgmq:v1.13.0
+    environment:
+      POSTGRES_DB: branchyard
+      POSTGRES_PASSWORD: ${BRANCHYARD_DB_PASSWORD:?set a development database password}
+    volumes:
+      - branchyard-database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d branchyard"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      BRANCHYARD_DATABASE_URL: postgres://postgres:${BRANCHYARD_DB_PASSWORD}@database:5432/branchyard
+    command: ["migrate"]
+    depends_on:
+      database:
+        condition: service_healthy
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      BRANCHYARD_DATABASE_URL: postgres://postgres:${BRANCHYARD_DB_PASSWORD}@database:5432/branchyard
+    command: ["serve", "--config", "/config/server.json", "--bind", "0.0.0.0:8787"]
+    ports: ["127.0.0.1:8787:8787"]
+    volumes:
+      - ${BRANCHYARD_SERVER_CONFIG:?set absolute configuration path}:/config/server.json:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  branchyard-database:

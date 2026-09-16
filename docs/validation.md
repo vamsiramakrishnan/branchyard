@@ -1,6 +1,6 @@
 # Validation record
 
-Prepared 16 September 2026. This record covers the controls foundation and SDK/CLI/skill slice, not production harness support.
+Prepared 16 September 2026. This record covers the controls, SDK/CLI/skill and admission server, not production harness support.
 
 ## Passed locally
 
@@ -11,6 +11,7 @@ Prepared 16 September 2026. This record covers the controls foundation and SDK/C
 | Rust controls | 9 resume-control tests pass on Rust 1.90.0 |
 | Protocol | 5 tests cover shape/version rejection, normalization, bounds and example round-trips |
 | SDK HTTP contract | 10 tests cover idempotent replay, changed input, lost acknowledgment, dropped futures, redirects, bounded bodies, cursor checks and concurrent submissions |
+| Server graph/policy | 5 tests cover dynamic descendants, cycles, delegation scope, depth and unsupported capabilities |
 | Distribution and CLI | 6 tests cover extraction, canonical skill parity, deterministic archives, installer refusal, launcher, generated-schema drift and CLI error behavior |
 | Plugin and skill metadata | Plugin-creator validator and skill-creator validator pass locally |
 | Rust formatting and Clippy | Formatting passes; Clippy has no warnings across all targets |
@@ -23,6 +24,17 @@ Prepared 16 September 2026. This record covers the controls foundation and SDK/C
 | Scion Muse Code provisioner | 14 tests pass |
 
 The six passing Scion suites total **239 tests**. These use temporary fixtures and mocked operations; they do not authenticate to model providers or launch production harness sessions. Catalog parsing does not validate every terminal regex against live harness output.
+
+## Real database gate
+
+Six PostgreSQL/PGMQ tests are compiled but explicitly ignored in the database-free
+workspace suite. The separate `postgres` CI job runs them against PGMQ 1.13.0.
+See [server reproduction](server.md#database-acceptance-tests). They test final
+queue-write rollback, concurrent duplicates, scopes, budgets and reconciliation
+after a committed response is lost. They do not simulate database process failure.
+
+Runtime preflight in this workspace fails because `/dev/kvm` and `msb` are absent;
+`qualified` remains false. See [runtime qualification](runtime-qualification.md).
 
 ## Known upstream incompatibility
 
@@ -37,12 +49,14 @@ This compatibility check is not a passing qualification of the Claude provisione
 ## Not validated
 
 - Live loading of the plugin in Codex/Claude or the standalone skill in other hosts.
-- Production HTTP authentication, idempotency retention or graph transactions; SDK tests use fixtures.
+- External identity-provider integration and automatic delegated credential issuance; current authentication uses an operator-managed token-hash registry.
+- PostgreSQL process crash/failover. Real database transaction tests run separately in CI, not in the database-free workspace test command.
 - Runtime isolation, KVM deployment, storage cloning, network enforcement, or startup latency.
 - Any live harness session, provider credential path, ACP exchange, or native driver.
 - The sixteen-profile matrix as deployed support.
 - OpenRig's application-dependent TypeScript contract or Warp's application-dependent AGPL modules as standalone binaries.
-- PostgreSQL/PGMQ execution, recursive budgets, dynamic graph mutation, failover, or Git promotion.
+- Queue consumption, live recursive execution, worker failover or Git promotion.
+- Container build/Compose deployment; no local container runtime is available.
 
 Those are explicit gates in [the implementation plan](implementation-plan.md), not capabilities implied by the passing unit tests.
 

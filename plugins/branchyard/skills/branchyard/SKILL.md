@@ -63,4 +63,5 @@ missing server.
   promotion are later server capabilities; do not claim they occurred.
 
 Report the observed state, IDs and any blocked prerequisite. The current package
-is a client contract, not a production server or proof of sandbox isolation.
+includes a durable admission server. Execution workers and sandbox isolation are
+not yet qualified; a successful operation does not mean a harness ran.

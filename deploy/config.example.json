@@ -1,0 +1,42 @@
+{
+  "tenants": {
+    "development": {
+      "max_reserved_tasks": 32,
+      "max_reserved_cpu_millis": 64000,
+      "max_reserved_memory_mib": 131072,
+      "max_tasks_per_root": 16,
+      "max_root_cpu_millis": 16000,
+      "max_root_memory_mib": 32768,
+      "max_wall_seconds": 3600,
+      "max_depth": 3,
+      "max_children": 4,
+      "harnesses": {},
+      "environments": [
+        "linux-private"
+      ],
+      "policies": [
+        "restricted"
+      ],
+      "repositories": [
+        "example-repo"
+      ]
+    }
+  },
+  "credentials": [
+    {
+      "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "principal": {
+        "tenant": "development",
+        "subject": "operator",
+        "expires_at_unix": 0,
+        "actions": [
+          "read",
+          "create_task",
+          "apply_graph",
+          "cancel_task"
+        ],
+        "subtree": null
+      }
+    }
+  ]
+}

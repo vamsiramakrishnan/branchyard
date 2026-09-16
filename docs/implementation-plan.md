@@ -1,6 +1,6 @@
 # Implementation plan
 
-Revision 4: put the SDK and portable harness surface first, then connect it to
+Revision 5: put the SDK and portable harness surface first, then connect it to
 real server execution. [Straitjacket's mechanisms](straitjacket.md) inform the
 boundaries; its local executor is not the Branchyard backend.
 
@@ -15,19 +15,24 @@ boundaries; its local executor is not the Branchyard backend.
 - Preserved resume controls, 82 pinned upstream assets, integrity checks and the
   explicit Scion Claude compatibility baseline.
 
-No production API server, database schema, scheduler, node, sandbox provider,
-ACP/native driver or integration coordinator exists yet. Test HTTP fixtures are
-not development executors and cannot qualify durability or isolation.
+- `branchyard-server`: authenticated admission, transactional graph/reservation/
+  operation/event writes and PGMQ dispatch. Bootstrap credentials carry tenant,
+  subject, expiry, action and optional subtree restrictions.
+- PostgreSQL/PGMQ integration tests and a dedicated CI database service.
+
+No queue consumer, execution node, sandbox provider, ACP/native driver or
+integration coordinator exists yet. Admission does not qualify runtime isolation.
+Scoped credentials are operator-issued; runtime credential delegation is pending.
 
 ## Ordered slices
 
 | Gate | Deliverable | Acceptance evidence |
 |---|---|---|
 | S0: caller surface — implemented | Shared protocol, Rust SDK, CLI, skill/plugin, scripts | Input/response validation; lost response reconciliation; no automatic retry; concurrent calls; extracted distribution works |
-| S1: durable admission | Axum/Tower API, authenticated principal, SQLx/Postgres operation/state schema, root reservations, transactional PGMQ command | Same request replays; changed input conflicts; stale revision leaves all state unchanged; crash after commit before response reconciles; retention/tombstones prevent identity reuse |
+| S1: durable admission — implemented | Axum/Tower API, authenticated principal, SQLx/Postgres operation/state schema, root reservations, transactional PGMQ command | Same request replays; changed input conflicts; stale revision leaves all state unchanged; crash after commit before response reconciles; retention/tombstones prevent identity reuse |
 | S2: sandbox qualification | Existing Microsandbox SDK/runtime on Linux KVM, provider contract derived from measured behavior | Create, inspect, exec with separate pipes, stop/destroy, private writes, resource/network enforcement without vendor-cloud credentials |
 | S3: one remote task | Node ownership, attempt fencing, source materialization, one ACP driver, artifacts | Submit remotely; client disconnect; same task observed from another client; explicit cancel; recover lost worker acknowledgment |
-| S4: dynamic delegation | Atomic graph deltas, scoped child credentials, root accounting, dependencies | Parent creates child which creates grandchild; no predefined graph; cycles/escalation/budget exhaustion reject atomically |
+| S4: dynamic delegation — graph admission implemented | Atomic graph deltas, scoped child credentials, root accounting, dependencies | Parent creates child which creates grandchild; no predefined graph; cycles/escalation/budget exhaustion reject atomically |
 | S5: workspaces and sharing | Prepared checkpoints, registered component bindings, placement, cache reuse | Private writes after fork; verified revoke before new exclusive writer; no secret inheritance; measured cold/warm critical paths |
 | S6: accepted code | Candidate creation, trusted checks, attestation, promotion intent, Git CAS | Conflict repair; target movement invalidates evidence; recover after ref update before database completion |
 | S7: second driver | Codex App Server or another native profile | Same task API works across ACP and native paths; session/permission differences stay visible |
@@ -37,29 +42,34 @@ S1 and S2 can be developed independently once the allocation identity/fencing
 contract is agreed. S3 needs both. Keep S4 independent of a sixteen-harness roster.
 Do not publish SDK/runtime compatibility claims based on the client fixture.
 
-## First next implementation: admission and reconciliation
+## Next implementation: qualify a runtime, then fence execution
 
-1. Treat `docs/control-api.md` and generated schemas as the initial wire contract.
-   Define a tenant-scoped authentication interface; delegated tokens carry root,
-   subtree, action, resource and expiry restrictions. A task file cannot grant
-   itself authority by naming a permissive profile.
-2. Introduce migrations for operations, task identities/revisions, graph state,
-   reservations and dispatch records. Resolve command identity before effects.
-   Define operation retention, tombstones and read-after-write consistency.
-3. Under a transaction, validate the resulting graph and policy, reserve the root
-   envelope, insert the operation and PGMQ command, and then return its receipt.
-   Treat all client fields as untrusted. Reject unsupported required capabilities.
-4. Persist execution uncertainty separately from HTTP uncertainty. Queue redelivery
-   first reconciles the operation/attempt; it does not reissue an unknown model turn.
-5. Exercise real Postgres crashes and concurrent submissions. Repeat the same
-   SDK/CLI requests against this implementation. Prove transaction behavior rather
-   than making a more realistic in-memory demo.
+Admission uses one PostgreSQL transaction under a tenant row lock. It commits the
+resulting graph, aggregate reservations, task events, operation receipt and PGMQ
+message together. Replays do not enqueue again. Identities are retained indefinitely.
+The database suite tests concurrent duplicates, final queue-write rollback, stale
+revisions, scopes, quotas and a lost HTTP response after the real handler commits.
+This is not yet a database-process crash or failover qualification.
 
-Next, integrate one provider and harness with an explicit attempt generation.
-A worker that reconnects with stale authority cannot claim completion or release
-someone else's resource. Callback filesystem/terminal operations execute inside
-the sandbox, never on the host. Continuous ACP request servicing must remain live
-while a prompt is pending.
+1. Run the [runtime preflight and qualification matrix](runtime-qualification.md)
+   on a Linux KVM node. Derive the provider interface from observed operations and
+   failure behavior before committing a public trait. Keep vendor cloud optional.
+2. Add durable worker claims, attempt generations and leases. PGMQ visibility is
+   delivery coordination, not authority to execute. Reconcile uncertain allocation
+   and model effects before retrying; stale generations cannot publish or release.
+3. Integrate one ACP profile using the maintained protocol client and the runtime's
+   separate stdin/stdout pipes. Service permission and filesystem callbacks while
+   prompts run; all guest filesystem and terminal actions stay in the sandbox.
+4. Mint child credentials through the authenticated server, attenuating parent
+   actions, expiry, subtree and root budget. Do not expose bootstrap tenant tokens
+   to guests. Prove live parent → child → grandchild execution with no fixed graph.
+5. Add candidate artifacts, trusted validation and Git compare-and-swap promotion.
+   A successful admission operation is not an execution or integration result.
+
+The local implementation environment has no KVM device or container runtime.
+Preflight fails explicitly; it does not substitute process isolation or report a
+sandbox qualification. A provisioned KVM node and one harness credential are the
+external prerequisites for the execution milestones.
 
 ## Packaging and extensions
 

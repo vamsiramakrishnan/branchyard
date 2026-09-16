@@ -12,4 +12,4 @@
 | [Validation](validation.md) | What has actually passed, what failed upstream, and what remains untested? |
 | [Third-party notices](../THIRD_PARTY.md) | Which revisions and licenses apply to the copied sources? |
 
-The architecture and driver documents specify the future execution backend. The SDK, CLI and skill/plugin implement the caller contract and are tested against HTTP fixtures. Production execution remains unimplemented.
+The architecture and driver documents specify the future execution backend. The SDK, CLI and skill/plugin implement the caller contract. The [admission server](server.md) persists graph edits and dispatch in PostgreSQL/PGMQ; execution remains unimplemented. See [runtime qualification](runtime-qualification.md) for the next gate.

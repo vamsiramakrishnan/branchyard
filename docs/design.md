@@ -454,7 +454,7 @@ If the critical path is source transfer, optimize data placement. If it is SDK s
 
 ## 15. Implementation plan
 
-The ordered milestones, owners, dependencies, and acceptance gates are in [the implementation plan](implementation-plan.md). The foundation establishes researched controls; the next slice implements the SDK/CLI/skill contract and HTTP conformance fixtures. Fixtures do not implement production execution. The roadmap now starts with durable server admission behind that contract.
+The ordered milestones, owners, dependencies, and acceptance gates are in [the implementation plan](implementation-plan.md). The controls, SDK/CLI/skill contract and durable PostgreSQL admission server are implemented. The next slice qualifies the existing sandbox runtime and adds fenced execution ownership. See [server scope](server.md); admission is not production execution.
 
 Qualify the public sandbox SDK before implementing a scheduler around its assumed capabilities. In parallel engineering work, the control/state, execution/harness, and workspace/integration lanes can proceed once their shared contracts are agreed. Pair on ownership fencing and Git/database recovery.
 

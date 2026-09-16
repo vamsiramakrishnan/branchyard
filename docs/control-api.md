@@ -1,9 +1,9 @@
 # Control API v1alpha1
 
-Status: implemented Rust types and HTTP client; production server implementation
-pending. [Generated schemas](../schema/contract.json) describe wire shape. The
-following server obligations are acceptance criteria, not guarantees supplied by
-the current client or test fixture.
+Status: Rust protocol, HTTP client and PostgreSQL-backed admission server are
+implemented. [Generated schemas](../schema/contract.json) describe wire shape;
+[server deployment](server.md) describes the implemented boundary. Execution and
+worker-side guarantees below remain acceptance criteria until a worker is shipped.
 
 ## Requests and identity
 
@@ -39,8 +39,10 @@ to create another task. A receipt binds its operation ID and fingerprint and mea
 **durable admission**, before remote allocation or model completion.
 
 Operation records and tombstones must outlive the documented retry horizon. An
-expired identity must be rejected, not silently treated as new. The production
-server must publish its retention contract before SDK retries are enabled.
+expired identity must be rejected, not silently treated as new. The current server
+retains operation, task and event identities indefinitely; no deletion/TTL endpoint
+exists. Replay is restricted to the original principal subject and current task
+scope. Automatic SDK retries remain disabled.
 
 ## Commands
 

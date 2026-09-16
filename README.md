@@ -8,8 +8,9 @@ dynamic graph changes, workspace isolation, resource access and eventual integra
 The topology develops during execution; it is not a statically configured committee.
 
 > **Early development:** the Rust protocol, remote SDK, JSON CLI and portable
-> skill/plugin are implemented and tested against HTTP fixtures. The production
-> server, sandbox execution, harness drivers and validated merging remain planned.
+> skill/plugin and PostgreSQL-backed admission server are implemented. Admission
+> persists dynamic graph edits and dispatch atomically. Sandbox workers, harness
+> execution and validated merging remain planned; `execution_ready` is false.
 > Installing the plugin does not provision a sandbox or start a worker.
 
 ## Try it now
@@ -51,6 +52,7 @@ Dropping a client does not cancel work. Cancellation is an explicit command.
 | `branchyard-sdk` | Async HTTP client; pooled connections, explicit deadlines, bounded responses, identity checks and uncertain-outcome reconciliation |
 | `branchyard` CLI | Offline describe/validate, remote submit/reconcile/inspect, readiness and event pages; JSON output |
 | Skill and plugin | One canonical skill, Codex/Claude manifests, standalone installer, launcher and reproducible archives |
+| `branchyard-server` | Axum API, scoped bootstrap credentials, PostgreSQL graph/reservations/events and transactional PGMQ dispatch |
 | `branchyard-controls` | Tested resume recipes adapted from Herdr |
 | Upstream controls | 82 pinned files from Scion, Herdr, OpenRig and Warp, with hashes and license boundaries |
 
@@ -89,9 +91,9 @@ flowchart TD
     Plugin["Plugin / skill / scripts"] --> CLI["JSON CLI"]
     CLI --> SDK["Rust SDK"]
     App["Custom meta-harness"] --> SDK
-    SDK --> Server["Server admission and policy — planned"]
+    SDK --> Server["Durable admission and scopes"]
     Server --> State["PostgreSQL and durable commands"]
-    Server --> Nodes["Execution nodes"]
+    Server --> Nodes["Execution nodes — planned"]
     Nodes --> Sandboxes["Isolated harnesses"]
     Sandboxes -->|"Scoped delegation"| Server
     Sandboxes --> Results["Artifacts and candidates"]
@@ -104,8 +106,8 @@ conversation fork. Shared components require explicit access and enforced owners
 Graph proposals change ownership/dependencies at runtime; physical placement is
 an independent decision.
 
-The planned backend uses Tokio/Axum, SQLx/PostgreSQL, PGMQ, Cedar, OpenDAL and
-Tonic. Existing runtimes provide virtualization and guest execution. The first
+The admission backend uses Tokio/Axum, SQLx/PostgreSQL and PGMQ. Cedar, OpenDAL
+and Tonic remain proposed execution-layer dependencies. Existing runtimes provide virtualization and guest execution. The first
 qualification target is the [Microsandbox open runtime](https://microsandbox.dev/)
 on Linux servers; its private-beta hosted service is not a dependency. Prepared
 images, cached source and available warm capacity will be measured separately
@@ -130,10 +132,14 @@ driver against the same contract before expanding the roster.
 
 ## Build next
 
-The next gate is durable server admission: authenticate, validate, reserve, write
-the operation and queue command in one transaction, then survive a lost response.
-Sandbox qualification and one remote task follow. Recursive execution, shared
-resource fencing and validated Git promotion each have separate acceptance gates.
+Run the [admission server](docs/server.md) against PostgreSQL/PGMQ. It supports
+atomic graph proposals, including a parent and grandchild introduced together,
+and reconciliation after a lost response. It does not consume the dispatch queue.
+
+The next gate is [runtime qualification](docs/runtime-qualification.md) on Linux
+KVM, then a fenced worker and one ACP harness. Automatic delegated credentials,
+recursive execution, shared-resource fencing and validated Git promotion each
+have separate acceptance gates.
 
 - [SDK and packaging guide](docs/sdk.md)
 - [Control API and server obligations](docs/control-api.md)

@@ -1,8 +1,8 @@
 # SDK and harness surface
 
 The implemented surface is a remote Rust client, a JSON CLI and a portable skill.
-They share one versioned contract. The production server, execution nodes and
-sandbox drivers are not implemented yet. Tests use an HTTP fixture, not a local
+They share one versioned contract. The admission server is implemented; execution nodes and
+sandbox drivers are not. Client-only tests use an HTTP fixture, not a local
 execution mode. Nothing here launches a model or runs a workspace command.
 
 ## Start without a server
