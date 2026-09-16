@@ -1,6 +1,6 @@
 # Contributing
 
-Start with [the implementation plan](docs/implementation-plan.md). The next deliverable is the domain/provider contract and sandbox qualification, followed by one complete remote task. The current crate only provides resume recipes.
+Start with [the implementation plan](docs/implementation-plan.md). The next deliverables are durable admission behind the implemented SDK contract and sandbox qualification, followed by one complete remote task. Read [the SDK guide](docs/sdk.md) and [control API obligations](docs/control-api.md).
 
 ## Boundaries to preserve
 
@@ -10,6 +10,10 @@ Start with [the implementation plan](docs/implementation-plan.md). The next deli
 - Reject unsupported required capabilities. Do not silently weaken isolation, permission handling, or resume semantics.
 - Treat uncertain effects as unknown until reconciled. A retryable queue message does not make a model turn idempotent.
 - Bind acceptance to the exact candidate, environment, and policy. Check target movement before promotion.
+
+## Extending the caller surface
+
+Keep one operation contract in `branchyard-protocol`; SDK, CLI and future tools share it. Regenerate `schema/contract.json` using `branchyard describe` when types change. Preserve strict version negotiation and uncertain-outcome behavior. The canonical skill lives in `plugins/branchyard/skills/branchyard`; generate standalone copies with `tools/package.py`. Run extraction tests from an empty directory, not only the source checkout. Never add local execution as a client fallback.
 
 ## Changing copied controls
 

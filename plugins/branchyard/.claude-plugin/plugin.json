@@ -1,0 +1,9 @@
+{
+  "name": "branchyard",
+  "version": "0.0.1",
+  "description": "Portable Branchyard remote control skill. Requires the Branchyard CLI and a compatible server.",
+  "author": {"name": "Branchyard contributors"},
+  "repository": "https://github.com/vamsiramakrishnan/branchyard",
+  "license": "Apache-2.0",
+  "skills": "./skills/"
+}

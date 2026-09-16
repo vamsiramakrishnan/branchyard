@@ -10,10 +10,10 @@ Use the existing [Rust ACP SDK](https://docs.rs/agent-client-protocol/latest/age
 
 | Boundary | Interface | Authority |
 |---|---|---|
-| Application → Branchyard | Rust SDK over HTTPS commands and SSE | Authenticated user or delegated run |
+| Application → Branchyard | Rust SDK over HTTPS commands and paged events; SSE planned | Authenticated user or delegated run |
 | Branchyard server → node | Versioned RPC over mTLS | Allocation lease and attempt generation |
 | Node → harness | ACP or qualified native protocol | Specific sandbox, session, and permission policy |
-| Harness → Branchyard tools | MCP or thin CLI | Attenuated run identity; same domain API |
+| Harness → Branchyard tools | Thin CLI implemented; MCP planned | Attenuated run identity; same domain API |
 | Harness → other systems | Registered tools and allowed network routes | Explicit tool/service credentials |
 
 MCP offers tools to a harness. ACP controls an agent session. Neither defines Branchyard's scheduling, durable graph mutations, root budgets, or Git promotion protocol. A2A may later expose remote peer agents, but is not required to supervise these local-to-the-server processes.

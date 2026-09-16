@@ -23,3 +23,6 @@ target
 # Python validation tools
 __pycache__/
 *.pyc
+
+# Generated distribution archives
+dist/

@@ -1,98 +1,151 @@
 # Branchyard
 
-**A Rust SDK for building meta-harnesses that control other coding harnesses on servers.**
+**A Rust SDK for meta-harnesses that control other coding harnesses on servers.**
 
-A meta-harness decides how to divide work, which harnesses to use, when to create children, and which results to pursue. Branchyard supplies the control operations: execution, resource access, durable state, and validated integration.
+Your harness decides how to divide work, which collaborators to create, and what
+to do with their results. Branchyard provides the control contract for tasks,
+dynamic graph changes, workspace isolation, resource access and eventual integration.
+The topology develops during execution; it is not a statically configured committee.
 
-The topology develops during execution. You define capabilities, budgets, and acceptance rules. The meta-harness creates and revises its collaborators as it discovers work.
+> **Early development:** the Rust protocol, remote SDK, JSON CLI and portable
+> skill/plugin are implemented and tested against HTTP fixtures. The production
+> server, sandbox execution, harness drivers and validated merging remain planned.
+> Installing the plugin does not provision a sandbox or start a worker.
 
-> **Early development.** This repository contains the researched design, a tested Rust controls crate, and pinned upstream control sources. The public task SDK, server, sandbox integration, and harness drivers are specified but not implemented.
+## Try it now
 
-## What you can build
+Build with the pinned Rust 1.90 toolchain and platform C/CMake build tools:
 
-A parent running Claude Code could delegate a parser change to Codex, request a review from Gemini CLI, and create another child when a dependency emerges. Each child receives a workspace, a resource budget, and scoped access. Children can delegate further when authorized. Their changes return as candidates for validation and integration.
+```sh
+cargo build --locked -p branchyard-cli
+./target/debug/branchyard describe
+./target/debug/branchyard validate --file examples/commands/create-task.json
+./target/debug/branchyard new-id
+```
 
-The system is designed to support:
+These commands run without server or model credentials. The JSON examples are
+request templates; their profile names, IDs and revisions are not live resources.
+For an installed binary: `cargo install --locked --path crates/branchyard-cli`.
+The crates are not yet published to crates.io.
 
-- **Dynamic delegation:** Create children, exchange messages, and change dependencies at runtime.
-- **Server execution:** Run harnesses in isolated sandboxes with explicit compute, storage, and network limits.
-- **Selective sharing:** Use private workspaces, shared read-only components, or coordinated mutable resources.
-- **Durable supervision:** Preserve task state across client disconnects and reconcile failed execution attempts.
-- **Validated merging:** Check exact candidate changes and promote them only against the expected target revision.
+With a compatible server and a scoped credential supplied through
+`BRANCHYARD_ENDPOINT` and `BRANCHYARD_TOKEN`:
 
-A task, a conversation, a sandbox, and a code branch have separate identities. Forking a conversation does not automatically copy its filesystem or credentials.
+```sh
+branchyard doctor
+branchyard call --file request.json
+branchyard reconcile --file request.json
+branchyard task TASK_UUID
+branchyard events TASK_UUID --after 0 --limit 50
+```
 
-## Architecture
+Persist the request before submitting it. A timeout can follow successful
+admission: reconcile the same operation ID instead of creating another task.
+Dropping a client does not cancel work. Cancellation is an explicit command.
 
-Clients submit work and observe results. All managed harness execution happens on servers.
+## One contract, several entry points
+
+| Component | What is implemented |
+|---|---|
+| `branchyard-protocol` | Typed identities, task specs, graph deltas, cancellation, receipts, bounded event pages and generated JSON schemas |
+| `branchyard-sdk` | Async HTTP client; pooled connections, explicit deadlines, bounded responses, identity checks and uncertain-outcome reconciliation |
+| `branchyard` CLI | Offline describe/validate, remote submit/reconcile/inspect, readiness and event pages; JSON output |
+| Skill and plugin | One canonical skill, Codex/Claude manifests, standalone installer, launcher and reproducible archives |
+| `branchyard-controls` | Tested resume recipes adapted from Herdr |
+| Upstream controls | 82 pinned files from Scion, Herdr, OpenRig and Warp, with hashes and license boundaries |
+
+The CLI and skill call the SDK's operations. They contain no second planner,
+execution engine or task journal. The plugin follows
+[lessons from Straitjacket](docs/straitjacket.md): shared mechanisms, explicit
+capabilities, bounded evidence and distribution checks outside the source tree.
+
+## Use it from a harness
+
+Any harness with a terminal can call the CLI. A custom Rust harness can use
+`branchyard-sdk`; other clients can use the [HTTP contract](docs/control-api.md).
+ACP is not required to call Branchyard.
+
+Install the [plugin](plugins/branchyard/README.md), or copy its canonical skill
+into a host's explicitly chosen skill directory:
+
+```sh
+python3 plugins/branchyard/scripts/install_skill.py --destination /path/to/project/.agents/skills
+python3 plugins/branchyard/scripts/install_skill.py --destination /path/to/project/.agents/skills --apply
+python3 tools/package.py --output dist
+```
+
+The installer previews first and refuses to overwrite an existing skill. Install
+one form per host. Archives include the skill and scripts; the CLI is installed
+separately. Packaging is tested; live plugin loading in every host is not qualified.
+MCP-only hosts need a future adapter; no MCP facade is shipped yet.
+
+## Server architecture
+
+All managed harness execution belongs on servers. Clients prepare, submit and
+observe remote work.
 
 ```mermaid
 flowchart TD
-    Client["Rust SDK / CLI / web"] --> Server["Branchyard server"]
+    Plugin["Plugin / skill / scripts"] --> CLI["JSON CLI"]
+    CLI --> SDK["Rust SDK"]
+    App["Custom meta-harness"] --> SDK
+    SDK --> Server["Server admission and policy — planned"]
     Server --> State["PostgreSQL and durable commands"]
     Server --> Nodes["Execution nodes"]
-    Nodes --> Sandboxes["Isolated harness sandboxes"]
-    Sandboxes -->|"Delegated control requests"| Server
-    Nodes --> Artifacts["Artifacts and candidates"]
-    Artifacts --> Checks["Validation and guarded promotion"]
-    Server --> Checks
+    Nodes --> Sandboxes["Isolated harnesses"]
+    Sandboxes -->|"Scoped delegation"| Server
+    Sandboxes --> Results["Artifacts and candidates"]
+    Results --> Integration["Validation and guarded promotion"]
 ```
 
-The planned Rust services use Tokio, Axum/Tower, SQLx/PostgreSQL, PGMQ, Cedar, OpenDAL, and Tonic. Existing sandbox runtimes supply virtualization and guest execution. The first provider to qualify is the [Microsandbox open runtime](https://microsandbox.dev/) on Linux servers. Access to its private-beta cloud service is not a dependency.
+A task, conversation, sandbox, workspace and integration candidate have distinct
+identities. Forking a workspace does not inherit credentials or imply a native
+conversation fork. Shared components require explicit access and enforced ownership.
+Graph proposals change ownership/dependencies at runtime; physical placement is
+an independent decision.
 
-Fast startup comes from prepared images, cached repository objects, private writable state, and available server capacity. Warm and cold startup paths will be measured separately. No latency guarantee is claimed yet.
+The planned backend uses Tokio/Axum, SQLx/PostgreSQL, PGMQ, Cedar, OpenDAL and
+Tonic. Existing runtimes provide virtualization and guest execution. The first
+qualification target is the [Microsandbox open runtime](https://microsandbox.dev/)
+on Linux servers; its private-beta hosted service is not a dependency. Prepared
+images, cached source and available warm capacity will be measured separately
+from harness startup. No sub-second latency result is claimed.
 
-## Harness interfaces
+## Controlling other harnesses
 
-| Interface | Purpose |
+The inbound SDK/CLI is separate from the server's outbound driver interfaces:
+
+| Interface | Responsibility |
 |---|---|
-| Rust SDK and server API | Durable task, graph, resource, and integration operations |
-| ACP | A common client protocol for controlling compatible harness sessions |
-| Native drivers | Harness-specific session, turn, permission, and lifecycle controls |
-| MCP tools or thin CLI | Let a harness call Branchyard's control operations |
+| Branchyard SDK / HTTP / CLI | Tasks, graph proposals, observation and recovery |
+| ACP client | Control a compatible harness session inside a sandbox |
+| Native driver | Preserve harness-specific sessions, permissions and lifecycle |
+| Future MCP tools | Let an MCP host invoke the same Branchyard operations |
 
-Use one ACP client alongside native drivers where required. Codex's App Server, Claude's Agent SDK, Antigravity's streaming CLI, and Pi-family RPC interfaces need their own qualified profiles. A structured JSON stream alone does not establish permission control or reliable recovery.
-
-The [integration design](docs/harness-integration.md) covers **16 harnesses**: Claude Code, Codex, Antigravity, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Pi, Goose, Aider, Cursor, GitHub Copilot, Amp, Qwen Code, Kimi CLI, and Hermes. This is a researched target matrix, not a claim of deployed support.
-
-## What is in this commit
-
-| Component | Status |
-|---|---|
-| `branchyard-controls` | Dependency-free Rust resume recipes adapted from Herdr; nine tests pass |
-| Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |
-| Herdr controls | Original resume source and 22 terminal-observation manifests |
-| OpenRig controls | Launch/readiness contract and configuration fragments; not a standalone adapter |
-| Warp controls | Separate AGPL source references for process supervision; excluded from the Rust build |
-| Architecture and plan | Server design, harness contracts, implementation milestones, and release gates |
-
-All **82 vendored files** retain upstream revisions, licenses, Git blob IDs, and SHA-256 hashes. Adaptations are recorded outside `vendor/`. [Vendoring decisions](docs/vendoring.md) explain their intended use. [Replicas](https://replicas.dev/) remains a product reference; no licensed runtime source was identified to copy.
-
-Scion's Claude provisioner and its model-alias tests disagree at the pinned revision. CI reproduces that exact incompatibility separately; the provisioner remains unqualified. See [validation](docs/validation.md).
-
-## Try the current controls crate
-
-Use the pinned Rust toolchain and Python 3.12. These commands validate the foundation without provider credentials or a sandbox host:
-
-```sh
-cargo test --workspace --locked --offline
-cargo run --locked --offline -p branchyard-controls --example plan_resume
-python3 tools/verify_vendor.py
-python3 tools/test_scion.py --qualified
-python3 tools/check_scion_compatibility.py
-```
-
-The example prints a resume argument vector. It does not launch a harness. The crate does not authorize sessions; callers must verify tenant, workspace, session ownership, and executable compatibility before using a recipe.
+The [driver research](docs/harness-integration.md) covers Claude Code, Codex,
+Antigravity, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Pi, Goose, Aider,
+Cursor, GitHub Copilot, Amp, Qwen Code, Kimi CLI and Hermes. These sixteen are
+integration targets, not deployed support. Qualify one ACP profile and one native
+driver against the same contract before expanding the roster.
 
 ## Build next
 
-Start with one complete remote task: shared contracts, a qualified sandbox provider, durable commands, one harness driver, and artifact capture. Then add dynamic children, resource sharing, guarded integration, and additional profiles.
+The next gate is durable server admission: authenticate, validate, reserve, write
+the operation and queue command in one transaction, then survive a lost response.
+Sandbox qualification and one remote task follow. Recursive execution, shared
+resource fencing and validated Git promotion each have separate acceptance gates.
 
-- [Architecture](docs/design.md): ownership, topology, compute, networking, storage, budgets, and recovery.
-- [Harness integration](docs/harness-integration.md): interfaces, callback placement, session semantics, and qualification.
-- [Implementation plan](docs/implementation-plan.md): ordered milestones and acceptance gates.
-- [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
+- [SDK and packaging guide](docs/sdk.md)
+- [Control API and server obligations](docs/control-api.md)
+- [Architecture](docs/design.md)
+- [Implementation plan](docs/implementation-plan.md)
+- [Validation and reproduction](docs/validation.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## License
 
-Branchyard-authored code is **Apache-2.0**. Vendored components retain their upstream licenses. `vendor/warp-agpl/` contains AGPL source references and is not linked into the Apache-licensed crate. The repository therefore contains multiple licenses. See [third-party notices](THIRD_PARTY.md).
+Branchyard-authored code is **Apache-2.0**. Vendored components retain upstream
+licenses. `vendor/warp-agpl/` contains unlinked AGPL source references, excluded
+from the Rust build. Scion's pinned Claude provisioner has a recorded test mismatch
+and remains unqualified. See [third-party notices](THIRD_PARTY.md),
+[vendoring decisions](docs/vendoring.md) and [validation](docs/validation.md).

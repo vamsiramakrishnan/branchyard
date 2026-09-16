@@ -1,9 +1,9 @@
-name: Verify foundation
+name: Verify Branchyard
 on: [push, pull_request]
 permissions:
   contents: read
 concurrency:
-  group: foundation-${{ github.ref }}
+  group: branchyard-${{ github.ref }}
   cancel-in-progress: true
 env:
   PYTHONDONTWRITEBYTECODE: '1'
@@ -23,6 +23,9 @@ jobs:
       - run: python tools/test_scion.py --qualified
       - name: Verify recorded upstream Claude incompatibility
         run: python tools/check_scion_compatibility.py
+      - run: cargo fetch --locked
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace --locked --offline
+      - run: cargo build --locked --offline -p branchyard-cli
+      - run: python -m unittest discover -s tests -p 'test_*.py' -v
       - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings

@@ -1,8 +1,8 @@
 # Branchyard: Rust SDK for meta-harnesses
 
-Design revision 3 · 16 September 2026 · Architecture specification
+Design revision 4 · 16 September 2026 · Architecture specification
 
-Repository: [vamsiramakrishnan/branchyard](https://github.com/vamsiramakrishnan/branchyard). The initial commit contains a controls crate and tested upstream assets. Server, SDK, node, and integration operations below are implementation specifications, not shipped services.
+Repository: [vamsiramakrishnan/branchyard](https://github.com/vamsiramakrishnan/branchyard). The repository now implements the versioned client contract, remote SDK, CLI and portable skill/plugin, in addition to controls and upstream assets. The server, node, sandbox execution and integration operations below remain specifications. See [the implemented SDK surface](sdk.md) and [wire contract](control-api.md).
 
 ## 1. Decision
 
@@ -58,9 +58,9 @@ Keep three boundaries explicit:
 
 Branchyard does not require a new model loop or a prebuilt planner agent. A custom Rust service can drive its SDK, or an existing harness can invoke the same operations through tools. A managed root meta-harness may itself run in a server-side sandbox. Any child with delegated rights can act as a meta-harness for its subtree.
 
-The public Rust crate should be named branchyard, subject to package-name availability. It is a typed asynchronous client of the reference backend. Keep the domain engine in an internal crate; do not require SDK consumers to link a VMM, SQL client, Wasmtime or policy engine.
+The current public client crate is `branchyard-sdk`, with shared wire types in `branchyard-protocol`. Crates are not published yet. It is a typed asynchronous client of the reference backend. Keep the domain engine in an internal crate; do not require SDK consumers to link a VMM, SQL client, Wasmtime or policy engine.
 
-Proposed SDK operations, not an implemented API:
+The following higher-level ergonomic API remains proposed. The implemented alpha client exposes `submit`, `reconcile`, `operation`, `task`, `info` and paged `events` over the shared command contract:
 
 ~~~text
 Client.connect(endpoint, credential_provider)
@@ -311,7 +311,7 @@ Tenant fairness applies before node selection. Limit launch bursts, CPU, memory,
 
 ## 10. Protocol and extensibility
 
-Public interface: HTTPS JSON commands and SSE event streams through Axum. The public Rust SDK uses this endpoint and owns typed handles, credential refresh integration, bounded observation and idempotency-aware retry behavior. Use request IDs, idempotency keys, structured errors, bounded payloads and resumable event cursors.
+Target public interface: HTTPS JSON commands and SSE event streams through Axum. The implemented alpha SDK uses HTTPS commands and paged events with bounded observation and explicit reconciliation. Typed ergonomic handles, credential refresh and SSE remain future work. No mutation is automatically retried. Use request IDs, idempotency keys, structured errors, bounded payloads and resumable event cursors.
 
 Internal interface: Tonic/Prost over authenticated TLS connections. Separate control streams from log/bulk channels. Retain reconnect acknowledgments and generations at the application layer; transport reconnection alone does not provide durability.
 
@@ -454,7 +454,7 @@ If the critical path is source transfer, optimize data placement. If it is SDK s
 
 ## 15. Implementation plan
 
-The ordered milestones, owners, dependencies, and acceptance gates are in [the implementation plan](implementation-plan.md). The first commit establishes researched contracts and a reusable controls crate. It does not claim to implement a fake server or any of the proposed SDK task methods.
+The ordered milestones, owners, dependencies, and acceptance gates are in [the implementation plan](implementation-plan.md). The foundation establishes researched controls; the next slice implements the SDK/CLI/skill contract and HTTP conformance fixtures. Fixtures do not implement production execution. The roadmap now starts with durable server admission behind that contract.
 
 Qualify the public sandbox SDK before implementing a scheduler around its assumed capabilities. In parallel engineering work, the control/state, execution/harness, and workspace/integration lanes can proceed once their shared contracts are agreed. Pair on ownership fencing and Git/database recovery.
 

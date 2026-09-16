@@ -1,79 +1,102 @@
 # Implementation plan
 
-The first commit captures the architecture and reusable controls. Build the next slices in dependency order. Ship a complete remote task before expanding the harness roster.
+Revision 4: put the SDK and portable harness surface first, then connect it to
+real server execution. [Straitjacket's mechanisms](straitjacket.md) inform the
+boundaries; its local executor is not the Branchyard backend.
 
-## Current foundation
+## Implemented foundation
 
-- Rust workspace with a dependency-free resume control crate and preserved upstream tests.
-- 82 unchanged upstream files with commit pins, Git blob IDs, SHA-256, and licenses.
-- Scion provisioning tests and an explicit compatibility exclusion for its Claude model-alias mismatch.
-- Architecture, harness interface design, vendoring decisions, and validation records.
+- `branchyard-protocol`: identities, versioned command/read contracts, local
+  validation, input fingerprints and generated schemas.
+- `branchyard-sdk`: pooled async remote client, deadlines, bounded bodies,
+  receipt checks and uncertain-submission reconciliation.
+- CLI, canonical skill, Codex/Claude manifests, explicit installer, launcher,
+  reproducible archives and extraction tests outside the checkout.
+- Preserved resume controls, 82 pinned upstream assets, integrity checks and the
+  explicit Scion Claude compatibility baseline.
 
-The task SDK, database schema, server, node, driver registry, and integration coordinator do not yet exist. Crate names below describe intended modules, not empty crates created to imply progress.
+No production API server, database schema, scheduler, node, sandbox provider,
+ACP/native driver or integration coordinator exists yet. Test HTTP fixtures are
+not development executors and cannot qualify durability or isolation.
 
-## Milestones and acceptance gates
+## Ordered slices
 
-| Milestone | Deliverable | Depends on | Gate |
-|---|---|---|---|
-| M1: contracts | Domain identities, capability types, command/event schema, fake provider and fake harness | Foundation | Type-level separation of task/run/attempt/session/workspace; duplicate command and stale revision tests |
-| M2: runtime qualification | Existing Microsandbox SDK/runtime on a Linux KVM host | M1 provider contract | Create, exec with independent pipes, inspect, stop, destroy, private writes, resource/network enforcement; no vendor-cloud credentials |
-| M3: durable commands | PostgreSQL schema, SQLx transactions, PGMQ delivery, operation lookup | M1 | Commit-and-timeout reconciliation; duplicate delivery; crash before acknowledgment; no repeated unknown external effect |
-| M4: one remote task | Thin SDK, server, node, one ACP harness, artifacts | M2, M3 | Submit remotely, disconnect client, reconnect from another client, observe same task, cancel, inspect result |
-| M5: dynamic delegation | Atomic graph proposals, root budgets, scoped capabilities, dependencies | M4 | Parent creates child which creates grandchild; no predefined graph; invalid delta leaves state and reservations unchanged |
-| M6: prepared workspaces | Environment/source checkpoints, explicit sharing modes, cache-aware placement | M2, M5 | Private writes after fork; revocation before writer reassignment; warm/cold timing breakdown; no secret inheritance |
-| M7: validated integration | Candidate construction, trusted checks, attestation, promotion intent and ref CAS | M5, M6 | Conflicts return for repair; moved target invalidates candidate; recover after Git update before DB completion |
-| M8: native drivers | Codex App Server and selected native profiles from the matrix | M4 driver contract | Two harness implementations complete the same task API; negotiated differences remain visible |
-| M9: operational limits | Backpressure, tenant fairness, partition handling, retention, observability | M4–M8 | Log floods and slow clients do not block cancel; stale nodes cannot publish accepted results; orphan resources reconciled |
-| M10: distribution | Versioned SDK, server image, node package, deployment guide, compatibility lock | M9 | Fresh server installation reproduces the release demonstration |
-
-Do not gate dynamic delegation on implementing all sixteen harnesses. One ACP profile plus one native driver provides a stronger contract test than many unqualified launch commands.
-
-## Engineering lanes
-
-| Lane | Owns | Interfaces to agree first |
+| Gate | Deliverable | Acceptance evidence |
 |---|---|---|
-| Control and state | Domain transitions, SQL schema, policy, budgets, queue handlers | Command IDs, generations, graph revision, event envelope |
-| Execution and harnesses | Runtime qualification, node lifecycle, ACP, native adapters | SandboxProvider, process streams, HarnessDriver, callback routing |
-| Workspaces and developer experience | Source checkpoints, integration, public SDK, CLI, docs | ResourceBinding, ArtifactManifest, Candidate, Attestation |
+| S0: caller surface — implemented | Shared protocol, Rust SDK, CLI, skill/plugin, scripts | Input/response validation; lost response reconciliation; no automatic retry; concurrent calls; extracted distribution works |
+| S1: durable admission | Axum/Tower API, authenticated principal, SQLx/Postgres operation/state schema, root reservations, transactional PGMQ command | Same request replays; changed input conflicts; stale revision leaves all state unchanged; crash after commit before response reconciles; retention/tombstones prevent identity reuse |
+| S2: sandbox qualification | Existing Microsandbox SDK/runtime on Linux KVM, provider contract derived from measured behavior | Create, inspect, exec with separate pipes, stop/destroy, private writes, resource/network enforcement without vendor-cloud credentials |
+| S3: one remote task | Node ownership, attempt fencing, source materialization, one ACP driver, artifacts | Submit remotely; client disconnect; same task observed from another client; explicit cancel; recover lost worker acknowledgment |
+| S4: dynamic delegation | Atomic graph deltas, scoped child credentials, root accounting, dependencies | Parent creates child which creates grandchild; no predefined graph; cycles/escalation/budget exhaustion reject atomically |
+| S5: workspaces and sharing | Prepared checkpoints, registered component bindings, placement, cache reuse | Private writes after fork; verified revoke before new exclusive writer; no secret inheritance; measured cold/warm critical paths |
+| S6: accepted code | Candidate creation, trusted checks, attestation, promotion intent, Git CAS | Conflict repair; target movement invalidates evidence; recover after ref update before database completion |
+| S7: second driver | Codex App Server or another native profile | Same task API works across ACP and native paths; session/permission differences stay visible |
+| S8: operational release | Tenant fairness, bounded event streaming, artifact access, package publishing, deployment guide | Slow clients/log floods do not block cancel; stale nodes cannot publish; fresh installation reproduces release scenario |
 
-Each change should complete a behavior and its failure path. Cross-review ownership fencing and Git/database reconciliation across lanes. A small team can rotate these responsibilities; they are boundaries, not prescribed headcount or a static agent topology.
+S1 and S2 can be developed independently once the allocation identity/fencing
+contract is agreed. S3 needs both. Keep S4 independent of a sixteen-harness roster.
+Do not publish SDK/runtime compatibility claims based on the client fixture.
 
-## First executable vertical slice
+## First next implementation: admission and reconciliation
 
-1. Define a `TaskSpec` referencing a registered repository revision, a registered harness profile, a resource limit, and a result contract.
-2. Accept it with an idempotency key; persist the task and queue command together. Return an operation ID before allocation completes.
-3. Lease a worker allocation with an attempt generation. Reconcile a previous allocation before retrying creation.
-4. Materialize exact source state in a private sandbox. Project scoped configuration through the selected upstream provisioner or adapter.
-5. Start one structured protocol session. Handle callbacks within the sandbox. Persist effective capabilities.
-6. Publish a verified artifact manifest and a typed outcome. Retain the distinction between model completion and accepted result.
-7. Demonstrate client disconnect, explicit cancellation, and recovery from a worker acknowledgment loss.
+1. Treat `docs/control-api.md` and generated schemas as the initial wire contract.
+   Define a tenant-scoped authentication interface; delegated tokens carry root,
+   subtree, action, resource and expiry restrictions. A task file cannot grant
+   itself authority by naming a permissive profile.
+2. Introduce migrations for operations, task identities/revisions, graph state,
+   reservations and dispatch records. Resolve command identity before effects.
+   Define operation retention, tombstones and read-after-write consistency.
+3. Under a transaction, validate the resulting graph and policy, reserve the root
+   envelope, insert the operation and PGMQ command, and then return its receipt.
+   Treat all client fields as untrusted. Reject unsupported required capabilities.
+4. Persist execution uncertainty separately from HTTP uncertainty. Queue redelivery
+   first reconciles the operation/attempt; it does not reissue an unknown model turn.
+5. Exercise real Postgres crashes and concurrent submissions. Repeat the same
+   SDK/CLI requests against this implementation. Prove transaction behavior rather
+   than making a more realistic in-memory demo.
 
-This slice requires a real sandbox host. A unit-test fake is useful for determinism but cannot establish kernel isolation, network policy, or filesystem durability.
+Next, integrate one provider and harness with an explicit attempt generation.
+A worker that reconnects with stale authority cannot claim completion or release
+someone else's resource. Callback filesystem/terminal operations execute inside
+the sandbox, never on the host. Continuous ACP request servicing must remain live
+while a prompt is pending.
 
-## Runtime qualification record
+## Packaging and extensions
 
-Record host CPU/architecture, kernel, virtualization access, runtime release and commit, SDK version, image digest, source size, storage backend, network mode, resource limits, and runtime logs. Test lifecycle without vendor-cloud credentials or control endpoints. Mark snapshot capabilities separately: disk/full, consistent/crash-consistent, local/portable, fresh identity, and sharing behavior.
+The CLI and plugin are delivery layers already built on the SDK. Add an MCP
+facade when a real caller needs it, using the maintained Rust MCP SDK and existing
+Branchyard operations. Do not implement another JSON-RPC stack or hidden daemon.
+Qualify a live plugin load with version-pinned hosts before claiming broad support.
 
-If live clone is unavailable, expose an explicitly named prepared-disk path. If basic isolation or lifecycle fails, qualify an existing alternative behind the same provider contract. Do not start a new VMM or depend on private runtime internals.
+Add artifact reads and SSE only with bounded output, access control, replay and
+retention-gap semantics. Keep the canonical skill short; references and generated
+schemas disclose detail on demand. Generate standalone copies and verify them in
+CI rather than editing another skill for every host.
 
-## Budget and side-effect model
+Only build native hooks when a required behavior cannot be expressed through the
+portable surface. A host's ability to call Branchyard is separate from Branchyard's
+ability to supervise that host. Preserve that distinction in support matrices.
 
-Reserve before spawning; account across the entire ownership subtree. Keep concurrent compute limits separate from spend reservations and cumulative usage. Limit allocation growth and lease duration even when a provider cannot report exact cost.
+## Performance and runtime receipts
 
-Hard model spend bounds require a metered broker or equivalent provider enforcement. A harness receiving an unrestricted provider credential can create unobserved requests. Such a profile must report its weaker accounting guarantee and cannot satisfy a task requiring strict per-request budget admission.
+Record CPU, kernel, virtualization access, runtime/SDK revisions, image digest,
+source size, storage/network mode and limits. Test disk preparation separately
+from full VM fork and native conversation resume. If a capability is unavailable,
+expose a named weaker option only when the request permits it; never infer it.
 
-Each side-effecting command has an operation ID and expected generation. Queue retries repeat reconciliation, not uncertain side effects. Deployment, remote pushes, and external database changes require explicit capabilities beyond producing a local candidate.
+Measure admission, queue wait, placement, guest readiness, source attachment,
+protocol handshake and first useful action. Compare cold, cached and warm paths
+under declared capacity with rejection/queue rates. The existing sub-second warm
+readiness goal remains a target. No fixture test establishes runtime latency.
 
-## Performance work
+## Release scenario
 
-Instrument admission, queue wait, placement, image readiness, source attachment, guest command readiness, harness handshake, and first useful action. Preserve cold and warm results separately. Include capacity, failures, and queue rates in every benchmark.
+Start with one remote root and no worker graph. It creates children using two
+qualified drivers; a child creates a grandchild after discovering a prerequisite.
+Disconnect the client and interrupt an execution-node connection. Reconnect and
+retain all task identities while ownership is reconciled.
 
-The design's sub-second warm readiness goal is an engineering target. It is not an upstream-derived guarantee. Optimize measured costs: prefetch source, reuse clean prepared state, bound CPU work, and reduce task-lock contention before introducing another transport or storage layer.
-
-## Release demonstration
-
-Begin with one remote meta-harness and no worker graph. It creates two children using different drivers. A child discovers a prerequisite and spawns a grandchild. Disconnect the client. Interrupt a node connection. Reconnect, reconcile ownership, and retain every task identity.
-
-Have children produce conflicting code. Resolve the conflict in an isolated integration attempt. Move the target after an initial validation and demonstrate that stale evidence cannot promote the candidate. Revalidate, promote through a guarded intent, and recover correctly if database recording is interrupted after the Git operation.
-
-The release is ready when this demonstration and the documented failure tests pass on a fresh server installation. A successful model response or a large number of registered harnesses is not the release criterion.
+Have children produce conflicting code. Repair in an isolated integration attempt.
+Move the target after validation and reject the stale evidence. Revalidate, promote
+through a guarded intent, and recover if database recording is interrupted after
+Git changes. This complete scenario, with its failure tests, is the release gate.

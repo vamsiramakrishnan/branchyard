@@ -1,6 +1,6 @@
 # Validation record
 
-Prepared 16 September 2026. This record describes the initial foundation, not production harness support.
+Prepared 16 September 2026. This record covers the controls foundation and SDK/CLI/skill slice, not production harness support.
 
 ## Passed locally
 
@@ -8,7 +8,11 @@ Prepared 16 September 2026. This record describes the initial foundation, not pr
 |---|---|
 | Vendored source integrity | 82 files match both their pinned Git blob IDs and SHA-256 hashes |
 | Herdr catalog | 22 TOML manifests parse; harness and per-manifest rule IDs are unique |
-| Rust compilation and tests | 9 tests pass on Rust 1.90.0, including inherited resume tests and added boundary validation |
+| Rust controls | 9 resume-control tests pass on Rust 1.90.0 |
+| Protocol | 5 tests cover shape/version rejection, normalization, bounds and example round-trips |
+| SDK HTTP contract | 10 tests cover idempotent replay, changed input, lost acknowledgment, dropped futures, redirects, bounded bodies, cursor checks and concurrent submissions |
+| Distribution and CLI | 6 tests cover extraction, canonical skill parity, deterministic archives, installer refusal, launcher, generated-schema drift and CLI error behavior |
+| Plugin and skill metadata | Plugin-creator validator and skill-creator validator pass locally |
 | Rust formatting and Clippy | Formatting passes; Clippy has no warnings across all targets |
 | Runnable example | `plan_resume` prints an argument vector without starting a harness |
 | Scion shared helper | 59 tests pass |
@@ -32,6 +36,8 @@ This compatibility check is not a passing qualification of the Claude provisione
 
 ## Not validated
 
+- Live loading of the plugin in Codex/Claude or the standalone skill in other hosts.
+- Production HTTP authentication, idempotency retention or graph transactions; SDK tests use fixtures.
 - Runtime isolation, KVM deployment, storage cloning, network enforcement, or startup latency.
 - Any live harness session, provider credential path, ACP exchange, or native driver.
 - The sixteen-profile matrix as deployed support.
@@ -42,7 +48,7 @@ Those are explicit gates in [the implementation plan](implementation-plan.md), n
 
 ## Reproduce
 
-Use Python 3.12 and the checked-in Rust toolchain. Python tools use the standard library; the Rust crate has no external dependencies.
+Use Python 3.12 and the checked-in Rust toolchain. Repository Python tools use the standard library. The controls crate remains dependency-free; the SDK uses locked Rust dependencies. Fetch those once before offline checks. A C compiler and CMake are needed by the selected TLS dependency.
 
 ```sh
 python3 tools/verify_vendor.py
@@ -51,8 +57,11 @@ python3 tools/check_catalog.py
 python3 tools/check_docs.py
 python3 tools/test_scion.py --qualified
 python3 tools/check_scion_compatibility.py
+cargo fetch --locked
 cargo fmt --all -- --check
 cargo test --workspace --locked --offline
+cargo build --locked --offline -p branchyard-cli
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 cargo run --locked --offline -p branchyard-controls --example plan_resume
 ```

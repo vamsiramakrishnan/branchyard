@@ -1,0 +1,4 @@
+interface:
+  display_name: "Branchyard"
+  short_description: "Prepare and reconcile remote harness tasks"
+  default_prompt: "Use $branchyard to prepare and inspect a remote delegation request."

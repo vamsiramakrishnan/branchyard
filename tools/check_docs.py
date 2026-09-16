@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
-    files = sorted(ROOT.glob("*.md")) + sorted((ROOT / "docs").rglob("*.md"))
+    files = sorted(ROOT.glob("*.md")) + sorted((ROOT / "docs").rglob("*.md")) + sorted((ROOT / "plugins").rglob("*.md"))
     errors = []
     for source in files:
         body = re.sub(r"(?ms)^(```|~~~).*?^\1[^\n]*$", "", source.read_text())

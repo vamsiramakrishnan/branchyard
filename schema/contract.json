@@ -1,0 +1,677 @@
+{
+  "command": {
+    "$defs": {
+      "Action": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "op": {
+                "const": "create_task",
+                "type": "string"
+              },
+              "spec": {
+                "$ref": "#/$defs/TaskSpec"
+              },
+              "task_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "task_id",
+              "spec"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "edits": {
+                "items": {
+                  "$ref": "#/$defs/GraphEdit"
+                },
+                "type": "array"
+              },
+              "expected_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "op": {
+                "const": "apply_graph",
+                "type": "string"
+              },
+              "root_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "root_id",
+              "expected_revision",
+              "edits"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cascade": {
+                "type": "boolean"
+              },
+              "expected_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "op": {
+                "const": "cancel_task",
+                "type": "string"
+              },
+              "task_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "task_id",
+              "expected_revision",
+              "cascade"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ComponentAccess": {
+        "enum": [
+          "read_only",
+          "exclusive_write"
+        ],
+        "type": "string"
+      },
+      "ComponentBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "access": {
+            "$ref": "#/$defs/ComponentAccess"
+          },
+          "component_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "component_id",
+          "access"
+        ],
+        "type": "object"
+      },
+      "GraphEdit": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "spawn",
+                "type": "string"
+              },
+              "parent_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "spec": {
+                "$ref": "#/$defs/TaskSpec"
+              },
+              "task_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "task_id",
+              "parent_id",
+              "spec"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "depends_on": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "kind": {
+                "const": "add_dependency",
+                "type": "string"
+              },
+              "task_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "task_id",
+              "depends_on"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "depends_on": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "kind": {
+                "const": "remove_dependency",
+                "type": "string"
+              },
+              "task_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "task_id",
+              "depends_on"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Limits": {
+        "additionalProperties": false,
+        "properties": {
+          "cpu_millis": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_children": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_depth": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "memory_mib": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "wall_seconds": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_children",
+          "max_depth",
+          "wall_seconds",
+          "cpu_millis",
+          "memory_mib"
+        ],
+        "type": "object"
+      },
+      "TaskSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "components": {
+            "items": {
+              "$ref": "#/$defs/ComponentBinding"
+            },
+            "type": "array"
+          },
+          "environment_profile": {
+            "type": "string"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "harness_profile": {
+            "description": "Server registry IDs, never executable paths or shell commands.",
+            "type": "string"
+          },
+          "limits": {
+            "$ref": "#/$defs/Limits"
+          },
+          "policy_profile": {
+            "type": "string"
+          },
+          "required_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "workspace": {
+            "$ref": "#/$defs/WorkspaceSource"
+          }
+        },
+        "required": [
+          "goal",
+          "harness_profile",
+          "environment_profile",
+          "policy_profile",
+          "workspace",
+          "components",
+          "required_capabilities",
+          "limits"
+        ],
+        "type": "object"
+      },
+      "Version": {
+        "enum": [
+          "branchyard/v1alpha1"
+        ],
+        "type": "string"
+      },
+      "WorkspaceSource": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "commit": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "repository",
+                "type": "string"
+              },
+              "repository_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository_id",
+              "commit"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Storage fork only; does not imply native conversation or full VM fork.",
+            "properties": {
+              "checkpoint_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "kind": {
+                "const": "checkpoint",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "checkpoint_id"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "$ref": "#/$defs/Action"
+      },
+      "operation_id": {
+        "description": "Caller-generated and persisted BEFORE submission. Also the idempotency key.",
+        "format": "uuid",
+        "type": "string"
+      },
+      "schema": {
+        "$ref": "#/$defs/Version"
+      }
+    },
+    "required": [
+      "schema",
+      "operation_id",
+      "action"
+    ],
+    "title": "Command",
+    "type": "object"
+  },
+  "event_page": {
+    "$defs": {
+      "Event": {
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sequence",
+          "kind",
+          "summary",
+          "artifacts"
+        ],
+        "type": "object"
+      },
+      "Version": {
+        "enum": [
+          "branchyard/v1alpha1"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "events": {
+        "items": {
+          "$ref": "#/$defs/Event"
+        },
+        "type": "array"
+      },
+      "next_after": {
+        "description": "Exclusive per-task sequence cursor; never advance past undelivered events.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "schema": {
+        "$ref": "#/$defs/Version"
+      },
+      "task_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema",
+      "task_id",
+      "events",
+      "next_after"
+    ],
+    "title": "EventPage",
+    "type": "object"
+  },
+  "limits": {
+    "event_page": 100,
+    "graph_edits": 64,
+    "request_bytes": 262144,
+    "response_bytes": 1048576
+  },
+  "operation": {
+    "$defs": {
+      "OperationState": {
+        "enum": [
+          "pending",
+          "running",
+          "succeeded",
+          "failed",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "Version": {
+        "enum": [
+          "branchyard/v1alpha1"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "operation_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "request_sha256": {
+        "type": "string"
+      },
+      "schema": {
+        "$ref": "#/$defs/Version"
+      },
+      "state": {
+        "$ref": "#/$defs/OperationState"
+      },
+      "task_ids": {
+        "items": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "schema",
+      "operation_id",
+      "request_sha256",
+      "state",
+      "task_ids"
+    ],
+    "title": "Operation",
+    "type": "object"
+  },
+  "receipt": {
+    "$defs": {
+      "Disposition": {
+        "enum": [
+          "accepted",
+          "replay"
+        ],
+        "type": "string"
+      },
+      "Version": {
+        "enum": [
+          "branchyard/v1alpha1"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "disposition": {
+        "$ref": "#/$defs/Disposition"
+      },
+      "operation_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "request_sha256": {
+        "type": "string"
+      },
+      "schema": {
+        "$ref": "#/$defs/Version"
+      }
+    },
+    "required": [
+      "schema",
+      "operation_id",
+      "request_sha256",
+      "disposition"
+    ],
+    "title": "Receipt",
+    "type": "object"
+  },
+  "schema": "branchyard/contract/v1alpha1",
+  "server_info": {
+    "$defs": {
+      "HarnessProfile": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "driver": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "qualified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "driver",
+          "qualified",
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "Version": {
+        "enum": [
+          "branchyard/v1alpha1"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "execution_ready": {
+        "type": "boolean"
+      },
+      "harness_profiles": {
+        "items": {
+          "$ref": "#/$defs/HarnessProfile"
+        },
+        "type": "array"
+      },
+      "operations": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "schema": {
+        "$ref": "#/$defs/Version"
+      }
+    },
+    "required": [
+      "schema",
+      "execution_ready",
+      "operations",
+      "harness_profiles"
+    ],
+    "title": "ServerInfo",
+    "type": "object"
+  },
+  "task": {
+    "$defs": {
+      "TaskState": {
+        "enum": [
+          "queued",
+          "running",
+          "blocked",
+          "completed",
+          "failed",
+          "cancel_requested",
+          "cancelled",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "Version": {
+        "enum": [
+          "branchyard/v1alpha1"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "artifacts": {
+        "items": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "effective_capabilities": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "graph_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "parent_id": {
+        "format": "uuid",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "root_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "schema": {
+        "$ref": "#/$defs/Version"
+      },
+      "state": {
+        "$ref": "#/$defs/TaskState"
+      },
+      "task_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema",
+      "task_id",
+      "root_id",
+      "revision",
+      "graph_revision",
+      "state",
+      "effective_capabilities",
+      "artifacts"
+    ],
+    "title": "Task",
+    "type": "object"
+  }
+}

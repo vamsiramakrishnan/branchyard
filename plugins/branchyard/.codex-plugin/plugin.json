@@ -1,0 +1,18 @@
+{
+  "name": "branchyard",
+  "version": "0.0.1",
+  "description": "Use the Branchyard remote control SDK through a portable CLI skill.",
+  "author": {"name": "Branchyard contributors"},
+  "repository": "https://github.com/vamsiramakrishnan/branchyard",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Branchyard",
+    "shortDescription": "Control remote harness tasks with Branchyard",
+    "longDescription": "Prepare, validate, submit and reconcile Branchyard commands. Requires the CLI and a compatible server; this plugin does not provide a sandbox runtime.",
+    "developerName": "Branchyard contributors",
+    "category": "Developer Tools",
+    "capabilities": [],
+    "defaultPrompt": ["Use Branchyard to prepare a remote delegation request."]
+  }
+}
