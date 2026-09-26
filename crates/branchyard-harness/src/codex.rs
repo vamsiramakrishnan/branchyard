@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use crate::{
-    frame, parse, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open, Opened,
-    Output, PermissionDecision, PermissionKey, PermissionRequest, Rejected, SessionMode, Submitted,
-    TurnOutcome, Turns, Usage, Value,
+    frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open,
+    Opened, Output, PermissionDecision, PermissionKey, PermissionRequest, Rejected, SessionMode,
+    Submitted, TurnOutcome, Turns, Usage, Value,
 };
 
 #[derive(Debug)]
@@ -117,9 +117,7 @@ impl Codex {
                 detail: format!("response to unknown request {}", message["id"]),
             });
         };
-        let error = message
-            .get("error")
-            .map(|e| e["message"].as_str().unwrap_or("error").to_owned());
+        let error = message.get("error").map(rpc_error);
         match (pending, error) {
             (Pending::Initialize, None) => Output {
                 events: Vec::new(),

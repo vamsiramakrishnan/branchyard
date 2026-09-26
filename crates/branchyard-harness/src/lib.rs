@@ -369,6 +369,19 @@ pub(crate) fn frame(value: &Value) -> Frame {
     bytes
 }
 
+/// A JSON-RPC error's message with its `data`, which often holds the cause.
+pub(crate) fn rpc_error(error: &Value) -> String {
+    let message = error["message"].as_str().unwrap_or("error");
+    match &error["data"] {
+        Value::Null => message.to_owned(),
+        Value::String(data) => format!("{message}: {data}"),
+        data => match data["details"].as_str() {
+            Some(details) => format!("{message}: {details}"),
+            None => format!("{message}: {data}"),
+        },
+    }
+}
+
 /// Parse one received line, reporting non-JSON output as a violation.
 pub(crate) fn parse(line: &[u8]) -> Result<Value, Output> {
     let text = String::from_utf8_lossy(line);

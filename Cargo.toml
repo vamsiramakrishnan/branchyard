@@ -2,6 +2,7 @@
 members = [
     "crates/branchyard-controls",
     "crates/branchyard-harness",
+    "crates/branchyard-qualify",
     "crates/branchyard-sandbox",
     "crates/branchyard-substrate",
 ]

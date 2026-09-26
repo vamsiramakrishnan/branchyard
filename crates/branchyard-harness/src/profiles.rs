@@ -37,16 +37,30 @@ pub struct Profile {
     /// Harness version whose protocol the driver was checked against, when a
     /// real transcript or generated schema exists for it.
     pub checked_against: Option<&'static str>,
+    /// ACP `_meta` for session requests, as JSON.
+    pub acp_session_meta: Option<&'static str>,
 }
 
 impl Profile {
     /// A fresh driver for this profile.
     pub fn driver(&self) -> Box<dyn Driver> {
-        let command = self.command.iter().map(|part| (*part).to_owned()).collect();
+        self.driver_with(self.command.iter().map(|part| (*part).to_owned()).collect())
+    }
+
+    /// A fresh driver launching `command` instead of the profile's own, for
+    /// an executable installed under another path.
+    pub fn driver_with(&self, command: Vec<String>) -> Box<dyn Driver> {
         match self.protocol {
             Protocol::ClaudeStreamJson => Box::new(ClaudeCode::new(command)),
             Protocol::CodexAppServer => Box::new(Codex::new(command)),
-            Protocol::Acp => Box::new(Acp::new(command)),
+            Protocol::Acp => {
+                let driver = Acp::new(command);
+                Box::new(match self.acp_session_meta {
+                    Some(meta) => driver
+                        .with_session_meta(serde_json::from_str(meta).expect("valid profile meta")),
+                    None => driver,
+                })
+            }
         }
     }
 }
@@ -58,8 +72,15 @@ const fn acp(id: &'static str, harness: &'static str, command: &'static [&'stati
         protocol: Protocol::Acp,
         command,
         checked_against: None,
+        acp_session_meta: None,
     }
 }
+
+/// Keeps permission bypass unavailable in claude-agent-acp sessions, so no
+/// mode switch can skip Branchyard's permission answers. The adapter
+/// otherwise enables it unless it runs as root without `IS_SANDBOX`.
+const CLAUDE_ACP_NO_BYPASS: &str =
+    r#"{"claudeCode":{"options":{"allowDangerouslySkipPermissions":false}}}"#;
 
 /// Implemented profiles. The first profile for a harness is its default.
 pub const PROFILES: &[Profile] = &[
@@ -69,9 +90,11 @@ pub const PROFILES: &[Profile] = &[
         protocol: Protocol::ClaudeStreamJson,
         command: &["claude"],
         checked_against: Some("Claude Code 2.1.283"),
+        acp_session_meta: None,
     },
     Profile {
-        checked_against: Some("claude-agent-acp 0.81.2 (initialize only)"),
+        checked_against: Some("claude-agent-acp 0.81.2"),
+        acp_session_meta: Some(CLAUDE_ACP_NO_BYPASS),
         ..acp("claude-code-acp", "claude-code", &["claude-agent-acp"])
     },
     Profile {
@@ -80,6 +103,7 @@ pub const PROFILES: &[Profile] = &[
         protocol: Protocol::CodexAppServer,
         command: &["codex"],
         checked_against: Some("codex-cli 0.157.1"),
+        acp_session_meta: None,
     },
     acp("codex-acp", "codex", &["codex-acp"]),
     acp("oh-my-pi-acp", "oh-my-pi", &["omp", "acp"]),

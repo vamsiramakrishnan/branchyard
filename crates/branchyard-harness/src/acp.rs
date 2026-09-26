@@ -23,9 +23,9 @@ use agent_client_protocol_schema::v1::{
 use serde_json::json;
 
 use crate::{
-    frame, parse, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open, Opened,
-    Output, PermissionDecision, PermissionKey, PermissionRequest, Rejected, SessionMode, Submitted,
-    TurnOutcome, Turns, Value,
+    frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open,
+    Opened, Output, PermissionDecision, PermissionKey, PermissionRequest, Rejected, SessionMode,
+    Submitted, TurnOutcome, Turns, Value,
 };
 
 /// The ACP protocol version this client speaks.
@@ -51,6 +51,8 @@ pub struct Acp {
     pending: HashMap<u64, Pending>,
     permissions: HashMap<String, (Value, Vec<PermissionOption>)>,
     turns: Turns,
+    /// Agent-specific `_meta` sent when opening a session.
+    session_meta: Option<Value>,
 }
 
 impl Acp {
@@ -66,7 +68,15 @@ impl Acp {
             pending: HashMap::new(),
             permissions: HashMap::new(),
             turns: Turns::default(),
+            session_meta: None,
         }
+    }
+
+    /// Send `meta` as `_meta` on `session/new`, `session/resume` and
+    /// `session/load`, for agent-specific session options a profile pins.
+    pub fn with_session_meta(mut self, meta: Value) -> Self {
+        self.session_meta = Some(meta);
+        self
     }
 
     fn request(&mut self, pending: Pending, method: &str, params: Value) -> Frame {
@@ -94,7 +104,7 @@ impl Acp {
         }
         let open = self.open.clone().expect("initialize follows open()");
         let capabilities = response.agent_capabilities;
-        let (method, params) = match &open.mode {
+        let (method, mut params) = match &open.mode {
             SessionMode::Fresh => ("session/new", json!({"cwd": open.cwd, "mcpServers": []})),
             SessionMode::Resume(session) if capabilities.session_capabilities.resume.is_some() => (
                 "session/resume",
@@ -114,6 +124,9 @@ impl Acp {
             }
             SessionMode::Fork(_) => unreachable!("fork is rejected in open()"),
         };
+        if let Some(meta) = &self.session_meta {
+            params["_meta"] = meta.clone();
+        }
         Output {
             events: Vec::new(),
             frames: vec![self.request(Pending::Session, method, params)],
@@ -157,9 +170,7 @@ impl Acp {
                 detail: format!("response to unknown request {}", message["id"]),
             });
         };
-        let error = message
-            .get("error")
-            .map(|e| e["message"].as_str().unwrap_or("error").to_owned());
+        let error = message.get("error").map(rpc_error);
         match (pending, error) {
             (Pending::Initialize, None) => self.initialized(&message["result"]),
             (Pending::Session, None) => self.session_opened(&message["result"]),

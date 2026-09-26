@@ -145,6 +145,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-qualify"
+version = "0.0.1"
+dependencies = [
+ "branchyard-harness",
+ "serde_json",
+]
+
+[[package]]
 name = "branchyard-sandbox"
 version = "0.0.1"
 

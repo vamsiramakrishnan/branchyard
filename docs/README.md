@@ -6,6 +6,7 @@
 | [Harness integration](harness-integration.md) | How do we control sixteen harnesses through ACP and native interfaces? |
 | [Implementation plan](implementation-plan.md) | What do we build next, in what order, and what proves each milestone works? |
 | [Agent Substrate](substrate.md) | How does Branchyard use Agent Substrate as a sandbox provider, and what does it not provide? |
+| [Driver qualification](qualification/README.md) | Which driver profiles passed live protocol qualification, and what did it find? |
 | [Vendoring](vendoring.md) | Which controls have been copied, why, and how are they adapted and upgraded? |
 | [Validation](validation.md) | What has actually passed, what failed upstream, and what remains untested? |
 | [Third-party notices](../THIRD_PARTY.md) | Which revisions and licenses apply to the copied sources? |

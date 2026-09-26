@@ -121,9 +121,9 @@ Transient display deltas may be coalesced under load. Permission requests, termi
 
 | Driver | Profiles | Evidence |
 |---|---|---|
-| Claude Code stream-json | `claude-code-stream-json` (default for Claude Code) | Replay of a recorded Claude Code 2.1.283 session; frames follow Agent SDK 0.3.283 types |
+| Claude Code stream-json | `claude-code-stream-json` (default for Claude Code) | Live protocol qualification, 9 of 9 scenarios, against Claude Code 2.1.283; replay of a recorded session; frames follow Agent SDK 0.3.283 types |
 | Codex App Server | `codex-app-server` (default for Codex) | Replay of a recorded codex-cli 0.157.1 session; every outgoing frame equals one the binary accepted; shapes from `codex app-server generate-json-schema` |
-| ACP v1 | `claude-code-acp`, `codex-acp`, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Goose, Cursor CLI, GitHub Copilot CLI, Qwen Code, Kimi CLI, Hermes | Recorded claude-agent-acp 0.81.2 `initialize`; every outgoing frame deserializes as the `agent-client-protocol-schema` type |
+| ACP v1 | `claude-code-acp` (live protocol qualification, 9 of 9, against claude-agent-acp 0.81.2), `codex-acp`, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Goose, Cursor CLI, GitHub Copilot CLI, Qwen Code, Kimi CLI, Hermes | Recorded claude-agent-acp 0.81.2 `initialize`; every outgoing frame deserializes as the `agent-client-protocol-schema` type |
 
 The drivers implement `open`, `submit`, `observe` (as `receive`), `interrupt` and permission answers. `probe` and `prepare` are not implemented yet, and `close` is process termination through the sandbox provider, reported as `SessionClosed`.
 
@@ -137,7 +137,7 @@ The drivers enforce the contract rather than trusting the harness:
 - Cancellation distinguishes acknowledgment from the turn's terminal state. ACP cancel also answers outstanding permission requests as cancelled, as the protocol requires.
 - Usage is reported as cumulative session totals where the harness reports it, and as unknown where it does not. A closed connection during a turn yields `OutcomeUnknown`.
 
-None of these profiles is qualified. The recorded sessions exercise the protocol, not isolation, credentials or recovery; qualification still needs the suite below on the target sandbox.
+`claude-code-stream-json` and `claude-code-acp` have passed live protocol qualification against Claude Code 2.1.283 and claude-agent-acp 0.81.2: turns, permission denial and approval, interrupts during a permission wait and during a tool, clean close, resume, fork and a lost connection. See [driver qualification](qualification/README.md) for the reports and findings. That run used local processes, not a Branchyard sandbox. Every profile remains unqualified for isolation, credentials and recovery, and the Codex and remaining ACP profiles have not run live.
 
 ## Transport and callback placement
 

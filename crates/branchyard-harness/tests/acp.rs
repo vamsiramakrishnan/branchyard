@@ -313,3 +313,57 @@ fn protocol_mismatches_fail_the_open() {
     let (events, _) = feed(&mut driver, &json!({"id": 9, "result": {}}));
     assert!(matches!(&events[0], Event::ProtocolViolation { .. }));
 }
+
+#[test]
+fn open_failures_keep_the_error_data() {
+    let (mut driver, _, request) = initialized(SessionMode::Fresh, json!({}));
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32603, "message": "Internal error",
+            "data": {"details": "Claude Code process exited with code 1"}}}),
+    );
+    assert_eq!(
+        events,
+        vec![Event::OpenFailed {
+            reason: "Internal error: Claude Code process exited with code 1".into()
+        }]
+    );
+}
+
+#[test]
+fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
+    use branchyard_harness::profiles;
+    let mut driver = profiles::by_id("claude-code-acp").unwrap().driver();
+    let opened = driver
+        .open(Open {
+            mode: SessionMode::Fresh,
+            cwd: "/workspace".into(),
+            model: None,
+        })
+        .unwrap();
+    let initialize = decode(&opened.frames[0]);
+    let (_, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+    );
+    assert_eq!(
+        frames[0]["params"]["_meta"],
+        json!({"claudeCode": {"options": {"allowDangerouslySkipPermissions": false}}})
+    );
+    conforms::<NewSessionRequest>(&frames[0], "params");
+    // Other ACP profiles send no agent-specific options.
+    let mut driver = profiles::by_id("gemini-cli-acp").unwrap().driver();
+    let opened = driver
+        .open(Open {
+            mode: SessionMode::Fresh,
+            cwd: "/workspace".into(),
+            model: None,
+        })
+        .unwrap();
+    let initialize = decode(&opened.frames[0]);
+    let (_, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+    );
+    assert!(frames[0]["params"].get("_meta").is_none());
+}
