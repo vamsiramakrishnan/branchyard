@@ -1,0 +1,60 @@
+name: Qualify drivers
+# Live protocol qualification against pinned harness releases. Each job spends
+# real model credits and runs only when its credential secret is configured.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: qualify
+  cancel-in-progress: false
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: claude-code-stream-json
+            package: '@anthropic-ai/claude-code@2.1.283'
+            secret: ANTHROPIC_API_KEY
+          - profile: claude-code-acp
+            package: '@agentclientprotocol/claude-agent-acp@0.81.2 @anthropic-ai/claude-code@2.1.283'
+            secret: ANTHROPIC_API_KEY
+          - profile: codex-app-server
+            package: '@openai/codex@0.157.1'
+            secret: OPENAI_API_KEY
+    env:
+      CREDENTIAL: ${{ secrets[matrix.secret] }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Skip without credentials
+        if: env.CREDENTIAL == ''
+        run: echo "::notice::${{ matrix.secret }} is not configured; ${{ matrix.profile }} was not qualified."
+      - name: Install harness
+        if: env.CREDENTIAL != ''
+        run: npm install --global ${{ matrix.package }}
+      - name: Run scenarios
+        if: env.CREDENTIAL != ''
+        run: |
+          export "${{ matrix.secret }}=$CREDENTIAL"
+          cargo fetch --locked
+          mkdir -p "$RUNNER_TEMP/qual"
+          cargo run --locked --offline -p branchyard-qualify -- \
+            --profile ${{ matrix.profile }} \
+            --workdir "$RUNNER_TEMP/qual" \
+            --keep-env ${{ matrix.secret }} \
+            --max-cost-usd 3 \
+            --report "$RUNNER_TEMP/${{ matrix.profile }}.json"
+      - name: Upload report
+        if: always() && env.CREDENTIAL != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qualification-${{ matrix.profile }}
+          path: ${{ runner.temp }}/${{ matrix.profile }}.json
+          if-no-files-found: warn
