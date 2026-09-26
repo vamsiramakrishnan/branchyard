@@ -55,6 +55,8 @@ Use one ACP client alongside native drivers where required. Codex's App Server, 
 
 Drivers for Claude Code, Codex and ten ACP harnesses are [implemented](docs/harness-integration.md#implemented-drivers). Both Claude Code profiles have passed [live protocol qualification](docs/qualification/README.md); none is yet qualified inside a sandbox. The [integration design](docs/harness-integration.md) covers **16 harnesses**: Claude Code, Codex, Antigravity, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Pi, Goose, Aider, Cursor, GitHub Copilot, Amp, Qwen Code, Kimi CLI, and Hermes. This is a researched target matrix, not a claim of deployed support.
 
+The generated [compatibility matrix](docs/compatibility.md) lists every profile's capabilities and live qualification result.
+
 ## What is in this commit
 
 | Component | Status |

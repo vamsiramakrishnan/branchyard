@@ -1,19 +1,20 @@
 //! Claude Code driver against a recorded Claude Code 2.1.283 session and
 //! frames shaped by the Agent SDK's published stdout protocol types.
 
-mod common;
-
 use branchyard_harness::claude_code::ClaudeCode;
+use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
-    Driver, Event, NativeSession, Open, PermissionDecision, PermissionKey, Rejected, SessionMode,
-    TurnOutcome,
+    Driver, Event, NativeSession, Open, Opened, PermissionDecision, PermissionKey, Rejected,
+    SessionMode, TurnOutcome,
 };
-use common::{decode, feed, transcript};
 use serde_json::{json, Value};
 
-const FIXTURE: &str = "claude-code-2.1.283-stream-json-turn.jsonl";
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/claude-code-2.1.283-stream-json-turn.jsonl"
+);
 
-fn open(mode: SessionMode) -> (ClaudeCode, Vec<String>, Value) {
+fn open_with(mode: SessionMode) -> (ClaudeCode, Opened) {
     let mut driver = ClaudeCode::new(vec!["claude".into()]);
     let opened = driver
         .open(Open {
@@ -23,17 +24,28 @@ fn open(mode: SessionMode) -> (ClaudeCode, Vec<String>, Value) {
         })
         .unwrap();
     assert_eq!(opened.launch.cwd, "/workspace");
+    (driver, opened)
+}
+
+fn open(mode: SessionMode) -> (ClaudeCode, Vec<String>, Value) {
+    let (driver, opened) = open_with(mode);
     let initialize = decode(&opened.frames[0]);
     (driver, opened.launch.argv, initialize)
 }
 
+/// Play Claude Code's side of the handshake.
+fn answer(frame: &Value) -> Vec<Value> {
+    match frame["request"]["subtype"].as_str() {
+        Some("initialize") => vec![
+            json!({"type": "control_response", "response": {"subtype": "success", "request_id": frame["request_id"], "response": {}}}),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 fn ready(mode: SessionMode) -> ClaudeCode {
-    let (mut driver, _, initialize) = open(mode);
-    let id = initialize["request_id"].clone();
-    let (events, _) = feed(
-        &mut driver,
-        &json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": {}}}),
-    );
+    let (mut driver, opened) = open_with(mode);
+    let events = handshake(&mut driver, &opened.frames, answer);
     assert_eq!(events, vec![Event::Ready]);
     driver
 }
@@ -76,36 +88,26 @@ fn launch_matches_the_agent_sdk_invocation() {
 /// accepted, and the recorded output maps to the expected events.
 #[test]
 fn replays_a_recorded_claude_code_turn() {
-    let recorded = transcript(FIXTURE);
-    let (mut driver, _, initialize) = open(SessionMode::Fresh);
-    let sent_initialize = &recorded[0].frame;
-    assert!(recorded[0].outgoing);
-    assert_eq!(initialize["request"], sent_initialize["request"]);
-
-    let mut events = Vec::new();
-    let mut our_uuid = String::new();
-    let mut recorded_uuid = String::new();
-    for row in &recorded[1..] {
-        if row.outgoing {
-            // The recorded user message, apart from its random UUID, is the
-            // frame the driver writes.
-            let submitted = driver.submit("Say hello.").unwrap();
-            let mut ours = decode(&submitted.frames[0]);
-            our_uuid = ours["uuid"].as_str().unwrap().to_owned();
-            recorded_uuid = row.frame["uuid"].as_str().unwrap().to_owned();
-            ours["uuid"] = row.frame["uuid"].clone();
-            assert_eq!(ours, row.frame);
-            continue;
-        }
-        let text = row
-            .frame
-            .to_string()
-            .replace("\"req-1\"", &format!("{}", initialize["request_id"]))
-            .replace(&recorded_uuid, &our_uuid);
-        let (mut received, frames) = feed(&mut driver, &serde_json::from_str(&text).unwrap());
-        assert!(frames.is_empty());
-        events.append(&mut received);
-    }
+    let recorded = Transcript::load(FIXTURE);
+    let (mut driver, opened) = open_with(SessionMode::Fresh);
+    // The request ID and the user message's random UUID are chosen per run;
+    // every other field equals the recorded frame.
+    let replayed = Replay::new(&recorded)
+        .alias("/request_id")
+        .alias("/uuid")
+        .prompt("Say hello.")
+        .run(&mut driver, &opened);
+    assert_eq!(replayed.sent, 2, "initialize and the user message");
+    assert!(replayed.unsent.is_empty());
+    let recorded_uuid = &recorded.rows[2].frame["uuid"];
+    let our_uuid = replayed.ours(recorded_uuid).unwrap().as_str().unwrap();
+    assert_ne!(
+        Some(our_uuid),
+        recorded_uuid.as_str(),
+        "a fresh UUID per run"
+    );
+    let our_uuid = our_uuid.to_owned();
+    let events = replayed.events;
 
     let session = session("73f1902f-b14d-4d40-8751-169fd42fec8c");
     assert_eq!(events[0], Event::Ready);

@@ -2,42 +2,42 @@
 //! frame the driver writes is checked against the official
 //! `agent-client-protocol-schema` request types.
 
-mod common;
-
 use agent_client_protocol_schema::v1::{
     CancelNotification, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
     RequestPermissionResponse, ResumeSessionRequest,
 };
 use branchyard_harness::acp::Acp;
-use branchyard_harness::{
-    Driver, Event, NativeSession, Open, PermissionDecision, Rejected, SessionMode, TurnOutcome,
+use branchyard_harness::conformance::{
+    assert_conforms, decode, decode_all, feed, handshake, Replay, Transcript,
 };
-use common::{decode, feed, transcript};
-use serde::de::DeserializeOwned;
+use branchyard_harness::{
+    Driver, Event, NativeSession, Open, Opened, PermissionDecision, Rejected, SessionMode,
+    TurnOutcome,
+};
 use serde_json::{json, Value};
 
-const FIXTURE: &str = "claude-agent-acp-0.81.2-initialize.jsonl";
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/claude-agent-acp-0.81.2-initialize.jsonl"
+);
 
-/// Assert that a frame's params (or result) deserialize as `T`.
-fn conforms<T: DeserializeOwned>(frame: &Value, part: &str) {
-    serde_json::from_value::<T>(frame[part].clone()).unwrap_or_else(|e| {
-        panic!(
-            "{} does not conform: {e}\n{frame}",
-            std::any::type_name::<T>()
-        )
-    });
+fn fresh() -> Open {
+    Open {
+        mode: SessionMode::Fresh,
+        cwd: "/workspace".into(),
+        model: None,
+    }
+}
+
+fn open_with(mode: SessionMode) -> (Acp, Opened) {
+    let mut driver = Acp::new(vec!["gemini".into(), "--experimental-acp".into()]);
+    let opened = driver.open(Open { mode, ..fresh() }).unwrap();
+    assert_eq!(opened.launch.argv, ["gemini", "--experimental-acp"]);
+    (driver, opened)
 }
 
 fn open(mode: SessionMode) -> (Acp, Value) {
-    let mut driver = Acp::new(vec!["gemini".into(), "--experimental-acp".into()]);
-    let opened = driver
-        .open(Open {
-            mode,
-            cwd: "/workspace".into(),
-            model: None,
-        })
-        .unwrap();
-    assert_eq!(opened.launch.argv, ["gemini", "--experimental-acp"]);
+    let (driver, opened) = open_with(mode);
     (driver, decode(&opened.frames[0]))
 }
 
@@ -55,12 +55,22 @@ fn initialized(mode: SessionMode, capabilities: Value) -> (Acp, Vec<Event>, Valu
     )
 }
 
+/// Play an ACP agent's side of a fresh handshake.
+fn answer(frame: &Value) -> Vec<Value> {
+    match frame["method"].as_str() {
+        Some("initialize") => vec![
+            json!({"jsonrpc": "2.0", "id": frame["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}}),
+        ],
+        Some("session/new") => {
+            vec![json!({"jsonrpc": "2.0", "id": frame["id"], "result": {"sessionId": "s1"}})]
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn ready() -> Acp {
-    let (mut driver, _, request) = initialized(SessionMode::Fresh, json!({}));
-    let (events, _) = feed(
-        &mut driver,
-        &json!({"jsonrpc": "2.0", "id": request["id"], "result": {"sessionId": "s1"}}),
-    );
+    let (mut driver, opened) = open_with(SessionMode::Fresh);
+    let events = handshake(&mut driver, &opened.frames, answer);
     assert_eq!(events[0], Event::Ready);
     driver
 }
@@ -71,18 +81,19 @@ fn session(id: &str) -> NativeSession {
 
 #[test]
 fn initialize_matches_a_recorded_handshake_and_opens_a_session() {
-    let recorded = transcript(FIXTURE);
-    let (mut driver, initialize) = open(SessionMode::Fresh);
-    conforms::<InitializeRequest>(&initialize, "params");
-    // The adapter accepted exactly these parameters.
-    assert_eq!(initialize["params"], recorded[0].frame["params"]);
-
-    let mut response = recorded[1].frame.clone();
-    response["id"] = initialize["id"].clone();
-    let (events, frames) = feed(&mut driver, &response);
-    assert!(events.is_empty());
+    let recorded = Transcript::load(FIXTURE);
+    let (mut driver, opened) = open_with(SessionMode::Fresh);
+    let initialize = decode(&opened.frames[0]);
+    assert_conforms::<InitializeRequest>(&initialize, "/params");
+    // The adapter accepted exactly this frame, apart from the request ID.
+    let replayed = Replay::new(&recorded)
+        .alias("/id")
+        .run(&mut driver, &opened);
+    assert_eq!(replayed.sent, 1);
+    assert!(replayed.events.is_empty());
+    let frames = replayed.unsent;
     assert_eq!(frames[0]["method"], "session/new");
-    conforms::<NewSessionRequest>(&frames[0], "params");
+    assert_conforms::<NewSessionRequest>(&frames[0], "/params");
 
     let (events, _) = feed(
         &mut driver,
@@ -107,14 +118,14 @@ fn resume_prefers_session_resume_then_load_and_never_starts_fresh() {
         json!({"loadSession": true, "sessionCapabilities": {"resume": {}}}),
     );
     assert_eq!(request["method"], "session/resume");
-    conforms::<ResumeSessionRequest>(&request, "params");
+    assert_conforms::<ResumeSessionRequest>(&request, "/params");
 
     let (mut driver, _, request) = initialized(
         SessionMode::Resume(session("old")),
         json!({"loadSession": true}),
     );
     assert_eq!(request["method"], "session/load");
-    conforms::<LoadSessionRequest>(&request, "params");
+    assert_conforms::<LoadSessionRequest>(&request, "/params");
     // History replayed during load is not reported.
     let replay = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "old",
         "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "earlier"}}}});
@@ -159,7 +170,7 @@ fn prompts_stream_updates_and_end_with_the_stop_reason() {
     let mut driver = ready();
     let submitted = driver.submit("Say hello.").unwrap();
     let prompt = decode(&submitted.frames[0]);
-    conforms::<PromptRequest>(&prompt, "params");
+    assert_conforms::<PromptRequest>(&prompt, "/params");
 
     let updates = [
         json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Hello"}}),
@@ -235,7 +246,7 @@ fn permissions_select_one_time_options_only() {
             .respond(&request.key, PermissionDecision::Allow)
             .unwrap()[0],
     );
-    conforms::<RequestPermissionResponse>(&reply, "result");
+    assert_conforms::<RequestPermissionResponse>(&reply, "/result");
     // allow_once, never the standing allow_always rule.
     assert_eq!(
         reply["result"]["outcome"],
@@ -260,11 +271,11 @@ fn cancel_answers_outstanding_permissions_and_awaits_the_stop_reason() {
     let mut driver = ready();
     let prompt = decode(&driver.submit("edit").unwrap().frames[0]);
     feed(&mut driver, &permission_request(50));
-    let frames: Vec<Value> = driver.interrupt().unwrap().iter().map(decode).collect();
+    let frames = decode_all(&driver.interrupt().unwrap());
     assert_eq!(frames[0]["method"], "session/cancel");
-    conforms::<CancelNotification>(&frames[0], "params");
+    assert_conforms::<CancelNotification>(&frames[0], "/params");
     assert_eq!(frames[1]["id"], 50);
-    conforms::<RequestPermissionResponse>(&frames[1], "result");
+    assert_conforms::<RequestPermissionResponse>(&frames[1], "/result");
     assert_eq!(
         frames[1]["result"]["outcome"],
         json!({"outcome": "cancelled"})
@@ -350,7 +361,7 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
         frames[0]["params"]["_meta"],
         json!({"claudeCode": {"options": {"allowDangerouslySkipPermissions": false}}})
     );
-    conforms::<NewSessionRequest>(&frames[0], "params");
+    assert_conforms::<NewSessionRequest>(&frames[0], "/params");
     // Other ACP profiles send no agent-specific options.
     let mut driver = profiles::by_id("gemini-cli-acp").unwrap().driver();
     let opened = driver

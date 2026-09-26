@@ -117,7 +117,7 @@ Transient display deltas may be coalesced under load. Permission requests, termi
 
 ## Implemented drivers
 
-`crates/branchyard-harness` implements the driver contract above as sans-IO state machines. A driver builds the argument vector and the frames to write, and turns each line the harness prints into normalized events. The process runs through `SandboxProvider.exec`. Profiles map each harness ID in `branchyard_controls::harness` to a driver and launch command.
+`crates/branchyard-harness` implements the driver contract above as sans-IO state machines. A driver builds the argument vector and the frames to write, and turns each line the harness prints into normalized events. The process runs through `SandboxProvider.exec`. Profiles map each harness ID in `branchyard_controls::harness` to a driver and launch command. [Writing a driver](writing-a-driver.md) explains how to add a profile or driver, test it with the conformance kit, and qualify it.
 
 | Driver | Profiles | Evidence |
 |---|---|---|

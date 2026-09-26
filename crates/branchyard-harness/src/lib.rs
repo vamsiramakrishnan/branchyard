@@ -17,10 +17,15 @@
 //! [`profiles`] maps harness IDs to a driver and launch command. A profile is
 //! implemented, not qualified: support needs the runtime gates in
 //! `docs/harness-integration.md`.
+//!
+//! [`conformance`] holds the transcript replay and contract checks these
+//! drivers are tested with, for authors of new drivers;
+//! `docs/writing-a-driver.md` describes the process.
 
 pub mod acp;
 pub mod claude_code;
 pub mod codex;
+pub mod conformance;
 pub mod profiles;
 
 use std::fmt;

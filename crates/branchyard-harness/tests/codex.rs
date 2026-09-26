@@ -1,40 +1,60 @@
 //! Codex driver against a recorded codex-cli 0.157.1 app-server session and
 //! frames shaped by the schema `codex app-server generate-json-schema` emits.
 
-mod common;
-
 use branchyard_harness::codex::Codex;
+use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
-    Driver, Event, NativeSession, Open, PermissionDecision, PermissionKey, Rejected, SessionMode,
-    TurnOutcome,
+    Driver, Event, NativeSession, Open, Opened, PermissionDecision, PermissionKey, Rejected,
+    SessionMode, TurnOutcome,
 };
-use common::{decode, feed, transcript};
 use serde_json::{json, Value};
 
-const FIXTURE: &str = "codex-0.157.1-unauthenticated-turn.jsonl";
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/codex-0.157.1-unauthenticated-turn.jsonl"
+);
 
-fn open(mode: SessionMode) -> (Codex, Vec<Value>) {
+fn fresh() -> Open {
+    Open {
+        mode: SessionMode::Fresh,
+        cwd: "/workspace".into(),
+        model: None,
+    }
+}
+
+fn open(mode: SessionMode) -> (Codex, Opened) {
     let mut driver = Codex::new(vec!["codex".into()]);
-    let opened = driver
-        .open(Open {
-            mode,
-            cwd: "/workspace".into(),
-            model: None,
-        })
-        .unwrap();
+    let opened = driver.open(Open { mode, ..fresh() }).unwrap();
     assert_eq!(opened.launch.argv, ["codex", "app-server"]);
-    (driver, opened.frames.iter().map(decode).collect())
+    (driver, opened)
+}
+
+/// Play the App Server's side of the handshake, answering the thread request
+/// with `thread_id`.
+fn answer(thread_id: &str) -> impl FnMut(&Value) -> Vec<Value> + '_ {
+    move |frame| match frame["method"].as_str() {
+        Some("initialize") => vec![json!({"id": frame["id"], "result": {}})],
+        Some("thread/start" | "thread/resume" | "thread/fork") => {
+            vec![json!({"id": frame["id"], "result": {"thread": {"id": thread_id}}})]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Complete the handshake, answering the thread request with `thread_id`.
 fn ready(mode: SessionMode, thread_id: &str) -> (Codex, Vec<Event>, Value) {
-    let (mut driver, _) = open(mode);
-    let (_, frames) = feed(&mut driver, &json!({"id": 1, "result": {}}));
-    let thread_request = frames[1].clone();
-    let (events, _) = feed(
-        &mut driver,
-        &json!({"id": 2, "result": {"thread": {"id": thread_id}}}),
-    );
+    let (mut driver, opened) = open(mode);
+    let mut thread_request = Value::Null;
+    let mut answer = answer(thread_id);
+    let events = handshake(&mut driver, &opened.frames, |frame| {
+        if frame["method"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("thread/"))
+        {
+            thread_request = frame.clone();
+        }
+        answer(frame)
+    });
     (driver, events, thread_request)
 }
 
@@ -47,29 +67,17 @@ fn session(id: &str) -> NativeSession {
 /// expected events, ending in the 401 failure.
 #[test]
 fn replays_a_recorded_codex_session() {
-    let recorded = transcript(FIXTURE);
-    let (mut driver, mut written) = open(SessionMode::Fresh);
-    let mut events = Vec::new();
-    let mut sent = 0;
-    for row in recorded {
-        if row.outgoing {
-            if written.is_empty() {
-                // The only frame not written in response to output.
-                let submitted = driver.submit("Say hello.").unwrap();
-                written = submitted.frames.iter().map(decode).collect();
-            }
-            assert_eq!(written.remove(0), row.frame, "outgoing frame {sent}");
-            sent += 1;
-            continue;
-        }
-        let (mut received, frames) = feed(&mut driver, &row.frame);
-        events.append(&mut received);
-        written.extend(frames);
-    }
+    let recorded = Transcript::load(FIXTURE);
+    let (mut driver, opened) = open(SessionMode::Fresh);
+    let replayed = Replay::new(&recorded)
+        .prompt("Say hello.")
+        .run(&mut driver, &opened);
     assert_eq!(
-        sent, 4,
+        replayed.sent, 4,
         "initialize, initialized, thread/start and turn/start"
     );
+    assert!(replayed.unsent.is_empty());
+    let events = replayed.events;
 
     let thread = session("01a0dfe1-467d-7ae1-b734-3917620eaeb6");
     assert!(events.contains(&Event::Ready));
