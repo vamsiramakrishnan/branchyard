@@ -20,6 +20,8 @@ MCP offers tools to a harness. ACP controls an agent session. Neither defines Br
 
 ## Sixteen initial integration targets
 
+Each row maps to one ID in `branchyard_controls::harness`, together with the Herdr and Scion names for the same harness. Its tests fail if this table and the registry diverge.
+
 Commands describe upstream entry points, not ready-to-run deployment recipes. Authentication, executable versions, images, and required capabilities must be qualified before activation.
 
 | Harness | Preferred profile | Documented entry point / integration | Qualification focus |

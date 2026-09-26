@@ -14,6 +14,14 @@ Branchyard vendors selected control sources rather than copying whole orchestrat
 
 The Scion provisioners cover Antigravity, Claude, Codex, Copilot, Gemini CLI, Grok Build, Hermes, Muse Code, and OpenCode. Their local copies of `scion_harness.py` are preserved: the root and adjacent helper files are not all identical at this revision. Do not consolidate them without a compatibility test.
 
+## Harness identity
+
+Each source names harnesses its own way. Herdr's `grok` manifest and Scion's `grok-build` provisioner describe the same harness; Herdr's `copilot` manifest is stored as `github-copilot.toml`; the integration matrix uses display names. `branchyard_controls::harness` gives every harness one Branchyard ID and records each source's name for it.
+
+Mappings rest on upstream evidence: Herdr's manifest aliases (`grok-build`, `muse-code`, `github-copilot`, `claude-code`) and Scion's launch commands (`grok`, `muse`, `gemini`, `copilot`). The registry's tests read the vendored files directly. They fail when an upstream update adds an unmapped manifest, provisioner or resume source, when a mapped name disappears, when the integration matrix changes, or when an upstream alias contradicts a mapping. Map new names in the same change that updates the upstream.
+
+A registry entry records naming only. It is not a support claim.
+
 ## Scion: reuse environment projection
 
 The reusable unit is its provisioner bundle: a manifest, staged inputs, a harness-specific translator, and output configuration. Preserve that boundary. Static tools and templates can be baked into images. Dynamic instructions and session-specific MCP configuration are projected into the sandbox before launch. A small Python provisioning step can coexist with a Rust server; rewriting it immediately would duplicate existing behavior.

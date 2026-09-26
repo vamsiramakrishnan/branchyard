@@ -8,7 +8,8 @@ Prepared 16 September 2026. This record describes the initial foundation, not pr
 |---|---|
 | Vendored source integrity | 84 files match both their pinned Git blob IDs and SHA-256 hashes |
 | Herdr catalog | 22 TOML manifests parse; harness and per-manifest rule IDs are unique |
-| Rust compilation and tests | 23 tests pass on Rust 1.90.0: 9 resume tests including inherited upstream cases, 4 capability-admission tests, and 10 Substrate adapter tests |
+| Rust compilation and tests | 29 tests pass on Rust 1.90.0: 9 resume tests including inherited upstream cases, 6 harness-registry tests, 4 capability-admission tests, and 10 Substrate adapter tests |
+| Harness identity registry | 27 harnesses; every Herdr manifest (22), Herdr resume source (18), Scion harness (9) and integration target (16) maps to exactly one ID, and Herdr's aliases agree with those mappings |
 | Substrate client generation | `ateapi.proto` compiles unmodified with pinned `protoc` from `protoc-bin-vendored` |
 | Substrate adapter over gRPC | Create/adopt, resume, inspect, suspend, checkpoint, branch, revert and UID-fenced destroy against an in-process fake `Control` service |
 | Rust formatting and Clippy | Formatting passes; Clippy has no warnings across all targets |

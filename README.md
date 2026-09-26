@@ -59,7 +59,7 @@ The [integration design](docs/harness-integration.md) covers **16 harnesses**: C
 
 | Component | Status |
 |---|---|
-| `branchyard-controls` | Dependency-free Rust resume recipes adapted from Herdr; nine tests pass |
+| `branchyard-controls` | Dependency-free Rust resume recipes adapted from Herdr, and one harness identity registry across Herdr, Scion and the integration matrix; 15 tests pass |
 | `branchyard-sandbox` | Vendor-independent sandbox capabilities and admission checks; unsupported requirements are rejected, never weakened |
 | `branchyard-substrate` | [Agent Substrate](https://github.com/agent-substrate/substrate) provider adapter over a client generated from its unmodified proto; tested against an in-process fake, **unqualified** against a cluster |
 | Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |
