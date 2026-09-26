@@ -87,6 +87,7 @@ Provide a fake backend implementing the public contract for deterministic tests.
 | Responsibility | Reuse | What Branchyard adds |
 |---|---|---|
 | MicroVM lifecycle, image preparation, guest execution | Microsandbox Rust SDK and runtime | Attempt identity, placement, capacity accounting and policy binding |
+| Suspend/resume multiplexing on Kubernetes (alternative provider) | Agent Substrate gRPC API | Capability mapping, tenant-to-atespace binding, UID-fenced lifecycle |
 | Async I/O and coordination | Tokio / tokio-util | Explicit concurrency limits and task ownership |
 | Public HTTP, streaming, middleware | Axum / Tower | Task API and tenant context |
 | Internal RPC | Tonic / Prost / rustls | Versioned node and extension contracts |
@@ -101,6 +102,8 @@ Provide a fake backend implementing the public contract for deterministic tests.
 | Portable extension execution | Wasmtime Component Model, later | Versioned bounded hook contracts |
 
 Microsandbox documents Rust APIs, OCI support and snapshot/branch operations; its repository labels the software beta. Its advertised sub-100 ms boot figure is an M1 guest-boot measurement, not evidence of our Linux server latency. Select it as the implementation to qualify, pin a tested SDK/runtime pair, and use conformance results to decide which capabilities ship. [Microsandbox repository](https://github.com/superradcompany/microsandbox)
+
+[Agent Substrate](substrate.md) is a second provider candidate for operators who already run Kubernetes. It suspends idle sandboxes to object storage and resumes them onto warm workers, which suits trees of mostly waiting harnesses. It has no exec API, so it cannot satisfy M2's independent-pipes gate as written; a Substrate profile reaches its harness through routed ingress. It stays optional: Kubernetes remains outside the default per-spawn path (§4).
 
 The supporting primitives already exist: [Tokio synchronization](https://docs.rs/tokio/latest/tokio/sync/index.html), [Tower limits](https://docs.rs/tower/latest/tower/limit/index.html), [SQLx](https://docs.rs/sqlx/latest/sqlx/), [PGMQ](https://github.com/pgmq/pgmq), [OpenDAL](https://github.com/apache/opendal), [Cedar](https://github.com/cedar-policy/cedar), [Tonic](https://docs.rs/tonic/latest/tonic/), and [BLAKE3](https://github.com/BLAKE3-team/BLAKE3).
 

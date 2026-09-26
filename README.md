@@ -38,7 +38,7 @@ flowchart TD
     Server --> Checks
 ```
 
-The planned Rust services use Tokio, Axum/Tower, SQLx/PostgreSQL, PGMQ, Cedar, OpenDAL, and Tonic. Existing sandbox runtimes supply virtualization and guest execution. The first provider to qualify is the [Microsandbox open runtime](https://microsandbox.dev/) on Linux servers. Access to its private-beta cloud service is not a dependency.
+The planned Rust services use Tokio, Axum/Tower, SQLx/PostgreSQL, PGMQ, Cedar, OpenDAL, and Tonic. Existing sandbox runtimes supply virtualization and guest execution. The first provider to qualify is the [Microsandbox open runtime](https://microsandbox.dev/) on Linux servers. Access to its private-beta cloud service is not a dependency. [Agent Substrate](docs/substrate.md) is a second candidate for operators who already run Kubernetes.
 
 Fast startup comes from prepared images, cached repository objects, private writable state, and available server capacity. Warm and cold startup paths will be measured separately. No latency guarantee is claimed yet.
 
@@ -60,21 +60,24 @@ The [integration design](docs/harness-integration.md) covers **16 harnesses**: C
 | Component | Status |
 |---|---|
 | `branchyard-controls` | Dependency-free Rust resume recipes adapted from Herdr; nine tests pass |
+| `branchyard-sandbox` | Vendor-independent sandbox capabilities and admission checks; unsupported requirements are rejected, never weakened |
+| `branchyard-substrate` | [Agent Substrate](https://github.com/agent-substrate/substrate) provider adapter over a client generated from its unmodified proto; tested against an in-process fake, **unqualified** against a cluster |
 | Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |
 | Herdr controls | Original resume source and 22 terminal-observation manifests |
 | OpenRig controls | Launch/readiness contract and configuration fragments; not a standalone adapter |
 | Warp controls | Separate AGPL source references for process supervision; excluded from the Rust build |
 | Architecture and plan | Server design, harness contracts, implementation milestones, and release gates |
 
-All **82 vendored files** retain upstream revisions, licenses, Git blob IDs, and SHA-256 hashes. Adaptations are recorded outside `vendor/`. [Vendoring decisions](docs/vendoring.md) explain their intended use. [Replicas](https://replicas.dev/) remains a product reference; no licensed runtime source was identified to copy.
+All **84 vendored files** retain upstream revisions, licenses, Git blob IDs, and SHA-256 hashes. Adaptations are recorded outside `vendor/`. [Vendoring decisions](docs/vendoring.md) explain their intended use. [Replicas](https://replicas.dev/) remains a product reference; no licensed runtime source was identified to copy.
 
 Scion's Claude provisioner and its model-alias tests disagree at the pinned revision. CI reproduces that exact incompatibility separately; the provisioner remains unqualified. See [validation](docs/validation.md).
 
-## Try the current controls crate
+## Try the current crates
 
-Use the pinned Rust toolchain and Python 3.12. These commands validate the foundation without provider credentials or a sandbox host:
+Use the pinned Rust toolchain and Python 3.12. These commands validate the foundation without provider credentials or a sandbox host. Only `cargo fetch` uses the network:
 
 ```sh
+cargo fetch --locked
 cargo test --workspace --locked --offline
 cargo run --locked --offline -p branchyard-controls --example plan_resume
 python3 tools/verify_vendor.py

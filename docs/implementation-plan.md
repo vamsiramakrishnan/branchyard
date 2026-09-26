@@ -5,7 +5,9 @@ The first commit captures the architecture and reusable controls. Build the next
 ## Current foundation
 
 - Rust workspace with a dependency-free resume control crate and preserved upstream tests.
-- 82 unchanged upstream files with commit pins, Git blob IDs, SHA-256, and licenses.
+- Vendor-independent sandbox capability types with an admission check (the capability half of M1's provider contract).
+- An unqualified Agent Substrate provider adapter, generated from its vendored proto; see [Agent Substrate](substrate.md).
+- 84 unchanged upstream files with commit pins, Git blob IDs, SHA-256, and licenses.
 - Scion provisioning tests and an explicit compatibility exclusion for its Claude model-alias mismatch.
 - Architecture, harness interface design, vendoring decisions, and validation records.
 

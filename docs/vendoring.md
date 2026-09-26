@@ -9,6 +9,7 @@ Branchyard vendors selected control sources rather than copying whole orchestrat
 | Scion | 44 | Shared helper and tests; nine provisioners and their adjacent helpers/configuration; six provisioner test files; Claude settings fixture; license and harness overview | Python suites run directly; no production launch path enabled |
 | Herdr | 25 | 22 detection TOMLs, manifest loader source, resume source, license | Resume logic extracted into the Rust crate; manifests parse through the catalog checker |
 | OpenRig | 6 | Runtime adapter contract, four runtime fragments, license | Design input for projection/readiness handling; TypeScript imports require the upstream application |
+| Agent Substrate | 2 | Public `ateapi.proto` and license | Rust client generated at build time; adapter in `branchyard-substrate`, unqualified |
 | Warp | 7 | Process control, exit escalation, JSON utilities, two test files, two license texts | AGPL reference collection, outside Cargo's build |
 
 The Scion provisioners cover Antigravity, Claude, Codex, Copilot, Gemini CLI, Grok Build, Hermes, Muse Code, and OpenCode. Their local copies of `scion_harness.py` are preserved: the root and adjacent helper files are not all identical at this revision. Do not consolidate them without a compatibility test.
@@ -44,6 +45,14 @@ Translate these semantics into Rust types and driver contract tests. A failed re
 The copied application helpers show bounded shutdown escalation and ownership checks before signaling a process group. They are AGPL sources and remain unlinked reference material. Their tests also depend on Warp's surrounding modules. This is not a vendored Warp Factory server: the public client repository does not establish that the hosted factory control plane is included.
 
 For the Apache-licensed worker, prefer the existing sandbox runtime's process supervision and termination operations. Implement Branchyard's lease and cancellation semantics around those operations. Do not paste Warp helper code into an Apache file or mechanically rewrite it while discarding attribution.
+
+## Agent Substrate: generate from the contract, do not translate the runtime
+
+[Agent Substrate](https://github.com/agent-substrate/substrate) is a Kubernetes-based runtime that suspends idle sandboxes to object storage and resumes them on warm workers. Branchyard consumes it through its public gRPC API. The vendored proto is the whole interface; its only imports are protobuf well-known types.
+
+Do not translate Substrate's Go services into Rust. The control plane, node agent, sandbox coordinators and router are its implementation, tied to Kubernetes, gVisor and Kata, and would become an unsynchronized fork. If Branchyard later needs a small, self-contained Substrate package in-process, vendor the Go file and its tests unchanged, translate the tests first, keep the upstream header with a modification notice, and extend `tools/verify_derivatives.py` to fail when the upstream blob changes.
+
+The adapter always creates atespace-scoped tags; it never publishes a tag beyond its atespace. Map each tenant authorization domain to one atespace. See [Agent Substrate](substrate.md) for the capability mapping and gaps.
 
 ## Replicas and Microsandbox
 

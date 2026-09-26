@@ -903,6 +903,28 @@
       "license": "Apache-2.0",
       "use": "upstream-test-fixture",
       "modified": false
+    },
+    {
+      "path": "vendor/substrate/LICENSE",
+      "upstream": "https://github.com/agent-substrate/substrate",
+      "commit": "1d7ca8ced056192a1801d6565251adcaab3eb0c9",
+      "upstream_path": "LICENSE",
+      "git_blob": "d645695673349e3947e8e5ae42332d0ac3164cd7",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "license": "Apache-2.0",
+      "use": "upstream-api-contract",
+      "modified": false
+    },
+    {
+      "path": "vendor/substrate/pkg/proto/ateapipb/ateapi.proto",
+      "upstream": "https://github.com/agent-substrate/substrate",
+      "commit": "1d7ca8ced056192a1801d6565251adcaab3eb0c9",
+      "upstream_path": "pkg/proto/ateapipb/ateapi.proto",
+      "git_blob": "fee1065cfe7e83973b572b37934ea0b9e5a69cf1",
+      "sha256": "1c5a5a2f3faaeb37311250f5b9c947547877613b7743144a22f4ab7a144556f2",
+      "license": "Apache-2.0",
+      "use": "upstream-api-contract",
+      "modified": false
     }
   ]
 }

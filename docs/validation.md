@@ -6,9 +6,11 @@ Prepared 16 September 2026. This record describes the initial foundation, not pr
 
 | Check | Result |
 |---|---|
-| Vendored source integrity | 82 files match both their pinned Git blob IDs and SHA-256 hashes |
+| Vendored source integrity | 84 files match both their pinned Git blob IDs and SHA-256 hashes |
 | Herdr catalog | 22 TOML manifests parse; harness and per-manifest rule IDs are unique |
-| Rust compilation and tests | 9 tests pass on Rust 1.90.0, including inherited resume tests and added boundary validation |
+| Rust compilation and tests | 23 tests pass on Rust 1.90.0: 9 resume tests including inherited upstream cases, 4 capability-admission tests, and 10 Substrate adapter tests |
+| Substrate client generation | `ateapi.proto` compiles unmodified with pinned `protoc` from `protoc-bin-vendored` |
+| Substrate adapter over gRPC | Create/adopt, resume, inspect, suspend, checkpoint, branch, revert and UID-fenced destroy against an in-process fake `Control` service |
 | Rust formatting and Clippy | Formatting passes; Clippy has no warnings across all targets |
 | Runnable example | `plan_resume` prints an argument vector without starting a harness |
 | Scion shared helper | 59 tests pass |
@@ -32,6 +34,7 @@ This compatibility check is not a passing qualification of the Claude provisione
 
 ## Not validated
 
+- Any Agent Substrate cluster. The fake `Control` service models documented behavior only; TLS, authentication, tag readiness and real snapshot semantics are untested.
 - Runtime isolation, KVM deployment, storage cloning, network enforcement, or startup latency.
 - Any live harness session, provider credential path, ACP exchange, or native driver.
 - The sixteen-profile matrix as deployed support.
@@ -42,9 +45,10 @@ Those are explicit gates in [the implementation plan](implementation-plan.md), n
 
 ## Reproduce
 
-Use Python 3.12 and the checked-in Rust toolchain. Python tools use the standard library; the Rust crate has no external dependencies.
+Use Python 3.12 and the checked-in Rust toolchain. Python tools use the standard library. `branchyard-controls` and `branchyard-sandbox` have no external dependencies; `branchyard-substrate` uses Tonic and Prost, fetched once from `Cargo.lock`.
 
 ```sh
+cargo fetch --locked
 python3 tools/verify_vendor.py
 python3 tools/verify_derivatives.py
 python3 tools/check_catalog.py

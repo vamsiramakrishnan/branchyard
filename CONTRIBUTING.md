@@ -1,6 +1,6 @@
 # Contributing
 
-Start with [the implementation plan](docs/implementation-plan.md). The next deliverable is the domain/provider contract and sandbox qualification, followed by one complete remote task. The current crate only provides resume recipes.
+Start with [the implementation plan](docs/implementation-plan.md). The next deliverable is the domain/provider contract and sandbox qualification, followed by one complete remote task. The current crates provide resume recipes, sandbox capability admission, and an unqualified Agent Substrate adapter.
 
 ## Boundaries to preserve
 
