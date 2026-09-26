@@ -1,0 +1,15 @@
+[package]
+name = "branchyard-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Harness driver contract and protocol drivers for Claude Code, Codex and ACP agents"
+
+[dependencies]
+agent-client-protocol-schema = { version = "1.9", default-features = false }
+branchyard-controls = { path = "../branchyard-controls" }
+serde_json = "1"
+
+[dev-dependencies]
+serde = "1"

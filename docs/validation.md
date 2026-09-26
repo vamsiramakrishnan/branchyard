@@ -8,7 +8,10 @@ Prepared 16 September 2026. This record describes the initial foundation, not pr
 |---|---|
 | Vendored source integrity | 84 files match both their pinned Git blob IDs and SHA-256 hashes |
 | Herdr catalog | 22 TOML manifests parse; harness and per-manifest rule IDs are unique |
-| Rust compilation and tests | 29 tests pass on Rust 1.90.0: 9 resume tests including inherited upstream cases, 6 harness-registry tests, 4 capability-admission tests, and 10 Substrate adapter tests |
+| Rust compilation and tests | 62 tests pass on Rust 1.90.0: 9 resume tests including inherited upstream cases, 6 harness-registry tests, 33 harness-driver tests, 4 capability-admission tests, and 10 Substrate adapter tests |
+| Claude Code driver | Replays a recorded Claude Code 2.1.283 stream-json session: launch, `initialize` and user frames match what the CLI accepted, and output maps to acknowledgment, session, message, cumulative usage and completion events. Permission, interrupt, limit, resume-mismatch and fork-identity cases use frames shaped by Agent SDK 0.3.283 types |
+| Codex driver | Replays a recorded codex-cli 0.157.1 app-server session without credentials: all four outgoing frames equal the frames the binary accepted, and the turn ends as a failed 401. Approval, interrupt, usage, resume and fork cases use shapes from the binary's generated JSON Schema |
+| ACP driver | Its `initialize` equals the one claude-agent-acp 0.81.2 accepted, and its response opens a session. Every outgoing frame deserializes as the official `agent-client-protocol-schema` 1.9.1 type |
 | Harness identity registry | 27 harnesses; every Herdr manifest (22), Herdr resume source (18), Scion harness (9) and integration target (16) maps to exactly one ID, and Herdr's aliases agree with those mappings |
 | Substrate client generation | `ateapi.proto` compiles unmodified with pinned `protoc` from `protoc-bin-vendored` |
 | Substrate adapter over gRPC | Create/adopt, resume, inspect, suspend, checkpoint, branch, revert and UID-fenced destroy against an in-process fake `Control` service |
@@ -35,6 +38,8 @@ This compatibility check is not a passing qualification of the Claude provisione
 
 ## Not validated
 
+- Any harness permission prompt, interrupt, resume or fork against a live binary. Only the recorded sessions above ran against real harnesses. The Claude Code recording made one real model call, about $0.04 as the CLI estimated it; the Codex recording ran without credentials.
+- The ten ACP harnesses other than the Claude adapter, and the Codex ACP adapter. Their profiles use launch commands from the integration matrix and are protocol-tested only.
 - Any Agent Substrate cluster. The fake `Control` service models documented behavior only; TLS, authentication, tag readiness and real snapshot semantics are untested.
 - Runtime isolation, KVM deployment, storage cloning, network enforcement, or startup latency.
 - Any live harness session, provider credential path, ACP exchange, or native driver.

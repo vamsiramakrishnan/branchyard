@@ -6,6 +6,7 @@ The first commit captures the architecture and reusable controls. Build the next
 
 - Rust workspace with a dependency-free resume control crate and preserved upstream tests.
 - One harness identity registry, checked against every vendored source and the integration matrix.
+- The `HarnessDriver` half of M1's contracts, with drivers for Claude Code stream-json, Codex App Server and ACP v1. Twelve of sixteen targets have an unqualified default profile; see [implemented drivers](harness-integration.md#implemented-drivers).
 - Vendor-independent sandbox capability types with an admission check (the capability half of M1's provider contract).
 - An unqualified Agent Substrate provider adapter, generated from its vendored proto; see [Agent Substrate](substrate.md).
 - 84 unchanged upstream files with commit pins, Git blob IDs, SHA-256, and licenses.

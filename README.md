@@ -6,7 +6,7 @@ A meta-harness decides how to divide work, which harnesses to use, when to creat
 
 The topology develops during execution. You define capabilities, budgets, and acceptance rules. The meta-harness creates and revises its collaborators as it discovers work.
 
-> **Early development.** This repository contains the researched design, a tested Rust controls crate, and pinned upstream control sources. The public task SDK, server, sandbox integration, and harness drivers are specified but not implemented.
+> **Early development.** This repository contains the researched design, pinned upstream control sources, and tested Rust crates: harness protocol drivers for Claude Code, Codex and ACP agents, sandbox capability admission, and an Agent Substrate adapter. None of these is qualified against a live runtime yet. The public task SDK and server are specified but not implemented.
 
 ## What you can build
 
@@ -53,13 +53,14 @@ Fast startup comes from prepared images, cached repository objects, private writ
 
 Use one ACP client alongside native drivers where required. Codex's App Server, Claude's Agent SDK, Antigravity's streaming CLI, and Pi-family RPC interfaces need their own qualified profiles. A structured JSON stream alone does not establish permission control or reliable recovery.
 
-The [integration design](docs/harness-integration.md) covers **16 harnesses**: Claude Code, Codex, Antigravity, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Pi, Goose, Aider, Cursor, GitHub Copilot, Amp, Qwen Code, Kimi CLI, and Hermes. This is a researched target matrix, not a claim of deployed support.
+Drivers for Claude Code, Codex and ten ACP harnesses are [implemented but not yet qualified](docs/harness-integration.md#implemented-drivers). The [integration design](docs/harness-integration.md) covers **16 harnesses**: Claude Code, Codex, Antigravity, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Pi, Goose, Aider, Cursor, GitHub Copilot, Amp, Qwen Code, Kimi CLI, and Hermes. This is a researched target matrix, not a claim of deployed support.
 
 ## What is in this commit
 
 | Component | Status |
 |---|---|
 | `branchyard-controls` | Dependency-free Rust resume recipes adapted from Herdr, and one harness identity registry across Herdr, Scion and the integration matrix; 15 tests pass |
+| `branchyard-harness` | Sans-IO protocol drivers: Claude Code stream-json, Codex App Server, and ACP v1 for ten more harnesses; 12 of 16 targets have a default profile; 33 tests, including replays of recorded Claude Code and Codex sessions; **unqualified** |
 | `branchyard-sandbox` | Vendor-independent sandbox capabilities and admission checks; unsupported requirements are rejected, never weakened |
 | `branchyard-substrate` | [Agent Substrate](https://github.com/agent-substrate/substrate) provider adapter over a client generated from its unmodified proto; tested against an in-process fake, **unqualified** against a cluster |
 | Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |
