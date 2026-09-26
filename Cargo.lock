@@ -179,6 +179,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-workspace"
+version = "0.0.1"
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
