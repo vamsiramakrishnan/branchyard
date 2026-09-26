@@ -65,5 +65,6 @@
     }
   ],
   "installed_from": "npm @agentclientprotocol/claude-agent-acp@0.81.2",
-  "date": "2026-09-26"
+  "date": "2026-09-26",
+  "correction": "The runner's survivor check at the time used `ps -g`, which selects by session rather than process group on procps, so the clean_close claim that no descendants outlived the harness is unverified. branchyard-runtime fixes the check; re-run to verify."
 }

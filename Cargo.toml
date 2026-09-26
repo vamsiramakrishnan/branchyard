@@ -5,6 +5,7 @@ members = [
     "crates/branchyard-controls",
     "crates/branchyard-harness",
     "crates/branchyard-qualify",
+    "crates/branchyard-runtime",
     "crates/branchyard-sandbox",
     "crates/branchyard-substrate",
     "crates/branchyard-workspace",

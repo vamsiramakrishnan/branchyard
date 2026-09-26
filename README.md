@@ -65,6 +65,8 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | `branchyard-harness` | Sans-IO protocol drivers: Claude Code stream-json, Codex App Server, and ACP v1 for ten more harnesses; 12 of 16 targets have a default profile; 42 tests, including replays and a conformance contract run against all 14 profiles of recorded Claude Code and Codex sessions; both Claude Code profiles pass live protocol qualification |
 | `branchyard-qualify` | Runs driver qualification scenarios against real harness binaries; see [driver qualification](docs/qualification/README.md) |
 | `branchyard-workspace` | Git worktree branches, candidate commits and validated merges: compare-and-swap on the target, checks in a temporary worktree, conflicts returned for repair; 18 tests |
+| `branchyard-runtime` | Runs a driver against a real harness process: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 12 hermetic tests against a fake ACP agent |
+| `branchyard-cli` | The `by` command: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `harnesses`; 35 tests; engine pending |
 | `branchyard-sandbox` | Vendor-independent sandbox capabilities and admission checks; unsupported requirements are rejected, never weakened |
 | `branchyard-substrate` | [Agent Substrate](https://github.com/agent-substrate/substrate) provider adapter over a client generated from its unmodified proto; tested against an in-process fake, **unqualified** against a cluster |
 | Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |
