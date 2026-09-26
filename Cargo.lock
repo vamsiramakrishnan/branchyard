@@ -149,6 +149,15 @@ name = "branchyard-qualify"
 version = "0.0.1"
 dependencies = [
  "branchyard-harness",
+ "branchyard-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "branchyard-runtime"
+version = "0.0.1"
+dependencies = [
+ "branchyard-harness",
  "serde_json",
 ]
 

@@ -2,8 +2,9 @@
 //!
 //! This is a development tool, not the Branchyard node. It starts the
 //! harness as a local process with a scrubbed environment and a private
-//! home, standing in for `SandboxProvider.exec`, and drives it through the
-//! profile's driver. It qualifies protocol behavior against the real binary:
+//! home through `branchyard-runtime`, standing in for `SandboxProvider.exec`,
+//! and drives it through the profile's driver. It qualifies protocol behavior
+//! against the real binary:
 //! turns, permission answers, interrupts, resume, fork and a lost connection.
 //! It does not qualify sandbox isolation.
 //!
@@ -18,20 +19,15 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use branchyard_harness::profiles::{self, Profile};
 use branchyard_harness::{
-    Driver, Event, NativeSession, Open, PermissionDecision, PermissionRequest, SessionMode,
-    TurnOutcome,
+    Event, NativeSession, Open, PermissionDecision, SessionMode, TurnOutcome,
 };
+use branchyard_runtime::{Environment, RuntimeError, Session};
 use serde_json::{json, Value};
 
 const CODE_WORD: &str = "PELICAN-7";
@@ -85,19 +81,6 @@ fn parse_args() -> Result<Config, String> {
     })
 }
 
-/// A running harness process wired to its driver.
-struct Session {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    lines: Receiver<Vec<u8>>,
-    driver: Box<dyn Driver>,
-    stderr: Arc<Mutex<String>>,
-    events: Vec<Event>,
-    /// Latest cumulative cost the harness reported for this session.
-    cost_usd: f64,
-    transcript: fs::File,
-}
-
 /// How to answer permission requests while pumping.
 #[derive(Clone, Copy)]
 enum Policy {
@@ -107,282 +90,109 @@ enum Policy {
     Hold,
 }
 
-impl Session {
-    fn start(
-        config: &Config,
-        home: &Path,
-        cwd: &Path,
-        mode: SessionMode,
-        label: &str,
-    ) -> Result<Session, String> {
-        let mut driver = config.profile.driver_with(config.command.clone());
-        let opened = driver
-            .open(Open {
-                mode,
-                cwd: cwd.display().to_string(),
-                model: None,
-            })
-            .map_err(|e| format!("open rejected: {e}"))?;
-        let mut command = Command::new(&opened.launch.argv[0]);
-        command
-            .args(&opened.launch.argv[1..])
-            .current_dir(&opened.launch.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // Its own process group, so teardown reaches every descendant.
-            .process_group(0);
-        scrub_env(&mut command, home, &config.keep_env);
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("spawn {:?}: {e}", opened.launch.argv))?;
-
-        let (sender, lines) = mpsc::channel();
-        let stdout = child.stdout.take().expect("piped");
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).split(b'\n') {
-                let Ok(line) = line else { break };
-                if sender.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        let stderr = Arc::new(Mutex::new(String::new()));
-        let sink = stderr.clone();
-        let mut pipe = child.stderr.take().expect("piped");
-        thread::spawn(move || {
-            let mut buffer = String::new();
-            let _ = pipe.read_to_string(&mut buffer);
-            sink.lock().unwrap().push_str(&buffer);
-        });
-
-        let transcript = fs::File::create(config.workdir.join(format!("{label}.transcript.jsonl")))
-            .map_err(|e| format!("transcript: {e}"))?;
-        let mut session = Session {
-            stdin: child.stdin.take(),
-            child,
-            lines,
-            driver,
-            stderr,
-            events: Vec::new(),
-            cost_usd: 0.0,
-            transcript,
-        };
-        session.write(&opened.frames)?;
-        Ok(session)
-    }
-
-    fn write(&mut self, frames: &[Vec<u8>]) -> Result<(), String> {
-        if frames.is_empty() {
-            return Ok(());
-        }
-        let stdin = self.stdin.as_mut().ok_or("stdin is closed")?;
-        for frame in frames {
-            let _ = writeln!(
-                self.transcript,
-                "{}",
-                json!({"dir": "out", "line": String::from_utf8_lossy(frame).trim()})
-            );
-            stdin.write_all(frame).map_err(|e| format!("write: {e}"))?;
-        }
-        stdin.flush().map_err(|e| format!("flush: {e}"))
-    }
-
-    /// Feed harness output to the driver until `until` matches an event or
-    /// `timeout` passes. Permission requests are answered by `policy`.
-    fn pump(
-        &mut self,
-        timeout: Duration,
-        policy: Policy,
-        until: impl Fn(&Event) -> bool,
-    ) -> Result<Event, String> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let (events, frames) = match self.lines.recv_timeout(remaining) {
-                Ok(line) => {
-                    let _ = writeln!(
-                        self.transcript,
-                        "{}",
-                        json!({"dir": "in", "line": String::from_utf8_lossy(&line)})
-                    );
-                    let output = self.driver.receive(&line);
-                    (output.events, output.frames)
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!("timed out after {timeout:?}"))
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    let events = self.driver.transport_closed();
-                    if events.iter().all(|e| !until(e)) {
-                        self.events.extend(events);
-                        return Err(format!("harness exited: {}", self.stderr_tail()));
-                    }
-                    (events, Vec::new())
-                }
-            };
-            self.write(&frames)?;
-            // Handle the whole batch before returning, so no event is lost.
-            let mut matched = None;
-            for event in events {
-                self.events.push(event.clone());
-                match &event {
-                    Event::UsageObserved { usage, .. } => {
-                        if let Some(cost) = usage.cost_usd {
-                            self.cost_usd = self.cost_usd.max(cost);
-                        }
-                    }
-                    Event::PermissionRequested { request, .. }
-                        if !matches!(policy, Policy::Hold) =>
-                    {
-                        let frames = self.answer(request, policy)?;
-                        self.write(&frames)?;
-                    }
-                    _ => {}
-                }
-                if matched.is_none() && until(&event) {
-                    matched = Some(event);
-                }
-            }
-            if let Some(event) = matched {
-                return Ok(event);
-            }
-        }
-    }
-
-    fn answer(
-        &mut self,
-        request: &PermissionRequest,
-        policy: Policy,
-    ) -> Result<Vec<Vec<u8>>, String> {
-        let decision = match policy {
+impl Policy {
+    fn answer(self) -> PermissionDecision {
+        match self {
             Policy::Allow => PermissionDecision::Allow,
             Policy::Deny | Policy::Hold => PermissionDecision::Deny {
                 message: "Branchyard qualification denies this action.".into(),
             },
-        };
-        self.driver
-            .respond(&request.key, decision)
-            .map_err(|e| format!("respond: {e}"))
-    }
-
-    fn turn(
-        &mut self,
-        prompt: &str,
-        policy: Policy,
-        timeout: Duration,
-    ) -> Result<(u64, TurnOutcome, String), String> {
-        let submitted = self
-            .driver
-            .submit(prompt)
-            .map_err(|e| format!("submit: {e}"))?;
-        let turn = submitted.turn;
-        self.write(&submitted.frames)?;
-        let ended = self.pump(
-            timeout,
-            policy,
-            |e| matches!(e, Event::TurnEnded { turn: t, .. } if *t == turn),
-        )?;
-        let Event::TurnEnded { outcome, .. } = ended else {
-            unreachable!()
-        };
-        Ok((turn, outcome, self.text(turn)))
-    }
-
-    fn text(&self, turn: u64) -> String {
-        self.events
-            .iter()
-            .filter_map(|e| match e {
-                Event::MessageDelta { turn: t, text } if *t == turn => Some(text.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn session_started(&self) -> Option<(NativeSession, Option<NativeSession>)> {
-        self.events.iter().find_map(|e| match e {
-            Event::SessionStarted {
-                session,
-                forked_from,
-            } => Some((session.clone(), forked_from.clone())),
-            _ => None,
-        })
-    }
-
-    fn saw(&self, predicate: impl Fn(&Event) -> bool) -> bool {
-        self.events.iter().any(predicate)
-    }
-
-    /// Close stdin and wait for the harness to exit, then tear down its
-    /// process group. Returns the session cost and whether any descendant
-    /// outlived the harness.
-    fn close(mut self) -> Result<(f64, Option<String>), String> {
-        self.stdin.take();
-        let result = self.pump(Duration::from_secs(30), Policy::Deny, |e| {
-            matches!(e, Event::SessionClosed)
-        });
-        if result.is_err() {
-            let _ = self.child.kill();
         }
-        let _ = self.child.wait();
-        let survivors = self.teardown();
-        result.map(|_| (self.cost_usd, survivors))
-    }
-
-    fn kill(mut self) -> Result<(Vec<Event>, f64), String> {
-        self.child.kill().map_err(|e| format!("kill: {e}"))?;
-        let _ = self.child.wait();
-        self.teardown();
-        let before = self.events.len();
-        self.pump(Duration::from_secs(10), Policy::Deny, |e| {
-            matches!(e, Event::SessionClosed)
-        })?;
-        Ok((self.events[before..].to_vec(), self.cost_usd))
-    }
-
-    /// Kill the harness's process group, naming any survivors.
-    fn teardown(&self) -> Option<String> {
-        let pgid = self.child.id().to_string();
-        let listing = Command::new("ps")
-            .args(["-o", "comm=", "-g", &pgid])
-            .output()
-            .ok()?;
-        let survivors: Vec<String> = String::from_utf8_lossy(&listing.stdout)
-            .lines()
-            .map(|l| l.trim().to_owned())
-            .filter(|l| !l.is_empty())
-            .collect();
-        if survivors.is_empty() {
-            return None;
-        }
-        let group = format!("-{pgid}");
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &group])
-            .stderr(Stdio::null())
-            .status();
-        Some(survivors.join(", "))
-    }
-
-    fn stderr_tail(&self) -> String {
-        let stderr = self.stderr.lock().unwrap();
-        let start = stderr.len().saturating_sub(400);
-        stderr[start..].trim().to_owned()
     }
 }
 
-/// Keep proxy and system settings; drop credentials and nested-session
-/// variables unless kept explicitly; give the harness a private home.
-fn scrub_env(command: &mut Command, home: &Path, keep: &BTreeSet<String>) {
-    for (name, _) in std::env::vars() {
-        let upper = name.to_ascii_uppercase();
-        let sensitive = ["ANTHROPIC", "CLAUDE", "OPENAI", "CODEX"]
-            .iter()
-            .any(|p| upper.starts_with(p));
-        if sensitive && !keep.contains(&name) {
-            command.env_remove(&name);
+/// A runtime error as a scenario detail, naming the refused operation.
+fn why(operation: &str, error: RuntimeError) -> String {
+    match error {
+        RuntimeError::Rejected(rejected) => format!("{operation}: {rejected}"),
+        other => other.to_string(),
+    }
+}
+
+/// Feed harness output to the driver until `until` matches an event or
+/// `timeout` passes. Permission requests are answered by `policy`.
+fn pump(
+    session: &mut Session,
+    timeout: Duration,
+    policy: Policy,
+    until: impl Fn(&Event) -> bool,
+) -> Result<Event, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = session
+            .next_event(remaining)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("timed out after {timeout:?}"))?;
+        if let Event::PermissionRequested { request, .. } = &event {
+            if !matches!(policy, Policy::Hold) {
+                session
+                    .respond(&request.key, policy.answer())
+                    .map_err(|e| why("respond", e))?;
+            }
+        }
+        if until(&event) {
+            return Ok(event);
         }
     }
-    command.env("HOME", home);
+}
+
+fn turn(
+    session: &mut Session,
+    prompt: &str,
+    policy: Policy,
+    timeout: Duration,
+) -> Result<(u64, TurnOutcome, String), String> {
+    let report = session
+        .run_turn(prompt, &mut |_| policy.answer(), timeout)
+        .map_err(|e| why("submit", e))?;
+    Ok((report.turn, report.outcome, report.text))
+}
+
+fn submit(session: &mut Session, prompt: &str) -> Result<u64, String> {
+    session.submit(prompt).map_err(|e| why("submit", e))
+}
+
+fn session_started(session: &Session) -> Option<(NativeSession, Option<NativeSession>)> {
+    session.events().iter().find_map(|e| match e {
+        Event::SessionStarted {
+            session,
+            forked_from,
+        } => Some((session.clone(), forked_from.clone())),
+        _ => None,
+    })
+}
+
+fn saw(session: &Session, predicate: impl Fn(&Event) -> bool) -> bool {
+    session.events().iter().any(predicate)
+}
+
+/// Close stdin and wait for the harness to exit, then tear down its process
+/// group. Returns the session cost and the descendants that outlived the
+/// harness, if any.
+fn close(session: Session) -> Result<(f64, Option<String>), String> {
+    let grace = Duration::from_secs(30);
+    let closed = session.close(grace).map_err(|e| e.to_string())?;
+    if closed.forced {
+        return Err(format!("timed out after {grace:?}"));
+    }
+    let survivors = (!closed.survivors.is_empty()).then(|| closed.survivors.join(", "));
+    Ok((closed.cost_usd.unwrap_or(0.0), survivors))
+}
+
+/// Kill the harness mid-session. Returns the events the driver produced as
+/// the connection closed and the session cost.
+fn kill(session: Session) -> Result<(Vec<Event>, f64), String> {
+    let before = session.cost_usd().unwrap_or(0.0);
+    let events = session.kill().map_err(|e| e.to_string())?;
+    let cost = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::UsageObserved { usage, .. } if usage.cumulative => usage.cost_usd,
+            _ => None,
+        })
+        .fold(before, f64::max);
+    Ok((events, cost))
 }
 
 struct Outcome {
@@ -394,7 +204,7 @@ struct Outcome {
 
 struct Run<'a> {
     config: &'a Config,
-    home: PathBuf,
+    env: Environment,
     results: Vec<Outcome>,
     spent_usd: f64,
 }
@@ -426,11 +236,22 @@ impl Run<'_> {
     }
 
     fn start(&self, mode: SessionMode, label: &str) -> Result<Session, String> {
-        let mut session = Session::start(self.config, &self.home, &self.cwd(), mode, label)?;
-        session.pump(Duration::from_secs(90), Policy::Deny, |e| {
+        let driver = self.config.profile.driver_with(self.config.command.clone());
+        let open = Open {
+            mode,
+            cwd: self.cwd().display().to_string(),
+            model: None,
+        };
+        let transcript = self
+            .config
+            .workdir
+            .join(format!("{label}.transcript.jsonl"));
+        let mut session = Session::start(driver, open, &self.env, Some(&transcript))
+            .map_err(|e| why("open rejected", e))?;
+        let opened = pump(&mut session, Duration::from_secs(90), Policy::Deny, |e| {
             matches!(e, Event::Ready | Event::OpenFailed { .. })
         })?;
-        if let Some(Event::OpenFailed { reason }) = session.events.last() {
+        if let Event::OpenFailed { reason } = opened {
             return Err(format!("open failed: {reason}"));
         }
         Ok(session)
@@ -457,9 +278,15 @@ fn main() {
     for dir in [home.clone(), config.workdir.join("workspace")] {
         fs::create_dir_all(&dir).expect("create qualification directories");
     }
+    // Keep proxy and system settings; drop credentials and nested-session
+    // variables unless kept explicitly; give the harness a private home.
+    let env = config
+        .keep_env
+        .iter()
+        .fold(Environment::new(home), |env, name| env.keep(name.as_str()));
     let mut run = Run {
         config: &config,
-        home,
+        env,
         results: Vec::new(),
         spent_usd: 0.0,
     };
@@ -484,14 +311,14 @@ fn scenarios(run: &mut Run) {
     let result = (|| {
         let prompt =
             format!("Remember this code word for later: {CODE_WORD}. Reply with exactly: OK");
-        let (_, outcome, text) = main.turn(&prompt, Policy::Deny, turn_timeout)?;
+        let (_, outcome, text) = turn(&mut main, &prompt, Policy::Deny, turn_timeout)?;
         check(outcome == TurnOutcome::Completed, || {
             format!("outcome {outcome:?}")
         })?;
         check(!text.trim().is_empty(), || "no message text".into())?;
-        let (session, _) = main.session_started().ok_or("no SessionStarted event")?;
+        let (session, _) = session_started(&main).ok_or("no SessionStarted event")?;
         check(
-            !capabilities.usage || main.saw(|e| matches!(e, Event::UsageObserved { .. })),
+            !capabilities.usage || saw(&main, |e| matches!(e, Event::UsageObserved { .. })),
             || "no usage reported".into(),
         )?;
         Ok(format!("session {session}; replied {:?}", text.trim()))
@@ -501,11 +328,11 @@ fn scenarios(run: &mut Run) {
     let t = Instant::now();
     let marker = run.cwd().join("deny-marker.txt");
     let result = (|| {
-        let before = main.events.len();
+        let before = main.events().len();
         let prompt = "Use your shell/Bash tool to run exactly this command: echo qualified > deny-marker.txt \
                       If you cannot, reply with the word DENIED and do not try another way.";
-        let (_, outcome, _) = main.turn(prompt, Policy::Deny, turn_timeout)?;
-        let requests = main.events[before..]
+        let (_, outcome, _) = turn(&mut main, prompt, Policy::Deny, turn_timeout)?;
+        let requests = main.events()[before..]
             .iter()
             .filter(|e| matches!(e, Event::PermissionRequested { .. }))
             .count();
@@ -527,7 +354,7 @@ fn scenarios(run: &mut Run) {
     let result = (|| {
         let prompt = "Use your shell/Bash tool to run exactly this command: echo qualified > allow-marker.txt \
                       Then reply with the word DONE.";
-        let (_, outcome, _) = main.turn(prompt, Policy::Allow, turn_timeout)?;
+        let (_, outcome, _) = turn(&mut main, prompt, Policy::Allow, turn_timeout)?;
         check(outcome == TurnOutcome::Completed, || {
             format!("outcome {outcome:?}")
         })?;
@@ -543,13 +370,11 @@ fn scenarios(run: &mut Run) {
     let t = Instant::now();
     let marker = run.cwd().join("hold-marker.txt");
     let result = (|| {
-        let submitted = main
-            .driver
-            .submit("Use your shell/Bash tool to run exactly this command: echo held > hold-marker.txt Then reply DONE.")
-            .map_err(|e| format!("submit: {e}"))?;
-        let turn = submitted.turn;
-        main.write(&submitted.frames)?;
-        main.pump(turn_timeout, Policy::Hold, |e| {
+        let turn = submit(
+            &mut main,
+            "Use your shell/Bash tool to run exactly this command: echo held > hold-marker.txt Then reply DONE.",
+        )?;
+        pump(&mut main, turn_timeout, Policy::Hold, |e| {
             matches!(e, Event::PermissionRequested { .. })
         })?;
         interrupt(
@@ -560,7 +385,7 @@ fn scenarios(run: &mut Run) {
         )
         .and_then(|detail| {
             check(!marker.exists(), || "the unanswered command ran".into())?;
-            let withdrawn = main.saw(|e| matches!(e, Event::PermissionWithdrawn { .. }));
+            let withdrawn = saw(&main, |e| matches!(e, Event::PermissionWithdrawn { .. }));
             Ok(format!(
                 "{detail}; pending request withdrawn by harness: {withdrawn}"
             ))
@@ -570,20 +395,17 @@ fn scenarios(run: &mut Run) {
 
     let t = Instant::now();
     let result = (|| {
-        let submitted = main
-            .driver
-            .submit(
-                "Use your shell/Bash tool to run exactly this command in the foreground, not in the background: \
-                 python3 -c \"import time; time.sleep(45)\" Then reply DONE.",
-            )
-            .map_err(|e| format!("submit: {e}"))?;
-        let turn = submitted.turn;
-        main.write(&submitted.frames)?;
-        main.pump(turn_timeout, Policy::Allow, |e| {
+        let turn = submit(
+            &mut main,
+            "Use your shell/Bash tool to run exactly this command in the foreground, not in the background: \
+             python3 -c \"import time; time.sleep(45)\" Then reply DONE.",
+        )?;
+        pump(&mut main, turn_timeout, Policy::Allow, |e| {
             matches!(e, Event::PermissionRequested { .. })
         })?;
         // Let the command start before interrupting it.
-        if let Ok(ended) = main.pump(
+        if let Ok(ended) = pump(
+            &mut main,
             Duration::from_secs(4),
             Policy::Allow,
             |e| matches!(e, Event::TurnEnded { turn: t, .. } if *t == turn),
@@ -600,9 +422,9 @@ fn scenarios(run: &mut Run) {
     run.record("interrupt_during_tool", t, result);
 
     let t = Instant::now();
-    let parent = main.session_started().map(|(s, _)| s);
+    let parent = session_started(&main).map(|(s, _)| s);
     let mut parent_cost = 0.0;
-    let result = main.close().map(|(cost, survivors)| {
+    let result = close(main).map(|(cost, survivors)| {
         run.spent_usd += cost;
         parent_cost = cost;
         match survivors {
@@ -644,13 +466,14 @@ fn scenarios(run: &mut Run) {
         };
         let result = (|| {
             let mut session = run.start(mode, name)?;
-            let (_, outcome, text) = session.turn(
+            let (_, outcome, text) = turn(
+                &mut session,
                 "What code word did I ask you to remember? Reply with only the code word.",
                 Policy::Deny,
                 turn_timeout,
             )?;
-            let started = session.session_started();
-            let (cost, _) = session.close()?;
+            let started = session_started(&session);
+            let (cost, _) = close(session)?;
             // A resumed or forked session reports totals that include its
             // parent's cost; count only what this session added.
             run.spent_usd += (cost - parent_cost).max(0.0);
@@ -686,21 +509,17 @@ fn scenarios(run: &mut Run) {
     }
     let result = (|| {
         let mut session = run.start(SessionMode::Fresh, "connection-lost")?;
-        let submitted = session
-            .driver
-            .submit(
-                "Use your shell/Bash tool to run exactly this command: sleep 60 Then reply DONE.",
-            )
-            .map_err(|e| format!("submit: {e}"))?;
-        let turn = submitted.turn;
-        session.write(&submitted.frames)?;
-        session.pump(turn_timeout, Policy::Allow, |e| {
+        let turn = submit(
+            &mut session,
+            "Use your shell/Bash tool to run exactly this command: sleep 60 Then reply DONE.",
+        )?;
+        pump(&mut session, turn_timeout, Policy::Allow, |e| {
             matches!(
                 e,
                 Event::ToolStarted { .. } | Event::PermissionRequested { .. }
             )
         })?;
-        let (events, cost) = session.kill()?;
+        let (events, cost) = kill(session)?;
         run.spent_usd += cost;
         check(
             events
@@ -721,12 +540,9 @@ fn interrupt(
     acknowledgment: bool,
 ) -> Result<String, String> {
     let interrupted_at = Instant::now();
-    let frames = session
-        .driver
-        .interrupt()
-        .map_err(|e| format!("interrupt: {e}"))?;
-    session.write(&frames)?;
-    let ended = session.pump(
+    session.interrupt().map_err(|e| why("interrupt", e))?;
+    let ended = pump(
+        session,
         Duration::from_secs(45),
         policy,
         |e| matches!(e, Event::TurnEnded { turn: t, .. } if *t == turn),
@@ -739,8 +555,10 @@ fn interrupt(
         format!("outcome {outcome:?}")
     })?;
     check(waited < 30.0, || format!("took {waited:.1}s to stop"))?;
-    let acknowledged =
-        session.saw(|e| matches!(e, Event::InterruptAcknowledged { turn: t } if *t == turn));
+    let acknowledged = saw(
+        session,
+        |e| matches!(e, Event::InterruptAcknowledged { turn: t } if *t == turn),
+    );
     check(!acknowledgment || acknowledged, || {
         "no interrupt acknowledgment".into()
     })?;
@@ -749,10 +567,10 @@ fn interrupt(
     ))
 }
 
-fn version(config: &Config, home: &Path) -> String {
+fn version(config: &Config, env: &Environment) -> String {
     let mut command = Command::new(&config.command[0]);
     command.arg("--version").stdin(Stdio::null());
-    scrub_env(&mut command, home, &config.keep_env);
+    env.apply(&mut command);
     command
         .output()
         .ok()
@@ -781,7 +599,7 @@ fn report(run: &Run, elapsed: Duration) {
         "profile": run.config.profile.id,
         "harness": run.config.profile.harness,
         "command": run.config.command.join(" "),
-        "harness_version": version(run.config, &run.home),
+        "harness_version": version(run.config, &run.env),
         "driver_version": env!("CARGO_PKG_VERSION"),
         "host": host(),
         "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
