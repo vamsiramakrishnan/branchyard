@@ -29,7 +29,7 @@ Live protocol qualification of harness driver profiles against real harness bina
 
 ## Findings
 
-- **Correction: `clean_close` survivor results are unverified.** The runner's survivor check used `ps -o comm= -g <pgid>`, which selects by session rather than process group on procps. It therefore listed nothing and never killed the group. The "no descendants outlived the harness" results above are unverified. `branchyard-runtime`, which the runner now uses, lists by process group and always signals it. Each report carries a `correction` field until a re-run replaces it. The background-task finding below was observed directly with `pgrep` and stands.
+- **claude-agent-acp leaves its Claude Code child running when it exits.** On `clean_close`, after the adapter exited, a `claude` process was still alive in its process group; the runner killed it and named it. The native profile left no survivors. Earlier reports could not have seen this: the runner's first survivor check used `ps -o comm= -g <pgid>`, which selects by session on procps. `branchyard-runtime` lists by process group and always signals it; the reports here come from that runner.
 - **Harness descendants can outlive the harness.** On an early run, Claude Code declined a foreground `sleep 60 && …`, ran it as a background task instead, and ended the turn; that task was still running after the CLI process exited. The end of a turn is not the end of its work, and harness exit is not teardown. Branchyard must terminate the sandbox or process group, and account background tasks to the attempt. The runner, now built on `branchyard-runtime`, kills each harness's process group and names survivors.
 - **claude-agent-acp makes permission bypass available by default.** The adapter passes `--allow-dangerously-skip-permissions` unless it runs as root without `IS_SANDBOX`. That lets a later mode switch skip Branchyard's permission answers; in this container it also made Claude Code refuse to start. The `claude-code-acp` profile now sends the adapter's documented per-session opt-out, `_meta.claudeCode.options.allowDangerouslySkipPermissions: false`. With it, every tool request reached Branchyard.
 - **ACP reports no stable usage.** claude-agent-acp returns `usage` on prompt responses, but in ACP schema 1.9.1 that field is behind the unstable `unstable_end_turn_token_usage` feature, so the driver does not consume it. The runner's cost cap cannot apply to ACP profiles.
@@ -39,7 +39,7 @@ Live protocol qualification of harness driver profiles against real harness bina
 
 ## Cost
 
-Scenarios make real model calls with the credentials the harness finds. In this environment, the container's proxy supplied Claude credentials. The final native run's harness-estimated cost was $0.074, excluding the killed turn, which reports none. Across all development and final runs, including the ACP runs that report no cost, estimated spend was under about $1.
+Scenarios make real model calls with the credentials the harness finds. In this environment, the container's proxy supplied Claude credentials. The latest native run's harness-estimated cost was $0.11, excluding the killed turn, which reports none. Across all development, final and re-verification runs, including the ACP runs that report no cost, estimated spend was about $1.
 
 ## Running
 
