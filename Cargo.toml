@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/branchyard",
     "crates/branchyard-controls",
     "crates/branchyard-harness",
     "crates/branchyard-qualify",

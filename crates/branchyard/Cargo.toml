@@ -1,0 +1,10 @@
+[package]
+name = "branchyard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Delegate coding work to agent harnesses on git branches, and merge only validated results"
+
+[dependencies]
+branchyard-harness = { path = "../branchyard-harness" }
