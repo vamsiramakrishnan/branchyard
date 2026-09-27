@@ -169,6 +169,17 @@ fn alive(pid: u32) -> bool {
     })
 }
 
+/// Wait until `pid` runs `name`: a forked child is named after its parent
+/// until it execs.
+fn wait_exec(pid: u32, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default() != format!("{name}\n")
+    {
+        assert!(Instant::now() < deadline, "pid {pid} never ran {name}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn wait_gone(pid: u32) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while alive(pid) {
@@ -237,6 +248,7 @@ fn teardown_names_and_kills_what_outlived_the_process() {
     let sleeper: u32 = line.trim().parse().unwrap();
     assert!(process.wait().unwrap().success());
     assert!(alive(sleeper));
+    wait_exec(sleeper, "sleep");
     let survivors = process.teardown();
     assert_eq!(survivors, vec!["sleep".to_owned()]);
     wait_gone(sleeper);
@@ -334,6 +346,7 @@ fn an_ended_or_superseded_attempt_is_never_accepted_again() {
     let mut stdout = BufReader::new(process.take_stdout().unwrap());
     stdout.read_line(&mut line).unwrap();
     let sleeper: u32 = line.trim().parse().unwrap();
+    wait_exec(sleeper, "sleep");
     let killed = first.end_attempt().unwrap();
     assert!(killed.iter().any(|name| name == "sleep"), "{killed:?}");
     wait_gone(sleeper);

@@ -14,7 +14,7 @@ use branchyard_sandbox::{
     SandboxState, SnapshotGuarantee, SnapshotScope,
 };
 use branchyard_substrate::{Config, SubstrateProvider};
-use common::{wait_gone, Cluster, Scratch};
+use common::{wait_exec, wait_gone, Cluster, Scratch};
 
 fn setup(name: &str, scratch: &Scratch) -> Setup {
     let workspace = scratch.path("workspace");
@@ -148,6 +148,7 @@ fn each_attempt_has_its_own_credential_and_ended_ones_stay_dead() {
         .read_line(&mut line)
         .unwrap();
     let pid: u32 = line.trim().parse().unwrap();
+    wait_exec(pid, "sleep");
     let killed = provider.end_attempt("actor").unwrap();
     assert!(killed.iter().any(|n| n == "sleep"), "{killed:?}");
     wait_gone(pid);
