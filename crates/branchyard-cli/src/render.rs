@@ -949,10 +949,97 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         };
         pairs.push(("seat", format!("{seat}; spawns seats: {spawns}")));
     }
+    if !i.depends_on.is_empty() {
+        pairs.push(("depends on", dependencies_text(&i.depends_on)));
+    }
+    if !i.bindings.is_empty() {
+        pairs.push(("bindings", bindings_text(&i.bindings)));
+    }
+    if i.graph_revision > 0 {
+        pairs.push(("graph revision", i.graph_revision.to_string()));
+    }
     if !i.last_message.is_empty() {
         pairs.push(("last message", i.last_message.trim_end().to_owned()));
     }
     key_values(&pairs, style)
+}
+
+fn dependencies_text(dependencies: &[branchyard::Dependency]) -> String {
+    dependencies
+        .iter()
+        .map(|d| match d.after {
+            branchyard::After::Settled => d.prerequisite.clone(),
+            branchyard::After::Integrated => format!("{} (integrated)", d.prerequisite),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn bindings_text(bindings: &[branchyard::Binding]) -> String {
+    bindings
+        .iter()
+        .map(|b| format!("{} ({})", b.scratch, b.access))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `by graph show`: each child, its status and what it waits for.
+pub fn graph(g: &branchyard::Graph, style: Style) -> String {
+    let mut out = format!("{}'s graph, revision {}\n", g.branch, g.revision);
+    if g.children.is_empty() {
+        out.push_str("  no children\n");
+        return out;
+    }
+    let width = g.children.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for child in &g.children {
+        let (status, tone) = status_text(&child.status);
+        let waits: Vec<branchyard::Dependency> = g
+            .dependencies
+            .iter()
+            .filter(|d| d.dependent == child.name)
+            .cloned()
+            .collect();
+        let mut line = format!(
+            "  {:width$}  {}",
+            child.name,
+            style.paint(tone, &status),
+            width = width
+        );
+        if !waits.is_empty() {
+            line.push_str(&format!("  after {}", dependencies_text(&waits)));
+        }
+        if !child.bindings.is_empty() {
+            line.push_str(&format!("  binds {}", bindings_text(&child.bindings)));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// `by graph apply`: what the proposal created, and the revision.
+pub fn graph_applied(a: &branchyard::GraphApplied, style: Style) -> String {
+    let mut out = format!("{}'s graph is at revision {}\n", a.branch, a.revision);
+    for spawned in &a.spawned {
+        let (status, tone) = status_text(&spawned.status);
+        out.push_str(&format!(
+            "  {} {}\n",
+            spawned.name,
+            style.paint(tone, &status)
+        ));
+    }
+    if !a.dependencies.is_empty() {
+        out.push_str(&format!(
+            "  {} dependenc{}\n",
+            a.dependencies.len(),
+            if a.dependencies.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ));
+    }
+    out
 }
 
 /// `by show`.

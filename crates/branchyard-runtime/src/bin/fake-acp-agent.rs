@@ -31,8 +31,8 @@
 //!   initializes it, calls `tools/call` with the JSON as arguments, and
 //!   replies `mcp <tool>: <text>` or `mcp <tool> error: <text>` for each
 //!   line. `MCP tools` replies the listed tool names instead,
-//!   `MCP wait <branch>` calls `inspect` until the branch is not running,
-//!   and `MCP started <branch>` calls `events` until the branch's prompt
+//!   `MCP wait <branch>` calls `inspect` until the branch is neither
+//!   running nor waiting for its prerequisites, and `MCP started <branch>` calls `events` until the branch's prompt
 //!   has been recorded, which it is just before the prompt is submitted.
 //!   Without a server it replies `mcp: no server`.
 //! - `SH <command>`, one per line: runs the command with `sh -c` in its
@@ -566,7 +566,8 @@ fn mcp(server: &Value, text: &str) -> String {
     out
 }
 
-/// Poll `inspect` until `branch` is not running, for up to a minute.
+/// Poll `inspect` until `branch` is neither running nor waiting for its
+/// prerequisites, for up to a minute.
 fn wait(client: &mut McpClient, branch: &str) -> Result<(bool, String), String> {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -579,7 +580,7 @@ fn wait(client: &mut McpClient, branch: &str) -> Result<(bool, String), String> 
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        if state != "running" || Instant::now() >= deadline {
+        if !matches!(state.as_str(), "running" | "waiting") || Instant::now() >= deadline {
             return Ok((false, state));
         }
         std::thread::sleep(Duration::from_millis(50));

@@ -148,6 +148,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::events(env, target, branch, cursor, limit, json),
         Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
         Command::Children { branch, json } => commands::children(env, target, branch, json),
+        Command::Graph(args) => commands::graph(env, target, &args),
         Command::Ask {
             as_branch,
             text,

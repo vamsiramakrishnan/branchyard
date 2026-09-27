@@ -1225,3 +1225,134 @@ fn artifact_and_scratch_commands_follow_the_delegation_tree() {
     let out = repo.by(&["scratch", "unlock", "cache", "--branch", "root"]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+/// A harness builds a graph of its children with `by graph` in its shell
+/// and with the Python module; both reach the same operation.
+#[test]
+fn a_harness_applies_a_graph_with_by_and_python() {
+    let repo = Repo::new();
+    let edits = r#"[{"kind":"spawn","prompt":"WRITE a.txt=1","name":"a"},{"kind":"spawn","prompt":"WRITE b.txt=1","name":"b","depends_on":["a"]}]"#;
+    let script = "import branchyard as b; g = b.graph(); print('python rev', g.revision); \
+                  a = b.apply_graph([{'kind': 'spawn', 'prompt': 'WRITE c.txt=1', 'name': 'c', \
+                  'depends_on': ['b']}], g.revision); \
+                  print('python applied', a.revision, a.spawned[0].status['state'], a.spawned[0].depends_on); \
+                  d = b.wait('c', timeout=60, poll=0.05); \
+                  print('python waited', d.status['state'], d.depends_on[0]['prerequisite']); \
+                  exec('try:\\n b.apply_graph([{\\'kind\\': \\'add_dependency\\', \\'dependent\\': \\'c\\', \\'prerequisite\\': \\'a\\'}], 0)\\nexcept b.StaleRevisionError as e:\\n print(\\'python stale\\', e.kind)')";
+    let prompt = [
+        "SH by graph show --json".to_owned(),
+        format!("SH by graph apply --edits '{edits}' --expected-revision 0 --json"),
+        format!("SH python3 -c \"{script}\""),
+        "SH by graph show --json".to_owned(),
+        "SH by graph apply --edits '[]' --expected-revision 0 --json".to_owned(),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "\"revision\": 0",
+        "\"state\": \"waiting\"",
+        "python rev 1",
+        "python applied 2 waiting ['b']",
+        "python waited ready b",
+        "python stale stale_revision",
+        "\"kind\": \"denied\"",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    let graph = repo.json(&["graph", "show", "root", "--json"]);
+    assert_eq!(graph["revision"], 2);
+    assert_eq!(graph["dependencies"].as_array().unwrap().len(), 2);
+    for child in graph["children"].as_array().unwrap() {
+        assert_eq!(child["status"]["state"], "ready", "{graph}");
+    }
+    let text = stdout(&repo.by(&["graph", "show", "root"]));
+    assert!(text.contains("root's graph, revision 2"), "{text}");
+    assert!(text.contains("after a"), "{text}");
+}
+
+/// A person applies a graph from a file outside a harness: the command
+/// waits for the children and what they start; a spawn with --depends-on
+/// waits for its sibling; a failed prerequisite blocks.
+#[test]
+fn a_person_applies_a_graph_and_spawns_dependents() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let proposal = repo.dir.join("proposal.json");
+    fs::write(
+        &proposal,
+        r#"{"expected_revision": 0, "edits": [
+            {"kind": "spawn", "prompt": "EXIT", "name": "bad"},
+            {"kind": "spawn", "prompt": "WRITE n.txt=1", "name": "next", "depends_on": ["bad"]}
+        ]}"#,
+    )
+    .unwrap();
+    let applied = repo.json(&[
+        "graph",
+        "apply",
+        proposal.to_str().unwrap(),
+        "--parent",
+        "root",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(applied["revision"], 1);
+    assert_eq!(applied["spawned"][1]["status"]["state"], "waiting");
+    let next = repo.json(&["inspect", "next", "--json"]);
+    assert_eq!(next["status"]["state"], "blocked", "{next}");
+    assert!(next["status"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("its prerequisite bad failed"));
+    // The same file again is stale now, and changes nothing.
+    let stale = repo.by(&[
+        "graph",
+        "apply",
+        proposal.to_str().unwrap(),
+        "--parent",
+        "root",
+        "--json",
+    ]);
+    assert_eq!(stale.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&stale.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "stale_revision");
+    assert_eq!(
+        repo.json(&["graph", "show", "root", "--json"])["revision"],
+        1
+    );
+    // by spawn --depends-on: created waiting, started when its sibling
+    // settles, before the command returns.
+    let spawned = repo.json(&[
+        "spawn",
+        "WRITE s.txt=1",
+        "--parent",
+        "root",
+        "--name",
+        "after-next",
+        "--depends-on",
+        "next",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(spawned["status"]["state"], "blocked", "{spawned}");
+    let spawned = repo.json(&[
+        "spawn",
+        "WRITE t.txt=1",
+        "--parent",
+        "root",
+        "--name",
+        "later",
+        "--depends-on",
+        "after-next",
+        "--after",
+        "integrated",
+        "--json",
+    ]);
+    assert_eq!(spawned["status"]["state"], "blocked", "{spawned}");
+    let usage = repo.by(&["graph", "apply", "--parent", "root"]);
+    assert_eq!(usage.status.code(), Some(2));
+    let usage = repo.by(&["spawn", "x", "--parent", "root", "--after", "soon"]);
+    assert_eq!(usage.status.code(), Some(2));
+}

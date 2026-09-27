@@ -114,6 +114,29 @@ pub struct SpawnArgs {
     pub deny: Vec<String>,
     /// `--seat`: the rig seat the child fills.
     pub seat: Option<String>,
+    /// `--depends-on`: siblings the child waits for.
+    pub depends_on: Vec<String>,
+    /// `--after`: when each of them counts as done.
+    pub after: branchyard::After,
+    /// `--bind NAME:ACCESS`, repeatable.
+    pub bindings: Vec<branchyard::Binding>,
+    pub json: bool,
+}
+
+/// `by graph show|apply|resume ...`; see `docs/graph.md`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphArgs {
+    pub action: String,
+    /// `show`'s branch, or `apply`'s proposal file (`-` for stdin).
+    pub arg: Option<String>,
+    /// The branch whose graph `apply` changes, outside a harness.
+    pub parent: Option<String>,
+    /// `--edits JSON`: the edits inline, instead of a file.
+    pub edits: Option<String>,
+    /// `--expected-revision N`, overriding a file's.
+    pub expected_revision: Option<u64>,
+    /// Permissions for the children's turns, outside a harness.
+    pub task: TaskArgs,
     pub json: bool,
 }
 
@@ -280,6 +303,7 @@ pub enum Command {
         unread: bool,
         json: bool,
     },
+    Graph(GraphArgs),
     Rig(RigArgs),
     Artifact(ArtifactArgs),
     Scratch(ScratchArgs),
@@ -643,6 +667,31 @@ const DENY: Flag = Flag {
     long: "deny",
     value: Some("TOOL,TOOL,..."),
     help: "Tools the child is denied outright; a trailing * matches a prefix",
+};
+const DEPENDS_ON: Flag = Flag {
+    long: "depends-on",
+    value: Some("BRANCH,BRANCH,..."),
+    help: "Siblings the child waits for: it is created waiting and starts once they have settled",
+};
+const AFTER: Flag = Flag {
+    long: "after",
+    value: Some("settled|integrated"),
+    help: "When each --depends-on branch counts as done: settled (default), or integrated into the parent",
+};
+const BIND: Flag = Flag {
+    long: "bind",
+    value: Some("SCRATCH:read_only|exclusive_write"),
+    help: "Bind the child to a scratch area; exclusive_write holds its writer lock for each turn (repeatable)",
+};
+const EDITS: Flag = Flag {
+    long: "edits",
+    value: Some("JSON"),
+    help: "The proposal's edits inline, as a JSON array, instead of a file",
+};
+const EXPECTED_REVISION: Flag = Flag {
+    long: "expected-revision",
+    value: Some("N"),
+    help: "The graph revision the proposal was made against (by graph show); overrides the file's",
 };
 const SEAT: Flag = Flag {
     long: "seat",
@@ -1037,6 +1086,9 @@ pub static COMMANDS: &[Spec] = &[
             STALL_ACTION,
             MAX_DEPTH,
             DENY,
+            DEPENDS_ON,
+            AFTER,
+            BIND,
             ALLOW_UNAPPROVED_TOOLS,
             WAIT,
             YES,
@@ -1073,6 +1125,20 @@ pub static COMMANDS: &[Spec] = &[
         positionals: &["branch?"],
         summary: "List the branches a branch delegated to",
         flags: &[JSON],
+    },
+    Spec {
+        name: "graph",
+        positionals: &["show|apply|resume", "arg?"],
+        summary: "Show a branch's children and their dependencies, or apply a graph proposal (see docs/graph.md)",
+        flags: &[
+            PARENT,
+            EDITS,
+            EXPECTED_REVISION,
+            ALLOW_UNAPPROVED_TOOLS,
+            YES,
+            ASK,
+            JSON,
+        ],
     },
     Spec {
         name: "ask",
@@ -1267,9 +1333,59 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                     None => Vec::new(),
                 },
                 seat: m.value("seat").map(str::to_owned),
+                depends_on: match m.value("depends-on") {
+                    Some(list) => harness_list(list)
+                        .map_err(|e| m.error(e.replace("--harness", "--depends-on")))?,
+                    None => Vec::new(),
+                },
+                after: match m.value("after") {
+                    None | Some("settled") => branchyard::After::Settled,
+                    Some("integrated") => branchyard::After::Integrated,
+                    Some(other) => {
+                        return Err(m.error(format!(
+                            "--after must be settled or integrated, not '{other}'"
+                        )))
+                    }
+                },
+                bindings: m
+                    .values("bind")
+                    .into_iter()
+                    .map(|text| branchyard::Binding::parse(text).map_err(|e| m.error(e)))
+                    .collect::<Result<_, _>>()?,
                 json: m.switch("json"),
             },
         },
+        "graph" => {
+            let action = next();
+            let arg = optional.next();
+            match action.as_str() {
+                "show" | "resume" => {}
+                "apply" => {
+                    if arg.is_some() == m.value("edits").is_some() {
+                        return Err(m.error(
+                            "graph apply needs a proposal: a FILE (or - for stdin), or --edits",
+                        ));
+                    }
+                    if m.value("edits").is_some() && m.value("expected-revision").is_none() {
+                        return Err(m.error("graph apply --edits needs --expected-revision"));
+                    }
+                }
+                other => {
+                    return Err(m.error(format!(
+                        "unknown graph action '{other}'; use show, apply or resume"
+                    )))
+                }
+            }
+            Command::Graph(GraphArgs {
+                action,
+                arg,
+                parent: m.value("parent").map(str::to_owned),
+                edits: m.value("edits").map(str::to_owned),
+                expected_revision: m.number("expected-revision")?,
+                task: m.task()?,
+                json: m.switch("json"),
+            })
+        }
         "inspect" => Command::Inspect {
             branch: optional.next(),
             json: m.switch("json"),

@@ -336,11 +336,30 @@ async fn poll(repo: RepoState, interval: Duration, mut shutdown: watch::Receiver
             recovered = tokio::time::Instant::now();
         }
         let (feed, yard) = (repo.feed.clone(), repo.yard.clone());
+        let wake = repo.wake.clone();
         let polled = tokio::task::spawn_blocking(move || {
             let recovered = match recover {
                 true => yard.recover().map(|r| r.len()),
                 false => Ok(0),
             };
+            // A dependent whose prerequisite settled while no engine here
+            // could start it: with the options of the proposal that made
+            // it, when this server applied that, else the default policy,
+            // deny. See docs/graph.md.
+            if recover {
+                let options = branchyard::TaskOptions {
+                    observer: Some(crate::api::observer(&wake)),
+                    ..branchyard::TaskOptions::default()
+                };
+                match yard.resume_graph(&options) {
+                    Ok(started) if started.is_empty() => {}
+                    Ok(started) => eprintln!(
+                        "branchyard-server: started {} whose prerequisites had settled",
+                        started.join(", ")
+                    ),
+                    Err(e) => eprintln!("branchyard-server: resuming graphs: {e}"),
+                }
+            }
             (feed.sync(), recovered)
         })
         .await;

@@ -15,7 +15,9 @@ use branchyard::{
 };
 use serde::Serialize;
 
-use crate::args::{self, shell_quote, ArtifactArgs, ScratchArgs, SpawnArgs, TaskArgs};
+use crate::args::{
+    self, shell_quote, ArtifactArgs, GraphArgs, Permissions, ScratchArgs, SpawnArgs, TaskArgs,
+};
 use crate::console::{self, Choice, Console};
 use crate::json;
 use crate::remote::{self, Remote};
@@ -830,6 +832,9 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         max_depth: args.max_depth,
         deny: args.deny.clone(),
         seat: args.seat.clone(),
+        depends_on: args.depends_on.clone(),
+        after: args.after,
+        bindings: args.bindings.clone(),
         ..Spawn::default()
     };
     if let Some(delegate) = harness_delegate(json)? {
@@ -846,13 +851,22 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
             Err(error) => return fail(json, &error),
         };
         if !args.wait {
-            return emit(json, Ok(spawned), |s| {
-                format!(
+            return emit(json, Ok(spawned), |s| match &s.status {
+                branchyard::BranchStatus::Waiting => format!(
+                    "created {} on {}, waiting for {}\n",
+                    s.name,
+                    s.profile,
+                    s.depends_on.join(", ")
+                ),
+                branchyard::BranchStatus::Blocked { reason } => {
+                    format!("created {}, blocked: {reason}\n", s.name)
+                }
+                _ => format!(
                     "spawned {} on {} from {}\n",
                     s.name,
                     s.profile,
                     short(&s.base)
-                )
+                ),
             });
         }
         let done = delegate.wait(&spawned.name, std::time::Duration::MAX);
@@ -944,7 +958,12 @@ pub fn integrate(target: &Target, branch: &str, json: bool) -> Outcome {
                         "{branch} was not delegated by another branch; merge it with by merge"
                     ))
                 })?;
-            as_user(&parent, TaskOptions::default())?.integrate(branch)
+            // One yard, so the wait sees a sibling this integration
+            // started on this process's threads.
+            let parent = yard.branch(&parent)?;
+            let merged = parent.delegate(TaskOptions::default())?.integrate(branch)?;
+            parent.wait_subtree()?;
+            Ok(merged)
         })(),
     };
     emit(json, result, |m| {
@@ -1123,6 +1142,141 @@ pub fn children(env: &Env, target: &Target, branch: Option<String>, json: bool) 
         true => format!("{} has no children\n", c.branch),
         false => render::branch_table(&c.descendants, now(), env.style()),
     })
+}
+
+/// `by graph show|apply|resume`; see `docs/graph.md`.
+pub fn graph(env: &Env, target: &Target, args: &GraphArgs) -> Outcome {
+    let json = args.json;
+    let inside = harness_delegate(json)?;
+    if inside.is_some() && (args.parent.is_some() || args.task.permissions != Permissions::Unset) {
+        let error = branchyard::Error::Denied(
+            "inside a harness, the graph is the harness's own branch's and its children inherit \
+             its policy; drop --parent, --yes and --ask"
+                .into(),
+        );
+        return fail(json, &error);
+    }
+    match args.action.as_str() {
+        "show" => {
+            let result = match (inside, target) {
+                (Some(delegate), _) => {
+                    let branch = args
+                        .arg
+                        .clone()
+                        .unwrap_or_else(|| delegate.branch().to_owned());
+                    delegate.graph(&branch)
+                }
+                (None, Target::Remote(remote)) => required_outside(args.arg.clone(), "graph show")
+                    .and_then(|b| remote.repo.graph(&b).map_err(remote::sdk_error)),
+                (None, Target::Local) => required_outside(args.arg.clone(), "graph show")
+                    .and_then(|b| as_user(&b, TaskOptions::default())?.graph(&b)),
+            };
+            emit(json, result, |g| render::graph(g, env.style()))
+        }
+        "apply" => {
+            let proposal = match proposal(args) {
+                Ok(proposal) => proposal,
+                Err(error) => return fail(json, &error),
+            };
+            let result = match (inside, target) {
+                (Some(delegate), _) => {
+                    delegate.apply_graph(proposal.edits, proposal.expected_revision)
+                }
+                (None, Target::Remote(remote)) => {
+                    required_outside(args.parent.clone(), "graph apply --parent").and_then(
+                        |parent| remote::apply_graph(remote, &parent, proposal, &args.task),
+                    )
+                }
+                (None, Target::Local) => {
+                    let parent = match required_outside(args.parent.clone(), "graph apply --parent")
+                    {
+                        Ok(parent) => parent,
+                        Err(error) => return fail(json, &error),
+                    };
+                    // The children run on this process's threads, so the
+                    // command waits for them, and for what they start.
+                    let live = Live::start_to(env, &args.task, true, json, None);
+                    let result = (|| {
+                        let parent = open_yard()?.branch(&parent)?;
+                        let delegate = parent.delegate(live.options(&args.task)?)?;
+                        let applied =
+                            delegate.apply_graph(proposal.edits, proposal.expected_revision)?;
+                        parent.wait_subtree()?;
+                        Ok(applied)
+                    })();
+                    live.console.finish();
+                    result
+                }
+            };
+            emit(json, result, |a| render::graph_applied(a, env.style()))
+        }
+        _ => {
+            // resume
+            let result = match (inside, target) {
+                (Some(_), _) => Err(branchyard::Error::Denied(
+                    "by graph resume is for a person, outside a harness".into(),
+                )),
+                (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
+                    "a server resumes its graphs itself, on its recovery interval".into(),
+                )),
+                (None, Target::Local) => {
+                    let live = Live::start_to(env, &args.task, true, json, None);
+                    let result = (|| {
+                        let yard = open_yard()?;
+                        let started = yard.resume_graph(&live.options(&args.task)?)?;
+                        for name in &started {
+                            if let Some(parent) = yard.branch(name)?.info().parent.clone() {
+                                yard.branch(&parent)?.wait_subtree()?;
+                            }
+                        }
+                        Ok(serde_json::json!({ "started": started }))
+                    })();
+                    live.console.finish();
+                    result
+                }
+            };
+            emit(json, result, |value| match value["started"].as_array() {
+                Some(started) if !started.is_empty() => format!(
+                    "started {}\n",
+                    started
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => "nothing was waiting on settled prerequisites\n".into(),
+            })
+        }
+    }
+}
+
+/// The proposal `by graph apply` was given: a file (`-` for stdin) holding
+/// `{"expected_revision", "edits"}`, or `--edits` with
+/// `--expected-revision`, which also overrides a file's revision.
+fn proposal(args: &GraphArgs) -> Result<branchyard::GraphProposal, branchyard::Error> {
+    let invalid = |why: String| branchyard::Error::Denied(format!("invalid graph proposal: {why}"));
+    let mut proposal = match (&args.edits, args.arg.as_deref()) {
+        (Some(edits), _) => branchyard::GraphProposal {
+            expected_revision: args.expected_revision.unwrap_or_default(),
+            edits: serde_json::from_str(edits).map_err(|e| invalid(e.to_string()))?,
+        },
+        (None, Some(path)) => {
+            let text = match path {
+                "-" => {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                    text
+                }
+                path => std::fs::read_to_string(path)?,
+            };
+            serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?
+        }
+        (None, None) => return Err(invalid("give a FILE or --edits".into())),
+    };
+    if let Some(revision) = args.expected_revision {
+        proposal.expected_revision = revision;
+    }
+    Ok(proposal)
 }
 
 fn short(commit: &str) -> &str {

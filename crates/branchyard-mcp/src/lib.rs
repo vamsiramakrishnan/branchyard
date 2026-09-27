@@ -4,7 +4,8 @@
 //! delegate (`TaskOptions::delegation`), passing `--root <repository>
 //! --branch <name>` and the turn's token in `BRANCHYARD_DELEGATION`. The
 //! server offers `spawn`, `inspect`, `events`, `send`, `steer`,
-//! `propose_integration`, `cancel`, `children`, and the artifact and
+//! `propose_integration`, `cancel`, `children`, `apply_graph` and `graph`
+//! (dependencies between children; see `docs/graph.md`), and the artifact and
 //! scratch-area tools (`publish_artifact`, `list_artifacts`,
 //! `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`,
 //! `share_scratch`, `lock_scratch`, `unlock_scratch`; see
@@ -48,7 +49,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
 /// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 22] = [
+pub const TOOLS: [&str; 24] = [
     "spawn",
     "inspect",
     "events",
@@ -57,6 +58,8 @@ pub const TOOLS: [&str; 22] = [
     "propose_integration",
     "cancel",
     "children",
+    "apply_graph",
+    "graph",
     "publish_artifact",
     "list_artifacts",
     "get_artifact",
@@ -78,7 +81,10 @@ delegate: spawn child branches with their own harness and budget, watch them wit
 and events, continue them with send, add to a child's running turn with steer, merge a \
 finished child into your own branch with \
 propose_integration (its check must pass), stop them with cancel, and list them with \
-children. Children run in parallel; spawn returns once a child has started. You act only as your own branch and only \
+children. Children run in parallel; spawn returns once a child has started. A child may \
+depend on its siblings (depends_on): it waits, and starts once they have settled; apply_graph \
+creates several children and dependencies at once, all or nothing, against the revision graph \
+shows. You act only as your own branch and only \
 on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
@@ -137,36 +143,81 @@ pub fn tools() -> Vec<Tool> {
         schema(json!({"type": "object", "properties": {}, "additionalProperties": false})),
     );
     children.annotations = Some(read_only("List your descendants"));
+    let mut graph = Tool::new(
+        "graph",
+        "Your children (or a descendant's), the dependencies among them, each child's status, \
+         and the graph revision apply_graph must be given.",
+        schema(json!({
+            "type": "object",
+            "properties": {"branch": branch_property("Your own branch or a descendant; defaults to your own")},
+            "additionalProperties": false,
+        })),
+    );
+    graph.annotations = Some(read_only("Show a branch's graph"));
+    let spawn_properties = json!({
+        "prompt": {"type": "string", "description": "The child's task"},
+        "harness": {"type": "string", "description": "Harness or profile ID, such as codex; defaults to yours and must be allowed by your envelope"},
+        "name": {"type": "string", "description": "Branch name: lowercase [a-z0-9._-]; defaults to a slug of the prompt"},
+        "base": {"type": "string", "description": "A git revision to start from instead of your current work"},
+        "budget": {
+            "type": "object",
+            "properties": {
+                "max_usd": {"type": "number", "exclusiveMinimum": 0, "description": "Cost limit; required when you have one"},
+                "max_turns": {"type": "integer", "minimum": 1},
+                "max_minutes": {"type": "number", "exclusiveMinimum": 0, "description": "Per turn"},
+            },
+            "additionalProperties": false,
+        },
+        "check": {"type": "array", "items": {"type": "string"}, "description": "Command argument vector that must pass before the child is merged; defaults to yours"},
+        "max_depth": {"type": "integer", "minimum": 0, "description": "Levels the child may delegate below itself; at most one fewer than yours"},
+        "max_children": {"type": "integer", "minimum": 0},
+        "harnesses": {"type": "array", "items": {"type": "string"}, "description": "Harnesses the child may delegate to; each must be allowed to you"},
+        "deny": {"type": "array", "items": {"type": "string"}, "description": "Tool names the child is denied outright; a trailing * matches a prefix"},
+        "seat": {"type": "string", "description": "In a rig, the seat to fill; it sets the child's harness, limits, check and instructions. Required in a rig, and must be one of your seats (inspect shows them); refused outside one"},
+        "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Your other children this one waits for; it starts once they have settled, from your branch as it is then"},
+        "after": {"type": "string", "enum": ["settled", "integrated"], "description": "settled (default): each dependency ended ready or no_changes, or was merged; integrated: you integrated it"},
+        "bindings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "scratch": {"type": "string", "description": "A scratch area you or an ancestor owns"},
+                    "access": {"type": "string", "enum": ["read_only", "exclusive_write"], "description": "exclusive_write holds the area's writer lock for each of the child's turns"},
+                },
+                "required": ["scratch", "access"],
+                "additionalProperties": false,
+            },
+        },
+    });
+    let mut spawn_edit = spawn_properties.clone();
+    spawn_edit["kind"] = json!({"const": "spawn"});
+    let edge = |kind: &str, after: bool| {
+        let mut properties = json!({
+            "kind": {"const": kind},
+            "dependent": branch_property("One of your children that has not started"),
+            "prerequisite": branch_property("Another of your children"),
+        });
+        if after {
+            properties["after"] = json!({"type": "string", "enum": ["settled", "integrated"]});
+        }
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": ["kind", "dependent", "prerequisite"],
+            "additionalProperties": false,
+        })
+    };
     vec![
         Tool::new(
             "spawn",
             "Create a child branch and start a harness on it with a prompt. It starts from your \
              current work (your uncommitted changes are committed to your branch first) or from \
              base. Its budget must fit in what you have left. Returns the child's name once it \
-             has started; it runs in parallel with you.",
+             has started; it runs in parallel with you. With depends_on it is created waiting, \
+             and starts once those children have settled.",
             schema(json!({
                 "type": "object",
-                "properties": {
-                    "prompt": {"type": "string", "description": "The child's task"},
-                    "harness": {"type": "string", "description": "Harness or profile ID, such as codex; defaults to yours and must be allowed by your envelope"},
-                    "name": {"type": "string", "description": "Branch name: lowercase [a-z0-9._-]; defaults to a slug of the prompt"},
-                    "base": {"type": "string", "description": "A git revision to start from instead of your current work"},
-                    "budget": {
-                        "type": "object",
-                        "properties": {
-                            "max_usd": {"type": "number", "exclusiveMinimum": 0, "description": "Cost limit; required when you have one"},
-                            "max_turns": {"type": "integer", "minimum": 1},
-                            "max_minutes": {"type": "number", "exclusiveMinimum": 0, "description": "Per turn"},
-                        },
-                        "additionalProperties": false,
-                    },
-                    "check": {"type": "array", "items": {"type": "string"}, "description": "Command argument vector that must pass before the child is merged; defaults to yours"},
-                    "max_depth": {"type": "integer", "minimum": 0, "description": "Levels the child may delegate below itself; at most one fewer than yours"},
-                    "max_children": {"type": "integer", "minimum": 0},
-                    "harnesses": {"type": "array", "items": {"type": "string"}, "description": "Harnesses the child may delegate to; each must be allowed to you"},
-                    "deny": {"type": "array", "items": {"type": "string"}, "description": "Tool names the child is denied outright; a trailing * matches a prefix"},
-                    "seat": {"type": "string", "description": "In a rig, the seat to fill; it sets the child's harness, limits, check and instructions. Required in a rig, and must be one of your seats (inspect shows them); refused outside one"},
-                },
+                "properties": spawn_properties,
                 "required": ["prompt"],
                 "additionalProperties": false,
             })),
@@ -227,6 +278,38 @@ pub fn tools() -> Vec<Tool> {
             })),
         ),
         children,
+        Tool::new(
+            "apply_graph",
+            "Change your children's graph in one step, all or nothing: spawn children (each may \
+             depend on others, including ones spawned in the same call) and add or remove \
+             dependencies between children that have not started. expected_revision must be the \
+             revision graph shows; if it moved on, nothing changes and you get stale_revision. \
+             Children with nothing to wait for start at once.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "expected_revision": {"type": "integer", "minimum": 0, "description": "Your graph's revision, from graph"},
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": branchyard::MAX_EDITS,
+                        "items": {"oneOf": [
+                            {
+                                "type": "object",
+                                "properties": spawn_edit,
+                                "required": ["kind", "prompt"],
+                                "additionalProperties": false,
+                            },
+                            edge("add_dependency", true),
+                            edge("remove_dependency", false),
+                        ]},
+                    },
+                },
+                "required": ["expected_revision", "edits"],
+                "additionalProperties": false,
+            })),
+        ),
+        graph,
         Tool::new(
             "publish_artifact",
             "Publish a file at a path in your worktree as a new immutable artifact of your \

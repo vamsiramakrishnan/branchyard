@@ -410,3 +410,74 @@ fn artifacts_and_scratch_areas_are_reachable_over_mcp() {
     let lock = result(&kid_said, "lock_scratch");
     assert_eq!(lock["holder_branch"], "kid");
 }
+
+/// The M5 gate: a parent creates a child which creates a grandchild, each
+/// through its own harness's `apply_graph` call; no graph is declared up
+/// front, and dependents start as their prerequisites settle.
+#[test]
+fn a_harness_builds_a_three_level_graph_at_runtime() {
+    let f = Fixture::new();
+    let lower = json!({"expected_revision": 0, "edits": [
+        {"kind": "spawn", "name": "grandchild", "prompt": "WRITE g.txt=deep"},
+        {"kind": "spawn", "name": "grandchild-2", "prompt": "WRITE h.txt=deeper",
+         "depends_on": ["grandchild"]},
+    ]});
+    let upper = json!({"expected_revision": 0, "edits": [
+        {"kind": "spawn", "name": "child", "prompt": format!("MCP apply_graph {lower}\nMCP wait grandchild-2")},
+        {"kind": "spawn", "name": "sibling", "prompt": "WRITE s.txt=1", "depends_on": ["child"]},
+    ]});
+    let stale = json!({"expected_revision": 0, "edits": [
+        {"kind": "add_dependency", "dependent": "sibling", "prerequisite": "child"},
+    ]});
+    let prompt = [
+        "MCP graph".to_owned(),
+        format!("MCP apply_graph {upper}"),
+        format!("MCP apply_graph {stale}"),
+        "MCP wait sibling".to_owned(),
+        r#"MCP graph {"branch": "child"}"#.to_owned(),
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(f.delegating(Envelope::depth(2)))
+        .name("root")
+        .run()
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let said = reply(&f, "root");
+    assert_eq!(result(&said, "graph")["revision"], 0);
+    let applied = result(&said, "apply_graph");
+    assert_eq!(applied["revision"], 1);
+    assert_eq!(applied["spawned"][0]["status"], json!({"state": "running"}));
+    assert_eq!(applied["spawned"][1]["status"], json!({"state": "waiting"}));
+    assert!(
+        said.contains("mcp apply_graph error: stale graph revision"),
+        "{said}"
+    );
+    assert!(said.contains("mcp wait: ready"), "{said}");
+    // The child's own harness built its graph.
+    let child_said = reply(&f, "child");
+    let lower_applied = result(&child_said, "apply_graph");
+    assert_eq!(lower_applied["spawned"][0]["depth"], 2);
+    assert!(child_said.contains("mcp wait: ready"), "{child_said}");
+    let child_graph = f.yard.graph("child").unwrap();
+    assert_eq!(child_graph.revision, 1);
+    assert_eq!(child_graph.dependencies[0].prerequisite, "grandchild");
+    for name in ["child", "sibling", "grandchild", "grandchild-2"] {
+        let status = f.yard.branch(name).unwrap().info().status.clone();
+        assert!(
+            matches!(status, BranchStatus::Ready | BranchStatus::NoChanges),
+            "{name}: {status:?}"
+        );
+    }
+    let depths: Vec<u32> = root
+        .descendants()
+        .unwrap()
+        .iter()
+        .map(|i| i.depth)
+        .collect();
+    assert_eq!(depths, [1, 1, 2, 2]);
+    // The grandchildren's graph is the child's, not the root's.
+    assert_eq!(f.yard.graph("root").unwrap().dependencies.len(), 1);
+}

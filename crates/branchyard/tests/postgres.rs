@@ -275,3 +275,75 @@ fn a_killed_engine_is_recovered_from_postgres_and_nothing_resubmitted() {
     assert_eq!(prompts(&yard, "crashy"), 1);
     assert!(yard.recover().unwrap().is_empty());
 }
+
+/// Task graphs on PostgreSQL: an invalid proposal changes nothing, a
+/// dependent waits for its prerequisite and starts in another yard's
+/// process when that yard integrates it, and a failed prerequisite blocks.
+#[test]
+fn a_graph_of_children_runs_with_its_state_in_postgres() {
+    use branchyard::{After, Envelope, GraphEdit, SpawnSpec};
+    let Some(pg) = Pg::new() else { return };
+    let options = branchyard::TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        policy: Policy::allow_all(),
+        ..pg.f.options()
+    };
+    let root = pg
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    let spawn = |name: &str, prompt: &str, depends_on: &[&str], after: After| {
+        GraphEdit::Spawn(SpawnSpec {
+            prompt: prompt.into(),
+            name: Some(name.into()),
+            depends_on: depends_on.iter().map(|s| (*s).to_owned()).collect(),
+            after,
+            ..SpawnSpec::default()
+        })
+    };
+    let cycle = delegate.apply_graph(
+        vec![
+            spawn("x", "say", &["y"], After::Settled),
+            spawn("y", "say", &["x"], After::Settled),
+        ],
+        0,
+    );
+    assert!(matches!(cycle, Err(Error::Denied(_))), "{cycle:?}");
+    assert!(pg.yard.branch("x").is_err());
+    assert_eq!(pg.yard.graph("root").unwrap().revision, 0);
+    let applied = delegate
+        .apply_graph(
+            vec![
+                spawn("lib", "WRITE lib.txt=1", &[], After::Settled),
+                spawn("app", "WRITE app.txt=1", &["lib"], After::Integrated),
+                spawn("bad", "EXIT", &[], After::Settled),
+                spawn("blocked", "say", &["bad"], After::Settled),
+            ],
+            0,
+        )
+        .unwrap();
+    assert_eq!(applied.revision, 1);
+    assert!(matches!(
+        delegate.apply_graph(vec![spawn("z", "say", &[], After::Settled)], 0),
+        Err(Error::StaleRevision { .. })
+    ));
+    root.wait_subtree().unwrap();
+    let status = |yard: &Yard, name: &str| yard.branch(name).unwrap().info().status.clone();
+    assert_eq!(status(&pg.yard, "app"), BranchStatus::Waiting);
+    assert!(matches!(
+        status(&pg.yard, "blocked"),
+        BranchStatus::Blocked { .. }
+    ));
+    // Another yard integrates lib; app starts there.
+    let other = pg.open();
+    let parent = other.branch("root").unwrap();
+    parent.delegate(options).unwrap().integrate("lib").unwrap();
+    parent.wait_subtree().unwrap();
+    assert_eq!(status(&pg.yard, "app"), BranchStatus::Ready);
+    assert_eq!(pg.yard.graph("root").unwrap().dependencies.len(), 2);
+}

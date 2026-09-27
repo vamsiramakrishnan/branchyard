@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use branchyard::{
-    Activity, BranchInfo, Budget, Envelope, HarnessInfo, Inspection, Merged, Policy, Provider,
-    Provisioning, RecordedEvent, Seats, StallAction,
+    Activity, After, Binding, BranchInfo, Budget, Envelope, GraphEdit, HarnessInfo, Inspection,
+    Merged, Policy, Provider, Provisioning, RecordedEvent, Seats, StallAction,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -366,6 +366,35 @@ pub struct SpawnRequest {
     /// `<parent>-<seat>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seat: Option<String>,
+    /// Siblings the child waits for, like [`branchyard::Spawn::depends_on`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_settled")]
+    pub after: After,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<Binding>,
+}
+
+fn is_settled(after: &After) -> bool {
+    *after == After::Settled
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/graph`: a graph proposal for
+/// the branch's children, applied with the server's authority as a person,
+/// like `by graph apply --parent`. The answer is the
+/// [`branchyard::GraphApplied`]; a proposal made against a revision that
+/// moved on is `409 stale_revision` and changes nothing. Children run on
+/// the server; follow them with `inspect`, `events` and `graph`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphRequest {
+    pub expected_revision: u64,
+    pub edits: Vec<GraphEdit>,
+    /// Answers the children's tool requests, before their denials.
+    #[serde(default)]
+    pub policy: PolicySpec,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unapproved_tools: bool,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/integrate`: merge a delegated
