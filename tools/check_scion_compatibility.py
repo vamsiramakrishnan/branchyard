@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Require the pinned Claude suite to match its explicit upstream incompatibility baseline."""
+"""Require the pinned Claude suite to match its recorded compatibility baseline.
+
+At Scion 54b9387 the Claude suite failed 11 of its 12 tests against its own
+provisioner; at the current pin, d9b9e6a, all 13 pass and the baseline records
+no incompatibility. A change in either direction fails this check until the
+baseline and docs/validation.md are updated together.
+"""
 import io
 import json
 import runpy
@@ -39,9 +45,13 @@ def main():
         print(output, file=sys.stderr)
         print(json.dumps(actual, indent=2), file=sys.stderr)
         raise SystemExit("Upstream compatibility changed; inspect it and update the recorded qualification.")
-    print(f"KNOWN INCOMPATIBILITY: {actual['tests_run']} Claude tests reproduced "
-          f"{len(actual['incompatibilities'])} expected failure/error observations. "
-          "This provisioner remains unqualified; see docs/validation.md.")
+    if actual["incompatibilities"]:
+        print(f"KNOWN INCOMPATIBILITY: {actual['tests_run']} Claude tests reproduced "
+              f"{len(actual['incompatibilities'])} expected failure/error observations. "
+              "See docs/validation.md.")
+    else:
+        print(f"COMPATIBLE: all {actual['tests_run']} Claude tests pass against the pinned "
+              "provisioner, as recorded; see docs/validation.md.")
 
 
 if __name__ == "__main__":

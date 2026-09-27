@@ -1,7 +1,8 @@
 // Derived from Scion (https://github.com/GoogleCloudPlatform/scion) at
-// d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: harnesses/claude/provision.py
-// and the model aliases of harnesses/claude/config.yaml. Copyright 2026
-// Google LLC. Licensed under the Apache License, Version 2.0.
+// d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: harnesses/claude/provision.py,
+// the model aliases of harnesses/claude/config.yaml, and the model tests of
+// harnesses/claude/provision_test.py. Copyright 2026 Google LLC. Licensed
+// under the Apache License, Version 2.0.
 //
 // Modified for Branchyard: translated from Python to a sans-IO planner.
 // The API-key fingerprint is added to `customApiKeyResponses.approved`

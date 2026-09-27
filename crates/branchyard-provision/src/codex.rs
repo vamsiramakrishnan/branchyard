@@ -1,6 +1,8 @@
 // Derived from Scion (https://github.com/GoogleCloudPlatform/scion) at
-// d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: harnesses/codex/provision.py.
-// Copyright 2026 Google LLC. Licensed under the Apache License, Version 2.0.
+// d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: harnesses/codex/provision.py,
+// the model aliases of harnesses/codex/config.yaml, and the tests of
+// harnesses/codex/provision_test.py. Copyright 2026 Google LLC. Licensed
+// under the Apache License, Version 2.0.
 //
 // Modified for Branchyard: translated from Python to a sans-IO planner.
 // `model_reasoning_effort` is placed at the top level before the first

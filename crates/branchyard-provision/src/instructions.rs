@@ -1,6 +1,8 @@
 // Derived from Scion (https://github.com/GoogleCloudPlatform/scion) at
 // d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: _strip_managed_block,
 // _markdown_section and project_instructions of harnesses/scion_harness.py.
+// Tests from harnesses/scion_harness_test.py,
+// harnesses/codex/provision_test.py and harnesses/hermes/provision_test.py.
 // Copyright 2026 Google LLC. Licensed under the Apache License, Version 2.0.
 //
 // Modified for Branchyard: translated from Python to Rust as pure functions

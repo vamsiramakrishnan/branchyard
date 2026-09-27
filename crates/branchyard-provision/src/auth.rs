@@ -1,8 +1,9 @@
 // Derived from Scion (https://github.com/GoogleCloudPlatform/scion) at
 // d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: AuthMethod, AuthSpec,
 // ResolvedAuth and ProvisionContext.select_auth of
-// harnesses/scion_harness.py. Copyright 2026 Google LLC. Licensed under the
-// Apache License, Version 2.0.
+// harnesses/scion_harness.py, and its tests in
+// harnesses/scion_harness_test.py. Copyright 2026 Google LLC. Licensed under
+// the Apache License, Version 2.0.
 //
 // Modified for Branchyard: translated from Python to Rust over the names of
 // the secrets given, with no candidates file, no environment fallback and

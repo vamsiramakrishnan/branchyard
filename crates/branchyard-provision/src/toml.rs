@@ -3,7 +3,9 @@
 // harnesses/scion_harness.py (toml_escape, toml_inline_table,
 // toml_string_array, strip_toml_sections) and _is_toml_key_line and
 // _strip_toml_top_level_key of harnesses/codex/provision.py.
-// Copyright 2026 Google LLC. Licensed under the Apache License, Version 2.0.
+// Tests from harnesses/scion_harness_test.py and
+// harnesses/codex/provision_test.py. Copyright 2026 Google LLC. Licensed
+// under the Apache License, Version 2.0.
 //
 // Modified for Branchyard: translated from Python to Rust; the predicate is
 // a closure over the trimmed header; insert_top_level is new, because

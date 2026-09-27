@@ -1,3 +1,12 @@
+// Partly derived from Scion (https://github.com/GoogleCloudPlatform/scion)
+// at d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: cases of
+// harnesses/claude/provision_test.py, harnesses/codex/provision_test.py and
+// harnesses/telemetry_provision_test.py. Copyright 2026 Google LLC. Licensed
+// under the Apache License, Version 2.0.
+//
+// Modified for Branchyard: translated to Rust against provisioning plans
+// applied to temporary homes and compared with golden files.
+
 //! Provisioning plans applied to temporary homes, compared with golden
 //! files under `tests/golden/<case>/`: the home's files after provisioning
 //! (by relative path) and `env.txt`, the harness variables, secrets shown

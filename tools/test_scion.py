@@ -11,15 +11,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    # Kept for CI: at the pinned revision no suite is excluded, so both
+    # forms run every suite. Exclude a suite here, with its reason, only
+    # while an upstream incompatibility is recorded in docs/validation.md.
     parser.add_argument("--qualified", action="store_true",
-                        help="Run the six passing suites; report Claude's upstream mismatch as excluded")
-    args = parser.parse_args()
+                        help="Run the suites Branchyard relies on (currently all of them)")
+    parser.parse_args()
     base = ROOT / "vendor/scion/harnesses"
-    suites = [base / "scion_harness_test.py", *sorted(base.glob("*/provision_test.py"))]
-    if args.qualified:
-        print("EXCLUDED: Claude model-alias suite is inconsistent at the pinned upstream revision. "
-              "See docs/validation.md; use the default command to reproduce.", flush=True)
-        suites = [s for s in suites if s.parent.name != "claude"]
+    suites = [base / "scion_harness_test.py", base / "telemetry_provision_test.py",
+              *sorted(base.glob("*/provision_test.py"))]
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     failures = []
     for suite in suites:

@@ -1,3 +1,15 @@
+// Partly derived from Scion (https://github.com/GoogleCloudPlatform/scion)
+// at d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: the dotted-path merge of
+// _walk_dotted_path and _merge_into_file, and read_json_skipping_comment_lines
+// with its test, in harnesses/scion_harness.py and
+// harnesses/scion_harness_test.py. Copyright 2026 Google LLC. Licensed under
+// the Apache License, Version 2.0.
+//
+// Modified for Branchyard: translated from Python to Rust as pure edits of
+// a file's content; unparseable JSON is refused instead of replaced by an
+// empty object; unchanged documents are returned byte for byte; dotenv
+// merging and array appends are new.
+
 //! File edits as data, and their pure application to a file's current
 //! content.
 //!

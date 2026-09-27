@@ -1,3 +1,16 @@
+// Partly derived from Scion (https://github.com/GoogleCloudPlatform/scion)
+// at d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338: the provisioning contract
+// of harnesses/authoring-guide.md and harnesses/scion_harness.py (staged
+// secrets, MCP servers, instructions and telemetry in; native files and an
+// environment overlay out), and _resolve_reasoning_effort of
+// harnesses/codex/provision.py. Copyright 2026 Google LLC. Licensed under
+// the Apache License, Version 2.0.
+//
+// Modified for Branchyard: a typed Rust contract whose planning does no
+// I/O, instead of a Python script run in the container; secrets resolved by
+// the caller instead of staged files; session channels preferred to native
+// configuration; writes limited to a home private to the branch.
+
 //! Harness provisioning: prepare a harness's home before it starts.
 //!
 //! In a sandbox, or with a private home, a harness finds none of your
