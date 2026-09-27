@@ -231,6 +231,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             prompt,
             options,
             fork_source: None,
+            note: None,
         },
         lease,
     )
@@ -296,6 +297,7 @@ pub(crate) fn run_on(
                     prompt,
                     options,
                     fork_source: None,
+                    note: None,
                 },
                 lease,
             )),
@@ -343,6 +345,7 @@ pub(crate) fn send(
             prompt,
             options,
             fork_source: None,
+            note: prepared.note,
         },
         prepared.lease,
     )
@@ -356,6 +359,8 @@ pub(crate) struct Prepared {
     pub profile: &'static Profile,
     pub command: Vec<String>,
     pub mode: SessionMode,
+    /// Recorded as a warning when the turn starts.
+    pub note: Option<String>,
 }
 
 /// Check that `name` can continue its session, and mark it running under
@@ -388,18 +393,32 @@ pub(crate) fn prepare_send(
             )));
         }
     }
-    if !profile.driver().capabilities().resume {
-        return Err(Error::Unsupported(format!(
-            "{} cannot resume a session",
-            profile.id
-        )));
-    }
-    let session = record
-        .info
-        .session
-        .as_deref()
-        .and_then(NativeSession::new)
-        .ok_or_else(|| Error::Unsupported(format!("{name} has no harness session to resume")))?;
+    // A branch none of whose turns submitted a prompt has no conversation
+    // to continue, such as one cancelled before its harness opened a
+    // session: it starts a fresh one, and says so.
+    let (mode, note) = match record.info.session.as_deref().and_then(NativeSession::new) {
+        Some(session) => {
+            if !profile.driver().capabilities().resume {
+                return Err(Error::Unsupported(format!(
+                    "{} cannot resume a session",
+                    profile.id
+                )));
+            }
+            (SessionMode::Resume(session), None)
+        }
+        None if record.info.turns == 0 => (
+            SessionMode::Fresh,
+            Some(format!(
+                "{name} has no harness session to resume, and no earlier turn submitted a \
+                 prompt; this turn starts a fresh session with only this prompt"
+            )),
+        ),
+        None => {
+            return Err(Error::Unsupported(format!(
+                "{name} has no harness session to resume"
+            )))
+        }
+    };
     if options.command.is_some() {
         record.command = options.command.clone();
     }
@@ -448,7 +467,8 @@ pub(crate) fn prepare_send(
         lease,
         profile,
         command,
-        mode: SessionMode::Resume(session),
+        mode,
+        note,
     })
 }
 
@@ -554,6 +574,7 @@ pub(crate) fn fork(
             prompt,
             options,
             fork_source: forking.then(|| parent.info.worktree.clone()),
+            note: None,
         },
         lease,
     )

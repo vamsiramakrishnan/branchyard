@@ -232,7 +232,7 @@ impl Live {
     }
 }
 
-/// Wait for every branch these delegated to and still run on this process,
+/// Wait for every branch these delegated to, in this process or another,
 /// saying which, and return them; `None` if there were none.
 fn wait_for_descendants(branches: &[&Branch]) -> Result<Option<Vec<BranchInfo>>, Failure> {
     let mut all = Vec::new();
@@ -252,17 +252,6 @@ fn wait_for_descendants(branches: &[&Branch]) -> Result<Option<Vec<BranchInfo>>,
             );
         }
         all.extend(branch.wait_subtree()?);
-    }
-    let unfinished: Vec<&str> = all
-        .iter()
-        .filter(|info| info.status == BranchStatus::Running)
-        .map(|info| info.name.as_str())
-        .collect();
-    if !unfinished.is_empty() {
-        eprintln!(
-            "by: still running in another process: {}",
-            unfinished.join(", ")
-        );
     }
     Ok((!all.is_empty()).then_some(all))
 }

@@ -138,7 +138,7 @@ by run "Fix the flaky parser test" --provider substrate \
 2. Copies the worktree and the private home in, and runs the harness in the workdir with `HOME` and the `--pass-env` variables on top of the image's environment.
 3. When the turn ends, copies both back and deletes the actor. A failure to bring the result back is a warning on the turn; the actor is deleted regardless.
 
-Delegation is refused to a sandboxed harness, as for Microsandbox. If the engine dies mid-turn, the bridge tears the harness down when its connection closes, and `Yard::recover` deletes the actor named by the `sandbox` step (with only the `Control` API; the key is not needed) and the turn's staging directory, and says so in the `recovered` event. What the harness changed in that actor is lost: recovery does not bring it back.
+Delegation is refused to a sandboxed harness, as for Microsandbox. If the engine dies mid-turn, the bridge tears the harness down when its connection closes. `Yard::recover` then finds the actor named by the `sandbox` step and, if it still exists, brings its work back as the turn's end would have: it begins a new attempt with the host's bridge key (superseding the dead engine's credential), pulls the actor's working files through the turn's staging repository, and applies them only if the worktree still holds exactly what was sent; it pulls the home too. It then deletes the actor (which needs only the `Control` API) and the staging directory. The `recovered` event says whether the work came back or why not, and the branch ends `interrupted`, with the recovered files in its candidate.
 
 ## Testing
 
@@ -148,7 +148,7 @@ The fake in `branchyard_substrate::fake` serves `Control` over real gRPC, runs a
 - every `branchyard_sandbox::conformance` check through `SubstrateProvider`, in the suite's mode for providers without mounts, where the two mount checks require a mount to be refused;
 - attempts (rotation, ending, suspend and resume, a branch refusing its parent's live credential) and a reused name never acted on;
 - the git round trip (additions, changes, deletions, a binary file, mode changes, links, a harness commit, files written outside the worktree and ignored files never coming back, the host repository's refs, objects and config unchanged, a concurrently changed worktree refused) and the home round trip;
-- the engine and the built `by` running the fake ACP agent in an actor, the candidate merging, the home and session carrying across sends, no process left running, delegation refused, and a killed engine's actor deleted by recovery.
+- the engine and the built `by` running the fake ACP agent in an actor, the candidate merging, the home and session carrying across sends, no process left running, delegation refused, and a killed engine's work brought back by recovery (and not applied over a worktree changed since) before its actor is deleted.
 
 The ignored tests in [`tests/cluster.rs`](../crates/branchyard-substrate/tests/cluster.rs) run the conformance checks, attempt rotation and a worktree round trip against a real cluster; [live testing](testing-live.md#6-agent-substrate-cluster) says how.
 
@@ -160,7 +160,7 @@ The ignored tests in [`tests/cluster.rs`](../crates/branchyard-substrate/tests/c
 4. **No quiescence handshake.** Checkpoints are crash-consistent. A harness must reach a quiet point (no in-flight tool call) before `stop`. The adapter enforces only that the actor is stopped.
 5. **Fencing covers delete only.** Suspend, resume and revert take a name without a UID precondition. `inspect` detects replacement, but a check followed by an action can still race.
 6. **Attempt state lives in the actor.** A process in the actor with write access to the state file could reset it and revive its own ended attempts; it still cannot mint a credential or accept one issued for another actor. The guest clock decides expiry.
-7. **Work lost on engine death.** Recovery deletes the actor and the turn's staging directory without bringing the actor's files back.
+7. **Work on engine death, partly recovered.** Recovery brings back the files the harness had written when the bridge ended it, and the home, then deletes the actor. Still lost: anything the harness had not yet written, and the result when the worktree changed since the turn began, when the bridge key cannot be read, or when the actor does not answer; the `recovered` event says which. Tested against the fake cluster only.
 8. **Kubernetes.** Substrate requires a cluster. It stays optional; Kubernetes is not on Branchyard's default per-spawn path.
 9. **Fork is upstream work.** Substrate lists actor forking from a state root on its roadmap. Revisit `branch` when it lands.
 

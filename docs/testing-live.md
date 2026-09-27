@@ -55,6 +55,7 @@ In the throwaway repository:
 | Interrupt | Ctrl-C during a long turn | The harness and its process group are gone (`ps -eo pgid,comm`) |
 | Cancel | `by cancel <b>` from a second terminal during a long turn | The turn stops; `by log <b>` names who cancelled |
 | Crash recovery | `kill -9` the `by` process mid-turn (after the prompt is submitted), then `by ls` | The harness's process group is gone; the branch is `interrupted` with a `recovered` event saying the outcome is unknown; the prompt was not sent again; `by send <b> …` resumes the session |
+| One server | `by serve --data-dir D` in two terminals | The second fails at once, naming the first's pid |
 | Two terminals | `by send <b> …` while another `by` runs a turn on `<b>` | Refused as running; no race |
 | Unapproved tools | `by run "…" --harness pi` | Refused; with `--allow-unapproved-tools` it runs |
 | Watch | `by watch` in a second terminal during the above | The tree updates live; `q` exits cleanly |
@@ -110,7 +111,7 @@ BY_MSB_IMAGE=alpine:3.20 cargo +1.94 test -p branchyard-microsandbox --features 
 - All 14 ignored tests pass.
 - Record who owns files the guest writes into the mounted worktree (uid and gid on the host).
 - Confirm the runtime archive's name and layout match what `providers.md` assumes.
-- Build an image with a harness installed, then run `by run "…" --provider microsandbox --image <it> --pass-env ANTHROPIC_API_KEY --yes`. The harness sees only `HOME` and the passed variables, and the microVM is gone after the turn.
+- Build an image with a harness installed, then run `by run "…" --provider microsandbox --image <it> --pass-env ANTHROPIC_API_KEY --yes`. The harness sees only `HOME` and the passed variables, and the microVM is gone after the turn. Run another, `kill -9` the `by` process mid-turn, and check that `by ls` recovers the branch, its `recovered` event says the sandbox was destroyed, and `msb` lists no sandbox for it.
 
 **Record:** in [sandbox providers](providers.md); mark the provider qualified only when all of this passed.
 
@@ -137,7 +138,7 @@ The Substrate provider has run only against the in-process fake. On a machine wi
    Use the router template you found in step 1, and your cluster's `SandboxConfig` name and storage location.
 5. **Cluster tests.** `cargo test -p branchyard-substrate --test cluster -- --ignored --test-threads 1 cluster_` runs the conformance checks without mounts, attempt rotation, and a worktree round trip. All must pass.
 6. **Observe what the fake assumes.** The identity files under `/run/branchyard/identity` after a resume and in a branched actor (new UID); that a superseded or ended credential is refused through the router; that the router forwards WebSocket upgrades and keeps a connection open for a long turn; whether it activates a suspended actor; `stop` ending processes before the suspend. Time create, resume, suspend, tag and branch, cold and warm.
-7. **A harness.** Rebuild the image with a harness installed, recreate the template, then in a throwaway repository: `by run "…" --provider substrate --substrate-endpoint $BY_SUBSTRATE_ENDPOINT --substrate-router "$BY_SUBSTRATE_ROUTER" --substrate-atespace $BY_SUBSTRATE_ATESPACE --substrate-template <it> --substrate-key bridge.key --pass-env ANTHROPIC_API_KEY --yes --budget-usd 1`. The candidate holds the harness's changes, `by merge` works, the actor is gone afterwards (`kubectl ate` or `ListActors`), and a `by send` resumes the session from the carried home. Kill `by` mid-turn and check that `by ls` recovers the branch and deletes the actor.
+7. **A harness.** Rebuild the image with a harness installed, recreate the template, then in a throwaway repository: `by run "…" --provider substrate --substrate-endpoint $BY_SUBSTRATE_ENDPOINT --substrate-router "$BY_SUBSTRATE_ROUTER" --substrate-atespace $BY_SUBSTRATE_ATESPACE --substrate-template <it> --substrate-key bridge.key --pass-env ANTHROPIC_API_KEY --yes --budget-usd 1`. The candidate holds the harness's changes, `by merge` works, the actor is gone afterwards (`kubectl ate` or `ListActors`), and a `by send` resumes the session from the carried home. Kill `by` mid-turn after the harness has written a file, and check that `by ls` recovers the branch, says in its `recovered` event that the work was brought back, shows the file in the candidate, and deletes the actor.
 
 **Record:** in [Agent Substrate](substrate.md) and [validation](validation.md), with the Substrate revision, the router template, the image digest and which tests passed; mark the provider qualified only when all of this passed.
 

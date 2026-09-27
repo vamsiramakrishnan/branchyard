@@ -17,6 +17,10 @@
 //!    again;
 //! 3. records an [`Activity::Recovered`] and the final status, and releases
 //!    the lease.
+//!
+//! It also frees names reserved by an engine that stopped before it created
+//! the branch: gone from this host, or reserved longer ago than
+//! [`crate::state::RESERVATION_TTL`].
 
 use std::collections::BTreeSet;
 
@@ -53,6 +57,14 @@ pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
             }
         }
     }
+    // Names reserved by an engine that stopped before creating the branch.
+    for row in store.backend().reservations()? {
+        if row.stale(now).is_some() {
+            if let Err(error) = store.backend().reclaim(&row) {
+                failed = failed.or(Some(error));
+            }
+        }
+    }
     match failed {
         Some(error) => Err(error),
         None => Ok(recovered),
@@ -68,6 +80,33 @@ pub(crate) fn stale(yard: &Yard, name: &str) -> Result<(), Error> {
         if row.branch == name {
             if let Some(why) = row.stale(now) {
                 lease(yard, &row, &why)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Settle `name` if no live engine is running its turn: a lease a stopped
+/// engine left, or a `running` record no engine holds a lease for. Nothing
+/// happens while a live engine, in any process, holds its lease.
+pub(crate) fn settle(yard: &Yard, name: &str) -> Result<(), Error> {
+    let store = yard.store();
+    let leases = store.backend().leases()?;
+    match leases.iter().find(|row| row.branch == name) {
+        Some(row) => {
+            if let Some(why) = row.stale(now_ms()) {
+                lease(yard, row, &why)?;
+            }
+        }
+        None => {
+            let record = match store.read(name) {
+                Ok(record) => record,
+                // Removed meanwhile: nothing is running.
+                Err(Error::UnknownBranch(_)) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if record.info.status == BranchStatus::Running {
+                unowned(yard, record)?;
             }
         }
     }
@@ -95,6 +134,19 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     }
     let steps = store.backend().steps(&row.branch, row.turn)?;
     let step = |name: &str| steps.iter().find(|s| s.step == name);
+    // What carries the start's marker: a harness spawned just before the
+    // engine stopped, whose pid was never recorded, and anything that left
+    // the harness's process group.
+    if let Some(start) = step(STEP_START) {
+        let here = start.intent.get("host").and_then(Value::as_str) == Some(proc::host());
+        if let (true, Some(marker)) = (here, start.intent.get("spawn").and_then(Value::as_str)) {
+            for pid in proc::kill_marked(marker) {
+                if !killed.contains(&pid) {
+                    killed.push(pid);
+                }
+            }
+        }
+    }
     let sandbox = step(placement::STEP_SANDBOX)
         .and_then(|s| placement::recover(yard, &record, &s.intent))
         .map(|done| format!("; {done}"))

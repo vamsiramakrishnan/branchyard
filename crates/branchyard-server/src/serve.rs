@@ -37,6 +37,8 @@ pub struct Running {
     grace: Duration,
     accept: tokio::task::JoinHandle<()>,
     pollers: Vec<tokio::task::JoinHandle<()>>,
+    /// Held until the server has stopped: one server per data directory.
+    _lock: branchyard::DirLock,
 }
 
 /// How a shutdown went.
@@ -150,6 +152,8 @@ pub async fn start(config: Config) -> Result<Running, String> {
     config.validate()?;
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?;
+    let lock = branchyard::DirLock::acquire(&config.data_dir, "a Branchyard server")
+        .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?;
     let tls = match &config.tls {
         Some(files) => Some(tls_acceptor(files)?),
         None => None,
@@ -193,6 +197,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         grace,
         accept,
         pollers,
+        _lock: lock,
     })
 }
 

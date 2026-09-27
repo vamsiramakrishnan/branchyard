@@ -12,8 +12,11 @@
 //! lease has moved on, in the same transaction as the write, so an engine
 //! that lost its lease cannot change the branch.
 //!
-//! A branch name is reserved by creating its row without a record; the
-//! record is written when the branch is created. A record's `children`
+//! A branch name is reserved by creating its row without a record, with
+//! the reserving engine named like a lease's owner; the record is written
+//! when the branch is created. A reservation whose engine is gone from this
+//! host, or that is older than [`RESERVATION_TTL`], is reclaimed by
+//! recovery. A record's `children`
 //! belong to [`Store::add_child`]: every other write keeps the list in the
 //! store, so a turn that ends after it spawned children cannot drop them.
 
@@ -36,6 +39,10 @@ pub(crate) const DIR: &str = ".branchyard";
 pub(crate) const LEASE_TTL: Duration = Duration::from_secs(30);
 /// How often a running turn renews its lease.
 pub(crate) const HEARTBEAT: Duration = Duration::from_secs(5);
+/// How long a reservation may stay without its branch being created
+/// before any engine may reclaim it. Creating the branch follows reserving
+/// its name within the same call, so this is far longer than it takes.
+pub(crate) const RESERVATION_TTL: Duration = Duration::from_secs(600);
 /// How often a waiting reader looks for another process's writes.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -130,12 +137,18 @@ pub(crate) struct LeaseRow {
     pub deadline_ms: Option<u64>,
 }
 
+/// Whether the process `pid` that started at `start` on `host` is known
+/// to be gone: it ran on this host and boot, and is not running now.
+pub(crate) fn gone(host: &str, pid: u32, start: &str) -> bool {
+    host == proc::host() && !proc::alive(pid, start)
+}
+
 impl LeaseRow {
     /// Why this held lease no longer protects a live engine, if it does
     /// not: its owner is gone from this host, or it expired.
     pub fn stale(&self, now_ms: u64) -> Option<String> {
         self.owner.as_ref()?;
-        if self.host == proc::host() && !proc::alive(self.pid, &self.start) {
+        if gone(&self.host, self.pid, &self.start) {
             return Some(format!(
                 "its engine (pid {}) is no longer running",
                 self.pid
@@ -148,6 +161,36 @@ impl LeaseRow {
             ));
         }
         None
+    }
+}
+
+/// A name reserved for a branch not yet created, and the engine that
+/// reserved it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ReservationRow {
+    pub name: String,
+    /// The reserving [`Owner`]'s ID.
+    pub owner: String,
+    pub host: String,
+    pub pid: u32,
+    pub start: String,
+    pub reserved_ms: u64,
+}
+
+impl ReservationRow {
+    /// Why this reservation can be reclaimed, if it can: the engine that
+    /// made it is gone from this host, or it is older than
+    /// [`RESERVATION_TTL`].
+    pub fn stale(&self, now_ms: u64) -> Option<String> {
+        if gone(&self.host, self.pid, &self.start) {
+            return Some(format!(
+                "the engine that reserved it (pid {}) is no longer running",
+                self.pid
+            ));
+        }
+        let age = now_ms.saturating_sub(self.reserved_ms);
+        (age >= RESERVATION_TTL.as_millis() as u64)
+            .then(|| format!("it was reserved {}s ago and never created", age / 1000))
     }
 }
 
@@ -201,10 +244,17 @@ pub(crate) struct FeedRow {
 /// still has the fence's incarnation and generation, checked in the same
 /// transaction as the write.
 pub(crate) trait Backend: Send + Sync + fmt::Debug {
-    /// Reserve `name`; false if it is already taken.
-    fn reserve(&self, name: &str) -> Result<bool, Error>;
+    /// Reserve `name` for `owner`; false if it is already taken.
+    fn reserve(&self, name: &str, owner: &Owner) -> Result<bool, Error>;
     /// Give up a reservation that has no record yet.
     fn release(&self, name: &str) -> Result<(), Error>;
+    /// Every reservation whose branch has not been created, with the engine
+    /// that made it. A reservation made by an earlier version names no
+    /// engine and is not listed.
+    fn reservations(&self) -> Result<Vec<ReservationRow>, Error>;
+    /// Free the name `row` reserved, unless it changed since it was read:
+    /// created, released, or reserved again. True if it was freed.
+    fn reclaim(&self, row: &ReservationRow) -> Result<bool, Error>;
     fn taken(&self, name: &str) -> Result<bool, Error>;
     /// The created branch's record; `None` for a reservation or no branch.
     fn read(&self, name: &str) -> Result<Option<Record>, Error>;
@@ -218,7 +268,9 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn delete(&self, name: &str) -> Result<(), Error>;
 
     /// Write `record` and take the branch's lease for a new turn, unless a
-    /// lease is held.
+    /// lease is held. Creating a reserved branch requires that `owner` made
+    /// the reservation; one that was reclaimed and reserved again by
+    /// another engine is refused with [`Error::BranchExists`].
     fn acquire(&self, record: &Record, owner: &Owner, ttl: Duration) -> Result<Acquired, Error>;
     fn renew(&self, fence: &Fence, ttl: Duration) -> Result<(), Error>;
     /// Write `record` and append `event`, if given, then release the lease:
@@ -383,7 +435,7 @@ impl Store {
 
     /// Reserve `name`; false if it is already taken.
     pub fn reserve(&self, name: &str) -> Result<bool, Error> {
-        self.backend.reserve(name)
+        self.backend.reserve(name, &self.owner)
     }
 
     /// Give up a reservation made by [`Store::reserve`].

@@ -22,7 +22,7 @@ by run "Split the parser rewrite into tokenizer and formatter work, delegate bot
 
 `--delegate` lets the harness create children one level deep; `--delegate=2` allows grandchildren. In the SDK, set `TaskOptions::delegation` to an `Envelope`. The envelope is stored with the branch, so later sends keep it.
 
-`by run` waits until every branch delegated on its process has finished, says which are still running while it waits, and prints a table of them. `by ls` shows the tree.
+`by run` waits until every branch it delegated has finished, whichever process runs it, says which are still running while it waits, and prints a table of them. A delegated branch whose engine stopped is recovered and ends `interrupted` rather than being waited for. `by ls` shows the tree.
 
 ## What a delegating harness gets
 
@@ -118,7 +118,7 @@ let done = me.wait(&child.name, std::time::Duration::from_secs(1800))?;
 me.integrate(&done.name)?;
 ```
 
-`Yard::as_branch(token)` finds the branch a token was issued to, in the engine's process or through its broker. `Branch::delegate(options)` acts as a branch with your own authority. `Delegate::call(tool, json)` takes the MCP tools' arguments and returns their results. `Branch::wait_subtree` joins every descendant running on this process; call it before the process exits.
+`Yard::as_branch(token)` finds the branch a token was issued to, in the engine's process or through its broker. `Branch::delegate(options)` acts as a branch with your own authority. `Delegate::call(tool, json)` takes the MCP tools' arguments and returns their results. `Branch::wait_subtree` waits until no descendant is running: it joins those on this process's threads, and waits for any another process drives through its durable status, recovering one whose engine stopped ([durability](durability.md#waiting-for-turns-in-other-processes)). Call it before the process exits, or the children on its threads are left to recovery. `Delegate::wait` waits for one branch the same way.
 
 ## MCP tools
 
@@ -151,16 +151,14 @@ In local mode this stops honest mistakes: a harness that confuses branches, reac
 
 Children run on threads of the process that runs their parent's turn, whether that process is `by run` or your own program. A spawn returns once the child's record exists and its thread has started. While any of its turns may delegate, the engine listens on a Unix socket in `.branchyard/delegation/`, or in the temporary directory when that path is too long; `by`, the Python module and the MCP server reach it there. A socket, unlike a loopback port, stays reachable from a sandbox without network that can still see the repository.
 
-`by cancel` records a durable cancel request for the running turn (see [durability](durability.md#cancellation-and-deadlines)), which the engine running it checks every 100 ms, in whichever process that is; the turn is interrupted like a budget stop, and ends `interrupted`. A request is bound to the turn it was asked of and never stops a later one. A turn cancelled before its harness opened has no session to continue.
+`by cancel` records a durable cancel request for the running turn (see [durability](durability.md#cancellation-and-deadlines)), which the engine running it checks every 100 ms, in whichever process that is; the turn is interrupted like a budget stop, and ends `interrupted`. A request is bound to the turn it was asked of and never stops a later one. A branch none of whose turns submitted a prompt, such as a child cancelled before its harness opened a session, has no conversation to continue: a later `send` starts a fresh session with only the prompt it sends, and records a warning that says so. A branch that ran a prompt and has no session is still refused.
 
 A child's own spend counts against every ancestor through the reservations. `inspect` reports `subtree_cost_usd`, the reported spend of a branch and its descendants.
 
 ## Not guaranteed
 
 - Cost limits for harnesses that report no cost, such as every ACP agent today.
-- Waiting across processes. A process waits only for the children it runs; `by run` names any still running elsewhere.
 - Tool calls longer than a harness's own MCP or shell timeout, such as an integration whose check runs for many minutes.
-- Resume of a child whose first turn was cancelled before its harness opened a session.
 - Isolation. Local mode runs everything as your user.
 - Delegation from a sandboxed harness. The tools reach the engine over a host socket with the host's `by`, so a turn with `--provider microsandbox` and `--delegate` fails, and a sandboxed branch runs without the tools.
 - Delegation through a server. `by spawn`, `inspect`, `events`, `integrate`, `children` and `send --json` refuse `--remote`, and the server does not offer the tools to its harnesses. `by --remote … cancel` works for a person, with the server's authority, not a branch's.

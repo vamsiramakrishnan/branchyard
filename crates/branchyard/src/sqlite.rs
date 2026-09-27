@@ -22,7 +22,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde_json::Value;
 
 use crate::state::{
-    now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record, StepRow,
+    now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
+    ReservationRow, StepRow,
 };
 use crate::{Error, RecordedEvent};
 
@@ -86,6 +87,14 @@ CREATE TABLE IF NOT EXISTS cancels (
     at_ms INTEGER NOT NULL,
     subtree INTEGER NOT NULL,
     PRIMARY KEY (incarnation, turn)
+);
+CREATE TABLE IF NOT EXISTS reservations (
+    name TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    host TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    pid_start TEXT NOT NULL,
+    reserved_ms INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -496,26 +505,87 @@ fn files(dir: &Path, suffix: &str) -> Result<Vec<(String, PathBuf)>, Error> {
 }
 
 impl Backend for Sqlite {
-    fn reserve(&self, name: &str) -> Result<bool, Error> {
+    fn reserve(&self, name: &str, owner: &Owner) -> Result<bool, Error> {
         self.tx(true, |tx| {
+            let now = int(now_ms());
             let inserted = tx
                 .execute(
                     "INSERT OR IGNORE INTO branches (name, created_ms, record) VALUES (?1, ?2, NULL)",
-                    params![name, int(now_ms())],
+                    params![name, now],
                 )
                 .map_err(|e| db("reserve", e))?;
+            if inserted == 1 {
+                tx.execute(
+                    "INSERT OR REPLACE INTO reservations (name, owner, host, pid, pid_start, \
+                     reserved_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![name, owner.id, owner.host, owner.pid, owner.start, now],
+                )
+                .map_err(|e| db("reserve", e))?;
+            }
             Ok(inserted == 1)
         })
     }
 
     fn release(&self, name: &str) -> Result<(), Error> {
         self.tx(true, |tx| {
-            tx.execute(
-                "DELETE FROM branches WHERE name = ?1 AND record IS NULL",
-                params![name],
-            )
-            .map_err(|e| db("release", e))?;
+            let released = tx
+                .execute(
+                    "DELETE FROM branches WHERE name = ?1 AND record IS NULL",
+                    params![name],
+                )
+                .map_err(|e| db("release", e))?;
+            if released == 1 {
+                tx.execute("DELETE FROM reservations WHERE name = ?1", params![name])
+                    .map_err(|e| db("release", e))?;
+            }
             Ok(())
+        })
+    }
+
+    fn reservations(&self) -> Result<Vec<ReservationRow>, Error> {
+        self.query(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT r.name, r.owner, r.host, r.pid, r.pid_start, r.reserved_ms \
+                     FROM reservations r JOIN branches b ON b.name = r.name \
+                     WHERE b.record IS NULL ORDER BY r.name",
+                )
+                .map_err(|e| db("reservations", e))?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok(ReservationRow {
+                        name: r.get(0)?,
+                        owner: r.get(1)?,
+                        host: r.get(2)?,
+                        pid: u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
+                        start: r.get(4)?,
+                        reserved_ms: uint(r.get(5)?),
+                    })
+                })
+                .map_err(|e| db("reservations", e))?;
+            rows.collect::<Result<_, _>>()
+                .map_err(|e| db("reservations", e))
+        })
+    }
+
+    fn reclaim(&self, row: &ReservationRow) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let removed = tx
+                .execute(
+                    "DELETE FROM reservations WHERE name = ?1 AND owner = ?2 AND reserved_ms = ?3",
+                    params![row.name, row.owner, int(row.reserved_ms)],
+                )
+                .map_err(|e| db("reclaim", e))?;
+            if removed == 0 {
+                return Ok(false);
+            }
+            let freed = tx
+                .execute(
+                    "DELETE FROM branches WHERE name = ?1 AND record IS NULL",
+                    params![row.name],
+                )
+                .map_err(|e| db("reclaim", e))?;
+            Ok(freed == 1)
         })
     }
 
@@ -577,6 +647,8 @@ impl Backend for Sqlite {
             let Some(incarnation) = incarnation(tx, name)? else {
                 return Ok(());
             };
+            tx.execute("DELETE FROM reservations WHERE name = ?1", params![name])
+                .map_err(|e| db("delete", e))?;
             for sql in [
                 "DELETE FROM steps WHERE incarnation = ?1",
                 "DELETE FROM processes WHERE incarnation = ?1",
@@ -596,6 +668,21 @@ impl Backend for Sqlite {
         self.tx(true, |tx| {
             let incarnation =
                 incarnation(tx, name)?.ok_or_else(|| Error::UnknownBranch(name.clone()))?;
+            // Creating a reserved name: only its reserving engine may, so a
+            // reservation reclaimed from a live but slow engine and taken by
+            // another is not created twice.
+            let reserver: Option<String> = tx
+                .query_row(
+                    "SELECT r.owner FROM reservations r JOIN branches b ON b.name = r.name \
+                     WHERE r.name = ?1 AND b.record IS NULL",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| db("acquire", e))?;
+            if reserver.is_some_and(|reserver| reserver != owner.id) {
+                return Err(Error::BranchExists(name.clone()));
+            }
             let current = lease_row(tx, name)?;
             if let Some(row) = &current {
                 if row.owner.is_some() && row.incarnation == incarnation {
@@ -625,6 +712,8 @@ impl Backend for Sqlite {
             )
             .map_err(|e| db("acquire", e))?;
             put(tx, record)?;
+            tx.execute("DELETE FROM reservations WHERE name = ?1", params![name])
+                .map_err(|e| db("acquire", e))?;
             Ok(Acquired::Granted(Fence {
                 branch: name.clone(),
                 incarnation,
@@ -1130,8 +1219,8 @@ mod tests {
     #[test]
     fn a_stale_owners_writes_are_fenced_once_the_lease_is_taken_over() {
         let (_temp, store) = open("fence");
-        assert!(store.reserve("b").unwrap());
-        assert!(!store.reserve("b").unwrap());
+        assert!(store.reserve("b", &owner("a")).unwrap());
+        assert!(!store.reserve("b", &owner("a")).unwrap());
         let first = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
         assert_eq!((first.generation, first.turn), (1, 1));
         // A second engine is refused while the first holds the lease.
@@ -1173,7 +1262,7 @@ mod tests {
     #[test]
     fn an_expired_lease_is_stale_and_a_new_turn_gets_the_next_generation() {
         let (_temp, store) = open("expiry");
-        store.reserve("b").unwrap();
+        store.reserve("b", &owner("a")).unwrap();
         let fence = granted(
             store
                 .acquire(&record("b"), &owner("a"), Duration::ZERO)
@@ -1189,7 +1278,7 @@ mod tests {
     #[test]
     fn a_step_records_its_intent_once_and_replays_its_outcome() {
         let (_temp, store) = open("steps");
-        store.reserve("b").unwrap();
+        store.reserve("b", &owner("a")).unwrap();
         let fence = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
         let intent = serde_json::json!({ "prompt": "p" });
         assert_eq!(
@@ -1219,7 +1308,7 @@ mod tests {
     #[test]
     fn a_cancel_is_bound_to_the_turn_it_was_asked_of() {
         let (_temp, store) = open("cancel");
-        store.reserve("b").unwrap();
+        store.reserve("b", &owner("a")).unwrap();
         assert!(matches!(
             store.request_cancel("nope", "x", false),
             Err(Error::UnknownBranch(_))
@@ -1235,5 +1324,61 @@ mod tests {
         store.finish(&fence, None, None).unwrap();
         let next = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
         assert_eq!(store.cancel_requested(&next).unwrap(), None);
+    }
+
+    #[test]
+    fn a_reservation_is_reclaimed_only_from_a_gone_engine_or_once_expired() {
+        let (_temp, store) = open("reservations");
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let dead = Owner {
+            id: "dead".into(),
+            pid: exited.id(),
+            start: crate::proc::start_time(exited.id()).unwrap_or_else(|| "1".into()),
+            host: crate::proc::host().into(),
+        };
+        exited.wait().unwrap();
+        assert!(store.reserve("gone", &dead).unwrap());
+        assert!(store.reserve("live", &owner("a")).unwrap());
+        let elsewhere = Owner {
+            host: "another-host/boot".into(),
+            ..owner("far")
+        };
+        assert!(store.reserve("far", &elsewhere).unwrap());
+        let rows = store.reservations().unwrap();
+        let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap().clone();
+        let now = now_ms();
+        assert!(row("gone")
+            .stale(now)
+            .unwrap()
+            .contains("no longer running"));
+        assert_eq!(row("live").stale(now), None);
+        assert_eq!(row("far").stale(now), None, "another host's engine");
+        let later = now + crate::state::RESERVATION_TTL.as_millis() as u64;
+        assert!(row("far").stale(later).unwrap().contains("never created"));
+
+        // Reclaiming frees the name once; a reservation made again since is
+        // a different one and is kept.
+        assert!(store.reclaim(&row("gone")).unwrap());
+        assert!(!store.taken("gone").unwrap());
+        assert!(!store.reclaim(&row("gone")).unwrap());
+        assert!(store.reserve("gone", &owner("b")).unwrap());
+        assert!(!store.reclaim(&row("gone")).unwrap());
+        assert!(store.taken("gone").unwrap());
+
+        // Only the reserving engine creates the branch; creating it ends
+        // the reservation.
+        assert!(matches!(
+            store.acquire(&record("gone"), &owner("a"), TTL),
+            Err(Error::BranchExists(_))
+        ));
+        let fence = granted(store.acquire(&record("gone"), &owner("b"), TTL).unwrap());
+        store.finish(&fence, None, None).unwrap();
+        let names: Vec<String> = store
+            .reservations()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, ["far", "live"]);
     }
 }
