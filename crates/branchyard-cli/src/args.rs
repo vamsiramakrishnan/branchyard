@@ -1020,6 +1020,12 @@ pub static COMMANDS: &[Spec] = &[
         flags: &[],
     },
     Spec {
+        name: "worker",
+        positionals: &[],
+        summary: "Run operations servers queued in a PostgreSQL database",
+        flags: &[],
+    },
+    Spec {
         name: "spawn",
         positionals: &["prompt"],
         summary: "Delegate to a new child branch of this branch",
@@ -1163,6 +1169,12 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         return Ok(Command::Serve {
             args: args[1..].to_vec(),
         });
+    }
+    if first == "worker" {
+        // `by serve --worker`: runs queued operations, serves nothing.
+        let mut rest = vec!["--worker".to_owned()];
+        rest.extend(args[1..].iter().cloned());
+        return Ok(Command::Serve { args: rest });
     }
     let spec = spec(first).ok_or_else(|| UsageError {
         message: format!("unknown command '{first}'"),
@@ -2585,6 +2597,16 @@ mod tests {
             parse_str("serve --listen 127.0.0.1:0 --help").unwrap(),
             Command::Serve {
                 args: vec!["--listen".into(), "127.0.0.1:0".into(), "--help".into()]
+            }
+        );
+        assert_eq!(
+            parse_str("worker --database postgres://h/d").unwrap(),
+            Command::Serve {
+                args: vec![
+                    "--worker".into(),
+                    "--database".into(),
+                    "postgres://h/d".into()
+                ]
             }
         );
         assert_eq!(

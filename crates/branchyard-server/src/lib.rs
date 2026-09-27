@@ -14,15 +14,22 @@
 //!
 //! - Every `/v1` request needs a configured bearer token, compared in
 //!   constant time; tokens are never logged.
-//! - A long operation (task, send, fork, merge) is saved to the operation
-//!   registry before `202 Accepted` is returned and before it starts, and
-//!   runs on a server thread: disconnecting the client has no effect on it
-//!   (design invariant 1).
+//! - A long operation (task, send, fork, reincarnate, merge, spawn,
+//!   integrate) is admitted in one transaction before `202 Accepted` is
+//!   returned: its record, idempotency binding, branch locks and a queue
+//!   row holding a serializable description of its work ([`work::Work`]).
+//!   A worker claims it from the queue under a lease and runs it on a
+//!   thread of its own: disconnecting the client has no effect on it
+//!   (design invariant 1), and a server that crashes before running it
+//!   leaves it for the next worker.
 //! - A repeated idempotency key from the same caller returns the original
-//!   operation and never starts a second (invariant 4); the same key with a
-//!   different request is refused.
-//! - Operation status survives a restart. An operation that was queued or
-//!   running when the server stopped is recorded as `interrupted`.
+//!   operation and never starts a second (invariant 4), on any server
+//!   sharing the operation store; the same key with a different request is
+//!   refused. `GET /v1/operations?idempotency_key=` finds it too.
+//! - Operation status survives a restart. An operation still running when
+//!   its server stopped, or whose worker's claim expired, is recorded as
+//!   `interrupted` and never run again; one still queued runs after the
+//!   restart, or on another server.
 //! - Branch state survives a crash: at start, and every 30 seconds, the
 //!   engine recovers branches whose turn's engine stopped (this server's
 //!   previous process, or a local `by`), killing a harness process group
@@ -49,10 +56,12 @@
 //!   them choose executables.
 //! - Resuming a turn after a crash: a recovered turn is interrupted, never
 //!   continued or resubmitted.
-//! - Multiple servers per data directory or database schema. Operations
-//!   persist through the [`store::OperationStore`] trait to SQLite in the
-//!   data directory, or with the `postgres` feature and `database`, to
-//!   PostgreSQL alongside the branch state (`docs/durability.md`).
+//! - Multiple servers per data directory. Operations persist through the
+//!   [`store::OperationStore`] trait to SQLite in the data directory, which
+//!   one server holds; or, with the `postgres` feature and `database`, to
+//!   PostgreSQL alongside the branch state, where several servers and
+//!   `--worker` processes serving the same repositories may share one
+//!   schema (`docs/server.md`, `docs/durability.md`).
 
 pub mod api;
 pub mod auth;
@@ -65,6 +74,7 @@ pub mod serve;
 pub mod storage_routes;
 pub mod store;
 pub mod webhook;
+pub mod work;
 
 pub use config::Config;
 pub use serve::{start, Handle, Running, Stopped};

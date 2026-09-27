@@ -141,6 +141,12 @@ pub struct Config {
     pub max_artifact_bytes: u64,
     /// Operations running at once; more wait queued.
     pub max_running: usize,
+    /// How long a worker's claim on a queued operation lasts without
+    /// renewal. Another worker takes over a claim that expired.
+    pub operation_lease: Duration,
+    /// Only run queued operations: bind no listener and deliver no
+    /// webhooks. Needs `database`.
+    pub worker_only: bool,
     /// How long shutdown waits for running operations.
     pub shutdown_grace: Duration,
     /// Executable per harness, used when a request names none.
@@ -191,6 +197,8 @@ impl Config {
             max_body_bytes: 1024 * 1024,
             max_artifact_bytes: DEFAULT_MAX_ARTIFACT_BYTES,
             max_running: 8,
+            operation_lease: crate::ops::DEFAULT_LEASE,
+            worker_only: false,
             shutdown_grace: Duration::from_secs(60),
             harness_commands: BTreeMap::new(),
             allow_client_commands: false,
@@ -245,6 +253,14 @@ impl Config {
             if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
                 return Err("database must be a PostgreSQL URL, postgres://user@host/name".into());
             }
+        }
+        if self.worker_only && self.database.is_none() {
+            return Err(
+                "a worker needs --database: it runs operations other servers queued there".into(),
+            );
+        }
+        if self.operation_lease < Duration::from_millis(100) {
+            return Err("operation_lease must be at least 100 milliseconds".into());
         }
         if self.max_body_bytes < 1024 {
             return Err("max_body_bytes must be at least 1024".into());

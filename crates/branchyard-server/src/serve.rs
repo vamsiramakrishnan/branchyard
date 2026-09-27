@@ -20,7 +20,7 @@ use crate::api::{self, App, RepoState};
 use crate::auth::Tokens;
 use crate::config::{Config, TlsFiles};
 use crate::feed::Feed;
-use crate::ops::Registry;
+use crate::ops::{Options, Registry};
 use crate::store::{OperationStore, SqliteStore};
 use crate::webhook;
 
@@ -39,8 +39,11 @@ pub struct Running {
     accept: tokio::task::JoinHandle<()>,
     pollers: Vec<tokio::task::JoinHandle<()>>,
     webhooks: Vec<tokio::task::JoinHandle<()>>,
-    /// Held until the server has stopped: one server per data directory.
-    _lock: branchyard::DirLock,
+    /// Held until the server has stopped: one server per data directory,
+    /// unless its operations are in PostgreSQL, which several servers may
+    /// share.
+    _lock: Option<branchyard::DirLock>,
+    worker: bool,
 }
 
 /// How a shutdown went.
@@ -52,8 +55,15 @@ pub struct Stopped {
 }
 
 impl Running {
+    /// The bound address; for a worker, which binds none, the configured
+    /// one.
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Whether this only runs operations, with no HTTP listener.
+    pub fn is_worker(&self) -> bool {
+        self.worker
     }
 
     /// `http://` or `https://` and the bound address.
@@ -92,7 +102,7 @@ impl Running {
         }
         let registry = self.registry.clone();
         let grace = self.grace;
-        let idle = tokio::task::spawn_blocking(move || registry.wait_idle(grace));
+        let idle = tokio::task::spawn_blocking(move || registry.wait_running(grace));
         tokio::select! {
             _ = idle => {}
             _ = self.force.notified() => {}
@@ -163,8 +173,16 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?;
-    let lock = branchyard::DirLock::acquire(&config.data_dir, "a Branchyard server")
-        .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?;
+    // With PostgreSQL, operations, their queue and branch locks are in the
+    // database, which several servers may share; otherwise they are in the
+    // data directory's SQLite, which one server owns.
+    let lock = match config.database {
+        Some(_) => None,
+        None => Some(
+            branchyard::DirLock::acquire(&config.data_dir, "a Branchyard server")
+                .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?,
+        ),
+    };
     let tls = match &config.tls {
         Some(files) => Some(tls_acceptor(files)?),
         None => None,
@@ -175,10 +193,19 @@ pub async fn start(config: Config) -> Result<Running, String> {
         tokio::task::spawn_blocking(move || open_state(&config))
     };
     let (repos, registry) = setup.await.map_err(|e| e.to_string())??;
-    let listener = TcpListener::bind(config.listen)
-        .await
-        .map_err(|e| format!("cannot listen on {}: {e}", config.listen))?;
-    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let worker = config.worker_only;
+    let listener = match worker {
+        true => None,
+        false => Some(
+            TcpListener::bind(config.listen)
+                .await
+                .map_err(|e| format!("cannot listen on {}: {e}", config.listen))?,
+        ),
+    };
+    let addr = match &listener {
+        Some(listener) => listener.local_addr().map_err(|e| e.to_string())?,
+        None => config.listen,
+    };
     let pollers = repos
         .values()
         .map(|repo| {
@@ -189,7 +216,10 @@ pub async fn start(config: Config) -> Result<Running, String> {
             ))
         })
         .collect();
-    let webhooks = start_webhooks(&config, &repos, shutdown_rx.clone())?;
+    let webhooks = match worker {
+        true => Vec::new(),
+        false => start_webhooks(&config, &repos, shutdown_rx.clone())?,
+    };
     let grace = config.shutdown_grace;
     let app = Arc::new(App {
         repos,
@@ -199,8 +229,22 @@ pub async fn start(config: Config) -> Result<Running, String> {
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),
     });
-    let router = api::router(app);
-    let accept = tokio::spawn(accept_loop(listener, tls.clone(), router, shutdown_rx));
+    registry
+        .start(Arc::new(crate::work::AppExecutor(app.clone())))
+        .map_err(|e| format!("could not start the operation dispatcher: {e}"))?;
+    let accept = match listener {
+        Some(listener) => {
+            let router = api::router(app);
+            tokio::spawn(accept_loop(listener, tls.clone(), router, shutdown_rx))
+        }
+        None => {
+            let mut shutdown = shutdown_rx;
+            tokio::spawn(async move {
+                let _app = app;
+                let _ = shutdown.wait_for(|stop| *stop).await;
+            })
+        }
+    };
     Ok(Running {
         addr,
         tls: tls.is_some(),
@@ -212,6 +256,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         pollers,
         webhooks,
         _lock: lock,
+        worker,
     })
 }
 
@@ -269,8 +314,15 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         );
     }
     let (store, place) = operation_store(config)?;
-    let registry = Registry::open(store, config.max_running)
-        .map_err(|e| format!("operation registry {place}: {e}"))?;
+    let options = Options {
+        max_running: config.max_running,
+        lease: config.operation_lease,
+        poll: config.poll_interval,
+        repos: config.repos.iter().map(|(name, _)| name.clone()).collect(),
+        exclusive: config.database.is_none(),
+    };
+    let registry =
+        Registry::open(store, options).map_err(|e| format!("operation registry {place}: {e}"))?;
     Ok((repos, registry))
 }
 

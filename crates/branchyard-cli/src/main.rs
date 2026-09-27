@@ -51,7 +51,11 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(2);
         }
-        return branchyard_server::cli::main(args, "by serve");
+        let program = match args.first().map(String::as_str) {
+            Some("--worker") => "by worker",
+            _ => "by serve",
+        };
+        return branchyard_server::cli::main(args, program);
     }
     match run(&Env::detect(), &globals, command) {
         Ok(()) => ExitCode::SUCCESS,
@@ -70,7 +74,7 @@ fn main() -> ExitCode {
 fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
     match command {
         Command::Help { topic: None } => return commands::print(&args::general_help()),
-        Command::Help { topic: Some(spec) } if spec.name == "serve" => {
+        Command::Help { topic: Some(spec) } if spec.name == "serve" || spec.name == "worker" => {
             return commands::print(branchyard_server::cli::USAGE)
         }
         Command::Help { topic: Some(spec) } => return commands::print(&args::command_help(spec)),
