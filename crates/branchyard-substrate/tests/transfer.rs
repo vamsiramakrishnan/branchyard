@@ -331,8 +331,9 @@ fn commits_come_back_as_commits_with_uncommitted_work_on_top() {
         &root,
         &[
             "log",
-            "--format=%H|%an <%ae>|%ad|%s|%b",
-            "--date=iso-strict",
+            // Author time in Unix seconds: git versions differ in how they
+            // print a UTC offset in ISO dates (`+00:00` or `Z`).
+            "--format=%H|%an <%ae>|%at|%s|%b",
             &format!("{base}..HEAD"),
         ],
     );
@@ -345,7 +346,7 @@ fn commits_come_back_as_commits_with_uncommitted_work_on_top() {
     assert!(lines[0].ends_with("|Second harness commit|"), "{log}");
     assert!(
         lines[1].starts_with(&format!(
-            "{}|Ada <ada@example.com>|2001-02-03T04:05:06+00:00|First harness commit|With a body.",
+            "{}|Ada <ada@example.com>|981173106|First harness commit|With a body.",
             pulled.commits[0]
         )),
         "{log}"
