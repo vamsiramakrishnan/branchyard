@@ -49,6 +49,10 @@ pub struct Seat {
     /// ones until they are removed. At least 1.
     #[serde(default = "one")]
     pub instances: u32,
+    /// Scratch areas a child in this seat is bound to; see
+    /// `docs/graph.md`. A spawn may add others, never change these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<crate::graph::Binding>,
 }
 
 fn one() -> u32 {
@@ -278,6 +282,7 @@ mod tests {
             delegates_to: below.iter().map(|s| (*s).to_owned()).collect(),
             escalates_to: Vec::new(),
             instances: 1,
+            bindings: Vec::new(),
         }
     }
 

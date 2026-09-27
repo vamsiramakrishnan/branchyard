@@ -315,6 +315,7 @@ fn a_harness_in_a_rig_spawns_by_seat_over_mcp() {
         delegates_to: Vec::new(),
         escalates_to: Vec::new(),
         instances: 1,
+        bindings: Vec::new(),
     };
     let seats = Seats {
         rig: "team".into(),

@@ -93,6 +93,10 @@ pub(crate) struct Hub {
     /// Set with [`crate::Yard::set_delivery_hook`]; tried before a message
     /// waits for its recipient's next turn.
     pub delivery_hook: Mutex<Option<Arc<dyn crate::inbox::DeliveryHook>>>,
+    /// The turn options each parent's latest graph proposal or spawn in
+    /// this process gave its children, by parent: a dependent started
+    /// here later runs under them (see `crate::graph`).
+    pub graph_options: Mutex<HashMap<String, crate::TaskOptions>>,
 }
 
 impl Default for Hub {
@@ -106,6 +110,7 @@ impl Default for Hub {
             broker: Default::default(),
             spawning: Default::default(),
             delivery_hook: Mutex::new(Some(Arc::new(crate::inbox::SteerDelivery::default()))),
+            graph_options: Default::default(),
         }
     }
 }

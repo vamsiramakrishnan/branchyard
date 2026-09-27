@@ -274,7 +274,7 @@ impl Lineage {
     /// Whether `descendant` is `ancestor` or descends from it, walking up
     /// from `descendant` through live branches; the walk may end on a
     /// removed parent, so `ancestor` itself need not be live.
-    fn descends(&self, ancestor: i64, descendant: i64) -> bool {
+    pub(crate) fn descends(&self, ancestor: i64, descendant: i64) -> bool {
         let mut cur = descendant;
         loop {
             if cur == ancestor {
@@ -730,6 +730,11 @@ fn reachable_scratch(store: &Store, branch: &str, name: &str) -> Result<i64, Err
         ));
     }
     Ok(me)
+}
+
+/// Fail unless `branch` may reach scratch area `name`.
+pub(crate) fn check_readable(yard: &Yard, branch: &str, name: &str) -> Result<(), Error> {
+    reachable_scratch(&yard.store(), branch, name).map(|_| ())
 }
 
 /// Share scratch area `name`, owned or already shared to `actor`, with

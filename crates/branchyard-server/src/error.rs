@@ -99,6 +99,7 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::Running(_) => (S::CONFLICT, "running"),
         E::NotRunning(_) => (S::CONFLICT, "not_running"),
         E::Fenced(_) => (S::CONFLICT, "fenced"),
+        E::StaleRevision { .. } => (S::CONFLICT, "stale_revision"),
         E::Remote { .. } => (S::BAD_GATEWAY, "remote_error"),
         E::Git(_) => (S::INTERNAL_SERVER_ERROR, "git_error"),
         E::Harness(_) => (S::INTERNAL_SERVER_ERROR, "harness_error"),
@@ -111,6 +112,9 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
             error_out.detail(json!({ "expected": expected, "actual": actual }))
         }
         E::Conflict { files } => error_out.detail(json!({ "files": files })),
+        E::StaleRevision {
+            expected, actual, ..
+        } => error_out.detail(json!({ "expected": expected, "actual": actual })),
         E::Remote { kind, .. } => error_out.detail(json!({ "kind": kind })),
         E::CheckFailed { output_tail } => error_out.detail(json!({ "output_tail": output_tail })),
         E::CheckTimedOut {

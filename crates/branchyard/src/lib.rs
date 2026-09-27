@@ -100,6 +100,7 @@ mod conformance;
 mod delegation;
 mod engine;
 mod git;
+mod graph;
 mod harness;
 mod inbox;
 mod lock;
@@ -140,6 +141,10 @@ use branchyard_workspace::Repository;
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
+};
+pub use graph::{
+    Access, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphEdit, GraphNode,
+    GraphProposal, SpawnSpec, MAX_EDITS,
 };
 pub use inbox::{DeliveryHook, SteerDelivery};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
@@ -196,6 +201,25 @@ impl Yard {
         recover::all(self)
     }
 
+    /// Start every `waiting` branch whose prerequisites have all settled,
+    /// its first turn on a thread of this process under `options`' policy,
+    /// observer and tools (its limits and denials are its own), and mark
+    /// `blocked` every one a prerequisite failed. The engine that settles a
+    /// prerequisite does this for its dependents; this is for a
+    /// prerequisite whose engine stopped before it could, and is what a
+    /// server does on its recovery interval. Returns the branches started;
+    /// wait for them before this process exits, as for any child
+    /// ([`Branch::wait_subtree`] on their parent). See `docs/graph.md`.
+    pub fn resume_graph(&self, options: &TaskOptions) -> Result<Vec<String>, Error> {
+        graph::resume(self, options)
+    }
+
+    /// `branch`'s graph: its children, the dependencies among them, and its
+    /// graph revision.
+    pub fn graph(&self, branch: &str) -> Result<Graph, Error> {
+        graph::show(&self.store(), branch)
+    }
+
     /// Ask `branch`'s running turn, and every running turn delegated below
     /// it, to stop; each ends `interrupted`. The request is durable and is
     /// observed by the engine running the turn in any process using this
@@ -207,7 +231,7 @@ impl Yard {
     /// [`Yard::cancel`] on behalf of `by`, whom each cancelled branch's
     /// event log names.
     pub fn cancel_as(&self, branch: &str, by: &str) -> Result<Vec<String>, Error> {
-        delegation::cancel_tree(&self.store(), branch, by)
+        delegation::cancel_tree(self, branch, by)
     }
 
     /// Deliver `text` into `branch`'s running turn as input from `by`,
@@ -1002,6 +1026,16 @@ pub struct CandidateInfo {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum BranchStatus {
     Running,
+    /// A delegated child created with prerequisites that have not all
+    /// settled yet: it has no worktree and has run no turn. See
+    /// `docs/graph.md`.
+    Waiting,
+    /// A child that will not start because a prerequisite failed, was
+    /// interrupted, stopped at a limit, is blocked itself or was removed.
+    /// Changing its dependencies with a graph proposal reopens it.
+    Blocked {
+        reason: String,
+    },
     /// The last turn completed and produced a candidate.
     Ready,
     /// The last turn completed without changing any file.
@@ -1552,6 +1586,13 @@ pub enum Error {
     /// This engine lost the branch's lease to another, which recovered or
     /// took over the branch; its writes are refused.
     Fenced(String),
+    /// A graph proposal was made against a revision of the branch's graph
+    /// that is no longer current; read the graph and propose again.
+    StaleRevision {
+        branch: String,
+        expected: u64,
+        actual: u64,
+    },
     /// An error the engine running a delegating turn returned through its
     /// broker, with the [`Error::kind`] it had there.
     Remote {
@@ -1613,6 +1654,15 @@ impl fmt::Display for Error {
             Error::Running(name) => write!(f, "branch {name} is running a turn"),
             Error::NotRunning(name) => write!(f, "branch {name} is not running a turn"),
             Error::Fenced(why) => write!(f, "fenced: {why}"),
+            Error::StaleRevision {
+                branch,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "stale graph revision: {branch}'s graph is at revision {actual}, not \
+                 {expected}; read it again and propose against the current revision"
+            ),
             Error::Remote { message, .. } => f.write_str(message),
             Error::Git(message) => write!(f, "git: {message}"),
             Error::Harness(message) => write!(f, "harness: {message}"),
@@ -1649,6 +1699,7 @@ impl Error {
             Error::Running(_) => "running",
             Error::NotRunning(_) => "not_running",
             Error::Fenced(_) => "fenced",
+            Error::StaleRevision { .. } => "stale_revision",
             Error::Remote { kind, .. } => kind,
             Error::Git(_) => "git",
             Error::Harness(_) => "harness",

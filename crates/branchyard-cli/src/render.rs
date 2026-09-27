@@ -582,6 +582,8 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
         BranchStatus::BudgetExceeded { limit } => (format!("over budget: {limit}"), Tone::Yellow),
         BranchStatus::Failed { reason } => (format!("failed: {reason}"), Tone::Red),
         BranchStatus::Merged { target, .. } => (format!("merged into {target}"), Tone::Blue),
+        BranchStatus::Waiting => ("waiting".into(), Tone::Dim),
+        BranchStatus::Blocked { reason } => (format!("blocked: {reason}"), Tone::Red),
     }
 }
 
@@ -831,6 +833,10 @@ pub fn next_commands(info: &BranchInfo) -> Vec<String> {
         ],
         BranchStatus::Running => vec![format!("by log {name}")],
         BranchStatus::Merged { .. } => vec![format!("by rm {name}")],
+        BranchStatus::Waiting | BranchStatus::Blocked { .. } => {
+            let parent = info.parent.as_deref().map(shell_quote).unwrap_or_default();
+            vec![format!("by graph show {parent}"), format!("by rm {name}")]
+        }
         BranchStatus::Interrupted
         | BranchStatus::BudgetExceeded { .. }
         | BranchStatus::Failed { .. } => {

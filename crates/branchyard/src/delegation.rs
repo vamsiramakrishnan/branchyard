@@ -28,7 +28,7 @@
 //! token files in `.branchyard/` and act as any branch with a running
 //! turn. Tokens stop honest mistakes, not a hostile harness.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -36,13 +36,16 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use branchyard_harness::profiles::{self, Profile};
-use branchyard_harness::SessionMode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::broker::Remote;
 use crate::engine::{self, Turn};
+use crate::graph::{
+    self, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphCommit, GraphEdit,
+    SpawnSpec, MAX_EDITS,
+};
 use crate::projection::{lock, same_token, ENV_BRANCH, ENV_ROOT, ENV_TOKEN};
 use crate::record::{self, Recorder};
 use crate::recover;
@@ -232,6 +235,14 @@ pub struct Spawn {
     /// branch may not name one. Unset `name` defaults to
     /// `<parent>-<seat>`.
     pub seat: Option<String>,
+    /// Siblings (other children of the same parent) this child waits for:
+    /// it is created `waiting` and starts its first turn when each has
+    /// settled; see `docs/graph.md`.
+    pub depends_on: Vec<String>,
+    /// When each of `depends_on` counts as done.
+    pub after: After,
+    /// Scratch areas the child is bound to for every turn.
+    pub bindings: Vec<Binding>,
 }
 
 impl Spawn {
@@ -244,28 +255,7 @@ impl Spawn {
 
     /// The `spawn` tool's arguments.
     fn arguments(&self) -> Value {
-        let mut args = json!({"prompt": self.prompt});
-        let mut set = |key: &str, value: Value| {
-            if !value.is_null() {
-                args[key] = value;
-            }
-        };
-        set("harness", json!(self.harness));
-        set("name", json!(self.name));
-        set("base", json!(self.base));
-        set("check", json!(self.check));
-        set("max_depth", json!(self.max_depth));
-        set("max_children", json!(self.max_children));
-        set("harnesses", json!(self.harnesses));
-        set("seat", json!(self.seat));
-        if !self.deny.is_empty() {
-            set("deny", json!(self.deny));
-        }
-        let budget = ChildBudget::from(&self.budget);
-        if budget != ChildBudget::default() {
-            set("budget", json!(budget));
-        }
-        args
+        serde_json::to_value(SpawnSpec::from_spawn(self)).unwrap_or(Value::Null)
     }
 }
 
@@ -289,7 +279,7 @@ impl From<&Budget> for ChildBudget {
 }
 
 impl ChildBudget {
-    fn to_budget(&self) -> Result<Budget, Error> {
+    pub(crate) fn to_budget(&self) -> Result<Budget, Error> {
         let max_duration = match self.max_minutes {
             None => None,
             Some(m) if m.is_finite() && m > 0.0 => Duration::try_from_secs_f64(m * 60.0).ok(),
@@ -322,6 +312,11 @@ pub struct Spawned {
     /// The seat it fills, for a child spawned by seat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seat: Option<String>,
+    /// The siblings it waits for, for a child with prerequisites; it is
+    /// `waiting` (or `blocked`) until they settle, and `base` is empty
+    /// until it starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 /// A descendant whose next turn was started.
@@ -396,6 +391,20 @@ pub struct Inspection {
     /// See [`crate::BranchInfo::stalled`].
     #[serde(default)]
     pub stalled: bool,
+    /// The branch's own graph revision: bumped by each graph proposal it
+    /// commits and each child it spawns. Omitted while 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub graph_revision: u64,
+    /// The siblings this branch waits for, or waited for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<Dependency>,
+    /// The scratch areas it is bound to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<Binding>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Recorded events from `cursor` on.
@@ -592,6 +601,36 @@ impl Delegate {
         }
     }
 
+    /// Apply a graph proposal to this branch's children: spawn children,
+    /// some waiting for others, and add or remove dependencies between
+    /// children that have not started, all or nothing. Refused with
+    /// [`Error::StaleRevision`] unless `expected_revision` is this branch's
+    /// current graph revision ([`Delegate::graph`]). Children with no
+    /// prerequisites start before this returns, as with
+    /// [`Delegate::spawn`]; see `docs/graph.md`.
+    pub fn apply_graph(
+        &self,
+        edits: Vec<GraphEdit>,
+        expected_revision: u64,
+    ) -> Result<GraphApplied, Error> {
+        match &self.via {
+            Via::Local(local) => local.apply_graph(&edits, expected_revision),
+            Via::Remote(_) => self.typed(
+                "apply_graph",
+                json!({"edits": edits, "expected_revision": expected_revision}),
+            ),
+        }
+    }
+
+    /// The graph of this branch or a descendant: its children, the
+    /// dependencies among them, and its revision.
+    pub fn graph(&self, branch: &str) -> Result<Graph, Error> {
+        match &self.via {
+            Via::Local(local) => local.graph(branch),
+            Via::Remote(_) => self.typed("graph", json!({ "branch": branch })),
+        }
+    }
+
     /// Publish `path` as a new immutable artifact of this branch; see
     /// `docs/storage.md`.
     pub fn publish_artifact(
@@ -724,7 +763,10 @@ impl Delegate {
         let deadline = Instant::now().checked_add(timeout);
         loop {
             let inspection = self.inspect(branch)?;
-            if inspection.status != BranchStatus::Running {
+            if !matches!(
+                inspection.status,
+                BranchStatus::Running | BranchStatus::Waiting
+            ) {
                 return Ok(inspection);
             }
             let now = Instant::now();
@@ -735,12 +777,13 @@ impl Delegate {
             match &self.via {
                 Via::Local(local) => {
                     recover::settle(&local.yard, branch)?;
+                    if inspection.status == BranchStatus::Waiting {
+                        graph::advance(&local.yard, &[branch.to_owned()], None)?;
+                    }
                     let store = local.store();
+                    let before = inspection.status.clone();
                     store.wait(left, || {
-                        Ok(
-                            (store.read(branch)?.info.status != BranchStatus::Running)
-                                .then_some(()),
-                        )
+                        Ok((store.read(branch)?.info.status != before).then_some(()))
                     })?;
                 }
                 Via::Remote(_) => std::thread::sleep(WAIT_POLL.min(left)),
@@ -931,16 +974,66 @@ pub(crate) fn is_ancestor(store: &Store, ancestor: &str, descendant: &str) -> Re
 /// Ask `name`'s running turn and every running turn below it to stop, on
 /// behalf of `by`: a durable request per running turn, which the engine
 /// running it observes.
-pub(crate) fn cancel_tree(store: &Store, name: &str, by: &str) -> Result<Vec<String>, Error> {
+///
+/// A branch still `waiting` for its prerequisites never starts: it ends
+/// `interrupted` at once, and what waits for it is blocked.
+pub(crate) fn cancel_tree(yard: &Yard, name: &str, by: &str) -> Result<Vec<String>, Error> {
+    let store = yard.store();
     let mut targets = vec![store.read(name)?.info];
-    targets.extend(descendants(store, name)?);
+    targets.extend(descendants(&store, name)?);
     let mut cancelled = Vec::new();
     for info in targets {
+        if info.status == BranchStatus::Waiting {
+            if let Ok(record) = store.read(&info.name) {
+                if graph::cancel_unstarted(&store, &record, by)? {
+                    graph::settled(yard, &info.name, None);
+                    cancelled.push(info.name);
+                }
+            }
+            continue;
+        }
         if store.request_cancel(&info.name, by, true)? {
             cancelled.push(info.name);
         }
     }
     Ok(cancelled)
+}
+
+/// Every branch a wait for `name`'s subtree covers, besides `all` (its
+/// descendants): what depends on a branch in the subtree, and their
+/// descendants, transitively. Such a branch is started by a turn in the
+/// subtree ending, so a process that waits for the subtree waits for it
+/// too.
+fn dependency_closure(
+    store: &Store,
+    name: &str,
+    all: &[BranchInfo],
+) -> Result<Vec<BranchInfo>, Error> {
+    let mut seen: BTreeSet<String> = all.iter().map(|info| info.name.clone()).collect();
+    seen.insert(name.to_owned());
+    let mut queue: Vec<String> = seen.iter().cloned().collect();
+    let mut extra = Vec::new();
+    while let Some(next) = queue.pop() {
+        for dependency in store.graph().dependents(&next)? {
+            let found = dependency.dependent;
+            if !seen.insert(found.clone()) {
+                continue;
+            }
+            let Ok(record) = store.read(&found) else {
+                continue;
+            };
+            let below = descendants(store, &found)?;
+            for info in &below {
+                if seen.insert(info.name.clone()) {
+                    queue.push(info.name.clone());
+                    extra.push(info.clone());
+                }
+            }
+            queue.push(found);
+            extra.push(record.info);
+        }
+    }
+    Ok(extra)
 }
 
 /// Wait until no descendant of `name` is running a turn, wherever it runs.
@@ -951,7 +1044,9 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
     let store = yard.store();
     loop {
         let all = descendants(&store, name)?;
-        let names: BTreeSet<String> = all.iter().map(|info| info.name.clone()).collect();
+        let mut watched = all.clone();
+        watched.extend(dependency_closure(&store, name, &all)?);
+        let names: BTreeSet<String> = watched.iter().map(|info| info.name.clone()).collect();
         let handles: Vec<JoinHandle<()>> = {
             let mut running = lock(&yard.hub.running);
             let waiting: Vec<String> = running
@@ -973,22 +1068,131 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
             }
             continue;
         }
-        let running: Vec<&BranchInfo> = all
+        let running: Vec<&BranchInfo> = watched
             .iter()
             .filter(|info| info.status == BranchStatus::Running)
             .collect();
         if running.is_empty() {
+            // A dependent whose prerequisites settled while no engine
+            // could start it, such as one whose prerequisite's engine
+            // stopped: start it now if this process applied its graph.
+            let waiting: Vec<String> = watched
+                .iter()
+                .filter(|info| info.status == BranchStatus::Waiting)
+                .map(|info| info.name.clone())
+                .collect();
+            if !waiting.is_empty() && !graph::advance(yard, &waiting, None)?.is_empty() {
+                continue;
+            }
             return Ok(all);
         }
         for info in running {
             recover::settle(yard, &info.name)?;
         }
+        let watching = names.clone();
         store.wait(SETTLE_EVERY, || {
-            let settled = descendants(&store, name)?
-                .iter()
-                .all(|info| info.status != BranchStatus::Running);
+            let settled = watching.iter().all(|name| {
+                store
+                    .read(name)
+                    .map_or(true, |record| record.info.status != BranchStatus::Running)
+            });
             Ok(settled.then_some(()))
         })?;
+    }
+}
+
+/// Run a turn on a thread of this process, joined by a wait for its
+/// subtree.
+pub(crate) fn start_turn(
+    yard: &Yard,
+    prepared: Prepared,
+    prompt: String,
+    options: TaskOptions,
+) -> Result<(), Error> {
+    let Prepared {
+        record,
+        lease,
+        profile,
+        command,
+        mode,
+        note,
+    } = prepared;
+    let name = record.info.name.clone();
+    let thread_yard = yard.clone();
+    let started = std::thread::Builder::new()
+        .name(format!("by-{name}"))
+        .spawn(move || {
+            // The outcome is the branch's status; errors are recorded there.
+            let _ = engine::execute(
+                Turn {
+                    yard: &thread_yard,
+                    record,
+                    profile,
+                    command,
+                    mode,
+                    prompt: &prompt,
+                    options: &options,
+                    fork_source: None,
+                    note,
+                },
+                lease,
+            );
+        });
+    match started {
+        Ok(handle) => {
+            let previous = lock(&yard.hub.running).insert(name, handle);
+            if let Some(previous) = previous {
+                let _ = previous.join();
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let store = yard.store();
+            if let Ok(mut record) = store.read(&name) {
+                record.info.status = BranchStatus::Failed {
+                    reason: format!("could not start a thread: {error}"),
+                };
+                let _ = store.write(&record);
+            }
+            Err(Error::Io(error))
+        }
+    }
+}
+
+/// One edit of a proposal, with a spawn in its Rust form.
+#[derive(Clone, Debug)]
+enum Edit {
+    Spawn(Box<Spawn>),
+    Add(Dependency),
+    Remove(DependencyRef),
+}
+
+impl Edit {
+    fn from_graph(edit: &GraphEdit) -> Result<Edit, Error> {
+        Ok(match edit {
+            GraphEdit::Spawn(spec) => Edit::Spawn(Box::new(spec.to_spawn()?)),
+            GraphEdit::AddDependency(d) => Edit::Add(d.clone()),
+            GraphEdit::RemoveDependency(d) => Edit::Remove(d.clone()),
+        })
+    }
+}
+
+/// A child of a proposal, checked and ready to be created.
+struct Planned {
+    /// Its `waiting` record.
+    record: Record,
+    limits: Limits,
+    seat: Option<String>,
+    depends_on: Vec<String>,
+    after: After,
+}
+
+/// What became of a spawned child, for its parent's event log.
+fn spawn_outcome(spawned: &Spawned) -> String {
+    match &spawned.status {
+        BranchStatus::Waiting => format!("waiting for {}", spawned.depends_on.join(", ")),
+        BranchStatus::Blocked { reason } => format!("blocked: {reason}"),
+        _ => format!("started on {}", spawned.profile),
     }
 }
 
@@ -1068,37 +1272,291 @@ impl Local {
     }
 
     fn spawn(&self, request: &Spawn) -> Result<Spawned, Error> {
-        let result = self.try_spawn(request);
+        let result = self
+            .try_apply_graph(&[Edit::Spawn(Box::new(request.clone()))], None)
+            .and_then(|applied| {
+                applied
+                    .spawned
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::State("the spawn created no child".into()))
+            });
         let target = match &result {
             Ok(spawned) => spawned.name.clone(),
             Err(_) => request.name.clone().unwrap_or_default(),
         };
-        self.note("spawn", &target, &result, |s| {
-            format!("started on {}", s.profile)
+        self.note("spawn", &target, &result, spawn_outcome);
+        result
+    }
+
+    fn apply_graph(&self, edits: &[GraphEdit], expected: u64) -> Result<GraphApplied, Error> {
+        let result = edits
+            .iter()
+            .map(Edit::from_graph)
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|edits| self.try_apply_graph(&edits, Some(expected)));
+        self.note("apply_graph", &self.branch, &result, |applied| {
+            let spawned: Vec<String> = applied
+                .spawned
+                .iter()
+                .map(|s| format!("{} ({})", s.name, spawn_outcome(s)))
+                .collect();
+            match spawned.is_empty() {
+                true => format!("revision {}", applied.revision),
+                false => format!("revision {}: {}", applied.revision, spawned.join(", ")),
+            }
         });
         result
     }
 
-    fn try_spawn(&self, request: &Spawn) -> Result<Spawned, Error> {
+    /// Validate a whole proposal, then commit it in one store transaction
+    /// and start the children whose prerequisites have settled. Nothing is
+    /// written unless every edit is valid. `expected` is checked here and
+    /// again in the transaction; `None` (a plain spawn) skips it.
+    fn try_apply_graph(
+        &self,
+        edits: &[Edit],
+        expected: Option<u64>,
+    ) -> Result<GraphApplied, Error> {
         let store = self.store();
         let _spawning = lock(&self.yard.hub.spawning);
+        if edits.is_empty() {
+            return Err(Error::Denied(
+                "a graph proposal needs at least one edit".into(),
+            ));
+        }
+        if edits.len() > MAX_EDITS {
+            return Err(Error::Denied(format!(
+                "a graph proposal may carry at most {MAX_EDITS} edits, not {}",
+                edits.len()
+            )));
+        }
         let caller = store.read(&self.branch)?;
         let grant = caller
             .grant
             .clone()
             .ok_or_else(|| Error::Denied(format!("{} was not given delegation", self.branch)))?;
-        if !grant.can_spawn() {
+        let revision = store.graph().graph_revision(&self.branch)?;
+        if let Some(expected) = expected.filter(|e| *e != revision) {
+            return Err(Error::StaleRevision {
+                branch: self.branch.clone(),
+                expected,
+                actual: revision,
+            });
+        }
+        let spawns = edits.iter().any(|e| matches!(e, Edit::Spawn(_)));
+        if spawns && !grant.can_spawn() {
             return Err(Error::Denied(format!(
                 "{} may not create children: its envelope's max_depth is 0",
                 self.branch
             )));
         }
+        let children: BTreeMap<String, Record> = caller
+            .info
+            .children
+            .iter()
+            .filter_map(|child| store.read(child).ok().map(|r| (child.clone(), r)))
+            .collect();
+        let mut planned: Vec<Planned> = Vec::new();
+        let mut taken: BTreeSet<String> = BTreeSet::new();
+        for edit in edits {
+            if let Edit::Spawn(request) = edit {
+                let child = self.plan_child(&caller, &grant, request, &planned, &taken)?;
+                taken.insert(child.record.info.name.clone());
+                planned.push(child);
+            }
+        }
+        let mut edges: BTreeMap<(String, String), After> = store
+            .graph()
+            .dependencies(&self.branch)?
+            .into_iter()
+            .map(|d| ((d.dependent, d.prerequisite), d.after))
+            .collect();
+        let endpoint = |name: &str| -> Result<(), Error> {
+            if taken.contains(name) || children.contains_key(name) {
+                return Ok(());
+            }
+            let below = store.read(name).is_ok()
+                && is_ancestor(&store, &self.branch, name).unwrap_or(false);
+            Err(Error::Denied(match below {
+                true => format!(
+                    "{name} is not a child of {}; a dependency joins two of its children",
+                    self.branch
+                ),
+                false => format!(
+                    "{name} is not a child of {}, and a branch acts only on its own children's \
+                     dependencies",
+                    self.branch
+                ),
+            }))
+        };
+        let unstarted = |name: &str| -> Result<(), Error> {
+            match children.get(name) {
+                Some(child) if !graph::unstarted(&child.info.status) => Err(Error::Denied(
+                    format!("{name} has already started, so its dependencies can no longer change"),
+                )),
+                _ => Ok(()),
+            }
+        };
+        let mut add = Vec::new();
+        let mut remove = Vec::new();
+        let mut touched = BTreeSet::new();
+        let mut add_edge = |dependency: Dependency,
+                            edges: &mut BTreeMap<(String, String), After>|
+         -> Result<(), Error> {
+            endpoint(&dependency.dependent)?;
+            endpoint(&dependency.prerequisite)?;
+            if dependency.dependent == dependency.prerequisite {
+                return Err(Error::Denied(format!(
+                    "{} cannot depend on itself",
+                    dependency.dependent
+                )));
+            }
+            let key = (
+                dependency.dependent.clone(),
+                dependency.prerequisite.clone(),
+            );
+            if edges.insert(key, dependency.after).is_some() {
+                return Err(Error::Denied(format!(
+                    "{} already depends on {}",
+                    dependency.dependent, dependency.prerequisite
+                )));
+            }
+            add.push(dependency);
+            Ok(())
+        };
+        for child in &planned {
+            for prerequisite in &child.depends_on {
+                add_edge(
+                    Dependency {
+                        dependent: child.record.info.name.clone(),
+                        prerequisite: prerequisite.clone(),
+                        after: child.after,
+                    },
+                    &mut edges,
+                )?;
+            }
+        }
+        for edit in edits {
+            match edit {
+                Edit::Spawn(_) => {}
+                Edit::Add(dependency) => {
+                    endpoint(&dependency.dependent)?;
+                    endpoint(&dependency.prerequisite)?;
+                    if dependency.dependent != dependency.prerequisite {
+                        unstarted(&dependency.dependent)?;
+                    }
+                    add_edge(dependency.clone(), &mut edges)?;
+                    touched.insert(dependency.dependent.clone());
+                }
+                Edit::Remove(dependency) => {
+                    endpoint(&dependency.dependent)?;
+                    endpoint(&dependency.prerequisite)?;
+                    unstarted(&dependency.dependent)?;
+                    let key = (
+                        dependency.dependent.clone(),
+                        dependency.prerequisite.clone(),
+                    );
+                    if edges.remove(&key).is_none() {
+                        return Err(Error::Denied(format!(
+                            "{} does not depend on {}",
+                            dependency.dependent, dependency.prerequisite
+                        )));
+                    }
+                    remove.push(dependency.clone());
+                    touched.insert(dependency.dependent.clone());
+                }
+            }
+        }
+        let pairs: BTreeSet<(String, String)> = edges.keys().cloned().collect();
+        if let Some(cycle) = graph::find_cycle(&pairs) {
+            return Err(Error::Denied(format!(
+                "the proposal would make a dependency cycle: {}",
+                cycle.join(" waits for ")
+            )));
+        }
+        // Children that start now begin from this branch's current work,
+        // as a spawn always has; later ones from its branch as it is then.
+        if planned
+            .iter()
+            .any(|p| p.depends_on.is_empty() && p.record.start_base.is_none())
+        {
+            self.current_work(&caller, "snapshot before delegating")?;
+        }
+        let revision = store.graph().commit_graph(&GraphCommit {
+            parent: self.branch.clone(),
+            expected,
+            create: planned.iter().map(|p| p.record.clone()).collect(),
+            add,
+            remove,
+        })?;
+        lock(&self.yard.hub.graph_options).insert(self.branch.clone(), self.child_options());
+        let mut consider: Vec<String> =
+            planned.iter().map(|p| p.record.info.name.clone()).collect();
+        consider.extend(touched);
+        let started = graph::advance(&self.yard, &consider, Some(&self.options))?;
+        let spawned = planned
+            .into_iter()
+            .map(|child| {
+                let name = child.record.info.name.clone();
+                let info = started
+                    .iter()
+                    .find(|r| r.info.name == name)
+                    .map(|r| r.info.clone())
+                    .or_else(|| store.read(&name).ok().map(|r| r.info))
+                    .unwrap_or(child.record.info);
+                Spawned {
+                    name: info.name,
+                    git_branch: info.git_branch,
+                    harness: info.harness,
+                    profile: info.profile,
+                    base: info.base,
+                    depth: info.depth,
+                    status: info.status,
+                    budget: ChildBudget {
+                        max_usd: child.limits.max_usd,
+                        max_turns: child.limits.max_turns,
+                        max_minutes: child.limits.max_duration_ms.map(|ms| ms as f64 / 60_000.0),
+                    },
+                    seat: child.seat,
+                    depends_on: child.depends_on,
+                }
+            })
+            .collect();
+        Ok(GraphApplied {
+            branch: self.branch.clone(),
+            revision,
+            spawned,
+            dependencies: edges
+                .into_iter()
+                .map(|((dependent, prerequisite), after)| Dependency {
+                    dependent,
+                    prerequisite,
+                    after,
+                })
+                .collect(),
+        })
+    }
+
+    /// Check one child of a proposal against this branch's envelope and
+    /// budget, counting the children planned before it, and build its
+    /// `waiting` record. Writes nothing.
+    fn plan_child(
+        &self,
+        caller: &Record,
+        grant: &Grant,
+        request: &Spawn,
+        planned: &[Planned],
+        taken: &BTreeSet<String>,
+    ) -> Result<Planned, Error> {
+        let store = self.store();
         let live = caller
             .info
             .children
             .iter()
             .filter(|child| store.read(child).is_ok())
-            .count();
+            .count()
+            + planned.len();
         if live >= grant.envelope.max_children as usize {
             return Err(Error::Denied(format!(
                 "{} already has {live} children, its envelope's max_children",
@@ -1108,7 +1566,7 @@ impl Local {
         if request.prompt.trim().is_empty() {
             return Err(Error::Denied("a child needs a prompt".into()));
         }
-        let seated = self.seat(&caller, &grant, request)?;
+        let seated = self.seat(caller, grant, request, planned)?;
         let filled;
         let request = match &seated {
             Some((name, seat, below)) => {
@@ -1132,7 +1590,8 @@ impl Local {
             )));
         }
         let envelope = grant.envelope.child(request, own)?;
-        let limits = self.child_limits(&caller, &request.budget)?;
+        let planned_usd: f64 = planned.iter().filter_map(|p| p.limits.max_usd).sum();
+        let limits = self.child_limits(caller, &request.budget, planned_usd)?;
         let mut deny = grant.deny.clone();
         for pattern in &request.deny {
             if !deny.contains(pattern) {
@@ -1167,24 +1626,30 @@ impl Local {
             provision.as_ref(),
             isolated || crate::placement::sandboxed(caller.provider.as_ref()),
         )?;
+        graph::check_bindings(&store, &self.branch, &request.bindings)?;
         let base = match &request.base {
-            Some(rev) => run::resolve_base(&self.yard, Some(rev))?,
-            None => self.current_work(&caller, "snapshot before delegating")?,
+            Some(rev) => Some(run::resolve_base(&self.yard, Some(rev))?),
+            None => None,
         };
         // A seat's child is named after its parent and seat by default.
         let stem = match (&seated, &request.name) {
             (Some((seat, _, _)), None) => format!("{}-{seat}", self.branch),
             _ => request.prompt.clone(),
         };
-        let name =
-            names::reserve(&store, &self.yard.root, request.name.as_deref(), &stem, &[])?.remove(0);
-        let record = run::create(
-            &self.yard,
+        let name = names::plan_one(
+            &store,
+            &self.yard.root,
+            request.name.as_deref(),
+            &stem,
+            taken,
+        )?;
+        let mut record = run::new_record(
+            &store,
             NewBranch {
                 name: &name,
                 prompt: &request.prompt,
                 profile,
-                base,
+                base: base.clone().unwrap_or_default(),
                 parent: Some(self.branch.clone()),
                 check: request.check.clone().or(caller.check.clone()),
                 command,
@@ -1195,48 +1660,35 @@ impl Local {
                 depth: caller.info.depth + 1,
                 provision,
             },
-        )
-        .inspect_err(|_| store.release(&name))?;
-        let (record, lease) = record;
-        store.add_child(&self.branch, &name)?;
-        let info = record.info.clone();
-        self.start(
-            Prepared {
-                record,
-                lease,
-                profile,
-                command: launch,
-                mode: SessionMode::Fresh,
-                note: None,
-            },
-            request.prompt.clone(),
         )?;
-        Ok(Spawned {
-            name: info.name,
-            git_branch: info.git_branch,
-            harness: info.harness,
-            profile: info.profile,
-            base: info.base,
-            depth: info.depth,
-            status: info.status,
-            budget: ChildBudget {
-                max_usd: limits.max_usd,
-                max_turns: limits.max_turns,
-                max_minutes: limits.max_duration_ms.map(|ms| ms as f64 / 60_000.0),
-            },
+        record.info.status = BranchStatus::Waiting;
+        record.bindings = request.bindings.clone();
+        record.start_base = base;
+        let mut depends_on = Vec::new();
+        for prerequisite in &request.depends_on {
+            if !depends_on.contains(prerequisite) {
+                depends_on.push(prerequisite.clone());
+            }
+        }
+        Ok(Planned {
+            record,
+            limits,
             seat: seated.map(|(name, _, _)| name),
+            depends_on,
+            after: request.after,
         })
     }
 
     /// The seat `request` fills, with the seats below it; `None` for a
     /// branch outside a rig that names none. A branch in a rig must name
     /// one its own seat delegates to, and may not fill it more often than
-    /// the seat's instances allow.
+    /// the seat's instances allow, counting children planned alongside.
     fn seat(
         &self,
         caller: &Record,
         grant: &Grant,
         request: &Spawn,
+        planned: &[Planned],
     ) -> Result<Option<(String, Seat, Seats)>, Error> {
         let seats = match (&grant.seats, &request.seat) {
             (None, None) => return Ok(None),
@@ -1282,7 +1734,11 @@ impl Local {
                     .and_then(|g| g.seats.as_ref())
                     .is_some_and(|s| s.seat == name)
             })
-            .count();
+            .count()
+            + planned
+                .iter()
+                .filter(|p| p.seat.as_deref() == Some(name.as_str()))
+                .count();
         if filled >= seat.instances as usize {
             return Err(Error::Denied(format!(
                 "{} already has {filled} child{} in seat {name}, the seat's instances",
@@ -1295,7 +1751,12 @@ impl Local {
     }
 
     /// The child's limits, checked against what this branch has left.
-    fn child_limits(&self, caller: &Record, asked: &Budget) -> Result<Limits, Error> {
+    fn child_limits(
+        &self,
+        caller: &Record,
+        asked: &Budget,
+        planned_usd: f64,
+    ) -> Result<Limits, Error> {
         let bounds = &self.options.budget;
         let max_usd = match (bounds.max_usd, asked.max_usd) {
             (_, Some(ask)) if !(ask.is_finite() && ask > 0.0) => {
@@ -1304,14 +1765,14 @@ impl Local {
                 )))
             }
             (Some(_), None) => {
-                let remaining = self.remaining(caller).unwrap_or(0.0).max(0.0);
+                let remaining = (self.remaining(caller).unwrap_or(0.0) - planned_usd).max(0.0);
                 return Err(Error::Denied(format!(
                     "{} has a cost limit, so a child needs max_usd; ${remaining:.4} remains",
                     self.branch
                 )));
             }
             (Some(_), Some(ask)) => {
-                let remaining = self.remaining(caller).unwrap_or(0.0);
+                let remaining = self.remaining(caller).unwrap_or(0.0) - planned_usd;
                 if ask > remaining + EPSILON_USD {
                     return Err(Error::Denied(format!(
                         "max_usd {ask} exceeds what {} has left, ${:.4}",
@@ -1376,66 +1837,17 @@ impl Local {
     /// The options a child's turn runs with: the parent's policy, observer
     /// and tools. Its budget and denials come from its own record.
     fn child_options(&self) -> TaskOptions {
-        TaskOptions {
-            policy: self.options.policy.clone(),
-            observer: self.options.observer.clone(),
-            delegation_cli: self.options.delegation_cli.clone(),
-            delegation_server: self.options.delegation_server.clone(),
-            ..TaskOptions::default()
-        }
+        graph::child_options(&self.options)
     }
 
     /// Run a turn on a thread of this process.
     fn start(&self, prepared: Prepared, prompt: String) -> Result<(), Error> {
-        let Prepared {
-            record,
-            lease,
-            profile,
-            command,
-            mode,
-            note,
-        } = prepared;
-        let name = record.info.name.clone();
-        let yard = self.yard.clone();
-        let options = self.child_options();
-        let started = std::thread::Builder::new()
-            .name(format!("by-{name}"))
-            .spawn(move || {
-                // The outcome is the branch's status; errors are recorded there.
-                let _ = engine::execute(
-                    Turn {
-                        yard: &yard,
-                        record,
-                        profile,
-                        command,
-                        mode,
-                        prompt: &prompt,
-                        options: &options,
-                        fork_source: None,
-                        note,
-                    },
-                    lease,
-                );
-            });
-        match started {
-            Ok(handle) => {
-                let previous = lock(&self.yard.hub.running).insert(name, handle);
-                if let Some(previous) = previous {
-                    let _ = previous.join();
-                }
-                Ok(())
-            }
-            Err(error) => {
-                let store = self.store();
-                if let Ok(mut record) = store.read(&name) {
-                    record.info.status = BranchStatus::Failed {
-                        reason: format!("could not start a thread: {error}"),
-                    };
-                    let _ = store.write(&record);
-                }
-                Err(Error::Io(error))
-            }
-        }
+        start_turn(&self.yard, prepared, prompt, self.child_options())
+    }
+
+    fn graph(&self, branch: &str) -> Result<Graph, Error> {
+        self.require_descendant(branch, true)?;
+        graph::show(&self.store(), branch)
     }
 
     fn inspect(&self, branch: &str) -> Result<Inspection, Error> {
@@ -1483,6 +1895,9 @@ impl Local {
             seat,
             seats: may_spawn,
             stalled: info.stalled,
+            graph_revision: store.graph().graph_revision(branch)?,
+            depends_on: store.graph().prerequisites(branch)?,
+            bindings: record.bindings,
         })
     }
 
@@ -1541,7 +1956,10 @@ impl Local {
         }
         let caller = store.read(&self.branch)?;
         self.current_work(&caller, &format!("snapshot before integrating {branch}"))?;
-        ops::merge(&self.yard, branch, &caller.info.git_branch)
+        let merged = ops::merge(&self.yard, branch, &caller.info.git_branch)?;
+        // A sibling waiting for this one to be integrated may start now.
+        graph::settled(&self.yard, branch, Some(&self.options));
+        Ok(merged)
     }
 
     fn steer(&self, branch: &str, text: &str) -> Result<Steer, Error> {
@@ -1562,7 +1980,7 @@ impl Local {
     fn cancel(&self, branch: &str) -> Result<Cancelled, Error> {
         let result = self
             .require_descendant(branch, false)
-            .and_then(|()| cancel_tree(&self.store(), branch, &self.branch))
+            .and_then(|()| cancel_tree(&self.yard, branch, &self.branch))
             .map(|cancelled| Cancelled { cancelled });
         self.note("cancel", branch, &result, |c| {
             match c.cancelled.is_empty() {
@@ -1790,6 +2208,21 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
             deny.push(pattern.clone());
         }
     }
+    // The seat's bindings, and any the request adds; a request may not
+    // change the access the seat gives an area.
+    let mut bindings = seat.bindings.clone();
+    for binding in &request.bindings {
+        match bindings.iter().find(|b| b.scratch == binding.scratch) {
+            Some(fixed) if fixed.access != binding.access => {
+                return Err(Error::Denied(format!(
+                    "seat {name} binds scratch area {} {}; spawn it without another access",
+                    binding.scratch, fixed.access
+                )))
+            }
+            Some(_) => {}
+            None => bindings.push(binding.clone()),
+        }
+    }
     Ok(Spawn {
         prompt: request.prompt.clone(),
         harness: Some(seat.harness.clone()),
@@ -1810,6 +2243,9 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         harnesses: Some(envelope.harnesses),
         deny,
         seat: Some(name.to_owned()),
+        depends_on: request.depends_on.clone(),
+        after: request.after,
+        bindings,
     })
 }
 
@@ -1837,19 +2273,9 @@ pub(crate) fn last_message(events: &[RecordedEvent]) -> String {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SpawnArgs {
-    prompt: String,
-    harness: Option<String>,
-    name: Option<String>,
-    base: Option<String>,
-    budget: Option<ChildBudget>,
-    check: Option<Vec<String>>,
-    max_depth: Option<u32>,
-    max_children: Option<u32>,
-    harnesses: Option<Vec<String>>,
-    #[serde(default)]
-    deny: Vec<String>,
-    seat: Option<String>,
+struct ApplyGraphArgs {
+    edits: Vec<GraphEdit>,
+    expected_revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -1966,21 +2392,17 @@ fn to_json<T: Serialize>(value: &T) -> Result<Value, Error> {
 pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Value, Error> {
     match tool {
         "spawn" => {
-            let args: SpawnArgs = parse(tool, arguments)?;
-            let budget = args.budget.unwrap_or_default().to_budget()?;
-            to_json(&local.spawn(&Spawn {
-                prompt: args.prompt,
-                harness: args.harness,
-                name: args.name,
-                base: args.base,
-                budget,
-                check: args.check,
-                max_depth: args.max_depth,
-                max_children: args.max_children,
-                harnesses: args.harnesses,
-                deny: args.deny,
-                seat: args.seat,
-            })?)
+            let spec: SpawnSpec = parse(tool, arguments)?;
+            to_json(&local.spawn(&spec.to_spawn()?)?)
+        }
+        "apply_graph" => {
+            let args: ApplyGraphArgs = parse(tool, arguments)?;
+            to_json(&local.apply_graph(&args.edits, args.expected_revision)?)
+        }
+        "graph" => {
+            let args: TargetArgs = parse(tool, arguments)?;
+            let branch = args.branch.unwrap_or_else(|| local.branch.clone());
+            to_json(&local.graph(&branch)?)
         }
         "inspect" => {
             let args: TargetArgs = parse(tool, arguments)?;
@@ -2153,6 +2575,8 @@ mod tests {
                 }),
                 seats: None,
             }),
+            bindings: Vec::new(),
+            start_base: None,
         }
     }
 
