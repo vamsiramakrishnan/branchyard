@@ -85,6 +85,14 @@ impl Endpoint {
         format!("http://{}:{}{}", self.host, self.port, self.path)
     }
 
+    /// The same credential presented at another URL.
+    pub fn with_url(&self, url: &str) -> io::Result<Endpoint> {
+        Ok(Endpoint {
+            connect_timeout: self.connect_timeout,
+            ..Endpoint::new(url, self.credential.clone())?
+        })
+    }
+
     /// The same bridge with another credential.
     pub fn with_credential(&self, credential: impl Into<String>) -> Endpoint {
         Endpoint {

@@ -1,0 +1,249 @@
+//! `SubstrateProvider` against the provider contract and its own promises,
+//! over real gRPC, a router and real bridge processes, all in the fake
+//! cluster. Not evidence about a Substrate cluster.
+
+mod common;
+
+use std::io::{self, BufRead, BufReader, Read};
+use std::path::Path;
+use std::time::Duration;
+
+use branchyard_sandbox::conformance::{self, Setup};
+use branchyard_sandbox::{
+    Consistency, ExecSpec, Locality, Mount, ProviderError, SandboxProvider, SandboxSpec,
+    SandboxState, SnapshotGuarantee, SnapshotScope,
+};
+use branchyard_substrate::{Config, SubstrateProvider};
+use common::{wait_gone, Cluster, Scratch};
+
+fn setup(name: &str, scratch: &Scratch) -> Setup {
+    let workspace = scratch.path("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut setup = Setup::without_mounts(format!("conf-{}", name.replace('_', "-")), workspace);
+    setup
+        .env
+        .insert("PATH".into(), std::env::var_os("PATH").unwrap_or_default());
+    setup.timeout = Duration::from_secs(20);
+    setup
+}
+
+macro_rules! conformance {
+    ($($check:ident),* $(,)?) => {$(
+        #[test]
+        fn $check() {
+            let cluster = Cluster::start(stringify!($check));
+            let provider = cluster.provider();
+            let scratch = Scratch::new(stringify!($check));
+            conformance::$check(&provider, &setup(stringify!($check), &scratch));
+            assert!(cluster.fake.actor_names().is_empty(), "a sandbox was left behind");
+        }
+    )*};
+}
+
+conformance!(
+    lifecycle,
+    exit_status,
+    missing_program,
+    stdio_round_trip,
+    env_and_cwd,
+    workspace_mount,
+    read_only_mount,
+    kill_reaches_descendants,
+    teardown_names_survivors,
+    drop_tears_down,
+    stop_ends_processes,
+);
+
+fn sh(cwd: &Path, script: &str) -> ExecSpec {
+    ExecSpec {
+        argv: vec!["sh".into(), "-c".into(), script.into()],
+        cwd: cwd.to_path_buf(),
+        env: [("PATH".into(), std::env::var_os("PATH").unwrap_or_default())].into(),
+    }
+}
+
+fn run(provider: &SubstrateProvider, name: &str, script: &str) -> Result<String, ProviderError> {
+    let mut process = provider.exec(name, &sh(Path::new("/"), script))?;
+    drop(process.take_stdin());
+    let mut out = String::new();
+    process
+        .take_stdout()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    let status = process.wait()?;
+    assert!(status.success(), "{script}: {status}");
+    Ok(out)
+}
+
+fn is_refused(result: Result<String, ProviderError>) -> bool {
+    matches!(result, Err(ProviderError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied)
+}
+
+#[test]
+fn capabilities_declare_exec_through_the_bridge() {
+    let cluster = Cluster::start("caps");
+    let caps = cluster.provider().capabilities();
+    assert!(caps.exec && caps.ingress);
+    assert_eq!(caps.branch[0].scope, SnapshotScope::Full);
+    let missing = Config::new(
+        cluster.fake.endpoint(),
+        common::ATESPACE,
+        "no-such-template",
+        cluster.fake.router(),
+    );
+    let provider = SubstrateProvider::connect(missing).unwrap();
+    assert_eq!(provider.capabilities(), Default::default());
+    assert!(provider.template_capabilities().is_err());
+}
+
+#[test]
+fn specs_it_cannot_honor_are_refused_and_create_nothing() {
+    let cluster = Cluster::start("refuse");
+    let provider = cluster.provider();
+    for spec in [
+        SandboxSpec::new("imaged").image("alpine:3"),
+        SandboxSpec::new("limited").resources(branchyard_sandbox::Resources {
+            cpus: Some(1),
+            memory_mib: None,
+        }),
+        SandboxSpec::new("mounted").mount(Mount::writable("/tmp", "/workspace")),
+    ] {
+        assert!(
+            matches!(provider.ensure(&spec), Err(ProviderError::Invalid(_))),
+            "{spec:?}"
+        );
+    }
+    assert!(cluster.fake.actor_names().is_empty());
+    let bad_router = Config::new(cluster.fake.endpoint(), "a", "t", "http://router/");
+    assert!(matches!(
+        SubstrateProvider::connect(bad_router),
+        Err(ProviderError::Invalid(_))
+    ));
+}
+
+#[test]
+fn each_attempt_has_its_own_credential_and_ended_ones_stay_dead() {
+    let cluster = Cluster::start("attempts");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let first = provider.endpoint("actor").unwrap();
+    assert_eq!(run(&provider, "actor", "echo one").unwrap(), "one\n");
+
+    // A new attempt supersedes the first; the first's credential is dead.
+    provider.begin_attempt("actor", "turn-2").unwrap();
+    assert_eq!(run(&provider, "actor", "echo two").unwrap(), "two\n");
+    let stale = first
+        .exec(&sh(Path::new("/"), "true"))
+        .map(|_| String::new());
+    assert!(is_refused(stale), "a superseded credential was accepted");
+
+    // Ending the attempt kills its processes and refuses its credential.
+    let second = provider.endpoint("actor").unwrap();
+    let mut sleeper = second
+        .exec(&sh(Path::new("/"), "sleep 300 & echo $!; wait"))
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(branchyard_sandbox::Process::take_stdout(&mut sleeper).unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let pid: u32 = line.trim().parse().unwrap();
+    let killed = provider.end_attempt("actor").unwrap();
+    assert!(killed.iter().any(|n| n == "sleep"), "{killed:?}");
+    wait_gone(pid);
+    let ended = second
+        .exec(&sh(Path::new("/"), "true"))
+        .map(|_| String::new());
+    assert!(is_refused(ended), "an ended credential was accepted");
+    assert!(matches!(
+        run(&provider, "actor", "true"),
+        Err(ProviderError::Runtime(_))
+    ));
+
+    // Suspend and resume restart the bridge; nothing old is revived.
+    provider.stop("actor").unwrap();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    assert_eq!(run(&provider, "actor", "echo three").unwrap(), "three\n");
+    for old in [&first, &second] {
+        let revived = old.exec(&sh(Path::new("/"), "true")).map(|_| String::new());
+        assert!(is_refused(revived));
+    }
+    let bridge = cluster.fake.bridge_pid("actor").unwrap();
+    provider.destroy("actor").unwrap();
+    wait_gone(bridge);
+    assert!(cluster.fake.actor_names().is_empty());
+}
+
+#[test]
+fn a_branch_has_a_new_identity_and_never_accepts_its_parents_credential() {
+    let cluster = Cluster::start("branch");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("parent")).unwrap();
+
+    let full = SnapshotGuarantee {
+        scope: SnapshotScope::Full,
+        consistency: Consistency::Crash,
+        locality: Locality::Portable,
+    };
+    // A checkpoint needs a stopped actor.
+    assert!(matches!(
+        provider.checkpoint("parent", &full),
+        Err(ProviderError::Runtime(_))
+    ));
+    let application = SnapshotGuarantee {
+        consistency: Consistency::Application,
+        ..full
+    };
+    assert!(matches!(
+        provider.checkpoint("parent", &application),
+        Err(ProviderError::Unsupported(_))
+    ));
+    provider.stop("parent").unwrap();
+    let checkpoint = provider.checkpoint("parent", &full).unwrap();
+    assert_eq!(checkpoint.guarantee, full);
+
+    let child = provider
+        .branch(&checkpoint, &SandboxSpec::new("child"))
+        .unwrap();
+    assert_eq!(child.state, SandboxState::Stopped);
+    provider.ensure(&SandboxSpec::new("child")).unwrap();
+    assert_eq!(run(&provider, "child", "echo child").unwrap(), "child\n");
+    let parent_handle = provider.handle("parent").unwrap().unwrap();
+    let child_handle = provider.handle("child").unwrap().unwrap();
+    assert_ne!(parent_handle.uid, child_handle.uid);
+
+    // The parent's live credential, presented to the child's bridge, whose
+    // attempt state was copied from the parent.
+    provider.ensure(&SandboxSpec::new("parent")).unwrap();
+    let parent = provider.endpoint("parent").unwrap();
+    assert_eq!(run(&provider, "parent", "echo parent").unwrap(), "parent\n");
+    let url = provider.config().router_url("child");
+    let at_child = parent.with_url(&url).unwrap();
+    let crossed = at_child
+        .exec(&sh(Path::new("/"), "true"))
+        .map(|_| String::new());
+    assert!(is_refused(crossed));
+    provider.destroy("child").unwrap();
+    provider.destroy("parent").unwrap();
+}
+
+#[test]
+fn a_name_reused_by_another_actor_is_never_acted_on() {
+    let cluster = Cluster::start("reuse");
+    let first = cluster.provider();
+    first.ensure(&SandboxSpec::new("worker")).unwrap();
+    // Someone else deletes and recreates the name.
+    let other = cluster.provider();
+    other.destroy("worker").unwrap();
+    other.ensure(&SandboxSpec::new("worker")).unwrap();
+    assert!(matches!(
+        first.inspect("worker"),
+        Err(ProviderError::Runtime(why)) if why.contains("is now")
+    ));
+    assert!(first.destroy("worker").is_err());
+    assert_eq!(
+        other.inspect("worker").unwrap().unwrap().state,
+        SandboxState::Running
+    );
+    other.destroy("worker").unwrap();
+}

@@ -639,7 +639,9 @@ dependencies = [
 name = "branchyard-substrate"
 version = "0.0.1"
 dependencies = [
+ "branchyard-bridge",
  "branchyard-sandbox",
+ "branchyard-substrate",
  "prost",
  "prost-types",
  "protoc-bin-vendored",

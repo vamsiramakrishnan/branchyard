@@ -8,6 +8,13 @@
 //! needs a POSIX shell with `sleep`, `cat` and `printf`, and a Linux
 //! `/proc`. They do not check isolation: a local provider passes them.
 //!
+//! A provider that cannot show host directories to a sandbox at all, such
+//! as one whose sandboxes run on another machine, is checked with
+//! [`Setup::without_mounts`]: its sandboxes are created without mounts and
+//! work in a directory that already exists in the sandbox, and the two
+//! mount checks instead require that a spec with a mount is refused, never
+//! created with the mount silently missing.
+//!
 //! ```no_run
 //! use branchyard_sandbox::conformance::{self, Setup};
 //! # fn provider() -> Box<dyn branchyard_sandbox::SandboxProvider> { unimplemented!() }
@@ -36,8 +43,12 @@ pub struct Setup {
     /// An existing host directory, mounted writable into every sandbox.
     /// Checks write files into it.
     pub workspace: PathBuf,
-    /// Where the workspace appears in the sandbox.
+    /// Where the workspace appears in the sandbox; with
+    /// [`Setup::mounts`] off, a directory that exists in every sandbox.
     pub guest_workspace: PathBuf,
+    /// Whether the provider mounts host directories. See
+    /// [`Setup::without_mounts`].
+    pub mounts: bool,
     /// Variables every exec sets, such as `PATH` for a provider whose base
     /// environment is empty.
     pub env: BTreeMap<OsString, OsString>,
@@ -57,12 +68,33 @@ impl Setup {
             resources: Resources::default(),
             workspace: workspace.into(),
             guest_workspace: guest_workspace.into(),
+            mounts: true,
             env: BTreeMap::new(),
             timeout: Duration::from_secs(30),
         }
     }
 
+    /// For a provider that cannot mount host directories: sandboxes get no
+    /// mount, processes run in `guest_workspace`, which must already exist
+    /// in every sandbox, and a spec with a mount must be refused.
+    pub fn without_mounts(prefix: impl Into<String>, guest_workspace: impl Into<PathBuf>) -> Setup {
+        let guest_workspace = guest_workspace.into();
+        Setup {
+            mounts: false,
+            ..Setup::new(prefix, guest_workspace.clone(), guest_workspace)
+        }
+    }
+
     fn spec(&self, check: &str) -> SandboxSpec {
+        let mut spec = self.mounted(check);
+        if !self.mounts {
+            spec.mounts.clear();
+        }
+        spec
+    }
+
+    /// The spec with the workspace mounted, whether or not the provider can.
+    fn mounted(&self, check: &str) -> SandboxSpec {
         SandboxSpec {
             name: format!("{}-{check}", self.prefix),
             image: self.image.clone(),
@@ -286,8 +318,32 @@ pub fn env_and_cwd(provider: &dyn SandboxProvider, setup: &Setup) {
     assert_eq!(out, expected);
 }
 
-/// Files cross the workspace mount in both directions.
+/// A provider without mounts refuses a spec that has one, and creates
+/// nothing.
+fn mount_refused(provider: &dyn SandboxProvider, mut spec: SandboxSpec) {
+    spec.name.push_str("-refused");
+    let _ = provider.destroy(&spec.name);
+    match provider.ensure(&spec) {
+        Err(ProviderError::Invalid(_) | ProviderError::Unsupported(_)) => {}
+        Err(other) => panic!("ensure with a mount it cannot honor: {other}"),
+        Ok(_) => {
+            let _ = provider.destroy(&spec.name);
+            panic!("a provider without mounts created a sandbox with a mount")
+        }
+    }
+    assert_eq!(
+        provider.inspect(&spec.name).expect("inspect"),
+        None,
+        "a refused spec created a sandbox"
+    );
+}
+
+/// Files cross the workspace mount in both directions. Without mounts, a
+/// mount is refused.
 pub fn workspace_mount(provider: &dyn SandboxProvider, setup: &Setup) {
+    if !setup.mounts {
+        return mount_refused(provider, setup.mounted("mount"));
+    }
     let sandbox = Sandbox::ensure(provider, setup, "mount");
     std::fs::write(setup.workspace.join("from-host.txt"), "host\n").unwrap();
     let (code, out, err) = sandbox.run("cat from-host.txt && printf guest > from-guest.txt");
@@ -302,8 +358,11 @@ pub fn workspace_mount(provider: &dyn SandboxProvider, setup: &Setup) {
 
 /// A read-only mount is either refused or enforced; never silently writable.
 pub fn read_only_mount(provider: &dyn SandboxProvider, setup: &Setup) {
-    let mut spec = setup.spec("read-only");
+    let mut spec = setup.mounted("read-only");
     spec.mounts[0].writable = false;
+    if !setup.mounts {
+        return mount_refused(provider, spec);
+    }
     let _ = provider.destroy(&spec.name);
     match provider.ensure(&spec) {
         Err(ProviderError::Invalid(_) | ProviderError::Unsupported(_)) => {
