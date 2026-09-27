@@ -635,6 +635,16 @@ async fn post_task(
         request.allow_delegation,
         request.unapproved_tools,
     )?;
+    if let Some(seats) = &request.seats {
+        if request.delegation.is_none() {
+            return Err(ApiError::bad_request(
+                "seats need a delegation envelope to spawn them within",
+            ));
+        }
+        seats
+            .validate()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
     let targets: Vec<Option<&str>> = match request.harnesses.is_empty() {
         true => vec![request.harness.as_deref()],
         false => request.harnesses.iter().map(|h| Some(h.as_str())).collect(),

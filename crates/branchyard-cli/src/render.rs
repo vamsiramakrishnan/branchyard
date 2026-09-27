@@ -849,6 +849,13 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
             ),
         ));
     }
+    if let Some(seat) = &i.seat {
+        let spawns = match i.seats.is_empty() {
+            true => "none".to_owned(),
+            false => i.seats.join(", "),
+        };
+        pairs.push(("seat", format!("{seat}; spawns seats: {spawns}")));
+    }
     if !i.last_message.is_empty() {
         pairs.push(("last message", i.last_message.trim_end().to_owned()));
     }

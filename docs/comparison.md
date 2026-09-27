@@ -61,7 +61,7 @@ Branchyard is the only one of the four that drives harnesses through their machi
 
 ### Where OpenRig is ahead of Branchyard
 
-- A declarative team: RigSpec with pods, members, edges, startup files and actions, restore policy, culture file and services (`docs/reference/rig-spec.md`; `packages/daemon/src/domain/rigspec-schema.ts`). Branchyard has no declarative configuration.
+- A declarative team: RigSpec with pods, members, edges, startup files and actions, restore policy, culture file and services (`docs/reference/rig-spec.md`; `packages/daemon/src/domain/rigspec-schema.ts`). Branchyard's [`by rig`](rigs.md) now declares seats, pods, delegation edges and startup files, and refuses the rest.
 - Startup delivery: a ten-step sequence from projection to a proved-ready seat (`packages/daemon/src/domain/startup-orchestrator.ts:86`), with delivery hints `guidance_merge`, `skill_install` and `send_text` (`packages/daemon/src/domain/types.ts:849`).
 - Honest restore: each resume is classified `resumed`, `failed`, `inconclusive` or `attention_required` from the pane (`packages/daemon/src/domain/native-resume-probe.ts:6`), and snapshot restore reports per-seat outcomes (`README.md`, "Key Concepts").
 - Coordination state: an owned-work queue with closure reasons (`packages/cli/src/commands/queue.ts:391`), chat rooms, a workflow runtime with watchdogs (`docs/as-built/architecture/workflow-runtime.md`), and token-burn reporting (`packages/cli/src/commands/usage.ts:41`).
@@ -112,7 +112,7 @@ Paths in a column are relative to that project's repository at its surveyed comm
 | Session fork | Not found | Seat fork from a live seat's context (`packages/cli/src/commands/fork.ts:34`; `adapters/claude-code-adapter.ts:216`) | Not found; `fork` recognized only as a session-start source (`src/agent_resume.rs:93`) | `Branch::fork` with native fork for Claude Code, Codex and Pi ([surfaces](surfaces.md)) |
 | Permissions and approvals | Bypassed at launch (`harnesses/claude/config.yaml:60`; `harnesses/codex/config.yaml:45`); a deny list of Claude tools (`harnesses/claude/home/.claude/settings.json`) | Launch posture per seat: `builtin:locked`, `standard`, `open`, `yolo` or a custom file (`packages/daemon/policies/builtin/`); intent classes with allow/ask/deny (`policies/builtin/standard.policy.md`); YOLO off by default (`README.md`) | Not answered; `blocked` recognized from approval UI (`agents.mdx:59`) | Every request answered by ordered rules with allow, deny or ask fallback (`crates/branchyard/src/policy.rs`); profiles that cannot route requests are refused without `--allow-unapproved-tools` (README) |
 | Delegation | Agents run `scion start` to create sub-agents; ancestry gives transitive access (`docs-site/src/content/docs/concepts.md:111`); roles capped by the parent (`GLOSSARY.md:235`); message modes for agent-to-agent messaging (`GLOSSARY.md`, "Branch mode") | By convention, through `rig send` and chat (`docs/as-built/architecture/architecture-rules-and-event-system.md:196`); edges `delegates_to`, `spawned_by`, `can_observe`, `collaborates_with`, `escalates_to` (`rigspec-schema.ts:30`) | Agents create panes and prompt each other through the CLI (`agent-automation.mdx`) | `by spawn`, Python, Rust and MCP; a per-turn token acts on descendants only; envelope of depth, width, harnesses, budget and denials ([delegation](delegation.md)) |
-| Topology | Runtime-grown | Declared (RigSpec), then changed at runtime with `rig grow`, `expand`, `shrink`, `launch`, `remove` (`packages/cli/src/commands/`) | Ad hoc layout | Runtime-grown; nothing declared ([design §2](design.md#2-scope-and-invariants)) |
+| Topology | Runtime-grown | Declared (RigSpec), then changed at runtime with `rig grow`, `expand`, `shrink`, `launch`, `remove` (`packages/cli/src/commands/`) | Ad hoc layout | Runtime-grown ([design §2](design.md#2-scope-and-invariants)); a [rig](rigs.md) declares the seats a root may fill |
 | Isolation and sandboxing | Container per agent; tmpfs shadow mounts; projected env; read-only credentials (`concepts.md:138`); egress firewall script (`harnesses/claude/init-firewall.sh`) | None beyond the user; Codex `workspace-write` sandbox flag (`yolo-mode.ts:59`) | None | Local: OS user only. Microsandbox microVMs and Substrate actors, both unqualified ([providers](providers.md)) |
 | Remote execution | Hub and Runtime Brokers; Kubernetes and Cloud Run (`pkg/runtime/k8s_runtime.go`; `pkg/runtime/cloudrun_runtime.go`) | Other hosts' daemons over HTTP (`domain/hosts/remote-daemon-http.ts`) | Remote Herdr servers over SSH (`src/remote/`) | `by serve` over HTTPS; harnesses on the server's host or in providers ([server](server.md)) |
 | Workspaces | Shared-plain, worktree-per-agent, clone-per-agent (`docs-site/src/content/docs/local/workspaces-and-sharing.md`) | The seat's `cwd`; typed workspace declarations (`docs/as-built/architecture/workspace-primitive.md`) | `worktree.create` and friends (`socket-api.mdx:104`) | A git worktree per branch ([strategy](strategy.md#the-developer-model-branches)) |
@@ -122,7 +122,7 @@ Paths in a column are relative to that project's repository at its surveyed comm
 | Budgets and cost | `max_turns`, `max_model_calls`, `max_duration` (`limits.go:21`; `pkg/agent/run.go:737`); token metrics; no cost limit found | Token burn per seat (`usage.ts:41`); no limit found | Not found | USD, turns and minutes per branch; subtree reservations ([delegation](delegation.md#the-envelope)) |
 | UI surfaces | Web UI with terminal (Lit, xterm.js); chat bridges (`extras/`); tmux attach | TUI (topology table and graph), older React web UI; Herdr or cmux terminal views (`README.md`, "Terminal UI and Workspaces") | The multiplexer TUI | `by watch` tree ([README](../README.md#watching-branches)) |
 | APIs and SDKs | Hub REST and WebSocket (`docs-site/src/content/docs/reference/api.md`); Go client (`pkg/hubclient/`); A2A bridge (`extras/scion-a2a-bridge/`) | Daemon HTTP; CLI with `--json`; MCP tools such as `rig_up`, `rig_send` (`README.md`, "How It Works") | Socket API with JSON Schema; CLI; plugins (`docs/next/website/src/content/docs/plugins.mdx`) | Rust SDK, HTTP JSON and SSE, Rust client, Python module, MCP ([surfaces](surfaces.md)) |
-| Configuration model | Layered `settings.yaml`, templates, harness-configs (`docs-site/src/content/docs/reference/settings-precedence.md`) | RigSpec and AgentSpec YAML, bundles with SHA-256 integrity (`docs/reference/rig-spec.md`; `docs/reference/rig-bundle.md`) | TOML config; manifest overrides (`agents.mdx:67`) | Per-call options and CLI flags (`TaskOptions`, `crates/branchyard/src/lib.rs:291`); no file |
+| Configuration model | Layered `settings.yaml`, templates, harness-configs (`docs-site/src/content/docs/reference/settings-precedence.md`) | RigSpec and AgentSpec YAML, bundles with SHA-256 integrity (`docs/reference/rig-spec.md`; `docs/reference/rig-bundle.md`) | TOML config; manifest overrides (`agents.mdx:67`) | Per-call options and CLI flags (`TaskOptions`); rig specs in TOML ([rigs](rigs.md)) |
 
 ## Vendored pins
 
@@ -187,73 +187,46 @@ OpenRig's most useful contribution is the declarative layer Branchyard lacks. It
 
 | Item | Type | Effort | Depends on | Notes |
 |---|---|---|---|---|
-| `by rig`: a declarative spec lowered to a task, its envelope and declared children | idea | 1.5–2 weeks | Instruction projection (below); a `model` option | Design below |
-| Startup delivery: guidance, skills and a first message | idea | 3–4 days | Scion provisioning port | `guidance_merge` and `skill_install` become projection into the private home or plugin directory, never the worktree. `send_text` becomes a prefix of the first prompt, as ACP instructions are delivered today ([delegation](delegation.md#projection-per-harness)) |
+| `by rig`: a declarative spec lowered to a task, its envelope and declared children | idea (done) | Done | — | [Rigs](rigs.md); as built and deviations below |
+| Startup delivery: guidance, skills and a first message | idea | Guidance done; 2–3 days for the rest | Scion provisioning port | `guidance_merge` is done: a rig's startup files become the seat's instructions through provisioning ([rigs](rigs.md)). `skill_install` would project into the plugin directory or private home, never the worktree, and `send_text` would be a prefix of the first prompt, as ACP instructions are delivered today ([delegation](delegation.md#projection-per-harness)) |
 | Permission posture presets and intent classes | idea | 3–5 days | A rule kind that matches command input | Branchyard rules match tool names (`crates/branchyard/src/policy.rs`). Classes such as `force_push` need matching on a shell command, like the existing delegation-command rule. `yolo` has no mapping: Branchyard never bypasses |
 | Resume honesty vocabulary | idea | 0.5 day | None | Branchyard's drivers already fail a resume they cannot confirm. Name the outcomes `resumed`, `failed` and `attention_required` in branch status so clients can show them |
 | Activity hooks | don't, for now | — | A terminal-attached profile, if one is ever added | Protocol drivers already emit tool and turn events. OpenRig's hooks exist because it drives TUIs |
 | OpenRig as a client | client | Upstream work | Branchyard's HTTP API | OpenRig's five-method `RuntimeAdapter` could gain a Branchyard runtime whose seats are branches. That is OpenRig's decision; Branchyard needs only a stable API |
 | Queue, chat rooms, workflows, services, culture files | don't | — | — | Coordination conventions above Branchyard's contract |
 
-#### `by rig` design
+#### `by rig` (done)
 
-A rig spec declares what may exist, not a fixed graph. It lowers to one root branch whose envelope permits exactly the declared seats, and optionally starts some of them eagerly. The lead can still spawn within the envelope, so topology remains runtime-grown.
+Built as designed in outline, with the deviations listed below; [rigs](rigs.md) is the reference. A rig spec declares what may exist, not a fixed graph. It lowers to one root branch whose envelope permits exactly the declared seats; the root's harness fills them at runtime with `by spawn --seat`, so topology is still grown by the meta-harness, inside a declared shape.
 
-| RigSpec | Branchyard |
+| RigSpec | Branchyard, as built |
 |---|---|
-| `name` | Root branch name and the name prefix of its children |
-| Pod | A group label and shared startup files; no runtime record |
-| Member | A seat: a child spawned at start (`start: eager`) or a template the parent may spawn by `seat` name (`start: on_demand`) |
-| `runtime` | Harness or profile ID, checked against the registry at plan time |
-| `model` | Refused until Branchyard has a model option; today only `command` can change arguments |
-| `delegates_to` from A to B | B is a child of A. The envelope of A allows B's harness, one more child and B's budget |
-| `spawned_by` | The same edge, reversed |
-| `can_observe` from A to B | A read grant: `inspect` and `events` on B. New: authority is descendants only today ([delegation](delegation.md#authority-and-its-limits)) |
-| `collaborates_with`, `escalates_to` | Refused at plan time: Branchyard has no branch-to-branch messaging |
-| `permission_policy` | A named preset lowered to `Policy`; `yolo` refused |
-| `startup.files`, `startup.actions` | Instruction projection and a first-prompt prefix; `slash_command` refused (drivers refuse prompts starting with `/`) |
-| `restore_policy: resume_if_possible` | The default: `send` resumes, and fails if it cannot |
-| `restore_policy: relaunch_fresh` | Permits a fresh session on send, with the warning Branchyard already records |
-| `continuity_policy`, `culture_file`, `services` | Refused, per [design invariant 8](design.md#2-scope-and-invariants): unsupported requirements fail admission |
-| (none) | Added: `budget` and `check` per seat; the root seat's budget bounds the whole tree, as an envelope does today |
+| `name` | Root branch name; children default to `<parent>-<seat>` |
+| Pod | `[pods.NAME]` with a description and shared startup files; no runtime record |
+| Member | A seat, `[seats.NAME]`, spawned by name when its parent chooses (`start = "on_demand"`) |
+| `runtime` | `harness`: a harness or profile ID, checked against the registry at plan time |
+| `model` | `model`, with `effort`, `auth`, `secrets` (names), `mcp` and `telemetry`, lowered to the seat's [provisioning](provisioning.md) |
+| `delegates_to` from A to B | `seats.A.delegates_to = ["B"]`. A's envelope allows B's harness, B's `instances` more children and B's budget |
+| `spawned_by` | Refused: declare the edge on the parent |
+| `can_observe` | Refused: authority is still descendants only |
+| `collaborates_with`, `escalates_to` | Refused: no branch-to-branch messaging |
+| `permission_policy` | Refused: presets are not implemented. The root seat has explicit `policy` rules (`default` allow, deny or ask; `deny`; `allow`; `delegation_commands`); a child seat may only add `deny` |
+| `startup.files` | Standing instructions through provisioning, after a generated section naming the seat and the seats it may spawn; never written to a worktree. Paths are relative, without `..`; `required = false` skips a missing file |
+| `startup.actions`, `delivery_hint` | Refused: the prompt is the first message, and drivers refuse slash commands |
+| `restore_policy: resume_if_possible` | Accepted: the default behaviour |
+| `restore_policy: relaunch_fresh`, `checkpoint_only` | Refused: a send resumes or fails |
+| `continuity_policy`, `culture_file`, `services` | Refused, per [design invariant 8](design.md#2-scope-and-invariants) |
+| (none) | Added: `budget`, `check`, `isolated` and `instances` per seat; the root seat's budget bounds the whole tree |
 
-Planning validates the whole spec before anything starts: the delegation graph must be a tree, each child's budget must fit its parent's, and every harness must be installed. `by rig plan` prints the lowered envelope and branches; `by rig up` runs the root and eager seats; `by ls` shows the result.
+Deviations from the design above, and why:
 
-```yaml
-# by rig up parser-rewrite.yaml
-version: 1
-name: parser
-permission_policy: standard        # preset: allow routine tools, deny force-push and history rewrites
-startup:
-  guidance: guidance/team-norms.md # projected into each harness's instructions, not the worktree
-seats:
-  lead:
-    harness: claude-code
-    prompt: "Split the parser rewrite. Delegate the tokenizer and the formatter, then integrate both."
-    budget: { max_usd: 6, max_minutes: 90 } # the whole tree: children reserve 4, leaving 2 for the lead
-    check: ["cargo test -p parser"]
-  tokenizer:
-    harness: codex
-    parent: lead                   # RigSpec: delegates_to lead -> tokenizer
-    start: on_demand               # the lead spawns it with `by spawn --seat tokenizer`
-    budget: { max_usd: 1.5, max_turns: 8 }
-    check: ["cargo test -p parser tokenizer"]
-  formatter:
-    harness: claude-code
-    parent: lead
-    start: on_demand
-    budget: { max_usd: 1.5 }
-    deny: [WebFetch]
-  reviewer:
-    harness: gemini-cli
-    parent: lead
-    start: eager
-    observes: [tokenizer, formatter] # RigSpec: can_observe; needs the read grant
-    prompt: "Review each candidate your peers propose; report, do not edit."
-    budget: { max_usd: 1 }
-```
-
-This lowers to a root branch `lead` with `max_depth: 1`, `max_children: 3`, harnesses `{codex, claude-code, gemini-cli}`, `max_usd: 6` of which its children reserve 4, and the `standard` rules; `reviewer` starts at once, the others when the lead spawns them by seat name. Implementation needs a spec parser and planner in `branchyard-cli`, a `seat` argument on `spawn` that fills options from the plan, and the read grant in the engine's authority check. Budget, envelope and merge semantics are unchanged.
+- **TOML, not YAML.** A TOML parser (`toml_edit`) was already in `Cargo.lock`; YAML would have added a dependency. The format is Branchyard's own, not RigSpec-compatible, and recognises OpenRig's field names only to refuse them with a reason.
+- **`by rig check` and `by rig run`**, not `plan` and `up`, with `--json` for both.
+- **No eager seats.** The root starts alone; `start = "eager"` is refused. Starting children beside the root needs `by rig run` to spawn them once the root's record exists but while its turn runs, which `TaskBuilder::run` does not expose; the root can spawn them first thing instead.
+- **Spawning is only by seat inside a rig.** The design let the lead also spawn freely within the envelope; a rig's branches spawn only the seats their own seat delegates to, so the file is the whole shape. `instances` lets a seat be filled more than once.
+- **Seats are stored with the root branch** (`TaskOptions::seats`, kept in its grant) and each child gets the subtree below its seat, rather than the planner living only in the CLI: the server and the SDK enforce them the same way. The planner itself is in `branchyard-cli`, as designed.
+- **Harnesses are checked against the registry, not for installation**, so a rig can be planned on a machine that runs it remotely. Installation is checked when each branch starts.
+- **No read grant.** `observes` was to be implemented; it is refused until authority can extend beyond descendants.
 
 ### Herdr
 

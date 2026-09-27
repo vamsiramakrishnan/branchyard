@@ -901,6 +901,12 @@ fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
     ]);
     assert_eq!(status, "");
 
+    let inspected = stdout(&repo.by(&["inspect", "team"]));
+    assert!(
+        inspected.contains("lead; spawns seats: worker, reviewer"),
+        "{inspected}"
+    );
+
     // Outside a harness, a person fills a seat the same way.
     let second = repo.json(&[
         "spawn",
