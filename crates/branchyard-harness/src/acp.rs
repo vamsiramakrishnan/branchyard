@@ -374,6 +374,21 @@ impl Driver for Acp {
         }
     }
 
+    fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
+        &[
+            (
+                "resume",
+                "uses session/resume when the agent advertises it, else session/load; a session that cannot resume fails to open rather than starting fresh",
+            ),
+            (
+                "fork",
+                "ACP session/fork is an unstable method; a driver that cannot fork must say so rather than start a fresh session",
+            ),
+            ("turn_acknowledgment", "not verified"),
+            ("usage", "not verified"),
+        ]
+    }
+
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
         if open.cwd.is_empty() {
             return Err(Rejected::InvalidOpen("empty working directory".into()));

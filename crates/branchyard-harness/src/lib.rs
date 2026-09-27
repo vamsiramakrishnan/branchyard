@@ -599,6 +599,33 @@ pub struct Requirements {
     pub usage: bool,
 }
 
+/// A capability name (as [`admit`] and [`Driver::capabilities`] name it,
+/// e.g. `"fork"`) paired with why it is unsupported, or supported only with
+/// a caveat. Quoted from the driver's own refusal message or module
+/// documentation; `"not verified"` marks a gap where no such evidence exists
+/// yet, never a guess. See `docs/compatibility.md`, which renders these.
+pub type CapabilityReason = (&'static str, &'static str);
+
+/// Look up why each name in `missing` (as [`admit`] returns it) is
+/// unavailable, from a profile's [`Driver::capability_reasons`]. A name with
+/// no recorded reason reports `"not verified"` rather than nothing, so a
+/// caller never has to guess whether the gap is evidenced.
+pub fn reasons_for(
+    missing: &[&'static str],
+    reasons: &[CapabilityReason],
+) -> Vec<CapabilityReason> {
+    missing
+        .iter()
+        .map(|name| {
+            let reason = reasons
+                .iter()
+                .find(|(capability, _)| capability == name)
+                .map_or("not verified", |(_, reason)| reason);
+            (*name, reason)
+        })
+        .collect()
+}
+
 /// Admit `required` against `offered`, naming every unmet requirement.
 ///
 /// Capabilities that depend on negotiation, such as ACP resume, are declared
@@ -635,6 +662,14 @@ pub fn admit(required: &Requirements, offered: &Capabilities) -> Result<(), Vec<
 pub trait Driver {
     /// Capabilities of this profile before negotiation.
     fn capabilities(&self) -> Capabilities;
+
+    /// Why each unsupported or partial capability in [`Driver::capabilities`]
+    /// is the way it is (see [`CapabilityReason`]). A profile whose
+    /// capabilities need no caveat returns `&[]`; the default does so for
+    /// every driver that grants everything unconditionally.
+    fn capability_reasons(&self) -> &'static [CapabilityReason] {
+        &[]
+    }
 
     /// Build the launch and the frames that start the handshake.
     fn open(&mut self, open: Open) -> Result<Opened, Rejected>;
@@ -804,6 +839,31 @@ mod tests {
             Err(vec!["fork", "tool_approvals"])
         );
         assert_eq!(admit(&Requirements::default(), &offered), Ok(()));
+    }
+
+    #[test]
+    fn admission_reasons_fall_back_to_not_verified() {
+        let missing = admit(
+            &Requirements {
+                resume: true,
+                fork: true,
+                tool_approvals: true,
+                ..Requirements::default()
+            },
+            &Capabilities {
+                resume: true,
+                ..Capabilities::default()
+            },
+        )
+        .unwrap_err();
+        let reasons = reasons_for(&missing, &[("fork", "the harness cannot fork a session")]);
+        assert_eq!(
+            reasons,
+            vec![
+                ("fork", "the harness cannot fork a session"),
+                ("tool_approvals", "not verified"),
+            ]
+        );
     }
 
     #[test]

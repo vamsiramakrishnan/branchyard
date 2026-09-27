@@ -242,6 +242,20 @@ impl Driver for Amp {
         }
     }
 
+    fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
+        &[
+            ("fork", "Amp cannot fork a thread"),
+            (
+                "cancellation",
+                "Amp's streaming input has no cancellation message",
+            ),
+            (
+                "tool_approvals",
+                "Amp does not ask before running tools; Branchyard must restrict tools through the private settings file (amp.tools.disable, amp.mcpPermissions, or a plugin) and must never set amp.dangerouslyAllowAll",
+            ),
+        ]
+    }
+
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
         if open.cwd.is_empty() {
             return Err(Rejected::InvalidOpen("empty working directory".into()));
