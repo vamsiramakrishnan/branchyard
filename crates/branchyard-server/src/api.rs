@@ -23,7 +23,8 @@ use branchyard::{
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, FeedEntry, ForkRequest,
     HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind, OperationResult,
-    PolicySpec, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
+    PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
+    TaskRequest,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -310,6 +311,10 @@ pub fn router(app: Shared) -> Router {
         .route(
             "/v1/repos/{repo}/branches/{branch}/fork",
             axum::routing::post(post_fork),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/reincarnate",
+            axum::routing::post(post_reincarnate),
         )
         .route(
             "/v1/repos/{repo}/branches/{branch}/merge",
@@ -879,6 +884,84 @@ async fn post_fork(
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Fork,
+        locks: planned.clone(),
+        branches: planned,
+        cursor,
+        idempotency: idem,
+    };
+    let (op, replayed) = app.registry.submit(new, work)?;
+    Ok(operation_response(op, replayed))
+}
+
+async fn post_reincarnate(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    JsonBody(request, canonical): JsonBody<ReincarnateRequest>,
+) -> Result<Response, ApiError> {
+    let repo = app.repo(&repo)?.clone();
+    let route = format!("POST /v1/repos/{}/branches/{branch}/reincarnate", repo.name);
+    let idem = idempotency(&headers, &caller, &route, &canonical)?;
+    if let Some(op) = idem
+        .as_ref()
+        .map(|i| app.registry.replay(i))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(operation_response(op, true));
+    }
+    let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
+    let provider = app.provider(request.provider.clone())?;
+    app.opt_ins(
+        request.delegation.is_some(),
+        request.allow_delegation,
+        request.unapproved_tools,
+    )?;
+    // Without a harness the reincarnation keeps its parent's, and its
+    // command.
+    let command = match (&request.command, &request.harness) {
+        (Some(_), _) => app.command(request.command.clone(), &[])?,
+        (None, Some(harness)) => app.command(None, &[Some(harness)])?,
+        (None, None) => None,
+    };
+    let source = existing(&repo.yard, &branch).await?;
+    let options = TaskOptions {
+        harness: request.harness.clone(),
+        name: request.name.clone(),
+        isolated: request.isolated,
+        provision: app.provision(request.provision.clone())?,
+        ..app.options(
+            &repo,
+            budget,
+            app.policy(&request.policy, request.allow_delegation),
+            request.check.clone(),
+            command,
+            request.delegation.clone(),
+            request.unapproved_tools,
+            provider,
+        )
+    };
+    let planned = {
+        let (yard, options, prompt) = (
+            repo.yard.clone(),
+            options.clone(),
+            source.info().prompt.clone(),
+        );
+        blocking(move || yard.task(prompt).options(options).planned_names(&[]))
+            .await?
+            .map_err(|e| error::sdk(&e))?
+    };
+    let cursor = sync_feed(&repo.feed).await?;
+    let work = job(repo.feed.clone(), move || {
+        source
+            .reincarnate(options)
+            .and_then(|b| finished(vec![b]))
+            .map_err(|e| *error::sdk(&e).body)
+    });
+    let new = NewOperation {
+        repo: repo.name.clone(),
+        kind: OperationKind::Reincarnate,
         locks: planned.clone(),
         branches: planned,
         cursor,

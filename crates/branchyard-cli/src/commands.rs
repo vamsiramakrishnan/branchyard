@@ -193,6 +193,8 @@ impl Live {
                 max_usd: task.budget_usd,
                 max_turns: task.max_turns,
                 max_duration: task.max_duration,
+                stall_after: task.stall_after,
+                stall_action: task.stall_action,
             },
             policy,
             check: task.check.clone(),
@@ -409,6 +411,16 @@ pub fn fork(
     let branch = open()?.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
     let result = branch.fork(prompt, fresh_session, live.options(task)?);
+    live.finish(env, result)
+}
+
+pub fn reincarnate(env: &Env, target: &Target, branch: &str, task: &TaskArgs) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::reincarnate(env, remote, branch, task);
+    }
+    let branch = open()?.branch(branch)?;
+    let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
+    let result = branch.reincarnate(live.options(task)?);
     live.finish(env, result)
 }
 
@@ -737,6 +749,8 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
             max_usd: task.budget_usd,
             max_turns: task.max_turns,
             max_duration: task.max_duration,
+            stall_after: task.stall_after,
+            stall_action: task.stall_action,
         },
         check: task.check.clone(),
         max_depth: args.max_depth,
@@ -1055,6 +1069,7 @@ pub fn rig(env: &Env, target: &Target, args: &args::RigArgs) -> Outcome {
                     .budget
                     .max_minutes
                     .and_then(|m| std::time::Duration::try_from_secs_f64(m * 60.0).ok()),
+                ..Budget::default()
             },
             policy,
             check: root.check.clone(),

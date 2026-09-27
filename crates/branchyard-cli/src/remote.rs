@@ -19,7 +19,7 @@ use branchyard::{
 };
 use branchyard_client::api::{
     BudgetSpec, ErrorBody, ForkRequest, MergeRequest, Operation, OperationResult, OperationState,
-    PolicyMode, PolicySpec, RuleSpec, SendRequest, SpawnRequest, TaskRequest,
+    PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec, SendRequest, SpawnRequest, TaskRequest,
 };
 use branchyard_client::{new_key, Client, Repo};
 
@@ -118,6 +118,8 @@ fn budget(task: &TaskArgs) -> BudgetSpec {
         max_usd: task.budget_usd,
         max_turns: task.max_turns,
         max_seconds: task.max_duration.map(|d| d.as_secs_f64()),
+        stall_after_seconds: task.stall_after.map(|d| d.as_secs_f64()),
+        stall_action: task.stall_after.map(|_| task.stall_action),
     }
 }
 
@@ -501,6 +503,28 @@ pub fn fork(
     finish_one(env, remote, &op, task.delegate.is_some())
 }
 
+pub fn reincarnate(env: &Env, remote: &Remote, branch: &str, task: &TaskArgs) -> Outcome {
+    let (policy, notice) = permissions(task)?;
+    let provider = provider(task)?;
+    let request = ReincarnateRequest {
+        name: task.name.clone(),
+        harness: task.harness.clone(),
+        budget: budget(task),
+        policy,
+        check: task.check.clone(),
+        isolated: task.isolated,
+        command: task.command.clone(),
+        delegation: task.delegate.map(Envelope::depth),
+        allow_delegation: task.allow_delegation,
+        unapproved_tools: task.unapproved_tools,
+        provider: provider.clone(),
+        provision: provision(task)?,
+    };
+    let op = remote.repo.reincarnate(branch, &request, &new_key())?;
+    announce(remote, notice, provider.as_ref());
+    finish_one(env, remote, &op, task.delegate.is_some())
+}
+
 /// `spawn --parent` on the server: the child runs there, and this waits
 /// for it as the local command does. Activity goes to stderr with
 /// `--json`.
@@ -638,6 +662,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
             max_usd: root.budget.max_usd,
             max_turns: root.budget.max_turns,
             max_seconds: root.budget.max_minutes.map(|m| m * 60.0),
+            ..BudgetSpec::default()
         },
         policy: PolicySpec { mode, rules },
         check: root.check.clone(),

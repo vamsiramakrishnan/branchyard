@@ -61,8 +61,8 @@ use serde::Serialize;
 
 use api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, ErrorResponse,
-    FeedEntry, ForkRequest, HarnessList, IntegrateRequest, MergeRequest, Operation, Removed,
-    RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
+    FeedEntry, ForkRequest, HarnessList, IntegrateRequest, MergeRequest, Operation,
+    ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -381,6 +381,18 @@ impl Repo {
     pub fn fork(&self, branch: &str, request: &ForkRequest, key: &str) -> Result<Operation, Error> {
         self.client
             .post(&self.branch_path(branch, "/fork"), request, key)
+    }
+
+    /// A new branch from `branch`'s latest candidate, always with a fresh
+    /// session and a generated handoff brief; like `by reincarnate`.
+    pub fn reincarnate(
+        &self,
+        branch: &str,
+        request: &ReincarnateRequest,
+        key: &str,
+    ) -> Result<Operation, Error> {
+        self.client
+            .post(&self.branch_path(branch, "/reincarnate"), request, key)
     }
 
     pub fn merge(

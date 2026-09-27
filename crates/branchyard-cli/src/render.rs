@@ -296,6 +296,11 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             };
             style.paint(Tone::Yellow, &format!("recovered: {reason}{killed}"))
         }
+        Activity::Stalled { .. } => style.paint(
+            Tone::Yellow,
+            "stalled: no harness activity for its stall window",
+        ),
+        Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
     })
 }
 
@@ -524,6 +529,16 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
     }
 }
 
+/// [`status_text`], with a `stalled` marker while the branch's running turn
+/// has had no harness activity for its stall window.
+pub fn branch_status_text(info: &BranchInfo) -> (String, Tone) {
+    let (text, tone) = status_text(&info.status);
+    match info.stalled {
+        true => (format!("{text} (stalled)"), Tone::Yellow),
+        false => (text, tone),
+    }
+}
+
 pub fn candidate_text(candidate: Option<&CandidateInfo>) -> String {
     match candidate {
         None => "-".into(),
@@ -639,7 +654,7 @@ pub fn branch_table(infos: &[BranchInfo], now: u64, style: Style) -> String {
                 0 => info.name.clone(),
                 _ => format!("{}└ {}", "  ".repeat(depth - 1), info.name),
             };
-            let (status, tone) = status_text(&info.status);
+            let (status, tone) = branch_status_text(info);
             vec![
                 Cell::plain(name),
                 Cell::plain(&info.harness),
@@ -824,6 +839,10 @@ pub fn summary(info: &BranchInfo, style: Style) -> String {
 /// `by inspect`.
 pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let (status, tone) = status_text(&i.status);
+    let (status, tone) = match i.stalled {
+        true => (format!("{status} (stalled)"), Tone::Yellow),
+        false => (status, tone),
+    };
     let money = |v: Option<f64>| v.map_or("unknown".into(), usd);
     let mut pairs = vec![
         ("branch", i.name.clone()),
@@ -876,7 +895,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
 
 /// `by show`.
 pub fn details(info: &BranchInfo, now: u64, style: Style) -> String {
-    let (status, tone) = status_text(&info.status);
+    let (status, tone) = branch_status_text(info);
     let mut pairs = vec![
         ("branch", info.name.clone()),
         ("git branch", info.git_branch.clone()),
@@ -886,6 +905,9 @@ pub fn details(info: &BranchInfo, now: u64, style: Style) -> String {
     ];
     if let Some(parent) = &info.parent {
         pairs.push(("forked from", parent.clone()));
+    }
+    if let Some(superseded_by) = &info.superseded_by {
+        pairs.push(("reincarnated as", superseded_by.clone()));
     }
     pairs.extend([
         ("base", short_commit(&info.base).to_owned()),
@@ -997,6 +1019,8 @@ mod tests {
             turns: 1,
             cost_usd: None,
             created_at: 10_000,
+            stalled: false,
+            superseded_by: None,
         }
     }
 

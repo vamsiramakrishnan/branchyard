@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use branchyard::{
     Activity, BranchEvent, BranchStatus, Budget, DecisionSource, Error, Event, PermissionDecision,
-    Policy, RecordedEvent, TaskOptions, TurnOutcome, Yard,
+    Policy, RecordedEvent, StallAction, TaskOptions, TurnOutcome, Yard,
 };
 use common::{edit_record, fake_agent, text, Fixture};
 
@@ -241,6 +241,93 @@ fn acp_cannot_fork_a_session_but_can_fork_with_a_fresh_one() {
     assert!(matches!(
         empty.fork("x", true, f.options()),
         Err(Error::NoCandidate(name)) if name == "nothing"
+    ));
+}
+
+#[test]
+fn reincarnation_starts_fresh_with_a_handoff_brief_and_marks_the_old_branch_superseded() {
+    let f = Fixture::new();
+    let parent = f.task("WRITE base.txt=1").name("elder").run().unwrap();
+    assert_eq!(parent.info().turns, 1);
+    let refused = f.yard.branch("nope");
+    assert!(refused.is_err(), "sanity: no such branch yet");
+
+    let reborn = parent
+        .reincarnate(TaskOptions {
+            name: Some("reborn".into()),
+            ..f.options()
+        })
+        .unwrap();
+    let info = reborn.info();
+    assert_eq!(info.parent.as_deref(), Some("elder"));
+    assert_eq!(
+        info.base,
+        parent.info().candidate.as_ref().unwrap().commit,
+        "starts from the old branch's latest candidate"
+    );
+    assert_eq!(info.turns, 1, "its own first turn, not the old branch's");
+    assert!(info.worktree.join("base.txt").is_file());
+
+    let events = reborn.events().unwrap();
+    let prompt = events
+        .iter()
+        .find_map(|e| match &e.activity {
+            Activity::Prompt(text) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.contains("WRITE base.txt=1"), "the original task");
+    assert!(prompt.contains("1 turn(s) completed"), "{prompt}");
+    assert!(
+        prompt.contains(&parent.info().candidate.as_ref().unwrap().commit),
+        "the candidate's commit"
+    );
+    assert!(prompt.contains("1 file(s) changed"), "{prompt}");
+
+    let old = f.yard.branch("elder").unwrap();
+    assert_eq!(old.info().superseded_by.as_deref(), Some("reborn"));
+}
+
+#[test]
+fn reincarnation_can_switch_harness_and_carries_the_change_in_its_brief() {
+    let f = Fixture::new();
+    let parent = f
+        .task("WRITE base.txt=1")
+        .name("elder-harness")
+        .run()
+        .unwrap();
+    // `goose` also speaks ACP, so the same fake agent drives it too.
+    let reborn = parent
+        .reincarnate(TaskOptions {
+            harness: Some("goose".into()),
+            name: Some("reborn-harness".into()),
+            command: Some(vec![fake_agent().display().to_string()]),
+            ..TaskOptions::default()
+        })
+        .unwrap();
+    assert_eq!(reborn.info().harness, "goose");
+    let prompt = reborn
+        .events()
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.activity {
+            Activity::Prompt(text) => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        prompt.contains("switches harness from gemini-cli-acp to goose-acp"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn a_branch_with_no_candidate_cannot_be_reincarnated() {
+    let f = Fixture::new();
+    let empty = f.task("nothing").name("empty").run().unwrap();
+    assert!(matches!(
+        empty.reincarnate(f.options()),
+        Err(Error::NoCandidate(name)) if name == "empty"
     ));
 }
 
@@ -492,6 +579,176 @@ fn a_duration_budget_interrupts_a_hanging_turn() {
             turn: 1,
             outcome: TurnOutcome::Interrupted
         })));
+}
+
+#[test]
+fn a_stall_interrupts_a_hanging_turn_when_asked_to() {
+    let f = Fixture::new();
+    let started = Instant::now();
+    let branch = f
+        .task("HANG WRITE partial.txt=1")
+        .name("stalls-interrupt")
+        .budget(
+            Budget::default()
+                .stall_after(Duration::from_millis(150))
+                .stall_action(StallAction::Interrupt),
+        )
+        .run()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(branch.info().status, BranchStatus::Interrupted);
+    assert!(
+        !branch.info().stalled,
+        "stalled clears once the turn has ended"
+    );
+    let events = branch.events().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.activity, Activity::Stalled { .. })),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|e| e.activity
+        == Activity::Harness(Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::Interrupted
+        })));
+}
+
+#[test]
+fn a_stall_is_recorded_but_does_not_stop_the_turn_by_default() {
+    let f = Fixture::new();
+    let task = f
+        .yard
+        .task("HANG WRITE partial.txt=1")
+        .options(f.options())
+        .name("stalls-notify")
+        .budget(Budget::default().stall_after(Duration::from_millis(150)));
+    let turn = std::thread::spawn(move || task.run());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f
+        .yard
+        .branch("stalls-notify")
+        .is_ok_and(|b| b.info().stalled)
+    {
+        assert!(Instant::now() < deadline, "the branch never stalled");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Notify keeps the turn running; still stalled a moment later.
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        f.yard.branch("stalls-notify").unwrap().info().status,
+        BranchStatus::Running
+    );
+    assert!(!f.yard.cancel("stalls-notify").unwrap().is_empty());
+    let branch = turn.join().unwrap().unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Interrupted);
+    assert!(!branch.info().stalled);
+    let events = branch.events().unwrap();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e.activity, Activity::Stalled { .. })));
+}
+
+#[test]
+fn a_stall_is_never_declared_while_answering_a_permission_request() {
+    let f = Fixture::new();
+    // The policy's callback runs synchronously inside the engine's own
+    // loop, so it is never polled for a stall while blocked delivering an
+    // answer, however long that takes.
+    let branch = f
+        .task("PERMISSION WRITE p.txt=1")
+        .name("stall-permission-wait")
+        .budget(Budget::default().stall_after(Duration::from_millis(150)))
+        .policy(Policy::ask(|_, _| {
+            std::thread::sleep(Duration::from_millis(400));
+            PermissionDecision::Allow
+        }))
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Ready);
+    assert!(!branch.info().stalled);
+    let events = branch.events().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.activity, Activity::Stalled { .. })),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_stall_is_not_declared_while_a_child_is_running() {
+    let f = Fixture::new();
+    let child = {
+        let task = f
+            .yard
+            .task("HANG WRITE child.txt=1")
+            .options(f.options())
+            .name("stall-wait-child");
+        std::thread::spawn(move || task.run())
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f
+        .yard
+        .branch("stall-wait-child")
+        .is_ok_and(|b| b.info().status == BranchStatus::Running)
+    {
+        assert!(Instant::now() < deadline, "the child never started running");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let parent = {
+        let task = f
+            .yard
+            .task("HANG WRITE parent.txt=1")
+            .options(f.options())
+            .name("stall-wait-parent")
+            .budget(Budget::default().stall_after(Duration::from_millis(150)));
+        std::thread::spawn(move || task.run())
+    };
+    while !f
+        .yard
+        .branch("stall-wait-parent")
+        .is_ok_and(|b| b.info().status == BranchStatus::Running)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the parent never started running"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Stands in for a child spawned during the parent's own turn, which the
+    // engine only sees by re-reading the store, not from its own stale
+    // snapshot of the record.
+    edit_record(&f.root, "stall-wait-parent", |record| {
+        record["info"]["children"] = serde_json::json!(["stall-wait-child"]);
+    });
+    // Well past the stall window, but the child is still running.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !f.yard.branch("stall-wait-parent").unwrap().info().stalled,
+        "excluded while its child runs"
+    );
+    assert!(!f.yard.cancel("stall-wait-child").unwrap().is_empty());
+    let child = child.join().unwrap().unwrap();
+    assert_eq!(child.info().status, BranchStatus::Interrupted);
+    // With the child gone, the parent's own idle time (already past its
+    // window) is now seen.
+    while !f
+        .yard
+        .branch("stall-wait-parent")
+        .is_ok_and(|b| b.info().stalled)
+    {
+        assert!(Instant::now() < deadline, "the parent never stalled");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!f.yard.cancel("stall-wait-parent").unwrap().is_empty());
+    let parent = parent.join().unwrap().unwrap();
+    assert_eq!(parent.info().status, BranchStatus::Interrupted);
 }
 
 #[test]

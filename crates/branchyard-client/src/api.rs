@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use branchyard::{
     Activity, BranchInfo, Budget, Envelope, HarnessInfo, Inspection, Merged, Policy, Provider,
-    Provisioning, RecordedEvent, Seats,
+    Provisioning, RecordedEvent, Seats, StallAction,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +25,13 @@ pub struct BudgetSpec {
     /// Per call, like [`branchyard::Budget::max_duration`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_seconds: Option<f64>,
+    /// Like [`branchyard::Budget::stall_after`], in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_after_seconds: Option<f64>,
+    /// Like [`branchyard::Budget::stall_action`]; ignored without
+    /// `stall_after_seconds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_action: Option<StallAction>,
 }
 
 impl BudgetSpec {
@@ -33,6 +40,8 @@ impl BudgetSpec {
             max_usd: budget.max_usd,
             max_turns: budget.max_turns,
             max_seconds: budget.max_duration.map(|d| d.as_secs_f64()),
+            stall_after_seconds: budget.stall_after.map(|d| d.as_secs_f64()),
+            stall_action: budget.stall_after.map(|_| budget.stall_action),
         }
     }
 
@@ -53,10 +62,24 @@ impl BudgetSpec {
             ),
             Some(s) => return Err(format!("budget.max_seconds must be positive, not {s}")),
         };
+        let stall_after = match self.stall_after_seconds {
+            None => None,
+            Some(s) if positive(s) => Some(
+                Duration::try_from_secs_f64(s)
+                    .map_err(|_| format!("budget.stall_after_seconds {s} is too large"))?,
+            ),
+            Some(s) => {
+                return Err(format!(
+                    "budget.stall_after_seconds must be positive, not {s}"
+                ))
+            }
+        };
         Ok(Budget {
             max_usd: self.max_usd,
             max_turns: self.max_turns,
             max_duration,
+            stall_after,
+            stall_action: self.stall_action.unwrap_or_default(),
         })
     }
 }
@@ -261,6 +284,45 @@ pub struct ForkRequest {
     pub provision: Option<Provisioning>,
 }
 
+/// `POST /v1/repos/{repo}/branches/{branch}/reincarnate`: a new branch from
+/// `branch`'s latest candidate, always with a fresh session and a generated
+/// handoff brief; see [`branchyard::Branch::reincarnate`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReincarnateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub budget: BudgetSpec,
+    #[serde(default)]
+    pub policy: PolicySpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Vec<String>>,
+    #[serde(default)]
+    pub isolated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    /// Let the harness delegate within this envelope, like
+    /// [`branchyard::TaskOptions::delegation`]. Refused unless the server
+    /// allows delegation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Envelope>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_delegation: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unapproved_tools: bool,
+    /// Without one, the new branch keeps the old one's provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+    /// Like [`branchyard::TaskOptions::provision`]; a model change here is
+    /// how a reincarnation changes model. Without one, the old branch's is
+    /// kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<Provisioning>,
+}
+
 /// `POST /v1/repos/{repo}/branches/{branch}/merge`. Without a target, the
 /// branch checked out in the served repository.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,6 +398,8 @@ pub enum OperationKind {
     Spawn,
     /// A child merged into its parent with `POST .../integrate`.
     Integrate,
+    /// A branch started with `POST .../reincarnate`.
+    Reincarnate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,6 +554,7 @@ mod tests {
             max_usd: Some(2.0),
             max_turns: Some(3),
             max_seconds: Some(1.5),
+            ..BudgetSpec::default()
         };
         let budget = ok.to_budget().unwrap();
         assert_eq!(budget.max_duration, Some(Duration::from_millis(1500)));

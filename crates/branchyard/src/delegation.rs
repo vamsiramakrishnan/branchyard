@@ -299,6 +299,7 @@ impl ChildBudget {
             max_usd: self.max_usd,
             max_turns: self.max_turns,
             max_duration,
+            ..Budget::default()
         })
     }
 }
@@ -372,6 +373,9 @@ pub struct Inspection {
     /// The seats it may spawn, if it is in a rig.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seats: Vec<String>,
+    /// See [`crate::BranchInfo::stalled`].
+    #[serde(default)]
+    pub stalled: bool,
 }
 
 /// Recorded events from `cursor` on.
@@ -640,6 +644,11 @@ pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
             budget.max_duration,
             limits.max_duration_ms.map(Duration::from_millis),
         ),
+        // Stall detection is not part of a delegation envelope: a parent
+        // narrows cost, turns and duration, but a stall window is the
+        // caller's own choice for this turn.
+        stall_after: budget.stall_after,
+        stall_action: budget.stall_action,
     }
 }
 
@@ -696,6 +705,24 @@ fn subtree_spent(store: &Store, record: &Record, seen: &mut BTreeSet<String>) ->
             .filter_map(|child| store.read(child).ok())
             .map(|child| subtree_spent(store, &child, seen))
             .sum::<f64>()
+}
+
+/// Whether any direct child of `name` is currently running a turn. Read
+/// fresh from the store, not from a turn's own (possibly stale) snapshot: a
+/// child spawned during the running turn itself is exactly the case a
+/// delegation wait needs to exclude. A branch delegating to a child keeps
+/// its own turn `Running` for as long as it waits on it (spawn, send or
+/// `wait_subtree` all block the calling turn), so checking direct children
+/// is enough, without walking the whole subtree.
+pub(crate) fn any_child_running(store: &Store, name: &str) -> bool {
+    let Ok(record) = store.read(name) else {
+        return false;
+    };
+    record.info.children.iter().any(|child| {
+        store
+            .read(child)
+            .is_ok_and(|record| record.info.status == BranchStatus::Running)
+    })
 }
 
 /// Every descendant of `name`, oldest first.
@@ -1271,6 +1298,7 @@ impl Local {
             last_message: last_message(&events),
             seat,
             seats: may_spawn,
+            stalled: info.stalled,
         })
     }
 
@@ -1406,6 +1434,8 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
             asked.max_duration,
             limit.max_duration,
         )?,
+        stall_after: asked.stall_after,
+        stall_action: asked.stall_action,
     };
     let envelope = below.envelope();
     let mut deny = seat.deny.clone();
@@ -1438,7 +1468,9 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
 }
 
 /// The text of the last turn, at most [`LAST_MESSAGE_MAX`] characters.
-fn last_message(events: &[RecordedEvent]) -> String {
+/// The harness's text since the branch's last prompt, truncated from the
+/// front. Also used to build a reincarnation's handoff brief.
+pub(crate) fn last_message(events: &[RecordedEvent]) -> String {
     let start = events
         .iter()
         .rposition(|e| matches!(e.activity, Activity::Prompt(_)))
@@ -1612,6 +1644,8 @@ mod tests {
                 turns: 1,
                 cost_usd: cost,
                 created_at: 0,
+                stalled: false,
+                superseded_by: None,
             },
             created_ms: 0,
             check: None,
@@ -1672,6 +1706,29 @@ mod tests {
     }
 
     #[test]
+    fn a_running_child_is_found_even_when_added_after_the_parent_was_read() {
+        let (_temp, store) = temp_store();
+        let root = record("root", &[], None, None);
+        store.write(&root).unwrap();
+        assert!(!any_child_running(&store, "root"), "no children at all yet");
+        let mut idle_child = record("idle", &[], None, None);
+        idle_child.info.status = BranchStatus::Ready;
+        store.write(&idle_child).unwrap();
+        store.add_child("root", "idle").unwrap();
+        assert!(
+            !any_child_running(&store, "root"),
+            "its only child is not running"
+        );
+        let mut busy_child = record("busy", &[], None, None);
+        busy_child.info.status = BranchStatus::Running;
+        store.write(&busy_child).unwrap();
+        // Added after `root`'s own record was last read: a spawn during the
+        // parent's own turn, which stall detection must still see.
+        store.add_child("root", "busy").unwrap();
+        assert!(any_child_running(&store, "root"));
+    }
+
+    #[test]
     fn imposed_limits_only_narrow_the_callers_budget() {
         let mut child = record("c", &[], None, Some(0.5));
         child
@@ -1690,6 +1747,7 @@ mod tests {
                 max_usd: Some(0.5),
                 max_turns: Some(2),
                 max_duration: Some(Duration::from_secs(60)),
+                ..Budget::default()
             }
         );
         let tighter = Budget::usd(0.1);

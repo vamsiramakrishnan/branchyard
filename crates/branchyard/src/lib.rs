@@ -682,6 +682,18 @@ impl Branch {
         run::fork(&self.yard, &self.info.name, prompt, fresh_session, &options)
     }
 
+    /// A new branch from this branch's latest candidate, always with a
+    /// fresh session, whose first prompt is a generated handoff brief: the
+    /// original task, turns so far, its last message, the candidate's
+    /// diffstat and why it was reincarnated. Works even when
+    /// `options.harness` or `options.provision`'s model differs from this
+    /// branch's own. This branch's record gets `superseded_by` set to the
+    /// new branch's name, best-effort (informational; never blocks the new
+    /// branch). See `docs/lifecycle.md`.
+    pub fn reincarnate(&self, options: TaskOptions) -> Result<Branch, Error> {
+        run::reincarnate(&self.yard, &self.info.name, &options)
+    }
+
     /// Unified diff of the candidate against the branch's base; empty when
     /// there is no candidate.
     pub fn diff(&self) -> Result<String, Error> {
@@ -784,6 +796,15 @@ pub struct BranchInfo {
     pub cost_usd: Option<f64>,
     /// Seconds since the Unix epoch.
     pub created_at: u64,
+    /// A running turn has had no harness activity for its
+    /// [`Budget::stall_after`] window; see [`Activity::Stalled`]. Always
+    /// `false` once the turn has ended.
+    #[serde(default)]
+    pub stalled: bool,
+    /// The branch [`Branch::reincarnate`] started from this one's latest
+    /// candidate, with a fresh session and a handoff brief.
+    #[serde(default)]
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -824,6 +845,16 @@ pub struct Budget {
     pub max_usd: Option<f64>,
     pub max_turns: Option<u32>,
     pub max_duration: Option<Duration>,
+    /// No harness activity (a protocol event, including a permission
+    /// answer) for this long marks the branch [`Activity::Stalled`]. Never
+    /// while the turn is waiting on a permission answer (the engine is
+    /// blocked delivering it, not polling) or on a running child
+    /// (delegation wait; see `docs/lifecycle.md`). `None` disables stall
+    /// detection, the default.
+    pub stall_after: Option<Duration>,
+    /// What a detected stall does. Ignored when [`Budget::stall_after`] is
+    /// `None`.
+    pub stall_action: StallAction,
 }
 
 impl Budget {
@@ -843,6 +874,31 @@ impl Budget {
         self.max_duration = Some(limit);
         self
     }
+
+    /// Mark the branch stalled after this long without harness activity.
+    pub fn stall_after(mut self, window: Duration) -> Self {
+        self.stall_after = Some(window);
+        self
+    }
+
+    /// What a stall does; see [`Budget::stall_after`].
+    pub fn stall_action(mut self, action: StallAction) -> Self {
+        self.stall_action = action;
+        self
+    }
+}
+
+/// What a detected stall does to the turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StallAction {
+    /// Record [`Activity::Stalled`] and keep running; the branch shows
+    /// `stalled: true` until new activity or the turn ends.
+    #[default]
+    Notify,
+    /// Record [`Activity::Stalled`], then interrupt the turn as
+    /// [`BranchStatus::Interrupted`], the same way a cancel does.
+    Interrupt,
 }
 
 /// Answers permission requests, one invocation at a time. Never a bypass:
@@ -1044,6 +1100,15 @@ pub enum Activity {
         /// Harness processes that were still running and were killed.
         killed: Vec<u32>,
     },
+    /// No harness activity for the turn's [`Budget::stall_after`] window;
+    /// recorded once per stall. See `docs/lifecycle.md`.
+    Stalled {
+        /// Milliseconds since the Unix epoch when activity was last seen.
+        since_ms: u64,
+    },
+    /// Activity was observed after [`Activity::Stalled`]; the branch is no
+    /// longer stalled.
+    Resumed,
 }
 
 /// Activity from a named branch.
