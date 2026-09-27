@@ -577,3 +577,118 @@ fn remote_mcp_servers_go_to_agents_that_advertise_them() {
         "{events:?}"
     );
 }
+
+fn steer_fixture(name: &str) -> Transcript {
+    Transcript::load(format!(
+        "{}/tests/fixtures/claude-agent-acp-0.81.2-{name}.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+}
+
+fn claude_code_acp() -> (Box<dyn Driver>, Opened) {
+    let mut driver = branchyard_harness::profiles::by_id("claude-code-acp")
+        .unwrap()
+        .driver();
+    let opened = driver.open(fresh()).unwrap();
+    (driver, opened)
+}
+
+/// Recorded against claude-agent-acp 0.81.2 and a stand-in API: the agent
+/// advertises `_meta.steering`, injects the input into the running prompt,
+/// and answers the prompt once.
+#[test]
+fn steering_is_injected_where_the_agent_advertises_it() {
+    let recorded = steer_fixture("steer");
+    let (mut driver, opened) = claude_code_acp();
+    let replayed = Replay::new(&recorded)
+        .alias("/id")
+        .ignore("/params/clientInfo/version")
+        .prompt("TEXTTURN: please start")
+        .steer("STEER-MESSAGE: bananas")
+        .run(driver.as_mut(), &opened);
+    assert_eq!(
+        replayed.sent, 4,
+        "initialize, session/new, prompt and steer"
+    );
+    let steer = recorded
+        .rows
+        .iter()
+        .find(|r| r.frame["method"] == "_session/steering")
+        .unwrap();
+    assert_conforms::<PromptRequest>(&steer.frame, "/params");
+    let events = replayed.events;
+    assert!(events.contains(&Event::SteerAccepted { turn: 1, steer: 1 }));
+    assert!(events.iter().any(|e| matches!(e,
+        Event::MessageDelta { text, .. } if text.contains("STEER-MESSAGE: bananas"))));
+    let ends: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::TurnEnded { .. }))
+        .collect();
+    assert_eq!(
+        ends,
+        [&Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::Completed
+        }]
+    );
+}
+
+/// Input that reaches the agent after its prompt ended comes back
+/// undelivered (`promptRequired`), never as a turn of its own.
+#[test]
+fn steering_after_the_prompt_ended_is_returned_undelivered() {
+    let recorded = steer_fixture("steer-idle");
+    let (mut driver, opened) = claude_code_acp();
+    // Up to the prompt response: the driver steers while it still thinks
+    // the prompt runs, as it would had the response been in flight.
+    let prompt_ended = recorded
+        .rows
+        .iter()
+        .position(|r| r.frame["result"]["stopReason"].is_string())
+        .unwrap();
+    let before = Transcript {
+        note: None,
+        rows: recorded.rows[..prompt_ended].to_vec(),
+    };
+    let replayed = Replay::new(&before)
+        .alias("/id")
+        .ignore("/params/clientInfo/version")
+        .prompt("TEXTTURN: please start")
+        .run(driver.as_mut(), &opened);
+    assert_eq!(replayed.sent, 3);
+    let steer = decode(&driver.steer("STEER-MESSAGE: bananas").unwrap()[0]);
+    assert_eq!(
+        steer["params"]["_meta"],
+        json!({"steering": {"idleBehavior": "promptRequired"}})
+    );
+    let mut events = Vec::new();
+    for row in &recorded.rows[prompt_ended..] {
+        if row.direction != branchyard_harness::conformance::Direction::In {
+            continue;
+        }
+        let mut frame = row.frame.clone();
+        if frame["result"]["outcome"].is_string() {
+            frame["id"] = steer["id"].clone();
+        } else if frame["result"]["stopReason"].is_string() {
+            frame["id"] = replayed.ours(&frame["id"]).cloned().unwrap_or(json!(3));
+        }
+        events.extend(feed(driver.as_mut(), &frame).0);
+    }
+    assert!(events.contains(&Event::SteerRejected {
+        turn: 1,
+        steer: 1,
+        reason: "the agent's prompt had already ended".into()
+    }));
+}
+
+#[test]
+fn an_agent_without_the_steering_extension_refuses_it() {
+    let mut driver = ready();
+    driver.submit("go").unwrap();
+    assert_eq!(
+        driver.steer("x"),
+        Err(Rejected::Unsupported(
+            "the agent does not advertise the _session/steering extension".into()
+        ))
+    );
+}

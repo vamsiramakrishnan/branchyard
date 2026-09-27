@@ -41,6 +41,19 @@ enum Pending {
     State,
     Prompt(u64),
     Abort(u64),
+    /// A `steer`: the turn and the steer's number.
+    Steer(u64, u64),
+    /// A `clear_queue` for the turn.
+    ClearQueue(u64),
+}
+
+/// A steered message Pi has not yet delivered or dropped.
+#[derive(Debug)]
+struct Steer {
+    number: u64,
+    text: String,
+    /// A `queue_update` listed it.
+    queued: bool,
 }
 
 /// Extension UI methods that block until the client answers.
@@ -59,6 +72,11 @@ pub struct Pi {
     interrupting: bool,
     /// The last assistant message's stop reason and error in this turn.
     last_stop: Option<(String, Option<String>)>,
+    steers: Vec<Steer>,
+    next_steer: u64,
+    /// A `clear_queue` is unanswered: the queue empties because of it, not
+    /// because Pi delivered what was queued.
+    clearing: bool,
 }
 
 impl Pi {
@@ -75,7 +93,49 @@ impl Pi {
             turns: Turns::default(),
             interrupting: false,
             last_stop: None,
+            steers: Vec::new(),
+            next_steer: 0,
+            clearing: false,
         }
+    }
+
+    /// Reject the outstanding steers whose text is in `texts`, each text
+    /// once, as `reason` says.
+    fn reject_listed(&mut self, turn: u64, texts: &[Value], reason: &str) -> Vec<Event> {
+        let mut events = Vec::new();
+        for text in texts.iter().filter_map(Value::as_str) {
+            if let Some(at) = self.steers.iter().position(|s| s.text == text) {
+                let steer = self.steers.remove(at);
+                events.push(Event::SteerRejected {
+                    turn,
+                    steer: steer.number,
+                    reason: reason.to_owned(),
+                });
+            }
+        }
+        events
+    }
+
+    /// Track delivery from Pi's queue: a steer that was listed and no
+    /// longer is has been delivered.
+    fn queue_update(&mut self, message: &Value) {
+        if self.clearing {
+            return;
+        }
+        let mut listed: Vec<&str> = message["steering"]
+            .as_array()
+            .map(|texts| texts.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        self.steers.retain_mut(
+            |steer| match listed.iter().position(|text| *text == steer.text) {
+                Some(at) => {
+                    listed.remove(at);
+                    steer.queued = true;
+                    true
+                }
+                None => !steer.queued,
+            },
+        );
     }
 
     fn command(&mut self, pending: Pending, mut command: Value) -> Frame {
@@ -124,6 +184,41 @@ impl Pi {
             (Pending::Abort(_), Some(error)) => Output::event(Event::Warning {
                 message: format!("abort failed: {error}"),
             }),
+            (Pending::Steer(turn, steer), None) => {
+                Output::event(Event::SteerAccepted { turn, steer })
+            }
+            (Pending::Steer(turn, steer), Some(reason)) => {
+                self.steers.retain(|s| s.number != steer);
+                Output::event(Event::SteerRejected {
+                    turn,
+                    steer,
+                    reason,
+                })
+            }
+            (Pending::ClearQueue(turn), None) => {
+                self.clearing = false;
+                let cleared = message["data"]["steering"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let events = self.reject_listed(
+                    turn,
+                    &cleared,
+                    "cleared from Pi's queue before it was delivered",
+                );
+                // What was queued and not cleared had been delivered.
+                self.steers.retain(|steer| !steer.queued);
+                Output {
+                    events,
+                    frames: Vec::new(),
+                }
+            }
+            (Pending::ClearQueue(_), Some(error)) => {
+                self.clearing = false;
+                Output::event(Event::Warning {
+                    message: format!("clearing Pi's queue failed: {error}"),
+                })
+            }
         }
     }
 
@@ -173,6 +268,21 @@ impl Pi {
         let Some(turn) = self.end_turn() else {
             return Output::default();
         };
+        // Steered messages Pi did not deliver in this run would join the
+        // next prompt: clear them, and say they were not delivered.
+        let mut events = Vec::new();
+        let mut frames = Vec::new();
+        if !self.steers.is_empty() {
+            self.clearing = true;
+            frames.push(self.command(Pending::ClearQueue(turn), json!({"type": "clear_queue"})));
+            for steer in std::mem::take(&mut self.steers) {
+                events.push(Event::SteerRejected {
+                    turn,
+                    steer: steer.number,
+                    reason: "the run settled before Pi delivered it".into(),
+                });
+            }
+        }
         let outcome = match last {
             _ if interrupted => TurnOutcome::Interrupted,
             None => TurnOutcome::Completed,
@@ -190,7 +300,8 @@ impl Pi {
                 },
             },
         };
-        Output::event(Event::TurnEnded { turn, outcome })
+        events.push(Event::TurnEnded { turn, outcome });
+        Output { events, frames }
     }
 
     fn message_end(&mut self, turn: u64, message: &Value) -> Output {
@@ -253,6 +364,10 @@ impl Pi {
                 })
             }
             "agent_settled" => return self.settled(),
+            "queue_update" => {
+                self.queue_update(message);
+                return Output::default();
+            }
             _ => {}
         }
         let Some(turn) = self.turns.active else {
@@ -303,7 +418,6 @@ impl Pi {
             | "tool_execution_end"
             | "auto_retry_end"
             | "compaction_start"
-            | "queue_update"
             | "entry_appended" => Output::default(),
             other => Output::event(Event::Unrecognized {
                 kind: other.to_owned(),
@@ -327,6 +441,7 @@ impl Driver for Pi {
             tool_approvals: false,
             turn_acknowledgment: true,
             usage: true,
+            steer: true,
         }
     }
 
@@ -390,6 +505,8 @@ impl Driver for Pi {
         }
         let turn = self.turns.begin()?;
         self.last_stop = None;
+        self.steers.clear();
+        self.clearing = false;
         let command = self.command(
             Pending::Prompt(turn),
             json!({"type": "prompt", "message": prompt}),
@@ -403,9 +520,37 @@ impl Driver for Pi {
     fn interrupt(&mut self) -> Result<Vec<Frame>, Rejected> {
         let turn = self.turns.active.ok_or(Rejected::NoTurn)?;
         self.interrupting = true;
-        Ok(vec![
-            self.command(Pending::Abort(turn), json!({"type": "abort"}))
-        ])
+        let mut frames = Vec::new();
+        // An abort leaves queued steered messages for the next prompt.
+        if !self.steers.is_empty() {
+            self.clearing = true;
+            frames.push(self.command(Pending::ClearQueue(turn), json!({"type": "clear_queue"})));
+        }
+        frames.push(self.command(Pending::Abort(turn), json!({"type": "abort"})));
+        Ok(frames)
+    }
+
+    fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
+        if !self.ready {
+            return Err(Rejected::NotReady);
+        }
+        let turn = self.turns.active.ok_or(Rejected::NoTurn)?;
+        if text.starts_with('/') {
+            return Err(Rejected::Unsupported(
+                "a steered message beginning with / can run a Pi command".into(),
+            ));
+        }
+        self.next_steer += 1;
+        let steer = self.next_steer;
+        self.steers.push(Steer {
+            number: steer,
+            text: text.to_owned(),
+            queued: false,
+        });
+        Ok(vec![self.command(
+            Pending::Steer(turn, steer),
+            json!({"type": "steer", "message": text}),
+        )])
     }
 
     fn respond(
@@ -422,6 +567,8 @@ impl Driver for Pi {
         self.pending.clear();
         self.interrupting = false;
         self.last_stop = None;
+        self.steers.clear();
+        self.clearing = false;
         self.turns.closed()
     }
 }

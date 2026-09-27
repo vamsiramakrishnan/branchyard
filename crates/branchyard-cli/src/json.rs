@@ -88,6 +88,14 @@ pub fn event(event: &Event) -> Value {
         Event::InterruptAcknowledged { turn } => {
             json!({ "type": "interrupt_acknowledged", "turn": turn })
         }
+        Event::SteerAccepted { turn, steer } => {
+            json!({ "type": "steer_accepted", "turn": turn, "steer": steer })
+        }
+        Event::SteerRejected {
+            turn,
+            steer,
+            reason,
+        } => json!({ "type": "steer_rejected", "turn": turn, "steer": steer, "reason": reason }),
         Event::TurnEnded { turn, outcome: o } => {
             json!({ "type": "turn_ended", "turn": turn, "outcome": outcome(o) })
         }

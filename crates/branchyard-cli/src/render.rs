@@ -180,6 +180,17 @@ pub fn event_line(event: &Event, style: Style) -> Option<String> {
         }
         Event::UsageObserved { usage, .. } => dim(usage_text(usage)),
         Event::InterruptAcknowledged { turn } => dim(format!("turn {turn} interrupt acknowledged")),
+        Event::SteerAccepted { turn, steer } => {
+            dim(format!("turn {turn} took steered input {steer}"))
+        }
+        Event::SteerRejected {
+            turn,
+            steer,
+            reason,
+        } => style.paint(
+            Tone::Yellow,
+            &format!("turn {turn} did not take steered input {steer}: {reason}"),
+        ),
         Event::TurnEnded { turn, outcome } => outcome_line(*turn, outcome, style),
         Event::OutcomeUnknown { turn, reason } => {
             style.paint(Tone::Red, &format!("turn {turn} outcome unknown: {reason}"))
