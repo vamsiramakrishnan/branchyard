@@ -1,5 +1,15 @@
 [workspace]
-members = ["crates/branchyard-controls"]
+members = [
+    "crates/branchyard",
+    "crates/branchyard-cli",
+    "crates/branchyard-controls",
+    "crates/branchyard-harness",
+    "crates/branchyard-qualify",
+    "crates/branchyard-runtime",
+    "crates/branchyard-sandbox",
+    "crates/branchyard-substrate",
+    "crates/branchyard-workspace",
+]
 resolver = "2"
 
 [workspace.package]

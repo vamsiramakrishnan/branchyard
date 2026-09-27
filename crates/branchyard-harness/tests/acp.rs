@@ -1,0 +1,394 @@
+//! ACP driver against a recorded claude-agent-acp 0.81.2 handshake. Every
+//! frame the driver writes is checked against the official
+//! `agent-client-protocol-schema` request types.
+
+use agent_client_protocol_schema::v1::{
+    CancelNotification, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
+    RequestPermissionResponse, ResumeSessionRequest,
+};
+use branchyard_harness::acp::Acp;
+use branchyard_harness::conformance::{
+    assert_conforms, decode, decode_all, feed, handshake, Replay, Transcript,
+};
+use branchyard_harness::{
+    Driver, Event, NativeSession, Open, Opened, PermissionDecision, Rejected, SessionMode,
+    TurnOutcome,
+};
+use serde_json::{json, Value};
+
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/claude-agent-acp-0.81.2-initialize.jsonl"
+);
+
+fn fresh() -> Open {
+    Open {
+        mode: SessionMode::Fresh,
+        cwd: "/workspace".into(),
+        model: None,
+    }
+}
+
+fn open_with(mode: SessionMode) -> (Acp, Opened) {
+    let mut driver = Acp::new(vec!["gemini".into(), "--experimental-acp".into()]);
+    let opened = driver.open(Open { mode, ..fresh() }).unwrap();
+    assert_eq!(opened.launch.argv, ["gemini", "--experimental-acp"]);
+    (driver, opened)
+}
+
+fn open(mode: SessionMode) -> (Acp, Value) {
+    let (driver, opened) = open_with(mode);
+    (driver, decode(&opened.frames[0]))
+}
+
+/// Initialize with `capabilities`, returning the session request it sends.
+fn initialized(mode: SessionMode, capabilities: Value) -> (Acp, Vec<Event>, Value) {
+    let (mut driver, initialize) = open(mode);
+    let (events, frames) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1, "agentCapabilities": capabilities}}),
+    );
+    (
+        driver,
+        events,
+        frames.into_iter().next().unwrap_or(Value::Null),
+    )
+}
+
+/// Play an ACP agent's side of a fresh handshake.
+fn answer(frame: &Value) -> Vec<Value> {
+    match frame["method"].as_str() {
+        Some("initialize") => vec![
+            json!({"jsonrpc": "2.0", "id": frame["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}}),
+        ],
+        Some("session/new") => {
+            vec![json!({"jsonrpc": "2.0", "id": frame["id"], "result": {"sessionId": "s1"}})]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn ready() -> Acp {
+    let (mut driver, opened) = open_with(SessionMode::Fresh);
+    let events = handshake(&mut driver, &opened.frames, answer);
+    assert_eq!(events[0], Event::Ready);
+    driver
+}
+
+fn session(id: &str) -> NativeSession {
+    NativeSession::new(id).unwrap()
+}
+
+#[test]
+fn initialize_matches_a_recorded_handshake_and_opens_a_session() {
+    let recorded = Transcript::load(FIXTURE);
+    let (mut driver, opened) = open_with(SessionMode::Fresh);
+    let initialize = decode(&opened.frames[0]);
+    assert_conforms::<InitializeRequest>(&initialize, "/params");
+    // The adapter accepted exactly this frame, apart from the request ID.
+    let replayed = Replay::new(&recorded)
+        .alias("/id")
+        .run(&mut driver, &opened);
+    assert_eq!(replayed.sent, 1);
+    assert!(replayed.events.is_empty());
+    let frames = replayed.unsent;
+    assert_eq!(frames[0]["method"], "session/new");
+    assert_conforms::<NewSessionRequest>(&frames[0], "/params");
+
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": frames[0]["id"], "result": {"sessionId": "sess-1"}}),
+    );
+    assert_eq!(
+        events,
+        vec![
+            Event::Ready,
+            Event::SessionStarted {
+                session: session("sess-1"),
+                forked_from: None
+            }
+        ]
+    );
+}
+
+#[test]
+fn resume_prefers_session_resume_then_load_and_never_starts_fresh() {
+    let (_, _, request) = initialized(
+        SessionMode::Resume(session("old")),
+        json!({"loadSession": true, "sessionCapabilities": {"resume": {}}}),
+    );
+    assert_eq!(request["method"], "session/resume");
+    assert_conforms::<ResumeSessionRequest>(&request, "/params");
+
+    let (mut driver, _, request) = initialized(
+        SessionMode::Resume(session("old")),
+        json!({"loadSession": true}),
+    );
+    assert_eq!(request["method"], "session/load");
+    assert_conforms::<LoadSessionRequest>(&request, "/params");
+    // History replayed during load is not reported.
+    let replay = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "old",
+        "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "earlier"}}}});
+    assert_eq!(feed(&mut driver, &replay).0, vec![]);
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": request["id"], "result": {}}),
+    );
+    assert_eq!(
+        events[1],
+        Event::SessionStarted {
+            session: session("old"),
+            forked_from: None
+        }
+    );
+
+    let (_, events, request) = initialized(SessionMode::Resume(session("old")), json!({}));
+    assert_eq!(request, Value::Null);
+    assert!(matches!(&events[0], Event::OpenFailed { reason } if reason.contains("neither")));
+}
+
+#[test]
+fn fork_and_model_selection_are_rejected_before_launch() {
+    let mut driver = Acp::new(vec!["agent".into()]);
+    let open = |mode, model| Open {
+        mode,
+        cwd: "/workspace".into(),
+        model,
+    };
+    assert!(matches!(
+        driver.open(open(SessionMode::Fork(session("p")), None)),
+        Err(Rejected::Unsupported(_))
+    ));
+    assert!(matches!(
+        driver.open(open(SessionMode::Fresh, Some("m".into()))),
+        Err(Rejected::Unsupported(_))
+    ));
+}
+
+#[test]
+fn prompts_stream_updates_and_end_with_the_stop_reason() {
+    let mut driver = ready();
+    let submitted = driver.submit("Say hello.").unwrap();
+    let prompt = decode(&submitted.frames[0]);
+    assert_conforms::<PromptRequest>(&prompt, "/params");
+
+    let updates = [
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Hello"}}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "Run tests", "kind": "execute"}),
+        json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "hmm"}}),
+    ];
+    let events: Vec<Event> = updates
+        .into_iter()
+        .flat_map(|update| {
+            feed(
+                &mut driver,
+                &json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": update}}),
+            )
+            .0
+        })
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            Event::MessageDelta {
+                turn: 1,
+                text: "Hello".into()
+            },
+            Event::ToolStarted {
+                turn: 1,
+                call_id: "call-1".into(),
+                name: "Run tests".into()
+            },
+        ]
+    );
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "max_tokens"}}),
+    );
+    assert_eq!(
+        events,
+        vec![Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::LimitReached {
+                limit: "max_tokens".into()
+            }
+        }]
+    );
+}
+
+fn permission_request(id: u64) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": {
+    "sessionId": "s1",
+    "toolCall": {"toolCallId": "call-1", "title": "Edit src/lib.rs", "rawInput": {"path": "src/lib.rs"}},
+    "options": [
+        {"optionId": "always", "name": "Always allow", "kind": "allow_always"},
+        {"optionId": "once", "name": "Allow", "kind": "allow_once"},
+        {"optionId": "no", "name": "Reject", "kind": "reject_once"}
+    ]}})
+}
+
+#[test]
+fn permissions_select_one_time_options_only() {
+    let mut driver = ready();
+    driver.submit("edit").unwrap();
+    let (events, _) = feed(&mut driver, &permission_request(40));
+    let Event::PermissionRequested {
+        turn: Some(1),
+        request,
+    } = &events[0]
+    else {
+        panic!("{events:?}")
+    };
+    assert_eq!(request.tool, "Edit src/lib.rs");
+    assert_eq!(request.input, json!({"path": "src/lib.rs"}));
+    let reply = decode(
+        &driver
+            .respond(&request.key, PermissionDecision::Allow)
+            .unwrap()[0],
+    );
+    assert_conforms::<RequestPermissionResponse>(&reply, "/result");
+    // allow_once, never the standing allow_always rule.
+    assert_eq!(
+        reply["result"]["outcome"],
+        json!({"outcome": "selected", "optionId": "once"})
+    );
+
+    let mut only_always = permission_request(41);
+    only_always["params"]["options"] =
+        json!([{"optionId": "always", "name": "Always", "kind": "allow_always"}]);
+    let (events, _) = feed(&mut driver, &only_always);
+    let Event::PermissionRequested { request, .. } = &events[0] else {
+        panic!()
+    };
+    assert!(matches!(
+        driver.respond(&request.key, PermissionDecision::Allow),
+        Err(Rejected::Unsupported(_))
+    ));
+}
+
+#[test]
+fn cancel_answers_outstanding_permissions_and_awaits_the_stop_reason() {
+    let mut driver = ready();
+    let prompt = decode(&driver.submit("edit").unwrap().frames[0]);
+    feed(&mut driver, &permission_request(50));
+    let frames = decode_all(&driver.interrupt().unwrap());
+    assert_eq!(frames[0]["method"], "session/cancel");
+    assert_conforms::<CancelNotification>(&frames[0], "/params");
+    assert_eq!(frames[1]["id"], 50);
+    assert_conforms::<RequestPermissionResponse>(&frames[1], "/result");
+    assert_eq!(
+        frames[1]["result"]["outcome"],
+        json!({"outcome": "cancelled"})
+    );
+
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "cancelled"}}),
+    );
+    assert_eq!(
+        events,
+        vec![Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::Interrupted
+        }]
+    );
+}
+
+#[test]
+fn client_filesystem_and_terminal_requests_are_refused() {
+    let mut driver = ready();
+    for method in ["fs/read_text_file", "terminal/create"] {
+        let (events, frames) = feed(
+            &mut driver,
+            &json!({"jsonrpc": "2.0", "id": 60, "method": method, "params": {"path": "/etc/passwd"}}),
+        );
+        assert_eq!(
+            events,
+            vec![Event::UnsupportedRequest {
+                method: method.into()
+            }]
+        );
+        assert_eq!(frames[0]["error"]["code"], -32601);
+    }
+}
+
+#[test]
+fn protocol_mismatches_fail_the_open() {
+    let (mut driver, initialize) = open(SessionMode::Fresh);
+    let (events, frames) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 2}}),
+    );
+    assert!(frames.is_empty());
+    assert!(matches!(&events[0], Event::OpenFailed { .. }));
+    let (events, _) = feed(&mut driver, &json!({"id": 9, "result": {}}));
+    assert!(matches!(&events[0], Event::ProtocolViolation { .. }));
+}
+
+#[test]
+fn open_failures_keep_the_error_data() {
+    let (mut driver, _, request) = initialized(SessionMode::Fresh, json!({}));
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32603, "message": "Internal error",
+            "data": {"details": "Claude Code process exited with code 1"}}}),
+    );
+    assert_eq!(
+        events,
+        vec![Event::OpenFailed {
+            reason: "Internal error: Claude Code process exited with code 1".into()
+        }]
+    );
+}
+
+#[test]
+fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
+    use branchyard_harness::profiles;
+    let mut driver = profiles::by_id("claude-code-acp").unwrap().driver();
+    let opened = driver
+        .open(Open {
+            mode: SessionMode::Fresh,
+            cwd: "/workspace".into(),
+            model: None,
+        })
+        .unwrap();
+    let initialize = decode(&opened.frames[0]);
+    let (_, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+    );
+    assert_eq!(
+        frames[0]["params"]["_meta"],
+        json!({"claudeCode": {"options": {"allowDangerouslySkipPermissions": false}}})
+    );
+    assert_conforms::<NewSessionRequest>(&frames[0], "/params");
+    // Other ACP profiles send no agent-specific options.
+    let mut driver = profiles::by_id("gemini-cli-acp").unwrap().driver();
+    let opened = driver
+        .open(Open {
+            mode: SessionMode::Fresh,
+            cwd: "/workspace".into(),
+            model: None,
+        })
+        .unwrap();
+    let initialize = decode(&opened.frames[0]);
+    let (_, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+    );
+    assert!(frames[0]["params"].get("_meta").is_none());
+}
+
+#[test]
+fn updates_for_another_session_are_violations() {
+    let mut driver = ready();
+    driver.submit("Say hello.").unwrap();
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "other",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "stale"}}}}),
+    );
+    assert!(
+        matches!(&events[..], [Event::ProtocolViolation { detail }] if detail.contains("other"))
+    );
+}

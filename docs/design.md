@@ -12,7 +12,7 @@ The SDK is the primary developer contract. The reference server and node service
 
 Build the graph, delegation and integration semantics. Reuse existing implementations for virtualization, guest execution, snapshotting, networking, persistent queues, storage access and policy evaluation.
 
-The server owns execution. The SDK is a remote client. No desktop worker, new hypervisor, or custom guest protocol is part of the design.
+The server owns execution. The SDK is a remote client. No desktop worker, new hypervisor, or custom guest protocol is part of the design. Local mode (§4) runs the same engine in-process for development; it is a deployment of the server, not a separate worker.
 
 The proposed first deployment uses:
 
@@ -87,6 +87,7 @@ Provide a fake backend implementing the public contract for deterministic tests.
 | Responsibility | Reuse | What Branchyard adds |
 |---|---|---|
 | MicroVM lifecycle, image preparation, guest execution | Microsandbox Rust SDK and runtime | Attempt identity, placement, capacity accounting and policy binding |
+| Suspend/resume multiplexing on Kubernetes (alternative provider) | Agent Substrate gRPC API | Capability mapping, tenant-to-atespace binding, UID-fenced lifecycle |
 | Async I/O and coordination | Tokio / tokio-util | Explicit concurrency limits and task ownership |
 | Public HTTP, streaming, middleware | Axum / Tower | Task API and tenant context |
 | Internal RPC | Tonic / Prost / rustls | Versioned node and extension contracts |
@@ -101,6 +102,8 @@ Provide a fake backend implementing the public contract for deterministic tests.
 | Portable extension execution | Wasmtime Component Model, later | Versioned bounded hook contracts |
 
 Microsandbox documents Rust APIs, OCI support and snapshot/branch operations; its repository labels the software beta. Its advertised sub-100 ms boot figure is an M1 guest-boot measurement, not evidence of our Linux server latency. Select it as the implementation to qualify, pin a tested SDK/runtime pair, and use conformance results to decide which capabilities ship. [Microsandbox repository](https://github.com/superradcompany/microsandbox)
+
+[Agent Substrate](substrate.md) is a second provider candidate for operators who already run Kubernetes. It suspends idle sandboxes to object storage and resumes them onto warm workers, which suits trees of mostly waiting harnesses. It has no exec API, so it cannot satisfy M2's independent-pipes gate as written; a Substrate profile reaches its harness through routed ingress. It stays optional: Kubernetes remains outside the default per-spawn path (§4).
 
 The supporting primitives already exist: [Tokio synchronization](https://docs.rs/tokio/latest/tokio/sync/index.html), [Tower limits](https://docs.rs/tower/latest/tower/limit/index.html), [SQLx](https://docs.rs/sqlx/latest/sqlx/), [PGMQ](https://github.com/pgmq/pgmq), [OpenDAL](https://github.com/apache/opendal), [Cedar](https://github.com/cedar-policy/cedar), [Tonic](https://docs.rs/tonic/latest/tonic/), and [BLAKE3](https://github.com/BLAKE3-team/BLAKE3).
 
@@ -143,6 +146,14 @@ Ship three binaries:
 | branchyard-node | Host service using the upstream sandbox SDK |
 
 Reuse the sandbox runtime's guest agent. Do not ship a new branchyard-guest.
+
+### Local mode
+
+For development, the `by` CLI and the `branchyard` SDK embed the engine in-process and run harnesses through a local process provider: its own process group, a scrubbed environment and a private home per harness. Branches are git worktrees of the developer's repository. Task, branch, event, budget and merge semantics are identical to the server's; only the provider and the state store differ (a `.branchyard/` directory in the repository instead of PostgreSQL). Local mode provides no isolation beyond the operating-system user and must say so wherever it runs. Moving work to a server changes the provider and endpoint, not the program.
+
+### Developer vocabulary
+
+The public SDK and CLI name work in git terms: a **task** is what was asked; a **branch** is one agent working in its own worktree and harness session; a **fork** is a new branch from another branch's candidate, forking the conversation where the harness supports it; a **candidate** is the exact commit a branch proposes; a **merge** promotes a candidate only after checks pass against the exact target revision (§12). Domain identities in §5 (task, run, attempt, session, workspace, candidate) remain separate internally.
 
 The server is one modular service initially. Run multiple replicas against the same PostgreSQL primary when needed; transactions and unique constraints coordinate them. Execution hosts maintain outbound authenticated connections to the server, which avoids requiring publicly reachable host control ports.
 

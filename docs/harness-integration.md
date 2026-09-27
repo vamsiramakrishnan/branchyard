@@ -20,6 +20,8 @@ MCP offers tools to a harness. ACP controls an agent session. Neither defines Br
 
 ## Sixteen initial integration targets
 
+Each row maps to one ID in `branchyard_controls::harness`, together with the Herdr and Scion names for the same harness. Its tests fail if this table and the registry diverge.
+
 Commands describe upstream entry points, not ready-to-run deployment recipes. Authentication, executable versions, images, and required capabilities must be qualified before activation.
 
 | Harness | Preferred profile | Documented entry point / integration | Qualification focus |
@@ -53,7 +55,7 @@ Branchyard should store the last observed native turn and its outcome before all
 
 ### Claude Code
 
-Reuse the maintained ACP adapter for the common profile. For SDK-specific hooks, permissions, and richer session control, use a small helper built on the official Python or TypeScript SDK. Keep that helper inside the execution boundary and pin it with the CLI. The Rust worker owns its lifecycle; Rust need not reimplement the SDK's private subprocess protocol. [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)
+The default profile drives print mode directly: `claude -p` with stream-json input and output and `--permission-prompt-tool stdio`, the launch the Agent SDK itself uses. The Agent SDK publishes this stdout protocol as typed frames (`StdoutMessage`, with `control_request`/`control_response` for the handshake, interrupts and `can_use_tool` permission prompts), so the Rust driver follows those types rather than an undocumented stream. It pins the pair it was checked against, Claude Code 2.1.283 with Agent SDK 0.3.283, and must be rechecked on upgrade. The maintained ACP adapter remains an alternate profile. A helper built on the official SDK is still the route for SDK-only features such as hook callbacks and in-process MCP servers, which the stream-json profile refuses. [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)
 
 Structured print mode remains useful for bounded batch runs, but its existence does not establish a complete bidirectional control contract. Choose the driver according to required capabilities. Do not accidentally disable required hooks or Branchyard tools when selecting a reduced-discovery launch mode. [Headless operation](https://code.claude.com/docs/en/headless)
 
@@ -112,6 +114,30 @@ Every normalized event carries task, run, attempt, generation, connection epoch,
 Separate `Ready`, `TurnAccepted`, `MessageDelta`, `ToolStarted`, `PermissionRequested`, `UsageObserved`, `TurnEnded`, `SessionClosed`, and `OutcomeUnknown`. Model stop, process exit, task completion, and candidate acceptance are different transitions. Missing usage is unknown, not zero.
 
 Transient display deltas may be coalesced under load. Permission requests, terminal outcomes, durable commands, and artifact publication may not be silently discarded. A reconnecting client gets a durable cursor; raw process byte streams are not assumed replayable.
+
+## Implemented drivers
+
+`crates/branchyard-harness` implements the driver contract above as sans-IO state machines. A driver builds the argument vector and the frames to write, and turns each line the harness prints into normalized events. The process runs through `SandboxProvider.exec`. Profiles map each harness ID in `branchyard_controls::harness` to a driver and launch command. [Writing a driver](writing-a-driver.md) explains how to add a profile or driver, test it with the conformance kit, and qualify it.
+
+| Driver | Profiles | Evidence |
+|---|---|---|
+| Claude Code stream-json | `claude-code-stream-json` (default for Claude Code) | Live protocol qualification, 9 of 9 scenarios, against Claude Code 2.1.283; replay of a recorded session; frames follow Agent SDK 0.3.283 types |
+| Codex App Server | `codex-app-server` (default for Codex) | Replay of a recorded codex-cli 0.157.1 session; every outgoing frame equals one the binary accepted; shapes from `codex app-server generate-json-schema` |
+| ACP v1 | `claude-code-acp` (live protocol qualification, 9 of 9, against claude-agent-acp 0.81.2), `codex-acp`, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Goose, Cursor CLI, GitHub Copilot CLI, Qwen Code, Kimi CLI, Hermes | Recorded claude-agent-acp 0.81.2 `initialize`; every outgoing frame deserializes as the `agent-client-protocol-schema` type |
+
+The drivers implement `open`, `submit`, `observe` (as `receive`), `interrupt` and permission answers. `probe` and `prepare` are not implemented yet, and `close` is process termination through the sandbox provider, reported as `SessionClosed`.
+
+Twelve of the sixteen targets have a default profile. Antigravity, Pi and Amp need native drivers; Aider has no persistent protocol. A test fails if a target is neither implemented nor listed with its reason.
+
+The drivers enforce the contract rather than trusting the harness:
+
+- A resume that comes back under another session ID, or a fork that keeps the parent's, is a protocol violation or a failed open, never a silent fresh session.
+- ACP fork is rejected because `session/fork` is unstable. ACP resume uses `session/resume` or `session/load` only when the agent advertises it; history replayed by `session/load` is not reported as a new turn.
+- Permission requests surface as events and are answered per invocation. ACP answers select only `allow_once` or `reject_once`, never a standing rule. Requests a profile does not implement (Claude hook callbacks, Codex user-input prompts, ACP filesystem and terminal callbacks) are answered with an error immediately.
+- Cancellation distinguishes acknowledgment from the turn's terminal state. ACP cancel also answers outstanding permission requests as cancelled, as the protocol requires.
+- Usage is reported as cumulative session totals where the harness reports it, and as unknown where it does not. A closed connection during a turn yields `OutcomeUnknown`.
+
+`claude-code-stream-json` and `claude-code-acp` have passed live protocol qualification against Claude Code 2.1.283 and claude-agent-acp 0.81.2: turns, permission denial and approval, interrupts during a permission wait and during a tool, clean close, resume, fork and a lost connection. See [driver qualification](qualification/README.md) for the reports and findings. That run used local processes, not a Branchyard sandbox. Every profile remains unqualified for isolation, credentials and recovery, and the Codex and remaining ACP profiles have not run live.
 
 ## Transport and callback placement
 

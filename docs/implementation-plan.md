@@ -5,7 +5,11 @@ The first commit captures the architecture and reusable controls. Build the next
 ## Current foundation
 
 - Rust workspace with a dependency-free resume control crate and preserved upstream tests.
-- 82 unchanged upstream files with commit pins, Git blob IDs, SHA-256, and licenses.
+- One harness identity registry, checked against every vendored source and the integration matrix.
+- The `HarnessDriver` half of M1's contracts, with drivers for Claude Code stream-json, Codex App Server and ACP v1. Twelve of sixteen targets have an unqualified default profile; see [implemented drivers](harness-integration.md#implemented-drivers).
+- Vendor-independent sandbox capability types with an admission check (the capability half of M1's provider contract).
+- An unqualified Agent Substrate provider adapter, generated from its vendored proto; see [Agent Substrate](substrate.md).
+- 84 unchanged upstream files with commit pins, Git blob IDs, SHA-256, and licenses.
 - Scion provisioning tests and an explicit compatibility exclusion for its Claude model-alias mismatch.
 - Architecture, harness interface design, vendoring decisions, and validation records.
 
@@ -18,6 +22,7 @@ The task SDK, database schema, server, node, driver registry, and integration co
 | M1: contracts | Domain identities, capability types, command/event schema, fake provider and fake harness | Foundation | Type-level separation of task/run/attempt/session/workspace; duplicate command and stale revision tests |
 | M2: runtime qualification | Existing Microsandbox SDK/runtime on a Linux KVM host | M1 provider contract | Create, exec with independent pipes, inspect, stop, destroy, private writes, resource/network enforcement; no vendor-cloud credentials |
 | M3: durable commands | PostgreSQL schema, SQLx transactions, PGMQ delivery, operation lookup | M1 | Commit-and-timeout reconciliation; duplicate delivery; crash before acknowledgment; no repeated unknown external effect |
+| M3.5: local mode | `branchyard` SDK engine and `by` CLI over a local process provider, git worktree branches and validated merge | M1 | `by run`, `by fork`, `by merge` work end to end on a local repository; merge refuses a moved target and failing checks; budget and policy stop and answer out-of-policy actions |
 | M4: one remote task | Thin SDK, server, node, one ACP harness, artifacts | M2, M3 | Submit remotely, disconnect client, reconnect from another client, observe same task, cancel, inspect result |
 | M5: dynamic delegation | Atomic graph proposals, root budgets, scoped capabilities, dependencies | M4 | Parent creates child which creates grandchild; no predefined graph; invalid delta leaves state and reservations unchanged |
 | M6: prepared workspaces | Environment/source checkpoints, explicit sharing modes, cache-aware placement | M2, M5 | Private writes after fork; revocation before writer reassignment; warm/cold timing breakdown; no secret inheritance |

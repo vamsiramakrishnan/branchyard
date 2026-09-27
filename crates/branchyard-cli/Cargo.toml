@@ -1,0 +1,15 @@
+[package]
+name = "branchyard-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The by command: delegate coding work to agent harnesses on git branches"
+
+[[bin]]
+name = "by"
+path = "src/main.rs"
+
+[dependencies]
+branchyard = { path = "../branchyard" }
+serde_json = "1"

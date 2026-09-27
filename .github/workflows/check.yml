@@ -24,5 +24,7 @@ jobs:
       - name: Verify recorded upstream Claude incompatibility
         run: python tools/check_scion_compatibility.py
       - run: cargo fmt --all -- --check
+      # Resolve crates from Cargo.lock once; every later cargo step runs offline.
+      - run: cargo fetch --locked
       - run: cargo test --workspace --locked --offline
       - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings

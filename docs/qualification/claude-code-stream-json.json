@@ -1,0 +1,68 @@
+{
+  "profile": "claude-code-stream-json",
+  "harness": "claude-code",
+  "command": "claude",
+  "harness_version": "2.1.283 (Claude Code)",
+  "driver_version": "0.0.1",
+  "host": "Linux 6.18.44-fc-v42 x86_64",
+  "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
+  "seconds": 45.0,
+  "harness_estimated_cost_usd": 0.1095,
+  "scenarios": [
+    {
+      "name": "fresh_turn",
+      "passed": true,
+      "detail": "session eedaae8a-bbe8-4504-bfa5-82b5bb874384; replied \"OK\"",
+      "seconds": 3.1
+    },
+    {
+      "name": "permission_denied",
+      "passed": true,
+      "detail": "1 request(s) denied; marker absent; turn Completed",
+      "seconds": 7.0
+    },
+    {
+      "name": "permission_allowed",
+      "passed": true,
+      "detail": "request allowed; command ran",
+      "seconds": 8.4
+    },
+    {
+      "name": "interrupt_during_permission",
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: true; pending request withdrawn by harness: true",
+      "seconds": 2.5
+    },
+    {
+      "name": "interrupt_during_tool",
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: true",
+      "seconds": 15.5
+    },
+    {
+      "name": "clean_close",
+      "passed": true,
+      "detail": "closed cleanly; no descendants outlived the harness; session cost $0.0879",
+      "seconds": 0.0
+    },
+    {
+      "name": "resume",
+      "passed": true,
+      "detail": "session eedaae8a-bbe8-4504-bfa5-82b5bb874384; remembered PELICAN-7; cost $0.0954",
+      "seconds": 3.1
+    },
+    {
+      "name": "fork",
+      "passed": true,
+      "detail": "session f9ee9300-a76c-4425-9756-fc27ee6e3066; remembered PELICAN-7; cost $0.1019",
+      "seconds": 3.0
+    },
+    {
+      "name": "connection_lost",
+      "passed": true,
+      "detail": "killed mid-turn; outcome reported unknown",
+      "seconds": 2.3
+    }
+  ],
+  "date": "2026-09-26"
+}

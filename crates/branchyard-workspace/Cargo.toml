@@ -1,0 +1,7 @@
+[package]
+name = "branchyard-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Git branches, candidates, and validated integration for Branchyard"

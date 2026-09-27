@@ -1,0 +1,69 @@
+{
+  "profile": "claude-code-acp",
+  "harness": "claude-code",
+  "command": "claude-agent-acp",
+  "harness_version": "0.81.2",
+  "driver_version": "0.0.1",
+  "host": "Linux 6.18.44-fc-v42 x86_64",
+  "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
+  "seconds": 37.0,
+  "harness_estimated_cost_usd": "not reported by this protocol; the cost cap did not apply",
+  "scenarios": [
+    {
+      "name": "fresh_turn",
+      "passed": true,
+      "detail": "session 3d0b8497-0057-4d39-a981-56d0c1c109c8; replied \"OK\"",
+      "seconds": 13.1
+    },
+    {
+      "name": "permission_denied",
+      "passed": true,
+      "detail": "1 request(s) denied; marker absent; turn Completed",
+      "seconds": 6.3
+    },
+    {
+      "name": "permission_allowed",
+      "passed": true,
+      "detail": "request allowed; command ran",
+      "seconds": 3.7
+    },
+    {
+      "name": "interrupt_during_permission",
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: false; pending request withdrawn by harness: false",
+      "seconds": 1.7
+    },
+    {
+      "name": "interrupt_during_tool",
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: false",
+      "seconds": 5.9
+    },
+    {
+      "name": "clean_close",
+      "passed": true,
+      "detail": "closed; descendants outlived the harness and were killed: claude; session cost $0.0000",
+      "seconds": 0.0
+    },
+    {
+      "name": "resume",
+      "passed": true,
+      "detail": "session 3d0b8497-0057-4d39-a981-56d0c1c109c8; remembered PELICAN-7; cost $0.0000",
+      "seconds": 2.2
+    },
+    {
+      "name": "fork",
+      "passed": true,
+      "detail": "rejected before launch as declared: unsupported: ACP session/fork is an unstable method",
+      "seconds": 0.0
+    },
+    {
+      "name": "connection_lost",
+      "passed": true,
+      "detail": "killed mid-turn; outcome reported unknown",
+      "seconds": 3.7
+    }
+  ],
+  "date": "2026-09-26",
+  "installed_from": "npm @agentclientprotocol/claude-agent-acp@0.81.2"
+}
