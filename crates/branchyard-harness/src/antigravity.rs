@@ -223,6 +223,20 @@ impl Driver for Antigravity {
         }
     }
 
+    fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
+        &[
+            ("fork", "the Antigravity CLI cannot fork a conversation"),
+            (
+                "cancellation",
+                "the Antigravity stream has no cancellation message; a signal ends the whole process",
+            ),
+            (
+                "tool_approvals",
+                "the stream carries no permission requests; a tool that needs approval is soft-denied under the permission rules in the harness's private settings file, never through Branchyard",
+            ),
+        ]
+    }
+
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
         if open.cwd.is_empty() {
             return Err(Rejected::InvalidOpen("empty working directory".into()));

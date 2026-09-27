@@ -330,6 +330,13 @@ impl Driver for Pi {
         }
     }
 
+    fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
+        &[(
+            "tool_approvals",
+            "Pi never asks for tool approval; its tools run with the process's own permissions, so restrict them with --tools/--no-tools and the sandbox instead",
+        )]
+    }
+
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
         if open.cwd.is_empty() {
             return Err(Rejected::InvalidOpen("empty working directory".into()));

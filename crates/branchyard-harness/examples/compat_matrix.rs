@@ -93,10 +93,10 @@ pub fn render() -> String {
          \n\
          Every integration target and driver profile, in the order of the harness registry. Implemented means the driver exists and passes its protocol tests; it does not mean supported. Live qualification ran the profile's driver against the real harness binary as a local process, not inside a Branchyard sandbox, so isolation, credentials and recovery remain unqualified for every profile. See [driver qualification](qualification/README.md) for scope and findings, and [writing a driver](writing-a-driver.md) to add a row.\n\
          \n\
-         Capabilities are what the driver offers before negotiation. ACP resume is used only when the agent advertises `session/resume` or `session/load`; a session that cannot resume fails to open rather than starting fresh. \"Checked against\" names the harness version whose transcript or generated schema the driver's frames were compared with.\n\
+         Capabilities are what the driver offers before negotiation. ACP resume is used only when the agent advertises `session/resume` or `session/load`; a session that cannot resume fails to open rather than starting fresh. \"Checked against\" names the harness version whose transcript or generated schema the driver's frames were compared with. \"Reasons\" names why each `no` capability (and any `yes`/`if advertised` with a real caveat) is that way, quoted from the driver's own refusal message or documentation; `not verified` marks a gap with no such evidence yet, never a guess.\n\
          \n\
-         | Harness | Profile | Protocol | Role | Resume | Fork | Cancel | Approvals | Usage | Checked against | Live qualification |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|\n",
+         | Harness | Profile | Protocol | Role | Resume | Fork | Cancel | Approvals | Usage | Checked against | Live qualification | Reasons |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     // Integration targets, then any other registered harness with a profile.
     let rows = HARNESSES
@@ -115,13 +115,15 @@ pub fn render() -> String {
                 .map(|(_, reason)| *reason)
                 .unwrap_or_else(|| panic!("{} is neither implemented nor explained", target.id));
             out += &format!(
-                "| {name} | — | — | — | — | — | — | — | — | — | not implemented: {} |\n",
+                "| {name} | — | — | — | — | — | — | — | — | — | not implemented: {} | — |\n",
                 reason.replace('|', "\\|")
             );
             continue;
         }
         for (index, profile) in implemented.enumerate() {
-            let capabilities = profile.driver().capabilities();
+            let driver = profile.driver();
+            let capabilities = driver.capabilities();
+            let reasons = driver.capability_reasons();
             let resume = match (capabilities.resume, profile.protocol) {
                 (true, Protocol::Acp) => "if advertised",
                 (resume, _) => yes(resume),
@@ -133,8 +135,17 @@ pub fn render() -> String {
                 ),
                 None => "not qualified".into(),
             };
+            let reason_notes: Vec<String> = reasons
+                .iter()
+                .map(|(capability, reason)| format!("{capability}: {reason}"))
+                .collect();
+            let reason_notes = if reason_notes.is_empty() {
+                "—".to_owned()
+            } else {
+                reason_notes.join("; ").replace('|', "\\|")
+            };
             out += &format!(
-                "| {name} | `{}` | {} | {} | {resume} | {} | {} | {} | {} | {} | {live} |\n",
+                "| {name} | `{}` | {} | {} | {resume} | {} | {} | {} | {} | {} | {live} | {reason_notes} |\n",
                 profile.id,
                 protocol(profile.protocol),
                 if index == 0 { "default" } else { "alternate" },
