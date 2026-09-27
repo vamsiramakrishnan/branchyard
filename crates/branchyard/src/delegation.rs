@@ -72,6 +72,7 @@ const SETTLE_EVERY: Duration = Duration::from_secs(1);
 
 /// What a branch may delegate. Children get an envelope at most as wide as
 /// their parent's, one level shallower.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     /// Levels of descendants below this branch: 1 allows children but no
@@ -160,6 +161,7 @@ impl Envelope {
 
 /// Limits a parent put on a delegated child. They bound every turn of the
 /// child, whoever sends it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Limits {
     pub max_usd: Option<f64>,
@@ -168,6 +170,7 @@ pub(crate) struct Limits {
 }
 
 /// A branch's delegation record.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Grant {
     pub envelope: Envelope,
@@ -270,6 +273,7 @@ impl Spawn {
 }
 
 /// A child's limits as the tools show them.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChildBudget {
     pub max_usd: Option<f64>,
@@ -309,6 +313,7 @@ impl ChildBudget {
 }
 
 /// A child that was created and started.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spawned {
     pub name: String,
@@ -325,6 +330,7 @@ pub struct Spawned {
 }
 
 /// A descendant whose next turn was started.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sent {
     pub name: String,
@@ -332,12 +338,14 @@ pub struct Sent {
 }
 
 /// The branches a cancel asked to stop.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cancelled {
     pub cancelled: Vec<String>,
 }
 
 /// A branch's subtree.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Children {
     pub branch: String,
@@ -346,6 +354,7 @@ pub struct Children {
 }
 
 /// A branch's own inbox: every message addressed to it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Inbox {
     pub branch: String,
@@ -353,6 +362,7 @@ pub struct Inbox {
 }
 
 /// A question sent, and its answer if one arrived within the wait.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Asked {
     pub message: Message,
@@ -362,6 +372,7 @@ pub struct Asked {
 }
 
 /// A branch as a delegating parent sees it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Inspection {
     pub name: String,
@@ -399,6 +410,7 @@ pub struct Inspection {
 }
 
 /// Recorded events from `cursor` on.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventPage {
     pub branch: String,

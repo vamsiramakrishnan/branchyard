@@ -6,6 +6,11 @@ license.workspace = true
 publish.workspace = true
 description = "Harness driver contract and protocol drivers for Claude Code, Codex and ACP agents"
 
+[features]
+# Derive schemars::JsonSchema on wire event types, for schema/contract.json;
+# see tools/schema-gen.
+schema = ["dep:schemars"]
+
 [dependencies]
 agent-client-protocol-schema = { version = "1.9", default-features = false }
 branchyard-controls = { path = "../branchyard-controls" }
@@ -13,3 +18,4 @@ branchyard-controls = { path = "../branchyard-controls" }
 # tree through serde_json.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = { version = "1", optional = true }

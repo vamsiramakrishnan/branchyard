@@ -45,6 +45,8 @@
 
 pub mod api;
 pub mod http;
+#[cfg(feature = "schema")]
+pub mod schema;
 pub mod sse;
 pub mod storage_api;
 

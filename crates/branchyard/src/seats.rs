@@ -16,6 +16,7 @@ use crate::delegation::ChildBudget;
 use crate::{harness, Envelope, Error, Provisioning};
 
 /// A child a rig's branch may spawn by name.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Seat {
@@ -60,6 +61,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// The seat a branch occupies in a rig and the seats it may fill.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Seats {

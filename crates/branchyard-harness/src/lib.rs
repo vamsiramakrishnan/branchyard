@@ -84,6 +84,19 @@ impl fmt::Display for NativeSession {
     }
 }
 
+/// Schema for `schema/contract.json`: the same bare string [`Serialize`]
+/// writes, not the tuple struct's own shape.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for NativeSession {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NativeSession".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
+
 /// How a session begins. Exactly one mode; a driver never substitutes one
 /// for another.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,9 +422,11 @@ impl Output {
 }
 
 /// Identifies one outstanding permission request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PermissionKey(pub String);
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PermissionRequest {
     pub key: PermissionKey,
@@ -421,6 +436,7 @@ pub struct PermissionRequest {
     pub input: Value,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum PermissionDecision {
@@ -433,6 +449,7 @@ pub enum PermissionDecision {
 
 /// Token and cost observations. Fields a protocol does not report are `None`,
 /// never zero.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     /// True when the values are running totals for the session rather than
@@ -445,6 +462,7 @@ pub struct Usage {
     pub cost_usd: Option<f64>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TurnOutcome {
@@ -466,6 +484,7 @@ pub enum TurnOutcome {
 ///
 /// Serialized as an object tagged by `type` in snake case, such as
 /// `{"type": "turn_ended", "turn": 1, "outcome": {"kind": "completed"}}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {

@@ -576,6 +576,7 @@ dependencies = [
  "postgres",
  "rcgen",
  "rusqlite",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "tokio",
@@ -618,6 +619,7 @@ dependencies = [
  "httparse",
  "rustls",
  "rustls-pki-types",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "webpki-roots",
@@ -633,6 +635,7 @@ version = "0.0.1"
 dependencies = [
  "agent-client-protocol-schema",
  "branchyard-controls",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
 ]
@@ -673,6 +676,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-controls",
  "branchyard-harness",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
 ]

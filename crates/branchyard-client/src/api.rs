@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Limits for a branch; see [`branchyard::Budget`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetSpec {
@@ -86,6 +87,7 @@ impl BudgetSpec {
 
 /// How requests no rule decides are answered. There is no remote `ask`:
 /// a server has no terminal to ask on.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyMode {
@@ -94,6 +96,7 @@ pub enum PolicyMode {
     Deny,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSpec {
@@ -103,6 +106,7 @@ pub struct RuleSpec {
 }
 
 /// A permission policy: rules in order, then the mode. Defaults to deny.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicySpec {
@@ -136,6 +140,7 @@ impl PolicySpec {
 
 /// `POST /v1/repos/{repo}/tasks`. With `harnesses`, runs one branch per
 /// harness like [`branchyard::TaskBuilder::run_on`]; otherwise one branch.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskRequest {
@@ -200,6 +205,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/send`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendRequest {
@@ -237,6 +243,7 @@ pub struct SendRequest {
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/fork`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkRequest {
@@ -287,6 +294,7 @@ pub struct ForkRequest {
 /// `POST /v1/repos/{repo}/branches/{branch}/reincarnate`: a new branch from
 /// `branch`'s latest candidate, always with a fresh session and a generated
 /// handoff brief; see [`branchyard::Branch::reincarnate`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReincarnateRequest {
@@ -325,6 +333,7 @@ pub struct ReincarnateRequest {
 
 /// `POST /v1/repos/{repo}/branches/{branch}/merge`. Without a target, the
 /// branch checked out in the served repository.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeRequest {
@@ -336,6 +345,7 @@ pub struct MergeRequest {
 /// created with the server's authority as a person, like
 /// `by spawn --parent`. The parent's envelope bounds it exactly as it bounds
 /// a local spawn. Needs a server that allows delegation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnRequest {
@@ -371,6 +381,7 @@ pub struct SpawnRequest {
 /// `POST /v1/repos/{repo}/branches/{branch}/integrate`: merge a delegated
 /// child into the parent that delegated it, like `by integrate`. No fields
 /// yet.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntegrateRequest {}
@@ -378,6 +389,7 @@ pub struct IntegrateRequest {}
 /// `POST /v1/repos/{repo}/branches/{branch}/steer`: input for the branch's
 /// running turn, like `by send --steer`. The answer is the
 /// [`branchyard::Steer`] after waiting briefly for its delivery.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SteerRequest {
@@ -385,12 +397,14 @@ pub struct SteerRequest {
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/cancel`: no fields yet.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CancelRequest {}
 
 /// The branches a cancel asked to stop: the branch and its delegated
 /// descendants that were running a turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelResult {
     pub cancelled: Vec<String>,
@@ -398,6 +412,7 @@ pub struct CancelResult {
 
 /// `POST /v1/repos/{repo}/branches/{branch}/ask`: a question to the
 /// branch's parent, like `by ask`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AskRequest {
@@ -410,6 +425,7 @@ pub struct AskRequest {
 
 /// `POST /v1/repos/{repo}/branches/{branch}/report` or `/escalate`: a
 /// message with no answer expected, like `by report` and `by escalate`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextRequest {
@@ -418,6 +434,7 @@ pub struct TextRequest {
 
 /// `POST /v1/repos/{repo}/branches/{branch}/answer`: an answer to one of
 /// the branch's own descendants' messages, like `by answer`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnswerRequest {
@@ -425,6 +442,7 @@ pub struct AnswerRequest {
     pub text: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
@@ -440,6 +458,7 @@ pub enum OperationKind {
     Reincarnate,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationState {
@@ -463,6 +482,7 @@ impl OperationState {
 }
 
 /// What a finished operation produced.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OperationResult {
     /// Branches a task, send or fork ran, in request order.
@@ -482,6 +502,7 @@ pub struct OperationResult {
 
 /// A long operation, run in the background. Durable on the server from
 /// the moment it is returned.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Operation {
     pub id: String,
@@ -509,6 +530,7 @@ pub struct Operation {
 }
 
 /// A structured error. `code` is stable; `message` is for people.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub code: String,
@@ -518,12 +540,14 @@ pub struct ErrorBody {
 }
 
 /// Every error response is `{"error": {...}}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: ErrorBody,
 }
 
 /// One entry of a repository's activity feed, as streamed.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedEntry {
     /// Position in the feed, from 1. Resume after it with `cursor=<seq>`.
@@ -535,27 +559,32 @@ pub struct FeedEntry {
 
 /// `GET .../branches/{branch}/events?cursor=N`: the events after the first
 /// `N`, and the cursor to pass next.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchEvents {
     pub events: Vec<RecordedEvent>,
     pub cursor: u64,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchList {
     pub branches: Vec<BranchInfo>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diff {
     pub diff: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Removed {
     pub removed: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoEntry {
     pub name: String,
@@ -563,6 +592,7 @@ pub struct RepoEntry {
     pub root: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoList {
     pub repos: Vec<RepoEntry>,
@@ -572,6 +602,7 @@ pub struct RepoList {
 /// form. `available` is about the server's `PATH`.
 pub type HarnessEntry = HarnessInfo;
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessList {
     pub harnesses: Vec<HarnessInfo>,

@@ -76,6 +76,7 @@ pub const SCION_REVISION: &str = "d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338";
 /// What a task asks to have provisioned. Stored with the branch, so it
 /// holds where secrets come from, never their values; every turn resolves
 /// them again.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provisioning {
@@ -115,6 +116,7 @@ impl Provisioning {
 }
 
 /// Where a secret's value comes from.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretSource {
@@ -128,6 +130,7 @@ pub struct SecretSource {
 }
 
 /// A variable or a file on the host that runs the turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretFrom {
@@ -182,6 +185,7 @@ pub fn check_variable_name(name: &str) -> Result<(), &'static str> {
 }
 
 /// A stdio MCP server, in a form that is stored and sent over the API.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerSpec {
@@ -302,6 +306,7 @@ impl McpServerSpec {
 /// An HTTP or SSE MCP server, in a form that is stored and sent over the
 /// API. Every header's value is one of the task's secrets, named here and
 /// resolved each turn, so no header value is stored.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteMcpSpec {
@@ -316,6 +321,7 @@ pub struct RemoteMcpSpec {
 }
 
 /// [`RemoteMcpSpec::transport`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteMcpTransport {
@@ -392,6 +398,7 @@ impl RemoteMcpSpec {
 }
 
 /// How hard the model reasons, where the harness can be told.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
@@ -439,6 +446,7 @@ impl Effort {
 }
 
 /// The harness's own OpenTelemetry export.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Telemetry {
@@ -610,6 +618,7 @@ impl Context {
 /// the ones no longer asked for and nothing else, and the credentials it
 /// wrote, so removing the branch removes them
 /// ([`apply::remove_credentials`]).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Installed {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -620,6 +629,7 @@ pub struct Installed {
 
 /// A credential Branchyard wrote in a home: a file holding a secret, by
 /// path relative to the home, and which part of it is Branchyard's.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Credential {
@@ -805,6 +815,7 @@ impl fmt::Debug for McpConfigFile {
 }
 
 /// How one secret reaches the harness. Names and paths only.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
     /// The secret's name, as the task gave it.
@@ -820,6 +831,7 @@ pub struct Delivery {
 }
 
 /// Where a secret's value is.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "via", rename_all = "snake_case")]
 pub enum Via {

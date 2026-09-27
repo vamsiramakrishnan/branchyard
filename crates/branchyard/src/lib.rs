@@ -443,6 +443,7 @@ pub fn harness_profile(id: &str) -> Result<HarnessProfile, Error> {
 }
 
 /// A harness profile as [`harness_profile`] resolves it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessProfile {
     pub harness: String,
@@ -556,6 +557,7 @@ pub struct TaskOptions {
 ///
 /// Serialized as an object tagged by `kind`, such as `{"kind": "local"}` or
 /// `{"kind": "microsandbox", "image": "...", ...}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 // One per branch, built once per command: the size does not matter, and
@@ -575,6 +577,7 @@ pub enum Provider {
 }
 
 /// A sandboxed harness's image, limits and credentials.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SandboxOptions {
     /// OCI image reference. The harness executable must be installed in it
@@ -596,6 +599,7 @@ pub struct SandboxOptions {
 /// worktree into it at [`SubstrateOptions::workdir`] and the branch's private
 /// home to [`SubstrateOptions::home`], runs the harness there through the
 /// bridge, copies both back and deletes the actor. See `docs/substrate.md`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SubstrateOptions {
     /// The `Control` API, as `https://host:port`, or `http://host:port` on
@@ -946,6 +950,7 @@ impl Branch {
 }
 
 /// A branch's durable record.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchInfo {
     pub name: String,
@@ -988,6 +993,7 @@ pub struct BranchInfo {
     pub superseded_by: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CandidateInfo {
     pub commit: String,
@@ -998,6 +1004,7 @@ pub struct CandidateInfo {
 
 /// Serialized as an object tagged by `state`, such as
 /// `{"state": "failed", "reason": "..."}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum BranchStatus {
@@ -1070,6 +1077,7 @@ impl Budget {
 }
 
 /// What a detected stall does to the turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StallAction {
@@ -1205,6 +1213,7 @@ impl Policy {
 }
 
 /// What answered a permission request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DecisionSource {
@@ -1223,6 +1232,7 @@ pub enum DecisionSource {
 ///
 /// Serialized with the variant as the key in snake case, such as
 /// `{"harness": {"type": "ready"}}` or `{"warning": "..."}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activity {
@@ -1310,6 +1320,7 @@ pub enum Activity {
 
 /// How [`Activity::MessagesDelivered`] messages reached a turn. Serialized
 /// as an object tagged by `path`, such as `{"path": "steer", "steer": 3}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "path", rename_all = "snake_case")]
 pub enum DeliveredVia {
@@ -1321,6 +1332,7 @@ pub enum DeliveredVia {
 
 /// Input for a branch's running turn, and what became of it; see
 /// [`Branch::steer`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Steer {
     /// Unique in the repository's store.
@@ -1336,6 +1348,7 @@ pub struct Steer {
 
 /// Where a [`Steer`] is. Serialized as an object tagged by `state`, such as
 /// `{"state": "refused", "reason": "..."}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SteerState {
@@ -1356,6 +1369,7 @@ pub enum SteerState {
 /// too, or further up an ancestor its rig seat's `escalates_to` names; an
 /// `answer` goes from a branch to one of its own descendants, and normally
 /// carries `in_reply_to` a question's id.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
@@ -1398,6 +1412,7 @@ impl std::str::FromStr for MessageKind {
 
 /// One harness-to-harness message, durable in the store; see
 /// `docs/delegation.md#inbox`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     /// Assigned by the store when it is sent; counts from 1 across the
@@ -1427,6 +1442,7 @@ pub struct BranchEvent {
 }
 
 /// Activity as recorded in `.branchyard/`, with its observation time.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RecordedEvent {
     /// Milliseconds since the Unix epoch.
@@ -1435,6 +1451,7 @@ pub struct RecordedEvent {
 }
 
 /// A page of one branch's events; see [`Branch::events_since`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub events: Vec<RecordedEvent>,
@@ -1444,6 +1461,7 @@ pub struct Page {
 }
 
 /// A page of the repository's feed; see [`Yard::events_since`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedPage {
     pub events: Vec<FeedEvent>,
@@ -1453,6 +1471,7 @@ pub struct FeedPage {
 }
 
 /// One event in the repository's feed.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedEvent {
     /// Position in the feed, from 1.
@@ -1462,6 +1481,7 @@ pub struct FeedEvent {
 }
 
 /// A branch [`Yard::recover`] took over.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Recovery {
     pub branch: String,
@@ -1472,6 +1492,7 @@ pub struct Recovery {
     pub killed: Vec<u32>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Merged {
     pub branch: String,
@@ -1481,6 +1502,7 @@ pub struct Merged {
 }
 
 /// Known harness profile and local availability.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub harness: String,
