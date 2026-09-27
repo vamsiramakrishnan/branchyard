@@ -41,6 +41,22 @@ by rm make-the-flaky-parser-test-deterministic-claude-code
 
 Every tool permission request reaches Branchyard: `--ask` prompts on the terminal, `--yes` allows each one, and with neither flag and no terminal they are denied. `by log` shows each decision. These commands are tested end to end against a fake ACP agent; they have not yet run against a real harness. Resuming or forking a session in another worktree may fail for harnesses that keep sessions per directory, such as Claude Code; the branch then reports the failure rather than starting over silently.
 
+## Delegation
+
+A harness can act as a meta-harness. With `--delegate`, the harness runs `by` in its own shell to create and coordinate child branches, within an envelope of depth, width, harnesses and budget:
+
+```sh
+by run "Split the parser rewrite: delegate the tokenizer to codex and the formatter to yourself, then integrate both" \
+  --delegate --budget-usd 3 --yes
+# inside the harness, as its own branch:
+#   by spawn "Port the tokenizer to the new API; run its tests" --name tokenizer --harness codex --budget-usd 1
+#   by inspect tokenizer --json
+#   by integrate tokenizer          # merges into the parent's branch, never into yours
+by ls                               # the tree
+```
+
+The same operations are a Python module, a Rust `Delegate`, and MCP tools (`by mcp`), with one authority model: a per-turn token that lets a branch act only on its descendants. In local mode that stops mistakes, not a hostile harness. See [delegation](docs/delegation.md).
+
 ## Architecture
 
 Clients submit work and observe results. All managed harness execution happens on servers.
