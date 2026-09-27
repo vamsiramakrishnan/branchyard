@@ -347,3 +347,92 @@ fn a_graph_of_children_runs_with_its_state_in_postgres() {
     assert_eq!(status(&pg.yard, "app"), BranchStatus::Ready);
     assert_eq!(pg.yard.graph("root").unwrap().dependencies.len(), 2);
 }
+
+/// Several processes on one database run `resume_graph` at once (every
+/// server and `by worker` does on its recovery tick): a dependent whose
+/// prerequisite settled with no engine starting it is claimed, and so
+/// started, by exactly one of them.
+#[test]
+fn concurrent_resume_graph_on_one_database_starts_a_dependent_once() {
+    use branchyard::{After, Envelope, GraphEdit, SpawnSpec};
+    let Some(pg) = Pg::new() else { return };
+    let options = branchyard::TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        policy: Policy::allow_all(),
+        ..pg.f.options()
+    };
+    let root = pg
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let spawn = |name: &str, prompt: &str, depends_on: &[&str], after: After| {
+        GraphEdit::Spawn(SpawnSpec {
+            prompt: prompt.into(),
+            name: Some(name.into()),
+            depends_on: depends_on.iter().map(|s| (*s).to_owned()).collect(),
+            after,
+            ..SpawnSpec::default()
+        })
+    };
+    root.delegate(options.clone())
+        .unwrap()
+        .apply_graph(
+            vec![
+                spawn("first", "WRITE f.txt=1", &[], After::Settled),
+                spawn("second", "WRITE s.txt=1", &["first"], After::Integrated),
+            ],
+            0,
+        )
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let status = |yard: &Yard, name: &str| yard.branch(name).unwrap().info().status.clone();
+    assert_eq!(status(&pg.yard, "second"), BranchStatus::Waiting);
+    // The state an engine that stopped between settling the prerequisite
+    // and starting the dependent leaves: satisfied, never claimed.
+    let mut db = postgres::Client::connect(&pg.url, postgres::NoTls).unwrap();
+    let changed = db
+        .execute(
+            "UPDATE by_graph_edges SET after = 'settled' WHERE repo = $1 AND dependent = 'second'",
+            &[&pg.scope],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    const RACERS: usize = 6;
+    let yards: Vec<Yard> = (0..RACERS).map(|_| pg.open()).collect();
+    let barrier = std::sync::Barrier::new(RACERS);
+    let started: Vec<Vec<String>> = std::thread::scope(|s| {
+        let handles: Vec<_> = yards
+            .iter()
+            .map(|yard| {
+                let (barrier, options) = (&barrier, options.clone());
+                s.spawn(move || {
+                    barrier.wait();
+                    yard.resume_graph(&options).unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let winners: Vec<usize> = (0..RACERS)
+        .filter(|&i| started[i].iter().any(|n| n == "second"))
+        .collect();
+    assert_eq!(winners.len(), 1, "started by {winners:?}: {started:?}");
+    yards[winners[0]]
+        .branch("root")
+        .unwrap()
+        .wait_subtree()
+        .unwrap();
+    assert_eq!(status(&pg.yard, "second"), BranchStatus::Ready);
+    assert_eq!(prompts(&pg.yard, "second"), 1, "one turn, from one engine");
+    assert_eq!(pg.yard.branch("second").unwrap().info().turns, 1);
+    // Nothing is left for any of them.
+    for yard in &yards {
+        assert!(yard.resume_graph(&options).unwrap().is_empty());
+    }
+    assert_eq!(prompts(&pg.yard, "second"), 1);
+}

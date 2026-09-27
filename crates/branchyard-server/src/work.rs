@@ -523,6 +523,22 @@ mod tests {
                 name: Some("b-c".into()),
                 request: SpawnRequest::default(),
             },
+            // A spawn that waits: its dependencies and bindings are part of
+            // the durable description a worker reads.
+            Work::Spawn {
+                parent: "b".into(),
+                name: Some("b-d".into()),
+                request: SpawnRequest {
+                    prompt: "p".into(),
+                    depends_on: vec!["b-c".into()],
+                    after: branchyard::After::Integrated,
+                    bindings: vec![branchyard::Binding {
+                        scratch: "notes".into(),
+                        access: branchyard::Access::ExclusiveWrite,
+                    }],
+                    ..SpawnRequest::default()
+                },
+            },
             Work::Integrate {
                 branch: "b-c".into(),
                 parent: "b".into(),
@@ -534,5 +550,22 @@ mod tests {
             assert_eq!(value["kind"], kind);
             assert_eq!(serde_json::from_value::<Work>(value).unwrap(), work);
         }
+    }
+
+    #[test]
+    fn a_spawn_description_carries_what_the_child_waits_for() {
+        let value = serde_json::json!({
+            "kind": "spawn",
+            "parent": "root",
+            "name": "app",
+            "request": {"prompt": "p", "depends_on": ["lib"], "after": "integrated",
+                        "bindings": [{"scratch": "notes", "access": "read_only"}]},
+        });
+        let Work::Spawn { request, .. } = serde_json::from_value::<Work>(value).unwrap() else {
+            panic!("not a spawn");
+        };
+        assert_eq!(request.depends_on, ["lib"]);
+        assert_eq!(request.after, branchyard::After::Integrated);
+        assert_eq!(request.bindings[0].access, branchyard::Access::ReadOnly);
     }
 }

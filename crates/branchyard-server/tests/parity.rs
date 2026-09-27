@@ -458,3 +458,66 @@ fn a_person_applies_a_graph_through_the_server() {
         other => panic!("{other:?}"),
     }
 }
+
+/// `POST …/spawn` with `depends_on` is queued work like any spawn: the
+/// worker that runs it creates the child waiting, the operation finishes
+/// without starting it, and integrating its prerequisite (queued too)
+/// starts it from the parent's branch.
+#[test]
+fn a_spawn_that_waits_goes_through_the_queue_and_starts_after_its_prerequisite() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.by_path = Some("/bin/true".into());
+    config.allow_delegation = true;
+    let server = Server::start(config);
+    let client = server.client();
+    let repo = client.repo("app");
+    let root = run(
+        &client,
+        &TaskRequest {
+            delegation: Some(Envelope::default()),
+            ..task("say hi", "root")
+        },
+    );
+    assert_eq!(root.state, OperationState::Succeeded, "{root:?}");
+    let spawn = |name: &str, prompt: &str, depends_on: &[&str]| SpawnRequest {
+        prompt: prompt.into(),
+        name: Some(name.into()),
+        policy: PolicySpec::allow_all(),
+        depends_on: depends_on.iter().map(|s| (*s).to_owned()).collect(),
+        after: branchyard::After::Integrated,
+        ..SpawnRequest::default()
+    };
+    let lib = repo
+        .spawn("root", &spawn("lib", "WRITE lib.txt=1", &[]), &new_key())
+        .unwrap();
+    assert_eq!(wait(&client, &lib.id).state, OperationState::Succeeded);
+    let app = repo
+        .spawn(
+            "root",
+            &spawn("app", "WRITE app.txt=1", &["lib"]),
+            &new_key(),
+        )
+        .unwrap();
+    assert_eq!(app.kind, OperationKind::Spawn);
+    let app = wait(&client, &app.id);
+    assert_eq!(app.state, OperationState::Succeeded, "{app:?}");
+    let inspection = app.result.unwrap().inspection.unwrap();
+    assert_eq!(inspection.status, BranchStatus::Waiting);
+    assert_eq!(inspection.depends_on[0].prerequisite, "lib");
+    assert_eq!(repo.graph("root").unwrap().dependencies.len(), 1);
+    assert_eq!(repo.branch("app").unwrap().turns, 0);
+
+    let integrated = wait(&client, &repo.integrate("lib", &new_key()).unwrap().id);
+    assert_eq!(
+        integrated.state,
+        OperationState::Succeeded,
+        "{integrated:?}"
+    );
+    common::eventually("app to start and finish", || {
+        repo.branch("app").unwrap().status == BranchStatus::Ready
+    });
+    let app = repo.branch("app").unwrap();
+    assert_eq!(app.turns, 1);
+    assert!(app.worktree.join("lib.txt").is_file(), "built on lib");
+}

@@ -212,6 +212,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
             tokio::spawn(poll(
                 repo.clone(),
                 config.poll_interval,
+                config.recover_interval,
                 shutdown_rx.clone(),
             ))
         })
@@ -368,14 +369,21 @@ fn operation_store(config: &Config) -> Result<(Store, String), String> {
     Ok((Box::new(store), place))
 }
 
-/// How often the server looks for branches whose engine stopped, such as a
-/// local `by run` that was killed.
-const RECOVER_EVERY: Duration = Duration::from_secs(30);
+/// How often, by default, the server looks for branches whose engine
+/// stopped, such as a local `by run` that was killed, and for waiting
+/// dependents whose prerequisites settled; [`Config::recover_interval`].
+pub const RECOVER_EVERY: Duration = Duration::from_secs(30);
 
 /// Publish a repository's feed head when the engine reports activity, and
 /// otherwise every `interval`, which picks up other processes' activity.
-/// Every [`RECOVER_EVERY`], recover branches whose engine stopped.
-async fn poll(repo: RepoState, interval: Duration, mut shutdown: watch::Receiver<bool>) {
+/// Every `recover_every`, recover branches whose engine stopped and start
+/// waiting dependents whose prerequisites settled.
+async fn poll(
+    repo: RepoState,
+    interval: Duration,
+    recover_every: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let mut recovered = tokio::time::Instant::now();
     loop {
         tokio::select! {
@@ -383,7 +391,7 @@ async fn poll(repo: RepoState, interval: Duration, mut shutdown: watch::Receiver
             _ = tokio::time::sleep(interval) => {}
             _ = shutdown.changed() => {}
         }
-        let recover = recovered.elapsed() >= RECOVER_EVERY;
+        let recover = recovered.elapsed() >= recover_every;
         if recover {
             recovered = tokio::time::Instant::now();
         }
