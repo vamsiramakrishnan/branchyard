@@ -115,12 +115,19 @@ fn a_child_reports_and_asks_its_parent_across_both_event_logs() {
     // kid's HANG turn is running and the fake agent takes steering, so the
     // answer was steered straight into it, not left for its next turn.
     assert!(inbox.messages[0].delivered, "steered into the running turn");
-    let kid_log = f.yard.branch("kid").unwrap().events().unwrap();
-    assert!(
-        kid_log.iter().any(|e| matches!(&e.activity,
-            Activity::MessagesDelivered { ids, via: DeliveredVia::Steer { .. } } if ids == &[answer.id])),
-        "{kid_log:?}"
-    );
+    // The engine records the delivery event just after it settles the
+    // steer that marked the message delivered; wait for the entry.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let kid_log = f.yard.branch("kid").unwrap().events().unwrap();
+        if kid_log.iter().any(|e| matches!(&e.activity,
+            Activity::MessagesDelivered { ids, via: DeliveredVia::Steer { .. } } if ids == &[answer.id]))
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{kid_log:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     // A fresh question, answered from a background thread while `ask`
     // blocks for it: the wait sees the answer across processes' writes,
