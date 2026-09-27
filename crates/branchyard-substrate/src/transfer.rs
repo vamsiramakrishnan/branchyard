@@ -6,13 +6,18 @@
 //! commits and their history, and recreates the worktree in a fresh
 //! repository in the actor: `HEAD` at the same commit, the working files as
 //! they were on the host, the index at `HEAD`. [`pull`] snapshots the
-//! actor's working files the same way, brings that one commit back in a
-//! bundle, and applies the difference between the two snapshots to the
-//! host worktree's files: additions, changes, deletions, modes and
-//! symbolic links. The host's index, refs and branch are not touched; the
-//! engine's own snapshot then records the candidate as it would for a local
-//! harness. Commits the harness made inside the actor are flattened into
-//! that difference.
+//! actor's working files the same way on top of the actor's `HEAD`, brings
+//! that commit and the commits below it back in a bundle, and applies the
+//! difference between the two snapshots to the host worktree's files:
+//! additions, changes, deletions, modes and symbolic links. Commits the
+//! harness made in the actor come back as they are (messages, authors,
+//! dates, order): the host branch moves to the actor's `HEAD`, and the
+//! host's index to that commit, so what the harness left uncommitted is a
+//! working-tree change on top of them. The actor's `HEAD` must descend
+//! from the commit that was sent; history rewritten below it is refused.
+//! When the harness made no commit, the host's index, refs and object
+//! store are not touched. Either way the engine's own snapshot then records
+//! the candidate as it would for a local harness.
 //!
 //! Only commits and files cross. The bundles carry objects reachable from
 //! the two snapshots; the actor's repository is new, so no host
@@ -23,8 +28,10 @@
 //! On the host, both steps work in a staging repository whose object store
 //! falls back to the host repository's (git alternates): snapshot objects
 //! and the actor's objects land there, are checked with
-//! `transfer.fsckObjects`, and are deleted with it. The host repository's
-//! refs and object store are never written.
+//! `transfer.fsckObjects`, and are deleted with it. Only the harness's
+//! commits (checked again as they are fetched) reach the host repository's
+//! object store, and only the worktree's branch is moved, from exactly the
+//! commit that was sent, with hooks disabled.
 //!
 //! The actor needs `git` on its `PATH`.
 
@@ -73,6 +80,9 @@ pub enum Error {
     /// The host worktree changed while the harness ran in the actor, so the
     /// result cannot be applied without losing one side's changes.
     WorktreeChanged(String),
+    /// The actor's `HEAD` does not descend from the commit that was sent:
+    /// the harness rewrote history below it. Nothing was applied.
+    Rewritten(String),
     Io(io::Error),
 }
 
@@ -85,6 +95,11 @@ impl fmt::Display for Error {
                 f,
                 "the worktree changed on the host while the sandbox ran; not applying the \
                  sandbox's result: {why}"
+            ),
+            Error::Rewritten(why) => write!(
+                f,
+                "the sandbox rewrote history below the commit it was given; not applying its \
+                 result: {why}"
             ),
             Error::Io(error) => write!(f, "{error}"),
         }
@@ -133,6 +148,8 @@ pub struct Pulled {
     pub result: String,
     /// Whether any file differs from what was pushed.
     pub changed: bool,
+    /// The commits the harness made, oldest first, now on the host branch.
+    pub commits: Vec<String>,
 }
 
 /// A bare staging repository borrowing the host repository's objects.
@@ -421,7 +438,9 @@ pub fn push_staged(
 }
 
 /// Bring the actor's worktree back and apply it to the host `worktree`,
-/// which must still hold exactly the files [`push`] sent.
+/// whose `HEAD` must still be the commit [`push`] sent and whose files
+/// must still be exactly what it sent. The harness's commits move the
+/// host branch; its uncommitted changes land in the working tree.
 pub fn pull(endpoint: &Endpoint, pushed: &Pushed, worktree: &Path) -> Result<Pulled, Error> {
     let dir = &pushed.guest;
     let meta = dir.join(".git/branchyard");
@@ -486,12 +505,87 @@ pub fn pull(endpoint: &Endpoint, pushed: &Pushed, worktree: &Path) -> Result<Pul
             fetched.trim()
         )));
     }
+    // The result is the actor's files on top of the actor's HEAD, which the
+    // host reads from the fetched objects rather than from the actor.
+    let head = stage
+        .run(&["rev-parse", "--verify", &format!("{result}^1^{{commit}}")])
+        .map_err(|_| Error::Guest(format!("the result {result} has no parent")))?
+        .trim()
+        .to_owned();
+    if stage
+        .run(&["rev-parse", "--verify", "-q", &format!("{result}^2")])
+        .is_ok()
+    {
+        return Err(Error::Guest(format!("the result {result} is a merge")));
+    }
+    let commits = match head == pushed.base {
+        true => Vec::new(),
+        false => {
+            let (descends, _, _) = host_output(
+                &stage.dir,
+                &[
+                    "--git-dir",
+                    path_str(&stage.git())?,
+                    "merge-base",
+                    "--is-ancestor",
+                    &pushed.base,
+                    &head,
+                ],
+                &[],
+            )?;
+            if !descends {
+                return Err(Error::Rewritten(format!(
+                    "the sandbox's HEAD {head} does not descend from {}",
+                    pushed.base
+                )));
+            }
+            stage
+                .run(&[
+                    "rev-list",
+                    "--reverse",
+                    "--topo-order",
+                    &format!("{}..{head}", pushed.base),
+                ])?
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+    };
 
+    let now = host(worktree, &["rev-parse", "--verify", "HEAD^{commit}"], &[])?;
+    if now.trim() != pushed.base {
+        return Err(Error::WorktreeChanged(format!(
+            "HEAD moved from {} to {}",
+            pushed.base,
+            now.trim()
+        )));
+    }
     let env = stage.env("pull.index");
     host(worktree, &["read-tree", &pushed.snapshot], &env)?;
     let (clean, _, stderr) = host_output(worktree, &["update-index", "--refresh"], &env)?;
     if !clean {
         return Err(Error::WorktreeChanged(stderr.trim().to_owned()));
+    }
+    if !commits.is_empty() {
+        // The commits enter the host's object store now, checked again;
+        // nothing refers to them until the branch moves below.
+        stage.run(&["update-ref", "refs/branchyard/head", &head])?;
+        host(
+            worktree,
+            &[
+                "-c",
+                "transfer.fsckObjects=true",
+                "-c",
+                NO_HOOKS,
+                "fetch",
+                "-q",
+                "--no-tags",
+                "--no-write-fetch-head",
+                path_str(&stage.git())?,
+                "refs/branchyard/head",
+            ],
+            &[],
+        )?;
     }
     let before = host(
         worktree,
@@ -515,7 +609,79 @@ pub fn pull(endpoint: &Endpoint, pushed: &Pushed, worktree: &Path) -> Result<Pul
             other => other,
         })?;
     }
-    Ok(Pulled { result, changed })
+    if !commits.is_empty() {
+        if let Err(error) = advance(worktree, &pushed.base, &head) {
+            // Put the files back as they were, so nothing half-applied is
+            // left for the engine to record.
+            if changed {
+                let _ = host(
+                    worktree,
+                    &["read-tree", "-m", "-u", after.trim(), before.trim()],
+                    &env,
+                );
+            }
+            return Err(error);
+        }
+    }
+    Ok(Pulled {
+        result,
+        changed,
+        commits,
+    })
+}
+
+/// Disables hooks for git commands that write the host repository.
+const NO_HOOKS: &str = "core.hooksPath=/dev/null";
+
+/// Move the worktree's branch (or detached `HEAD`) from `base` to `head`,
+/// only if it is still at `base`, and its index to `head`, leaving the
+/// working files as they are.
+fn advance(worktree: &Path, base: &str, head: &str) -> Result<(), Error> {
+    let message = "branchyard: commits made in a sandbox";
+    let branch = host(worktree, &["symbolic-ref", "-q", "HEAD"], &[])
+        .map(|b| b.trim().to_owned())
+        .ok()
+        .filter(|b| !b.is_empty());
+    let moved = match &branch {
+        Some(branch) => host(
+            worktree,
+            &[
+                "-c",
+                NO_HOOKS,
+                "update-ref",
+                "-m",
+                message,
+                branch,
+                head,
+                base,
+            ],
+            &[],
+        ),
+        None => host(
+            worktree,
+            &[
+                "-c",
+                NO_HOOKS,
+                "update-ref",
+                "--no-deref",
+                "-m",
+                message,
+                "HEAD",
+                head,
+                base,
+            ],
+            &[],
+        ),
+    };
+    moved.map_err(|e| match e {
+        Error::Host(why) => Error::WorktreeChanged(why),
+        other => other,
+    })?;
+    host(worktree, &["read-tree", head], &[])?;
+    // Refresh stat information; files that differ from `head` are the
+    // uncommitted changes, so a non-zero exit is expected.
+    let _ = host_output(worktree, &["update-index", "-q", "--refresh"], &[]);
+    Ok(())
 }
 
 /// Copy the host directory `from` to `to` in the actor, if it exists.

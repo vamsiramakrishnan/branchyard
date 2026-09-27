@@ -1,7 +1,9 @@
 //! Code into and out of an actor through the bridge: a worktree round trip
-//! with every kind of change, the host repository left untouched, nothing
-//! from outside the worktree coming back, and a host worktree that changed
-//! meanwhile refused. Requires `git` and `sh`.
+//! with every kind of change, the harness's commits coming back as commits
+//! with its uncommitted changes on top, history rewritten below the base
+//! refused, the host repository otherwise untouched, nothing from outside
+//! the worktree coming back, and a host worktree that changed meanwhile
+//! refused. Requires `git` and `sh`.
 
 mod common;
 
@@ -169,13 +171,35 @@ fn a_worktree_round_trips_every_kind_of_change() {
     assert_eq!(read("ignored/cache"), b"never sent\n");
     assert!(outside.exists(), "the harness did write outside");
 
-    // HEAD, refs, objects and config of the host repository are untouched;
-    // the guest's commit arrives only as working-tree changes.
-    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
-    assert_eq!(host_state(&root), before);
+    // The guest's commit is now the branch's HEAD, on top of the old one;
+    // what it left uncommitted is a working-tree change. Other refs and
+    // the configuration are untouched.
+    assert_eq!(pulled.commits.len(), 1);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]).trim(), pulled.commits[0]);
+    assert_eq!(git(&root, &["rev-parse", "HEAD^"]), head);
+    assert_eq!(
+        git(&root, &["log", "-1", "--format=%s"]),
+        "harness commit
+"
+    );
+    assert_eq!(
+        git(&root, &["symbolic-ref", "--short", "HEAD"]),
+        "main
+"
+    );
+    assert_eq!(
+        git(&root, &["config", "--local", "--list"]),
+        before.2,
+        "configuration changed"
+    );
     let status = git(&root, &["status", "--porcelain"]);
-    assert!(status.contains(" D gone.txt"), "{status}");
-    assert!(status.contains("?? data.bin"), "{status}");
+    assert_eq!(
+        status,
+        "?? after-commit.txt
+"
+    );
+    assert!(git(&root, &["ls-files"]).contains("data.bin"));
+    assert!(!git(&root, &["ls-files"]).contains("gone.txt"));
     provider.destroy("actor").unwrap();
 }
 
@@ -189,9 +213,13 @@ fn an_unchanged_worktree_comes_back_unchanged() {
     let guest = cluster.scratch.path("guest");
     let status = git(&root, &["status", "--porcelain"]);
     let pushed = transfer::push(&endpoint, &root, &guest).unwrap();
+    let before = host_state(&root);
     let pulled = transfer::pull(&endpoint, &pushed, &root).unwrap();
     assert!(!pulled.changed);
+    assert!(pulled.commits.is_empty());
     assert_eq!(git(&root, &["status", "--porcelain"]), status);
+    // Without commits, the host repository is not written at all.
+    assert_eq!(host_state(&root), before);
 
     // A second push into a directory that already holds the repository is
     // refused rather than mixed with it.
@@ -262,5 +290,162 @@ fn a_home_directory_is_replaced_by_the_actors() {
         .filter(|e| e.file_name().to_string_lossy().starts_with(".home."))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
+    provider.destroy("actor").unwrap();
+}
+
+#[test]
+fn commits_come_back_as_commits_with_uncommitted_work_on_top() {
+    let cluster = Cluster::start("commits");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let endpoint = provider.endpoint("actor").unwrap();
+    let root = repository(&cluster.scratch.0);
+    // A clean worktree, as the engine leaves one between turns.
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "host work"]);
+    let base = git(&root, &["rev-parse", "HEAD"]).trim().to_owned();
+    let guest = cluster.scratch.path("guest");
+    let pushed = transfer::push(&endpoint, &root, &guest).unwrap();
+
+    // The harness: two commits of its own, by two authors, then a dirty
+    // file and a staged one it never commits.
+    guest_run(
+        &endpoint,
+        &guest,
+        "printf 'one\\n' > first.txt && git add first.txt \
+         && GIT_AUTHOR_NAME=Ada GIT_AUTHOR_EMAIL=ada@example.com \
+            GIT_AUTHOR_DATE='2001-02-03T04:05:06Z' \
+            git commit -q -m 'First harness commit' -m 'With a body.' \
+         && printf 'two\\n' > second.txt && git rm -q gone.txt && git add second.txt \
+         && GIT_AUTHOR_NAME=Grace GIT_AUTHOR_EMAIL=grace@example.com \
+            git commit -q -m 'Second harness commit' \
+         && printf 'dirty\\n' >> first.txt && printf 'staged\\n' > staged.txt \
+         && git add staged.txt",
+    );
+
+    let pulled = transfer::pull(&endpoint, &pushed, &root).unwrap();
+    assert!(pulled.changed);
+    assert_eq!(pulled.commits.len(), 2);
+    // Order, messages and authors are kept, on top of the base.
+    let log = git(
+        &root,
+        &[
+            "log",
+            "--format=%H|%an <%ae>|%ad|%s|%b",
+            "--date=iso-strict",
+            &format!("{base}..HEAD"),
+        ],
+    );
+    let lines: Vec<&str> = log.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(
+        lines[0].starts_with(&format!("{}|Grace <grace@example.com>|", pulled.commits[1])),
+        "{log}"
+    );
+    assert!(lines[0].ends_with("|Second harness commit|"), "{log}");
+    assert!(
+        lines[1].starts_with(&format!(
+            "{}|Ada <ada@example.com>|2001-02-03T04:05:06+00:00|First harness commit|With a body.",
+            pulled.commits[0]
+        )),
+        "{log}"
+    );
+    assert_eq!(git(&root, &["rev-parse", "HEAD~2"]).trim(), base);
+    assert_eq!(git(&root, &["symbolic-ref", "--short", "HEAD"]), "main\n");
+    // Uncommitted work is a working-tree change on top of the commits.
+    let status = git(&root, &["status", "--porcelain"]);
+    assert_eq!(status, " M first.txt\n?? staged.txt\n", "{status}");
+    assert_eq!(
+        fs::read_to_string(root.join("first.txt")).unwrap(),
+        "one\ndirty\n"
+    );
+    assert!(!root.join("gone.txt").exists());
+
+    // The engine's snapshot then records a candidate on top of them.
+    git(&root, &["add", "--all", "--", "."]);
+    git(&root, &["commit", "-q", "-m", "snapshot"]);
+    git(&root, &["merge-base", "--is-ancestor", &base, "HEAD"]);
+    assert_eq!(
+        git(&root, &["rev-list", "--count", &format!("{base}..HEAD")]),
+        "3\n"
+    );
+    let diff = git(&root, &["diff", "--name-status", &base, "HEAD"]);
+    assert_eq!(
+        diff,
+        "A\tfirst.txt\nD\tgone.txt\nA\tsecond.txt\nA\tstaged.txt\n"
+    );
+    git(&root, &["fsck", "--no-progress"]);
+    provider.destroy("actor").unwrap();
+}
+
+#[test]
+fn history_rewritten_below_the_base_is_refused() {
+    let cluster = Cluster::start("rewrite");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let endpoint = provider.endpoint("actor").unwrap();
+    let root = repository(&cluster.scratch.0);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "second"]);
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    let status = git(&root, &["status", "--porcelain"]);
+
+    for (name, script) in [
+        // Back below the base, then a new commit there.
+        (
+            "reset",
+            "git reset -q --hard HEAD~1 && printf 'x\\n' > x.txt && git add x.txt \
+             && git commit -q -m 'rewritten'",
+        ),
+        // The base amended.
+        ("amend", "git commit -q --amend -m 'amended'"),
+        // An unrelated history.
+        (
+            "orphan",
+            "git checkout -q --orphan fresh && git commit -q -m 'orphan'",
+        ),
+    ] {
+        let guest = cluster.scratch.path(&format!("guest-{name}"));
+        let pushed = transfer::push(&endpoint, &root, &guest).unwrap();
+        guest_run(&endpoint, &guest, script);
+        match transfer::pull(&endpoint, &pushed, &root) {
+            Err(Error::Rewritten(why)) => assert!(why.contains("does not descend"), "{why}"),
+            other => panic!("{name}: expected a refusal, got {other:?}"),
+        }
+        // Nothing was applied.
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), base, "{name}");
+        assert_eq!(git(&root, &["status", "--porcelain"]), status, "{name}");
+        assert!(!root.join("x.txt").exists(), "{name}");
+    }
+    provider.destroy("actor").unwrap();
+}
+
+#[test]
+fn commits_are_not_applied_over_a_host_branch_that_moved() {
+    let cluster = Cluster::start("moved");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let endpoint = provider.endpoint("actor").unwrap();
+    let root = repository(&cluster.scratch.0);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "second"]);
+    let guest = cluster.scratch.path("guest");
+    let pushed = transfer::push(&endpoint, &root, &guest).unwrap();
+    guest_run(
+        &endpoint,
+        &guest,
+        "printf 'g\\n' > g.txt && git add g.txt && git commit -q -m guest",
+    );
+    git(
+        &root,
+        &["commit", "-q", "--allow-empty", "-m", "host moved on"],
+    );
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert!(matches!(
+        transfer::pull(&endpoint, &pushed, &root),
+        Err(Error::WorktreeChanged(_))
+    ));
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    assert!(!root.join("g.txt").exists());
     provider.destroy("actor").unwrap();
 }
