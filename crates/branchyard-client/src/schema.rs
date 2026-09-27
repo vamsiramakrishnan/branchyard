@@ -73,6 +73,17 @@ pub fn contract() -> Value {
     entry::<api::HarnessEntry>("HarnessEntry", &mut types);
     entry::<api::HarnessList>("HarnessList", &mut types);
     entry::<api::MergedInfo>("MergedInfo", &mut types);
+    entry::<branchyard::BranchInfo>("BranchInfo", &mut types);
+    entry::<branchyard::Inspection>("Inspection", &mut types);
+    entry::<branchyard::Children>("Children", &mut types);
+    entry::<branchyard::EventPage>("EventPage", &mut types);
+    entry::<branchyard::Inbox>("Inbox", &mut types);
+    entry::<branchyard::Message>("Message", &mut types);
+    entry::<branchyard::Asked>("Asked", &mut types);
+    entry::<branchyard::Steer>("Steer", &mut types);
+    entry::<branchyard::ArtifactRef>("ArtifactRef", &mut types);
+    entry::<branchyard::ScratchArea>("ScratchArea", &mut types);
+    entry::<branchyard::ScratchLock>("ScratchLock", &mut types);
     entry::<storage_api::ArtifactList>("ArtifactList", &mut types);
     entry::<storage_api::ShareRequest>("ShareRequest", &mut types);
     entry::<storage_api::CreateScratchRequest>("CreateScratchRequest", &mut types);

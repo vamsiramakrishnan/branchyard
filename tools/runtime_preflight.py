@@ -89,7 +89,8 @@ def check_harnesses():
 def check_postgres(url: str, timeout: float = 3.0):
     parsed = urlsplit(url)
     if parsed.scheme not in ("postgres", "postgresql"):
-        return {"url": url, "reachable": False, "error": f"not a postgres:// URL: {parsed.scheme!r}"}
+        # Never echo the URL: it may carry a password.
+        return {"host": None, "port": None, "reachable": False, "error": f"not a postgres:// URL: {parsed.scheme!r}"}
     host = parsed.hostname or "localhost"
     port = parsed.port or 5432
     try:
@@ -117,7 +118,12 @@ def inspect(require_sandbox: bool, postgres_url):
     if postgres_url:
         checks["postgres"] = check_postgres(postgres_url)
         if not checks["postgres"]["reachable"]:
-            required_failures.append(f"PostgreSQL at {postgres_url!r} is not reachable")
+            # Only the parsed host and port: the URL may carry a password.
+            postgres = checks["postgres"]
+            if postgres["host"] is None:
+                required_failures.append(f"--postgres-url is not usable: {postgres['error']}")
+            else:
+                required_failures.append(f"PostgreSQL at {postgres['host']}:{postgres['port']} is not reachable")
     return {
         "schema": "branchyard/runtime-preflight/v1",
         "system": platform.system(),

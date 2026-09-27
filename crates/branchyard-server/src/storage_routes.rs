@@ -77,8 +77,8 @@ pub(crate) fn router() -> Router<Shared> {
             "/v1/repos/{repo}/branches/{branch}/scratch/{name}/unlock",
             post(unlock_scratch),
         )
-        // Not access controlled, like `Yard::scratch_lock_state`, and not
-        // scoped to an acting branch.
+        // Not scoped to an acting branch, but only for a repository the
+        // caller's tenant owns, with the `read` scope.
         .route("/v1/repos/{repo}/scratch/{name}/lock", get(lock_state))
 }
 
@@ -295,6 +295,10 @@ async fn publish(
             return Ok(replayed(status, value));
         }
     }
+    // After the replay: a retried upload that already published is
+    // answered as before, not refused for the bytes it already added.
+    app.check_artifact_upload(&caller, body.len() as u64)
+        .await?;
     let (name, media_type, labels) = parse_publish_query(&query);
     let (yard, acting) = (repo.yard.clone(), branch.clone());
     let artifact = blocking(move || {
@@ -466,13 +470,14 @@ async fn unlock_scratch(
 
 /// `GET /v1/repos/{repo}/scratch/{name}/lock`: the current holder, if
 /// any, whether or not its turn is still running. Not scoped to an
-/// acting branch: like [`branchyard::Yard::scratch_lock_state`], it is
-/// not access controlled.
+/// acting branch, unlike the rest of the storage routes, but the caller
+/// needs `read` on a repository its tenant owns.
 async fn lock_state(
     State(app): State<Shared>,
     Path((repo, name)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<LockState>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
     let lock = blocking(move || yard.scratch_lock_state(&name))
         .await?
         .map_err(|e| error::sdk(&e))?;

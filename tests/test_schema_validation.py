@@ -131,6 +131,23 @@ def _fenced_json_after(marker: str) -> dict:
     raise AssertionError(f"no ```json fence starting with {marker!r} in docs/server.md")
 
 
+class ContractCoversEveryEndpoint(unittest.TestCase):
+    def test_every_json_response_type_is_a_contract_root(self):
+        """Each `Json<T>` a server handler returns is published as a root,
+        so a client can look up every documented response."""
+        sources = [
+            ROOT / "crates/branchyard-server/src/api.rs",
+            ROOT / "crates/branchyard-server/src/storage_routes.rs",
+        ]
+        returned = set()
+        for source in sources:
+            for name in re.findall(r"Json<(?:[a-z_]+::)*([A-Z][A-Za-z]+)>", source.read_text()):
+                returned.add(name)
+        self.assertTrue(returned)
+        missing = sorted(returned - set(TYPES))
+        self.assertEqual(missing, [], "response types missing from schema/contract.json")
+
+
 class ContractTypesValidateTheirDocumentedExamples(unittest.TestCase):
     def test_the_documented_task_request_validates(self):
         request = _fenced_json_after("POST /v1/repos/app/tasks")

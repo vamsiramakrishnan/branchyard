@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{FromRequest, Path, RawQuery, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -103,6 +103,20 @@ fn scope_required(scope: &str) -> ApiError {
         format!("this request needs the {scope} scope"),
     )
     .detail(serde_json::json!({ "scope": scope }))
+}
+
+fn artifact_quota_exceeded(tenant: &str, max: u64, held: u64) -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "quota_exceeded",
+        format!(
+            "tenant {tenant} is at its max_artifact_bytes quota ({held} of {max}); ask the \
+             operator to raise it"
+        ),
+    )
+    .detail(serde_json::json!({
+        "tenant": tenant, "limit": "max_artifact_bytes", "max": max, "reserved": held
+    }))
 }
 
 fn usd_quota_exceeded(limit: &str, tenant: &str, max: f64, spent: f64) -> ApiError {
@@ -280,11 +294,61 @@ impl App {
         if policy.max_cost_usd.is_none() && policy.max_artifact_bytes.is_none() {
             return Ok(());
         }
+        let (cost, artifact_bytes) = self.tenant_usage(caller).await?;
+        if let Some(max) = policy.max_cost_usd {
+            if cost >= max {
+                return Err(usd_quota_exceeded(
+                    "max_cost_usd",
+                    caller.tenant(),
+                    max,
+                    cost,
+                ));
+            }
+        }
+        if let Some(max) = policy.max_artifact_bytes {
+            if artifact_bytes >= max {
+                return Err(artifact_quota_exceeded(
+                    caller.tenant(),
+                    max,
+                    artifact_bytes,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `max_artifact_bytes` for an upload of `adding` bytes: refused when
+    /// the tenant's artifacts would pass the ceiling. Counted before the
+    /// upload's digest is known, so re-publishing bytes the tenant already
+    /// holds counts too; best-effort like the other live checks.
+    pub(crate) async fn check_artifact_upload(
+        self: &Arc<Self>,
+        caller: &Caller,
+        adding: u64,
+    ) -> Result<(), ApiError> {
+        let policy = self.tenant_policy(caller);
+        let Some(max) = policy.max_artifact_bytes else {
+            return Ok(());
+        };
+        let (_, artifact_bytes) = self.tenant_usage(caller).await?;
+        if artifact_bytes.saturating_add(adding) > max {
+            return Err(artifact_quota_exceeded(
+                caller.tenant(),
+                max,
+                artifact_bytes,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The tenant's lifetime spend and its artifacts' bytes, read live
+    /// from durable branch and artifact state.
+    async fn tenant_usage(self: &Arc<Self>, caller: &Caller) -> Result<(f64, u64), ApiError> {
         let yards: Vec<Yard> = self
             .tenant_repos(caller.tenant())
             .map(|r| r.yard.clone())
             .collect();
-        let (cost, artifact_bytes) = blocking(move || {
+        blocking(move || {
             let mut cost = 0.0f64;
             let mut artifact_bytes = 0u64;
             // Deduplicated by digest: `Yard::artifacts` is reader-scoped
@@ -306,35 +370,7 @@ impl App {
             Ok::<_, branchyard::Error>((cost, artifact_bytes))
         })
         .await?
-        .map_err(|e| error::sdk(&e))?;
-        if let Some(max) = policy.max_cost_usd {
-            if cost >= max {
-                return Err(usd_quota_exceeded(
-                    "max_cost_usd",
-                    caller.tenant(),
-                    max,
-                    cost,
-                ));
-            }
-        }
-        if let Some(max) = policy.max_artifact_bytes {
-            if artifact_bytes >= max {
-                return Err(ApiError::new(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "quota_exceeded",
-                    format!(
-                        "tenant {} is at its max_artifact_bytes quota ({artifact_bytes} of \
-                         {max}); ask the operator to raise it",
-                        caller.tenant()
-                    ),
-                )
-                .detail(serde_json::json!({
-                    "tenant": caller.tenant(), "limit": "max_artifact_bytes", "max": max,
-                    "reserved": artifact_bytes
-                })));
-            }
-        }
-        Ok(())
+        .map_err(|e| error::sdk(&e))
     }
 
     /// The command for a new branch: the request's own when allowed, else
@@ -696,7 +732,8 @@ async fn request_id(log: bool, request: Request, next: Next) -> Response {
 }
 
 /// Everything but `/healthz` needs a token, unknown routes included, so
-/// routes cannot be probed anonymously.
+/// routes cannot be probed anonymously. Every read (`GET`, `HEAD`) needs
+/// the `read` scope, checked here once so no handler can forget it.
 async fn authenticate(State(app): State<Shared>, mut request: Request, next: Next) -> Response {
     if request.uri().path() == "/healthz" {
         return next.run(request).await;
@@ -707,6 +744,10 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
         .and_then(|v| v.to_str().ok());
     match app.credentials.verify(header) {
         Some(principal) => {
+            let read = matches!(*request.method(), Method::GET | Method::HEAD);
+            if read && !principal.allows("read") {
+                return scope_required("read").into_response();
+            }
             let caller = Caller(principal.clone());
             request.extensions_mut().insert(caller);
             next.run(request).await

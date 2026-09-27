@@ -483,3 +483,86 @@ fn max_branches_quota_covers_graph_proposals() {
         .unwrap();
     assert_eq!(applied.revision, 1);
 }
+
+/// Every read needs the `read` scope, whatever else a credential holds:
+/// listing repositories, reading an operation (by ID or by key) and a
+/// scratch area's lock are all refused without it.
+#[test]
+fn every_read_needs_the_read_scope() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.tokens.push(Token {
+        name: "blind".into(),
+        secret: "blind-token-0123456789".into(),
+    });
+    config.principals.insert(
+        "blind".into(),
+        Principal {
+            name: "blind".into(),
+            tenant: "default".into(),
+            scopes: ["run", "merge", "admin"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            repos: None,
+        },
+    );
+    let server = Server::start(config);
+    let op = run(&server.client(), &task("WRITE a.txt=x", "r1"));
+    assert_eq!(op.state, OperationState::Succeeded);
+    for path in [
+        "/v1/repos".to_owned(),
+        "/v1/harnesses".to_owned(),
+        format!("/v1/operations/{}", op.id),
+        "/v1/operations?idempotency_key=k".to_owned(),
+        "/v1/repos/app/scratch/notes/lock".to_owned(),
+        "/v1/repos/app/branches".to_owned(),
+    ] {
+        let (status, _, body) = raw(
+            server.addr,
+            &common::get(&path, Some("blind-token-0123456789")),
+        );
+        assert_eq!(status, 403, "{path}: {body}");
+        assert_eq!(json(&body)["error"]["detail"]["scope"], "read", "{path}");
+    }
+    // Writing is still admitted: the scope check is for reads only (and
+    // following the operation would need `read`).
+    let blind = branchyard_client::Client::new(&server.url(), "blind-token-0123456789").unwrap();
+    blind
+        .repo("app")
+        .submit_task(&task("WRITE b.txt=x", "r2"), &new_key())
+        .unwrap();
+}
+
+/// `max_artifact_bytes` also holds when artifact bytes are added: an
+/// upload that would take the tenant past it is refused, and one that
+/// fits is published.
+#[test]
+fn max_artifact_bytes_covers_uploads() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.tenants.insert(
+        "default".into(),
+        TenantPolicy {
+            max_artifact_bytes: Some(10),
+            ..TenantPolicy::default()
+        },
+    );
+    let server = Server::start(config);
+    let client = server.client();
+    let op = run(&client, &task("WRITE a.txt=x", "b1"));
+    assert_eq!(op.state, OperationState::Succeeded);
+    let repo = client.repo("app");
+    repo.publish_artifact("b1", b"123456", Some("first"), None, &[], &new_key())
+        .unwrap();
+    let denied = repo
+        .publish_artifact("b1", b"abcdef", Some("second"), None, &[], &new_key())
+        .unwrap_err();
+    assert_eq!(denied.code(), Some("quota_exceeded"), "{denied:?}");
+    assert!(
+        denied.to_string().contains("max_artifact_bytes"),
+        "{denied}"
+    );
+    repo.publish_artifact("b1", b"abcd", Some("fits"), None, &[], &new_key())
+        .unwrap();
+}

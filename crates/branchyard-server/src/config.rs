@@ -453,7 +453,22 @@ impl Config {
             }
             check_principal(principal)?;
         }
+        // Every accepted secret, plaintext or hashed, is one entry: the
+        // same secret twice could name two principals, and the verifier
+        // would silently pick one. Refused naming the entries, never the
+        // secret.
         let mut hashes = BTreeSet::new();
+        let mut token_names = std::collections::BTreeMap::new();
+        for token in &self.tokens {
+            let hash = sha256_hex(token.secret.as_bytes());
+            if let Some(first) = token_names.insert(hash.clone(), token.name.clone()) {
+                return Err(format!(
+                    "tokens {first} and {} have the same secret; each needs its own",
+                    token.name
+                ));
+            }
+            hashes.insert(hash);
+        }
         for credential in &self.credentials {
             let hash = &credential.token_sha256;
             if hash.len() != 64
@@ -463,6 +478,11 @@ impl Config {
             {
                 return Err(format!(
                     "credential {hash:?} is not a 64-character lowercase hex SHA-256"
+                ));
+            }
+            if let Some(token) = token_names.get(hash) {
+                return Err(format!(
+                    "credential {hash} is also token {token}'s secret; configure it once"
                 ));
             }
             if !hashes.insert(hash.clone()) {
@@ -1008,6 +1028,29 @@ mod tests {
         assert!(check_webhook_url("ftp://example.com/hook", false).is_err());
         assert!(check_webhook_event_kind("stall").is_ok());
         assert!(check_webhook_event_kind("bogus").is_err());
+    }
+
+    #[test]
+    fn one_secret_is_one_entry_across_tokens_and_credentials() {
+        // Two plaintext tokens with the same secret.
+        let mut c = config("127.0.0.1:0");
+        c.tokens.push(Token {
+            name: "u".into(),
+            secret: "0123456789abcdef".into(),
+        });
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("tokens t and u have the same secret"), "{err}");
+        assert!(!err.contains("0123456789abcdef"), "{err}");
+        // A token's secret again as a hashed credential for another tenant.
+        let mut c = config("127.0.0.1:0");
+        let mut other = Principal::default_for("x");
+        other.tenant = "other".into();
+        c.credentials.push(Credential {
+            token_sha256: sha256_hex(b"0123456789abcdef"),
+            principal: other,
+        });
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("also token t's secret"), "{err}");
     }
 
     #[test]
