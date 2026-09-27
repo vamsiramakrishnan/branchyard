@@ -925,6 +925,13 @@
               "minimum": 0,
               "description": "Children of this seat one parent may have at once, counting finished\nones until they are removed. At least 1.",
               "default": 1
+            },
+            "bindings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Binding"
+              },
+              "description": "Scratch areas a child in this seat is bound to; see\n`docs/graph.md`. A spawn may add others, never change these."
             }
           },
           "required": [
@@ -960,6 +967,38 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
         }
       }
     },
@@ -2786,6 +2825,22 @@
             "null"
           ],
           "description": "The seat of the parent's rig the child fills, like\n[`branchyard::Spawn::seat`]. Without a name, the child is named\n`<parent>-<seat>`."
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Siblings the child waits for, like [`branchyard::Spawn::depends_on`]."
+        },
+        "after": {
+          "$ref": "#/$defs/After"
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Binding"
+          }
         }
       },
       "required": [
@@ -2900,6 +2955,941 @@
             "tool",
             "allow"
           ]
+        },
+        "After": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "settled",
+              "description": "Its last turn ended `ready` or `no_changes`, or it was merged."
+            },
+            {
+              "type": "string",
+              "const": "integrated",
+              "description": "It was integrated into the parent (`merged` into the parent's git\nbranch), or ended `no_changes`, leaving nothing to integrate."
+            }
+          ],
+          "description": "When a prerequisite counts as done for its dependent."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
+        }
+      }
+    },
+    "GraphRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "edits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GraphEdit"
+          }
+        },
+        "policy": {
+          "$ref": "#/$defs/PolicySpec",
+          "description": "Answers the children's tool requests, before their denials.",
+          "default": {
+            "mode": "deny"
+          }
+        },
+        "unapproved_tools": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "edits"
+      ],
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/graph`: a graph proposal for\nthe branch's children, applied with the server's authority as a person,\nlike `by graph apply --parent`. The answer is the\n[`branchyard::GraphApplied`]; a proposal made against a revision that\nmoved on is `409 stale_revision` and changes nothing. Children run on\nthe server; follow them with `inspect`, `events` and `graph`.",
+      "title": "GraphRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "GraphEdit": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "prompt": {
+                  "type": "string"
+                },
+                "harness": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "base": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "budget": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ChildBudget"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "check": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "max_depth": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "max_children": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "harnesses": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deny": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "seat": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "depends_on": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Siblings this child waits for: other children of the same parent,\nor other spawns in the same proposal."
+                },
+                "after": {
+                  "$ref": "#/$defs/After",
+                  "description": "When each of `depends_on` counts as done."
+                },
+                "bindings": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Binding"
+                  }
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "spawn"
+                }
+              },
+              "required": [
+                "kind",
+                "prompt"
+              ],
+              "description": "Create a child of the branch whose graph this is."
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dependent": {
+                  "type": "string"
+                },
+                "prerequisite": {
+                  "type": "string"
+                },
+                "after": {
+                  "$ref": "#/$defs/After"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "add_dependency"
+                }
+              },
+              "required": [
+                "kind",
+                "dependent",
+                "prerequisite"
+              ],
+              "description": "Make one child wait for another. The dependent must not have\nstarted yet."
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dependent": {
+                  "type": "string"
+                },
+                "prerequisite": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "remove_dependency"
+                }
+              },
+              "required": [
+                "kind",
+                "dependent",
+                "prerequisite"
+              ],
+              "description": "Remove a dependency of a child that has not started yet."
+            }
+          ],
+          "description": "One edit of a graph proposal, tagged by `kind`."
+        },
+        "ChildBudget": {
+          "type": "object",
+          "properties": {
+            "max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "max_turns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_minutes": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Per turn."
+            }
+          },
+          "description": "A child's limits as the tools show them."
+        },
+        "After": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "settled",
+              "description": "Its last turn ended `ready` or `no_changes`, or it was merged."
+            },
+            {
+              "type": "string",
+              "const": "integrated",
+              "description": "It was integrated into the parent (`merged` into the parent's git\nbranch), or ended `no_changes`, leaving nothing to integrate."
+            }
+          ],
+          "description": "When a prerequisite counts as done for its dependent."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
+        },
+        "PolicySpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/PolicyMode",
+              "default": "deny"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RuleSpec"
+              }
+            }
+          },
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+        },
+        "PolicyMode": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny"
+          ],
+          "description": "How requests no rule decides are answered. There is no remote `ask`:\na server has no terminal to ask on."
+        },
+        "RuleSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "Exact tool name, or a `*` suffix wildcard such as `mcp__*`."
+            },
+            "allow": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "tool",
+            "allow"
+          ]
+        }
+      }
+    },
+    "Graph": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Bumped by every committed proposal and every spawn."
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GraphNode"
+          },
+          "description": "Direct children, oldest first."
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        }
+      },
+      "required": [
+        "branch",
+        "revision",
+        "children",
+        "dependencies"
+      ],
+      "description": "A branch's graph: its children and the dependencies among them.",
+      "title": "Graph",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "GraphNode": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/BranchStatus"
+            },
+            "depends_on": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "bindings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Binding"
+              }
+            },
+            "seat": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "description": "A child in [`Graph`]."
+        },
+        "BranchStatus": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "ready"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "no_changes"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed without changing any file."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "interrupted"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "budget_exceeded"
+                }
+              },
+              "required": [
+                "state",
+                "limit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "merged"
+                }
+              },
+              "required": [
+                "state",
+                "target",
+                "commit"
+              ]
+            }
+          ],
+          "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
+        },
+        "Dependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dependent": {
+              "type": "string"
+            },
+            "prerequisite": {
+              "type": "string"
+            },
+            "after": {
+              "$ref": "#/$defs/After"
+            }
+          },
+          "required": [
+            "dependent",
+            "prerequisite"
+          ],
+          "description": "`dependent` starts only after `prerequisite`; both are children of the\nsame parent."
+        },
+        "After": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "settled",
+              "description": "Its last turn ended `ready` or `no_changes`, or it was merged."
+            },
+            {
+              "type": "string",
+              "const": "integrated",
+              "description": "It was integrated into the parent (`merged` into the parent's git\nbranch), or ended `no_changes`, leaving nothing to integrate."
+            }
+          ],
+          "description": "When a prerequisite counts as done for its dependent."
+        }
+      }
+    },
+    "GraphApplied": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string",
+          "description": "The branch whose graph changed."
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Its graph revision after the proposal."
+        },
+        "spawned": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Spawned"
+          },
+          "description": "The children the proposal created, in proposal order, as they were\nwhen the call returned: `running` if started, `waiting` for their\nprerequisites, or `blocked`."
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          },
+          "description": "Every dependency among the branch's children after the proposal."
+        }
+      },
+      "required": [
+        "branch",
+        "revision",
+        "spawned",
+        "dependencies"
+      ],
+      "description": "What a committed proposal did.",
+      "title": "GraphApplied",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Spawned": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "git_branch": {
+              "type": "string"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "base": {
+              "type": "string"
+            },
+            "depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "status": {
+              "$ref": "#/$defs/BranchStatus"
+            },
+            "budget": {
+              "$ref": "#/$defs/ChildBudget"
+            },
+            "seat": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The seat it fills, for a child spawned by seat."
+            },
+            "depends_on": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The siblings it waits for, for a child with prerequisites; it is\n`waiting` (or `blocked`) until they settle, and `base` is empty\nuntil it starts."
+            }
+          },
+          "required": [
+            "name",
+            "git_branch",
+            "harness",
+            "profile",
+            "base",
+            "depth",
+            "status",
+            "budget"
+          ],
+          "description": "A child that was created and started."
+        },
+        "BranchStatus": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "ready"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "no_changes"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed without changing any file."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "interrupted"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "budget_exceeded"
+                }
+              },
+              "required": [
+                "state",
+                "limit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "merged"
+                }
+              },
+              "required": [
+                "state",
+                "target",
+                "commit"
+              ]
+            }
+          ],
+          "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "ChildBudget": {
+          "type": "object",
+          "properties": {
+            "max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "max_turns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_minutes": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Per turn."
+            }
+          },
+          "description": "A child's limits as the tools show them."
+        },
+        "Dependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dependent": {
+              "type": "string"
+            },
+            "prerequisite": {
+              "type": "string"
+            },
+            "after": {
+              "$ref": "#/$defs/After"
+            }
+          },
+          "required": [
+            "dependent",
+            "prerequisite"
+          ],
+          "description": "`dependent` starts only after `prerequisite`; both are children of the\nsame parent."
+        },
+        "After": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "settled",
+              "description": "Its last turn ended `ready` or `no_changes`, or it was merged."
+            },
+            {
+              "type": "string",
+              "const": "integrated",
+              "description": "It was integrated into the parent (`merged` into the parent's git\nbranch), or ended `no_changes`, leaving nothing to integrate."
+            }
+          ],
+          "description": "When a prerequisite counts as done for its dependent."
         }
       }
     },
@@ -3268,6 +4258,36 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "ready"
                 }
               },
@@ -3487,6 +4507,26 @@
               "type": "boolean",
               "description": "See [`crate::BranchInfo::stalled`].",
               "default": false
+            },
+            "graph_revision": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The branch's own graph revision: bumped by each graph proposal it\ncommits and each child it spawns. Omitted while 0."
+            },
+            "depends_on": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Dependency"
+              },
+              "description": "The siblings this branch waits for, or waited for."
+            },
+            "bindings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Binding"
+              },
+              "description": "The scratch areas it is bound to."
             }
           },
           "required": [
@@ -3531,6 +4571,73 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "Dependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dependent": {
+              "type": "string"
+            },
+            "prerequisite": {
+              "type": "string"
+            },
+            "after": {
+              "$ref": "#/$defs/After"
+            }
+          },
+          "required": [
+            "dependent",
+            "prerequisite"
+          ],
+          "description": "`dependent` starts only after `prerequisite`; both are children of the\nsame parent."
+        },
+        "After": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "settled",
+              "description": "Its last turn ended `ready` or `no_changes`, or it was merged."
+            },
+            {
+              "type": "string",
+              "const": "integrated",
+              "description": "It was integrated into the parent (`merged` into the parent's git\nbranch), or ended `no_changes`, leaving nothing to integrate."
+            }
+          ],
+          "description": "When a prerequisite counts as done for its dependent."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
         }
       }
     },
@@ -3872,6 +4979,36 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "ready"
                 }
               },
@@ -4091,6 +5228,26 @@
               "type": "boolean",
               "description": "See [`crate::BranchInfo::stalled`].",
               "default": false
+            },
+            "graph_revision": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The branch's own graph revision: bumped by each graph proposal it\ncommits and each child it spawns. Omitted while 0."
+            },
+            "depends_on": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Dependency"
+              },
+              "description": "The siblings this branch waits for, or waited for."
+            },
+            "bindings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Binding"
+              },
+              "description": "The scratch areas it is bound to."
             }
           },
           "required": [
@@ -4135,6 +5292,73 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "Dependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dependent": {
+              "type": "string"
+            },
+            "prerequisite": {
+              "type": "string"
+            },
+            "after": {
+              "$ref": "#/$defs/After"
+            }
+          },
+          "required": [
+            "dependent",
+            "prerequisite"
+          ],
+          "description": "`dependent` starts only after `prerequisite`; both are children of the\nsame parent."
+        },
+        "After": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "settled",
+              "description": "Its last turn ended `ready` or `no_changes`, or it was merged."
+            },
+            {
+              "type": "string",
+              "const": "integrated",
+              "description": "It was integrated into the parent (`merged` into the parent's git\nbranch), or ended `no_changes`, leaving nothing to integrate."
+            }
+          ],
+          "description": "When a prerequisite counts as done for its dependent."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
         },
         "ErrorBody": {
           "type": "object",
@@ -5224,6 +6448,36 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "ready"
                 }
               },
@@ -5496,6 +6750,10 @@
             {
               "type": "object",
               "properties": {
+                "boundary": {
+                  "type": "string",
+                  "default": "turn_start"
+                },
                 "path": {
                   "type": "string",
                   "const": "turn_start"
@@ -5514,6 +6772,10 @@
                   "format": "uint64",
                   "minimum": 0
                 },
+                "boundary": {
+                  "type": "string",
+                  "default": "not_recorded"
+                },
                 "path": {
                   "type": "string",
                   "const": "steer"
@@ -5526,7 +6788,7 @@
               "description": "Steered into the running turn as input `steer` ([`Steer::id`])."
             }
           ],
-          "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as `{\"path\": \"steer\", \"steer\": 3}`."
+          "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
         }
       }
     },
@@ -6558,6 +7820,36 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "ready"
                 }
               },
@@ -6830,6 +8122,10 @@
             {
               "type": "object",
               "properties": {
+                "boundary": {
+                  "type": "string",
+                  "default": "turn_start"
+                },
                 "path": {
                   "type": "string",
                   "const": "turn_start"
@@ -6848,6 +8144,10 @@
                   "format": "uint64",
                   "minimum": 0
                 },
+                "boundary": {
+                  "type": "string",
+                  "default": "not_recorded"
+                },
                 "path": {
                   "type": "string",
                   "const": "steer"
@@ -6860,7 +8160,7 @@
               "description": "Steered into the running turn as input `steer` ([`Steer::id`])."
             }
           ],
-          "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as `{\"path\": \"steer\", \"steer\": 3}`."
+          "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
         }
       }
     },
@@ -7037,6 +8337,36 @@
               "required": [
                 "state"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
             },
             {
               "type": "object",

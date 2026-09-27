@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn`, `by inspect`, `by integrate` and the Python module.
+description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by integrate`, the Python module and the MCP tools.
 ---
 
 # Delegating with Branchyard

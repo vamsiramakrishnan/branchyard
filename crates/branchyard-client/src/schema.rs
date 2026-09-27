@@ -47,6 +47,9 @@ pub fn contract() -> Value {
     entry::<api::ReincarnateRequest>("ReincarnateRequest", &mut types);
     entry::<api::MergeRequest>("MergeRequest", &mut types);
     entry::<api::SpawnRequest>("SpawnRequest", &mut types);
+    entry::<api::GraphRequest>("GraphRequest", &mut types);
+    entry::<branchyard::Graph>("Graph", &mut types);
+    entry::<branchyard::GraphApplied>("GraphApplied", &mut types);
     entry::<api::IntegrateRequest>("IntegrateRequest", &mut types);
     entry::<api::SteerRequest>("SteerRequest", &mut types);
     entry::<api::CancelRequest>("CancelRequest", &mut types);
