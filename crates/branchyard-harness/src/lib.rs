@@ -101,6 +101,8 @@ pub struct Open {
     /// configuration shape. Resumes and forks pass them again: harnesses do
     /// not keep them with the session.
     pub mcp_servers: Vec<McpServer>,
+    /// Standing instructions that are not part of any prompt.
+    pub instructions: Option<Instructions>,
 }
 
 impl Open {
@@ -111,9 +113,34 @@ impl Open {
             cwd: cwd.into(),
             model: None,
             mcp_servers: Vec::new(),
+            instructions: None,
         }
     }
 }
+
+/// Standing instructions for a session, such as how to use Branchyard's
+/// delegation tools. Each driver puts them where its harness reads
+/// instructions, never in the working tree:
+///
+/// - Claude Code loads `plugin_dir` with `--plugin-dir`, so the text
+///   arrives as a skill; without one, it appends `text` to the system
+///   prompt.
+/// - Codex sends `text` as the thread's `developerInstructions`.
+/// - ACP has no instructions field; the first prompt the driver submits
+///   starts with `text` between `<branchyard-instructions>` tags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Instructions {
+    pub text: String,
+    /// A Claude Code plugin directory (`.claude-plugin/plugin.json` and
+    /// `skills/<name>/SKILL.md`) carrying the same instructions.
+    pub plugin_dir: Option<String>,
+}
+
+/// Opening tag of the ACP instructions preamble.
+pub const PREAMBLE_OPEN: &str = "<branchyard-instructions>";
+/// Closing tag of the ACP instructions preamble; the prompt follows after a
+/// blank line.
+pub const PREAMBLE_CLOSE: &str = "</branchyard-instructions>";
 
 /// A stdio MCP server for the harness to start, such as Branchyard's own
 /// tools. The harness launches it, so it runs with the harness's identity

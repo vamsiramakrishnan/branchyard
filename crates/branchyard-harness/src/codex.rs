@@ -14,6 +14,9 @@
 //! and connected such a server on `thread/start` when checked; resume and
 //! fork send the same override but were not checked live.
 //!
+//! Instructions go in `developerInstructions`, a string field of all three
+//! thread requests in the same schema.
+//!
 //! Threads start with `approvalPolicy: "on-request"` so command and file
 //! change approvals reach Branchyard as server requests, and Codex's own
 //! sandbox in `workspace-write` mode inside Branchyard's sandbox. Server
@@ -122,6 +125,9 @@ impl Codex {
         }
         if !open.mcp_servers.is_empty() {
             params["config"] = json!({ "mcp_servers": mcp_servers(&open.mcp_servers) });
+        }
+        if let Some(instructions) = &open.instructions {
+            params["developerInstructions"] = json!(instructions.text);
         }
         let method = match &open.mode {
             SessionMode::Fresh => "thread/start",

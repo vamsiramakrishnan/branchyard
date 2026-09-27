@@ -11,8 +11,8 @@ use branchyard_harness::conformance::{
     assert_conforms, decode, decode_all, feed, handshake, Replay, Transcript,
 };
 use branchyard_harness::{
-    Driver, Event, McpServer, NativeSession, Open, Opened, PermissionDecision, Rejected,
-    SessionMode, TurnOutcome,
+    Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
+    Rejected, SessionMode, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -27,6 +27,7 @@ fn fresh() -> Open {
         cwd: "/workspace".into(),
         model: None,
         mcp_servers: Vec::new(),
+        instructions: None,
     }
 }
 
@@ -156,6 +157,7 @@ fn fork_and_model_selection_are_rejected_before_launch() {
         cwd: "/workspace".into(),
         model,
         mcp_servers: Vec::new(),
+        instructions: None,
     };
     assert!(matches!(
         driver.open(open(SessionMode::Fork(session("p")), None)),
@@ -353,6 +355,7 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
             cwd: "/workspace".into(),
             model: None,
             mcp_servers: Vec::new(),
+            instructions: None,
         })
         .unwrap();
     let initialize = decode(&opened.frames[0]);
@@ -373,6 +376,7 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
             cwd: "/workspace".into(),
             model: None,
             mcp_servers: Vec::new(),
+            instructions: None,
         })
         .unwrap();
     let initialize = decode(&opened.frames[0]);
@@ -476,4 +480,32 @@ fn mcp_servers_are_stdio_servers_on_new_resume_and_load() {
         driver.open(relative),
         Err(Rejected::InvalidOpen(_))
     ));
+}
+
+#[test]
+fn instructions_precede_only_the_first_prompt_in_delimiters() {
+    let mut driver = Acp::new(vec!["agent".into()]);
+    let opened = driver
+        .open(Open {
+            instructions: Some(Instructions {
+                text: "Delegate with by.".into(),
+                plugin_dir: None,
+            }),
+            ..fresh()
+        })
+        .unwrap();
+    let events = handshake(&mut driver, &opened.frames, answer);
+    assert!(events.contains(&Event::Ready));
+    let first = decode(&driver.submit("Fix it.").unwrap().frames[0]);
+    let _: PromptRequest = assert_conforms(&first, "/params");
+    assert_eq!(
+        first["params"]["prompt"][0]["text"],
+        "<branchyard-instructions>\nDelegate with by.\n</branchyard-instructions>\n\nFix it."
+    );
+    feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": first["id"], "result": {"stopReason": "end_turn"}}),
+    );
+    let second = decode(&driver.submit("Again.").unwrap().frames[0]);
+    assert_eq!(second["params"]["prompt"][0]["text"], "Again.");
 }

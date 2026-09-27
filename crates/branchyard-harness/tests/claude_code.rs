@@ -4,8 +4,8 @@
 use branchyard_harness::claude_code::ClaudeCode;
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
-    Driver, Event, McpServer, NativeSession, Open, Opened, PermissionDecision, PermissionKey,
-    Rejected, SessionMode, TurnOutcome,
+    Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
+    PermissionKey, Rejected, SessionMode, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -22,6 +22,7 @@ fn open_with(mode: SessionMode) -> (ClaudeCode, Opened) {
             cwd: "/workspace".into(),
             model: None,
             mcp_servers: Vec::new(),
+            instructions: None,
         })
         .unwrap();
     assert_eq!(opened.launch.cwd, "/workspace");
@@ -431,4 +432,38 @@ fn unusable_mcp_servers_are_rejected_before_launch() {
         ..Open::new(SessionMode::Fresh, "/workspace")
     };
     assert!(matches!(driver.open(twice), Err(Rejected::InvalidOpen(why)) if why.contains("twice")));
+}
+
+#[test]
+fn instructions_load_as_a_plugin_or_append_to_the_system_prompt() {
+    let launch = |instructions: Instructions| {
+        let mut driver = ClaudeCode::new(vec!["claude".into()]);
+        let opened = driver
+            .open(Open {
+                instructions: Some(instructions),
+                ..Open::new(SessionMode::Fresh, "/workspace")
+            })
+            .unwrap();
+        opened.launch.argv
+    };
+    let argv = launch(Instructions {
+        text: "Delegate.".into(),
+        plugin_dir: Some("/repo/.branchyard/plugin".into()),
+    });
+    let at = argv.iter().position(|a| a == "--plugin-dir").unwrap();
+    assert_eq!(argv[at + 1], "/repo/.branchyard/plugin");
+    assert!(!argv.contains(&"--append-system-prompt".to_owned()));
+    let argv = launch(Instructions {
+        text: "Delegate.".into(),
+        plugin_dir: None,
+    });
+    let at = argv
+        .iter()
+        .position(|a| a == "--append-system-prompt")
+        .unwrap();
+    assert_eq!(argv[at + 1], "Delegate.");
+    let (_, argv, _) = open(SessionMode::Fresh);
+    assert!(!argv
+        .iter()
+        .any(|a| a == "--plugin-dir" || a == "--append-system-prompt"));
 }

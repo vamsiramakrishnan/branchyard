@@ -7,6 +7,9 @@
 //!
 //! MCP servers are sent as stdio servers in `mcpServers` on `session/new`,
 //! `session/resume` and `session/load`, which every ACP agent must accept.
+//! ACP has no field for standing instructions, so the first prompt of each
+//! opened session starts with them between [`PREAMBLE_OPEN`] and
+//! [`PREAMBLE_CLOSE`]; the prompt the caller recorded is unchanged.
 //!
 //! Resume uses `session/resume` when the agent advertises it, else
 //! `session/load`; updates that `session/load` replays are not reported as a
@@ -28,7 +31,7 @@ use serde_json::json;
 use crate::{
     frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, McpServer,
     NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
-    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Value,
+    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Value, PREAMBLE_CLOSE, PREAMBLE_OPEN,
 };
 
 /// The ACP protocol version this client speaks.
@@ -72,6 +75,8 @@ pub struct Acp {
     turns: Turns,
     /// Agent-specific `_meta` sent when opening a session.
     session_meta: Option<Value>,
+    /// Instructions to put before the next prompt, once.
+    preamble: Option<String>,
 }
 
 impl Acp {
@@ -88,6 +93,7 @@ impl Acp {
             permissions: HashMap::new(),
             turns: Turns::default(),
             session_meta: None,
+            preamble: None,
         }
     }
 
@@ -359,6 +365,7 @@ impl Driver for Acp {
             return Err(Rejected::Unsupported("model selection over ACP".into()));
         }
         crate::check_mcp_servers(&open.mcp_servers)?;
+        self.preamble = open.instructions.as_ref().map(|i| i.text.clone());
         let launch = LaunchSpec {
             argv: self.command.clone(),
             cwd: open.cwd.clone(),
@@ -408,10 +415,16 @@ impl Driver for Acp {
             _ => return Err(Rejected::NotReady),
         };
         let turn = self.turns.begin()?;
+        let text = match self.preamble.take() {
+            Some(preamble) => {
+                format!("{PREAMBLE_OPEN}\n{preamble}\n{PREAMBLE_CLOSE}\n\n{prompt}")
+            }
+            None => prompt.to_owned(),
+        };
         let request = self.request(
             Pending::Prompt(turn),
             "session/prompt",
-            json!({"sessionId": session, "prompt": [{"type": "text", "text": prompt}]}),
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]}),
         );
         Ok(Submitted {
             turn,

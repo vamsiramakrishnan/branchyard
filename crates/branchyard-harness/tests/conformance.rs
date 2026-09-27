@@ -14,6 +14,7 @@ fn fresh() -> Open {
         cwd: "/workspace".into(),
         model: None,
         mcp_servers: Vec::new(),
+        instructions: None,
     }
 }
 

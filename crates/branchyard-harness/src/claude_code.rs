@@ -14,6 +14,10 @@
 //! already loads; it is not given `--strict-mcp-config`. The argument is
 //! visible to other processes of the same user, environment included.
 //!
+//! Instructions arrive as a plugin (`--plugin-dir`), whose skills Claude Code
+//! 2.1.283 lists in its `initialize` response as `<plugin>:<skill>`, or
+//! else through `--append-system-prompt`. Neither touches the working tree.
+//!
 //! Resume passes `--resume <id>`; fork adds `--fork-session`. The session ID
 //! arrives on `system/init` and is checked: a resume that comes back under a
 //! different ID, or a fork that keeps the parent's, is a protocol violation,
@@ -24,9 +28,9 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use crate::{
-    frame, parse, Capabilities, Driver, Event, Frame, LaunchSpec, McpServer, NativeSession, Open,
-    Opened, Output, PermissionDecision, PermissionKey, PermissionRequest, Rejected, SessionMode,
-    Submitted, TurnOutcome, Turns, Usage, Value,
+    frame, parse, Capabilities, Driver, Event, Frame, Instructions, LaunchSpec, McpServer,
+    NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
+    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Usage, Value,
 };
 
 #[derive(Debug)]
@@ -425,6 +429,16 @@ impl Driver for ClaudeCode {
         crate::check_mcp_servers(&open.mcp_servers)?;
         if !open.mcp_servers.is_empty() {
             argv.extend(["--mcp-config".into(), mcp_config(&open.mcp_servers)]);
+        }
+        match &open.instructions {
+            Some(Instructions {
+                plugin_dir: Some(dir),
+                ..
+            }) => argv.extend(["--plugin-dir".into(), dir.clone()]),
+            Some(instructions) => {
+                argv.extend(["--append-system-prompt".into(), instructions.text.clone()])
+            }
+            None => {}
         }
         match &open.mode {
             SessionMode::Fresh => {}

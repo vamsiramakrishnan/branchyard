@@ -4,8 +4,8 @@
 use branchyard_harness::codex::Codex;
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
-    Driver, Event, McpServer, NativeSession, Open, Opened, PermissionDecision, PermissionKey,
-    Rejected, SessionMode, TurnOutcome,
+    Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
+    PermissionKey, Rejected, SessionMode, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -20,6 +20,7 @@ fn fresh() -> Open {
         cwd: "/workspace".into(),
         model: None,
         mcp_servers: Vec::new(),
+        instructions: None,
     }
 }
 
@@ -382,4 +383,42 @@ fn mcp_servers_are_a_thread_config_override_on_every_open_mode() {
         driver.open(relative),
         Err(Rejected::InvalidOpen(_))
     ));
+}
+
+#[test]
+fn instructions_are_developer_instructions_on_every_open_mode() {
+    for mode in [
+        SessionMode::Fresh,
+        SessionMode::Resume(session("t1")),
+        SessionMode::Fork(session("t0")),
+    ] {
+        let mut driver = Codex::new(vec!["codex".into()]);
+        let opened = driver
+            .open(Open {
+                instructions: Some(Instructions {
+                    text: "Delegate with by.".into(),
+                    plugin_dir: Some("/ignored".into()),
+                }),
+                mode: mode.clone(),
+                ..fresh()
+            })
+            .unwrap();
+        let mut request = Value::Null;
+        let mut answer = answer("t1");
+        handshake(&mut driver, &opened.frames, |frame| {
+            if frame["method"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("thread/"))
+            {
+                request = frame.clone();
+            }
+            answer(frame)
+        });
+        assert_eq!(
+            request["params"]["developerInstructions"], "Delegate with by.",
+            "{mode:?}"
+        );
+    }
+    let (_, _, request) = ready(SessionMode::Fresh, "t1");
+    assert!(request["params"].get("developerInstructions").is_none());
 }
