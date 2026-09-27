@@ -10,6 +10,7 @@ Every statement about an upstream project cites a path in its repository at the 
 | OpenRig | mvschwarz/openrig | `c9be421b9c8522075006f9cee3c0b2ba00d52a22` | 2026-09-26 |
 | Herdr | herdrdev/herdr | `fff6c820aa45f4eabb9b2e0456326dc74cca5a25` | 2026-09-27 |
 | Warp | warpdotdev/warp | `5af88f49f84e70025f9c19e13f6b9ae64b624627` | 2026-09-25 |
+| Straitjacket | vamsiramakrishnan/straitjacket | `35c7868ba46e5069161aec5eaf7aa5e51b344ad1` | 2026-09-17 |
 
 Warp's application code, where all its agent code lives (`app/`), is AGPL-3.0; only its UI framework crates are MIT. Warp is surveyed for ideas only: nothing from it is ported, and Branchyard files contain none of its code ([vendoring](vendoring.md#warp-preserve-the-license-boundary)).
 
@@ -138,6 +139,38 @@ It launches every third-party harness with approvals bypassed: `claude … --dan
 - Cost budgets are enforced across a subtree; Warp tracks cost only.
 - Candidates are merged only after checks on the exact target; Warp records a link.
 - It is an open, portable contract; Warp's remote execution, events and delegation depend on its own service.
+
+## Straitjacket
+
+Straitjacket (`vamsiramakrishnan/straitjacket`, Apache-2.0, `LICENSE`) is a "context and evidence sidecar for coding agents" (`README.md:3`): Python with an optional Rust hook binary, no daemon, container or server (`README.md:17`). It runs beside an agent that is already running, captures command output into a content-addressed store, and hands back bounded digests with `run:`, `checkpoint:` and `blob:` addresses. It is not an orchestrator, so most of the matrix above does not apply to it. It was first reviewed in PR #1 (`docs/straitjacket.md` on `sdk-harness-surface`, at `b47e7af`); the commit surveyed here is one day newer and adds evidence capsules (`src/ctx/capsule.py`) and published measurements.
+
+| Dimension | Straitjacket |
+|---|---|
+| Runs harnesses | No; it attaches to one running agent. In ACP mode it drives workers it spawns (`spec/adr/006-acp-orchestration-transport.md`) |
+| Approvals | The host's own; ACP workers default to refusal and never get `allow_always` (ADR 006:41) |
+| Durable execution | `TaskRuntime`: one allowance per task, reservation and outcome rows in an append-only ledger, one coordinator per task (`src/ctx/task_runtime.py`, ADR 007) |
+| Messaging | `ctx relay`: typed rows (`ctx.watch/v1`, `ctx.signal/v1`, `ctx.delivery/v1`) drained at hook boundaries; addresses only, never content (ADR 008, `docs/RELAY.md`) |
+| Delivery receipts | Each receipt names the boundary that delivered it: `session-start`, `pre-invocation`, `post-tool-use` (two kinds), `pre-tool-use`, `acp-prompt`, `acp-cancel` (`docs/RELAY.md`, delivery-point table; `src/ctx/relay.py:87`) |
+| Exactly once | Matched on the signal, not the subscriber string, so aliases of one reader get it once (ADR 008, invariant 5) |
+| Failure direction | Every relay path degrades to silence on a corrupt or unreadable queue, tested adversarially (ADR 008, invariant 6; `tests/test_relay.py`) |
+| Budgets | Per task: calls, steps, time, tokens, cost (`task_runtime.py:34-46`); no subtree budget |
+| Delegation authority | Not found |
+| Portable evidence | `ctx capsule`: a deterministic tar of the manifests and blobs cited handles close over, verified member by member on export and import (`src/ctx/capsule.py`) |
+| Packaging | The plugin contains the skill; one canonical source for the standalone archive (ADR 004); the release archive is installed from outside the checkout in its check (`scripts/check_distribution.py`) |
+
+### Where Straitjacket is ahead of Branchyard
+
+- Delivery receipts name the exact protocol boundary. Branchyard's `messages_delivered` records only `steer` or `turn_start`.
+- Portable, verified evidence bundles, and a published measurement of why an existing format was rejected (`evals/memvid-fidelity-2026-09-16.md`).
+- A stated failure direction for a best-effort side channel, with adversarial tests.
+- Registered, qualified and effective capabilities kept apart, with two named gates per host (`docs/HOST-CAPABILITIES.md`).
+
+### Where Branchyard is ahead of Straitjacket
+
+- It runs harnesses, isolates each in a branch, and merges checked candidates; Straitjacket instruments one agent in place.
+- Delegation authority with envelopes and subtree budgets.
+- Steering live text into a running turn for several native protocols; Straitjacket delivers at the next hook boundary, or cancels an ACP worker.
+- A server, PostgreSQL durability with fencing, lifecycle features and provisioning.
 
 ## Feature matrix
 
@@ -312,6 +345,18 @@ Ideas only; nothing is ported, because Warp's application is AGPL-3.0.
 
 `vendor/warp-agpl` stays as it is: five files, at `2f0db5c5edd8134f0e858aebbc0ecd0db2f91d38`, substantively unchanged at the surveyed commit. The mailbox and the permission engine are left out of it: they are designs to reimplement, not source to keep.
 
+### Straitjacket
+
+Straitjacket is Apache-2.0; PR #1 already took its plugin, installer, task-runtime and capability lessons. What remains:
+
+| Item | Type | Effort | Depends on | Notes |
+|---|---|---|---|---|
+| Name the delivery boundary in `messages_delivered` | idea | 1–2 days | Steering, inbox | Record which protocol boundary carried a message (for example Claude Code's next model call, Codex's `turn/steer`, turn start), as the per-harness steering docs already describe |
+| Portable, verified artifact bundles | idea | 3–5 days | Artifacts | Export the artifacts a candidate cites as one deterministic archive, verified per member on export and import |
+| A failure-direction statement for best-effort channels | idea | 0.5 day | None | For webhooks and any future advisory channel: state and test that it degrading never changes a decision or fails the primary call |
+| Two-gate capability wording in the matrix | idea | 1–2 days | Capability reasons | Say per driver what it can intercept, and whether that is live-tested |
+| Its sidecar mechanisms: task ledger, guard modes, redaction, code index | don't | — | — | Outside Branchyard's contract |
+
 ## Surprises
 
 - Scion fixed the Claude model-alias mismatch that Branchyard documents as a known upstream incompatibility; the upstream suite passes at `d9b9e6a`.
@@ -321,3 +366,4 @@ Ideas only; nothing is ported, because Warp's application is AGPL-3.0.
 - Scion, like OpenRig, drives every harness as a TUI in tmux, and bypasses approvals for Claude Code, Codex and Grok. None of the three answers individual tool permissions.
 - Warp, like Scion, launches every third-party harness with approvals bypassed; its permission engine governs only its own agent.
 - Warp's most relevant mechanism for Branchyard, a mailbox into a running Claude Code session, is not in the vendored files; it exists because Claude Code's protocol has no live input, so Warp delivers at a hook boundary.
+- Straitjacket's relay reached several of the inbox's design questions independently (exactly once, never blocking the primary call) and answered the receipt question more precisely.
