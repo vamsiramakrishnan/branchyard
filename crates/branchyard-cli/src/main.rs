@@ -103,6 +103,14 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             branch,
             prompt,
             task,
+            steer: true,
+            json,
+        } => commands::steer(target, &branch, &prompt, &task, json),
+        Command::Send {
+            branch,
+            prompt,
+            task,
+            steer: false,
             json,
         } => commands::send(env, target, &branch, &prompt, &task, json),
         Command::Fork {

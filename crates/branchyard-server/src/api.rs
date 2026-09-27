@@ -23,7 +23,7 @@ use branchyard::{
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, FeedEntry, ForkRequest,
     HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind, OperationResult,
-    PolicySpec, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
+    PolicySpec, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest, TaskRequest,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -318,6 +318,10 @@ pub fn router(app: Shared) -> Router {
         .route(
             "/v1/repos/{repo}/branches/{branch}/cancel",
             axum::routing::post(post_cancel),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/steer",
+            axum::routing::post(post_steer),
         )
         .route(
             "/v1/repos/{repo}/branches/{branch}/spawn",
@@ -985,6 +989,34 @@ async fn post_cancel(
         .await?
         .map_err(|e| error::sdk(&e))?;
     Ok(Json(CancelResult { cancelled }))
+}
+
+/// How long a steer request waits for the engine running the turn to
+/// deliver the input.
+const STEER_WAIT: Duration = Duration::from_secs(10);
+
+/// Add input to the branch's running turn without interrupting it, like
+/// `by send --steer`. Like a cancel, not an operation and not subject to
+/// branch locks: the running turn's operation holds them, and the input is
+/// for exactly that turn. It is queued durably, bound to the turn, and the
+/// engine running it, here or in another process, delivers it; the answer
+/// waits briefly for that. Refused with 409 `not_running` when no turn
+/// runs, and 422 `unsupported` when the harness cannot take input mid-turn.
+async fn post_steer(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(SteerRequest { text }, _): JsonBody<SteerRequest>,
+) -> Result<Json<branchyard::Steer>, ApiError> {
+    let yard = app.repo(&repo)?.yard.clone();
+    let by = format!("{} through the server", caller.0);
+    let steer = blocking(move || {
+        let steer = yard.steer_as(&branch, &text, &by)?;
+        yard.wait_steer(&branch, steer.id, STEER_WAIT)
+    })
+    .await?
+    .map_err(|e| error::sdk(&e))?;
+    Ok(Json(steer))
 }
 
 /// Create a child of `parent` with the server's authority as a person,

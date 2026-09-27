@@ -395,6 +395,71 @@ pub fn send(
     live.finish(env, result)
 }
 
+/// How long `by send --steer` waits for the engine running the turn to
+/// deliver the input.
+const STEER_WAIT: Duration = Duration::from_secs(10);
+
+/// `by send --steer`: add `prompt` to `branch`'s running turn. Inside a
+/// harness, as that harness's branch and only to a descendant; outside, with
+/// your authority. Waits for delivery; a refusal exits with failure.
+pub fn steer(target: &Target, branch: &str, prompt: &str, task: &TaskArgs, json: bool) -> Outcome {
+    if *task != TaskArgs::default() {
+        return fail(
+            json,
+            &branchyard::Error::Denied(
+                "send --steer takes only --json: the running turn keeps its own limits and \
+                 permissions"
+                    .into(),
+            ),
+        );
+    }
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.steer(branch, prompt),
+        (None, Target::Remote(remote)) => {
+            remote
+                .repo
+                .steer(branch, prompt)
+                .map_err(|e| branchyard::Error::Remote {
+                    kind: e.code().unwrap_or("remote").to_owned(),
+                    message: e.to_string(),
+                })
+        }
+        (None, Target::Local) => open_yard().and_then(|yard| {
+            let steer = yard.steer_as(branch, prompt, "by send --steer")?;
+            yard.wait_steer(branch, steer.id, STEER_WAIT)
+        }),
+    };
+    let steer = match result {
+        Ok(steer) => steer,
+        Err(error) => return fail(json, &error),
+    };
+    match &steer.state {
+        branchyard::SteerState::Refused { reason } if json => {
+            let value = serde_json::json!({"error": {
+                "kind": "steer_refused",
+                "message": format!("{branch}'s turn did not take the input: {reason}"),
+                "steer": steer,
+            }});
+            print(&format!("{}\n", to_json(&value)))?;
+            Err(Failure::Reported)
+        }
+        branchyard::SteerState::Refused { reason } => {
+            eprintln!("by: {branch}'s turn did not take the input: {reason}");
+            Err(Failure::Reported)
+        }
+        _ if json => print(&format!("{}\n", to_json(&steer))),
+        branchyard::SteerState::Pending => print(&format!(
+            "queued for {branch}'s running turn; its engine has not delivered it yet \
+             (steer {})\n",
+            steer.id
+        )),
+        branchyard::SteerState::Delivered | branchyard::SteerState::Accepted => print(&format!(
+            "delivered into {branch}'s running turn (steer {})\n",
+            steer.id
+        )),
+    }
+}
+
 pub fn fork(
     env: &Env,
     target: &Target,

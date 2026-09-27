@@ -383,6 +383,60 @@ fn a_running_turn_is_cancelled_over_http() {
 }
 
 #[test]
+fn a_running_turn_is_steered_over_http() {
+    let f = Fixture::new();
+    let server = Server::start(f.config());
+    let client = server.client();
+    let repo = client.repo("app");
+    let op = repo
+        .submit_task(&task("AWAIT_STEER", "live"), &new_key())
+        .unwrap();
+    eventually("the prompt to be submitted", || {
+        repo.events("live", 0).is_ok_and(|page| {
+            page.events
+                .iter()
+                .any(|e| matches!(e.activity, branchyard::Activity::Prompt(_)))
+        })
+    });
+    // Like a cancel, it does not need the branch lock the operation holds.
+    let steer = repo.steer("live", "mind the cache").unwrap();
+    assert_eq!(steer.by, "tester through the server");
+    assert!(
+        matches!(
+            steer.state,
+            branchyard::SteerState::Delivered | branchyard::SteerState::Accepted
+        ),
+        "{steer:?}"
+    );
+    let done = wait(&client, &op.id);
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    assert_eq!(
+        done.result.unwrap().branches[0].status,
+        BranchStatus::NoChanges
+    );
+    let events = repo.events("live", 0).unwrap().events;
+    assert!(events.iter().any(|e| matches!(&e.activity,
+        branchyard::Activity::Steered { id, by, text }
+            if *id == steer.id && by == "tester through the server" && text == "mind the cache")));
+
+    let idle = repo.steer("live", "again").unwrap_err();
+    assert_eq!(idle.code(), Some("not_running"));
+    let missing = repo.steer("nope", "x").unwrap_err();
+    assert_eq!(missing.code(), Some("unknown_branch"));
+    let (status, _, body) = raw(
+        server.addr,
+        &post(
+            "/v1/repos/app/branches/live/steer",
+            Some(TOKEN),
+            "",
+            r#"{"text": "x", "interrupt": true}"#,
+        ),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(json(&body)["error"]["code"], "invalid_request");
+}
+
+#[test]
 fn operations_survive_a_restart() {
     let f = Fixture::new();
     let server = Server::start(f.config());

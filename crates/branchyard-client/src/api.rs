@@ -313,6 +313,15 @@ pub struct SpawnRequest {
 #[serde(deny_unknown_fields)]
 pub struct IntegrateRequest {}
 
+/// `POST /v1/repos/{repo}/branches/{branch}/steer`: input for the branch's
+/// running turn, like `by send --steer`. The answer is the
+/// [`branchyard::Steer`] after waiting briefly for its delivery.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SteerRequest {
+    pub text: String,
+}
+
 /// `POST /v1/repos/{repo}/branches/{branch}/cancel`: no fields yet.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -57,7 +57,9 @@ fn a_harness_spawns_a_child_and_integrates_it_into_its_own_branch() {
         .unwrap();
     let said = reply(&f, "root");
     assert!(
-        said.contains("mcp tools: spawn,inspect,events,send,propose_integration,cancel,children"),
+        said.contains(
+            "mcp tools: spawn,inspect,events,send,steer,propose_integration,cancel,children"
+        ),
         "{said}"
     );
     let spawned = result(&said, "spawn");
@@ -175,6 +177,45 @@ fn refusals_reach_the_harness_as_tool_errors() {
     assert_eq!(me["remaining_usd"], 0.5);
     // The other branch was never touched.
     assert!(f.yard.branch("other").unwrap().info().children.is_empty());
+}
+
+#[test]
+fn steer_adds_to_a_running_childs_turn() {
+    let f = Fixture::new();
+    let prompt = [
+        r#"MCP spawn {"prompt": "AWAIT_STEER", "name": "kid"}"#,
+        "MCP started kid",
+        r#"MCP steer {"branch": "kid", "text": "also update the docs"}"#,
+        "MCP wait kid",
+        r#"MCP steer {"branch": "kid", "text": "too late"}"#,
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let said = reply(&f, "root");
+    let steered = result(&said, "steer");
+    assert_eq!(steered["branch"], "kid");
+    assert_eq!(steered["by"], "root");
+    assert!(
+        matches!(
+            steered["state"]["state"].as_str(),
+            Some("delivered" | "accepted")
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("mcp steer error: branch kid is not running a turn"),
+        "{said}"
+    );
+    let kid = f.yard.branch("kid").unwrap();
+    assert_eq!(kid.info().status, BranchStatus::NoChanges);
+    assert!(text(&kid.events().unwrap()).contains("steered: also update the docs"));
 }
 
 #[test]

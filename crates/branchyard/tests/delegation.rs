@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use branchyard::{
     Activity, BranchStatus, Budget, ChildBudget, Delegate, Envelope, Error, Policy, Provisioning,
-    Seat, Seats, SecretSource, Spawn, TaskOptions, Yard,
+    Seat, Seats, SecretSource, Spawn, SteerState, TaskOptions, Yard,
 };
 use common::{edit_record, fake_agent, Fixture};
 
@@ -226,6 +226,63 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
     let plain = plain.delegate(options).unwrap();
     assert_eq!(plain.inspect("plain").unwrap().envelope, None);
     denied(plain.spawn(spawn("say p", "p")), "not given delegation");
+}
+
+/// A parent adds input to its running child's turn: delivered by the
+/// engine running the child, recorded with the parent as its sender, and
+/// the child's turn goes on to end once. Only descendants can be steered.
+#[test]
+fn a_parent_steers_its_running_child() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::default());
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    delegate.spawn(spawn("AWAIT_STEER", "kid")).unwrap();
+    wait_until("the child to wait for steering", || {
+        delegate
+            .inspect("kid")
+            .is_ok_and(|i| i.last_message.contains("waiting for steering"))
+    });
+    // Through the tool as every surface calls it.
+    let steered = delegate
+        .call(
+            "steer",
+            serde_json::json!({"branch": "kid", "text": "use the fast path"}),
+        )
+        .unwrap();
+    let state: SteerState = serde_json::from_value(steered["state"].clone()).unwrap();
+    assert!(
+        matches!(state, SteerState::Delivered | SteerState::Accepted),
+        "{steered}"
+    );
+    assert_eq!(steered["by"], "root");
+    let finished = root.wait_subtree().unwrap();
+    assert_eq!(finished[0].status, BranchStatus::NoChanges);
+    let log = f.yard.branch("kid").unwrap().events().unwrap();
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Steered { by, text, .. } if by == "root" && text == "use the fast path")));
+    assert!(delegate
+        .inspect("kid")
+        .unwrap()
+        .last_message
+        .contains("steered: use the fast path"));
+    // Recorded on the asking branch, like every delegation operation.
+    let root_log = f.yard.branch("root").unwrap().events().unwrap();
+    assert!(root_log.iter().any(|e| matches!(&e.activity,
+        Activity::Delegation { tool, branch, refused: false, .. } if tool == "steer" && branch == "kid")));
+    // With no turn running, and outside the subtree, it is refused.
+    assert!(matches!(
+        delegate.steer("kid", "again"),
+        Err(Error::NotRunning(name)) if name == "kid"
+    ));
+    denied(delegate.steer("root", "hi"), "only on its descendants");
+    denied(delegate.steer("main", "hi"), "not a descendant");
 }
 
 #[test]

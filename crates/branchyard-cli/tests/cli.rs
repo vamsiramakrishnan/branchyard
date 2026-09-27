@@ -542,6 +542,90 @@ fn a_harness_delegates_with_by_in_its_shell() {
 }
 
 #[test]
+fn a_harness_steers_its_running_children_with_by_and_python() {
+    let repo = Repo::new();
+    let script = "import branchyard as b; b.spawn('AWAIT_STEER', name='py'); \
+                  s = b.steer('py', 'from python'); print('steered', s.by, s.state['state']); \
+                  d = b.wait('py', timeout=60, poll=0.05); print('finished', d.status['state']); \
+                  exec('try:\\n b.steer(\\'py\\', \\'late\\')\\nexcept b.NotRunningError as e:\\n print(\\'refused\\', e.kind)')";
+    let prompt = [
+        "SH by spawn AWAIT_STEER --name kid --json".to_owned(),
+        "SH by send kid --steer 'check the edge case' --json".to_owned(),
+        format!("SH python3 -c \"{script}\""),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, steered) = sh_json(&said, 1);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(steered["branch"], "kid");
+    assert_eq!(steered["by"], "root");
+    assert!(
+        matches!(
+            steered["state"]["state"].as_str(),
+            Some("delivered" | "accepted")
+        ),
+        "{said}"
+    );
+    for expected in ["steered root", "finished no_changes", "refused not_running"] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    for (child, text) in [("kid", "check the edge case"), ("py", "from python")] {
+        let said = reply(&repo, child);
+        assert!(said.contains(&format!("steered: {text}")), "{said}");
+    }
+}
+
+/// `by send --steer` from another process adds to a turn a separate `by
+/// run` process is running, and is refused, with a reason and a failing
+/// exit, when no turn runs.
+#[test]
+fn send_steer_reaches_a_turn_another_process_runs() {
+    let repo = Repo::new();
+    let agent = fake_agent().display().to_string();
+    let mut running = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["run", "AWAIT_STEER", "--name", "live", "--yes"])
+        .args(["--harness", "gemini-cli", "--command", &agent])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let waiting = || {
+        let log = repo.by(&["log", "live", "--json"]);
+        log.status.success() && stdout(&log).contains("waiting for steering")
+    };
+    while !waiting() {
+        assert!(std::time::Instant::now() < deadline, "live never started");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let limited = repo.by(&["send", "live", "--steer", "x", "--budget-usd", "1"]);
+    assert!(!limited.status.success());
+    assert!(stderr(&limited).contains("send --steer takes only --json"));
+    let out = repo.by(&["send", "live", "--steer", "try the other file"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(
+        stdout(&out).starts_with("delivered into live's running turn"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(running.wait().unwrap().success());
+    assert!(reply(&repo, "live").contains("steered: try the other file"));
+    let log = stdout(&repo.by(&["log", "live"]));
+    assert!(
+        log.contains("steered by by send --steer: try the other file"),
+        "{log}"
+    );
+
+    let late = repo.by(&["send", "live", "--steer", "late", "--json"]);
+    assert!(!late.status.success());
+    let error: Value = serde_json::from_slice(&late.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "not_running");
+}
+
+#[test]
 fn a_harness_delegates_with_the_python_module() {
     let repo = Repo::new();
     let script = "import branchyard as b; c = b.spawn('WRITE py.txt=p', name='py'); \
@@ -670,8 +754,9 @@ fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     let tools = repo.by_agent(&["run", "MCP tools", "--name", "mcp", "--delegate", "--yes"]);
     assert!(tools.status.success(), "{}", stderr(&tools));
     assert!(
-        reply(&repo, "mcp")
-            .contains("mcp tools: spawn,inspect,events,send,propose_integration,cancel,children"),
+        reply(&repo, "mcp").contains(
+            "mcp tools: spawn,inspect,events,send,steer,propose_integration,cancel,children"
+        ),
         "{}",
         reply(&repo, "mcp")
     );
