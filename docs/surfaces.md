@@ -71,7 +71,7 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Apply a graph proposal, all or nothing | `Delegate::apply_graph` | `graph apply --parent` | yes; server opt-in `--allow-delegation` for spawns | `POST …/graph`; `409 stale_revision` | `apply_graph` |
 | Spawn a child that waits for siblings | `Spawn::depends_on`, `after` | `spawn --depends-on [--after integrated]` | yes | `depends_on`, `after` in the spawn | yes |
 | Bind a child to scratch areas | `Spawn::bindings` | `spawn --bind NAME:ACCESS` | yes | `bindings` in the spawn | yes |
-| Start dependents no engine started | `Yard::resume_graph` | `graph resume` | no: the server does it every 30 s | n/a | n/a |
+| Start dependents no engine started | `Yard::resume_graph` | `graph resume` | no: every server and `by worker` does it every 30 s, one claim winning | n/a | n/a |
 | Ask the branch's parent a question, optionally waiting for an answer | `Delegate::ask` | `ask "<text>" [--wait SECS]` | yes; capped at 120s | `POST …/ask` | `ask` |
 | Report to the branch's parent | `Delegate::report` | `report "<text>"` | yes | `POST …/report` | `report` |
 | Escalate to the parent, or further up if a rig seat allows | `Delegate::escalate` | `escalate "<text>"` | yes | `POST …/escalate` | `escalate` |
