@@ -208,8 +208,10 @@ fn ask(q: &Question) -> io::Result<Value> {
                 select = select.item(items.len(), OTHER, "anything the question accepts");
             }
             let chosen = select.interact()?;
+            // The label, as a harness sends it: a choice whose value is
+            // null means "skip", where a null answer would mean "default".
             match items.get(chosen) {
-                Some((value, _, _)) => Ok(value.clone()),
+                Some((_, label, _)) => Ok(Value::String(label.clone())),
                 None => text_input(q),
             }
         }
@@ -228,7 +230,7 @@ fn ask(q: &Question) -> io::Result<Value> {
             let mut values: Vec<Value> = chosen
                 .iter()
                 .filter_map(|i| items.get(*i))
-                .map(|(v, _, _)| v.clone())
+                .map(|(_, label, _)| Value::String(label.clone()))
                 .collect();
             if other {
                 let more: String =

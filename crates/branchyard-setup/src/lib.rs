@@ -65,8 +65,8 @@ pub enum Topic {
 impl Topic {
     pub const ALL: [Topic; 5] = [
         Topic::Project,
-        Topic::Rig,
         Topic::Server,
+        Topic::Rig,
         Topic::Deploy,
         Topic::Plugin,
     ];

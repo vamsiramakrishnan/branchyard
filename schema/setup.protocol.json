@@ -194,7 +194,7 @@
               "description": "Whether an answer outside the choices is accepted (checked by `rules`)."
             },
             "default": {
-              "description": "What an unanswered question becomes with `--defaults`, and what\nanswering `null` means."
+              "description": "What an unanswered question becomes with `--defaults`, and what\n`null` means for a required one."
             },
             "optional": {
               "type": "boolean",

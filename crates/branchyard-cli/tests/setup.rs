@@ -448,7 +448,7 @@ fn without_a_terminal_the_wizard_points_at_the_protocol() {
         .iter()
         .map(|t| t["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["project", "rig", "server", "deploy", "plugin"]);
+    assert_eq!(ids, ["project", "server", "rig", "deploy", "plugin"]);
     for (args, error) in [
         (&["init", "nope", "--json", "--next"][..], "unknown topic"),
         (

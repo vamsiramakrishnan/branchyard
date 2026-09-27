@@ -337,7 +337,7 @@ pub struct Question {
     /// Whether an answer outside the choices is accepted (checked by `rules`).
     pub allow_other: bool,
     /// What an unanswered question becomes with `--defaults`, and what
-    /// answering `null` means.
+    /// `null` means for a required one.
     pub default: Value,
     /// Whether `null` (skip) is a valid answer.
     pub optional: bool,
@@ -433,15 +433,26 @@ impl Question {
         })
     }
 
+    /// The default as an answer (what `--defaults` gives an unanswered
+    /// question).
+    pub fn default_answer(&self) -> Result<Value, String> {
+        match (&self.default, self.optional) {
+            (Value::Null, true) => Ok(Value::Null),
+            (Value::Null, false) => Err("needs an answer".into()),
+            (default, _) => Ok(default.clone()),
+        }
+    }
+
     /// Normalize a raw answer: labels to values, text to numbers and
     /// booleans, lists from comma-separated text, `null` to the default,
     /// then check it against the choices and the rules.
     pub fn normalize(&self, raw: &Value) -> Result<Value, String> {
+        // `null` is a skip choice's value: it skips an optional question;
+        // a required one takes its default.
         if raw.is_null() {
-            return match (&self.default, self.optional) {
-                (Value::Null, true) => Ok(Value::Null),
-                (Value::Null, false) => Err("needs an answer".into()),
-                (default, _) => Ok(default.clone()),
+            return match self.optional {
+                true => Ok(Value::Null),
+                false => self.default_answer(),
             };
         }
         if let Value::String(text) = raw {
@@ -452,9 +463,6 @@ impl Question {
                     .any(|s| t.eq_ignore_ascii_case(s));
             if skip && self.optional && self.kind != Kind::Confirm {
                 return Ok(Value::Null);
-            }
-            if t.eq_ignore_ascii_case("default") && !self.default.is_null() {
-                return Ok(self.default.clone());
             }
         }
         let value = match self.kind {
@@ -654,11 +662,12 @@ fn step(questions: &[Question], raw: &BTreeMap<String, Value>, defaults: bool) -
             Some(true) => {}
         }
         state.asked.push(q.clone());
-        let given = raw
-            .get(&q.id)
-            .cloned()
-            .or_else(|| defaults.then_some(Value::Null));
-        match given.map(|value| q.normalize(&value)) {
+        let given = match raw.get(&q.id) {
+            Some(value) => Some(q.normalize(value)),
+            None if defaults => Some(q.default_answer()),
+            None => None,
+        };
+        match given {
             Some(Ok(value)) => {
                 state.answers.insert(q.id.clone(), value);
             }
@@ -749,6 +758,20 @@ mod tests {
         ]);
         assert_eq!(q.normalize(&json!("Pee, q")).unwrap(), json!(["p", "q"]));
         assert!(q.normalize(&json!(["r"])).is_err());
+        // null skips an optional question, even one with a default, and
+        // takes a required question's default.
+        let limit = Question::new("n", Kind::Number, "N", "N?", "w")
+            .optional()
+            .default(5)
+            .choices(vec![
+                Choice::new(5, "$5", ""),
+                Choice::new(Value::Null, "No limit", ""),
+            ]);
+        assert_eq!(limit.normalize(&Value::Null).unwrap(), Value::Null);
+        assert_eq!(limit.normalize(&json!("No limit")).unwrap(), Value::Null);
+        assert_eq!(limit.default_answer().unwrap(), json!(5));
+        let required = Question::new("r", Kind::Number, "R", "R?", "w").default(8);
+        assert_eq!(required.normalize(&Value::Null).unwrap(), json!(8));
         let q = Question::new("c", Kind::Confirm, "C", "C?", "w");
         assert_eq!(q.normalize(&json!("Yes")).unwrap(), json!(true));
         let q = Question::new("s", Kind::SecretRef, "S", "S?", "w")

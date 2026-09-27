@@ -44,7 +44,7 @@ Answers are one flat JSON object keyed by question id. A step returns the normal
 
 1. `--next` returns at most four questions, none depending on another in the same batch, so one `AskUserQuestion` call takes the whole batch.
 2. Each question has an `id`, a `kind`, a `header` of at most 12 characters, a `prompt`, `why` it is asked, at most four `choices` (label, description, the recommended one first), `more_choices` reachable as "Other", whether other text is allowed, a `default`, whether it is `optional`, the `when` condition that made it appear, and its `rules`.
-3. An answer may be a choice's value or its label (what `AskUserQuestion` returns), text a question's rules accept, `"skip"` or `null` for an optional question. A refused answer comes back in `errors` and its question is asked again; the message never repeats a `secret_ref` answer.
+3. An answer may be a choice's value or its label (what `AskUserQuestion` returns), text a question's rules accept, or `"skip"` or `null` to skip an optional question (a required question's `null` takes its default; `--defaults` fills every unanswered one). A refused answer comes back in `errors` and its question is asked again; the message never repeats a `secret_ref` answer.
 4. When no question remains, `"done": true` and `plan` holds the files, the commands to run next, notes, and `valid`.
 
 A step, from `crates/branchyard-setup/tests/golden/server-second.json` (facts and questions shortened):

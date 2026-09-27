@@ -61,7 +61,9 @@ When `done` is true, `plan` holds `files` (`path`, `kind`, `mode`,
   For `multiselect`, send a list or the labels joined by ", ".
 - `kind`: `confirm` takes `true`/`false` or `"yes"`/`"no"`; `number` a
   number or numeric text; `secret_ref` a variable name or `@path`, never a
-  secret; `"skip"` or `null` skips an `optional` question.
+  secret; `"skip"`, `null`, or a choice whose value is `null` ("Skip",
+  "No limit", …) skips an `optional` question; `null` for a required
+  one takes its default.
 - `when` says which earlier answer made a question appear; you need not
   evaluate it, the engine already did.
 
