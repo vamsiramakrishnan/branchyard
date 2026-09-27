@@ -10,9 +10,15 @@ use crate::pb::control_client::ControlClient;
 
 /// An actor bound to the identity Substrate assigned when it was created.
 ///
-/// Names can be reused after deletion; the UID cannot. Operations that
-/// Substrate lets us fence by UID use it, so a handle never acts on a
-/// different actor that later took the same name.
+/// Names can be reused after deletion; the UID cannot. Delete is fenced by
+/// UID in the request itself (`DeleteOptions.uid`), the only precondition
+/// the API offers for these calls. Resume, suspend, revert and tag take a
+/// name only, so each checks the UID immediately before the call and again
+/// from the actor the call returns (or right after it, for a tag): an
+/// actor that was replaced before the call is never acted on, and one
+/// replaced during it is reported as [`Error::ReplacedDuring`], never
+/// passed off as success. Because a UID is never reused, matching UIDs
+/// before and after prove that the call acted on the handle's actor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActorHandle {
     pub atespace: String,
@@ -46,6 +52,15 @@ pub enum Error {
         expected_uid: String,
         actual_uid: String,
     },
+    /// The actor was replaced by another with the same name while
+    /// `operation` ran, which may therefore have acted on the newer actor.
+    /// A tag made from it has been deleted again.
+    ReplacedDuring {
+        actor: String,
+        operation: &'static str,
+        expected_uid: String,
+        actual_uid: String,
+    },
     /// A checkpoint needs a stopped actor; this one is not.
     NotQuiescent {
         actor: String,
@@ -73,6 +88,16 @@ impl fmt::Display for Error {
                 expected_uid,
                 actual_uid,
             } => write!(f, "actor {actor} is now {actual_uid}, not {expected_uid}"),
+            Error::ReplacedDuring {
+                actor,
+                operation,
+                expected_uid,
+                actual_uid,
+            } => write!(
+                f,
+                "actor {actor} was replaced during {operation}: it is now {actual_uid}, not \
+                 {expected_uid}, and {operation} may have acted on the newer actor"
+            ),
             Error::NotQuiescent { actor, state } => {
                 write!(
                     f,
@@ -197,11 +222,39 @@ impl Actors {
 
     /// Resume the actor from its latest snapshot. Running actors are unchanged.
     pub async fn start(&mut self, actor: &ActorHandle) -> Result<(), Error> {
-        self.client
+        self.inspect(actor).await?;
+        let acted = self
+            .client
             .resume_actor(pb::ResumeActorRequest {
                 actor: self.reference(&actor.name),
             })
-            .await?;
+            .await?
+            .into_inner()
+            .actor;
+        self.confirm(actor, "ResumeActor", acted).await
+    }
+
+    /// Check that `acted`, the actor an operation returned (or, if it
+    /// returned none, the actor now named), is the handle's actor.
+    async fn confirm(
+        &mut self,
+        actor: &ActorHandle,
+        operation: &'static str,
+        acted: Option<pb::Actor>,
+    ) -> Result<(), Error> {
+        let acted = match acted {
+            Some(acted) => acted,
+            None => self.get(&actor.name).await?,
+        };
+        let uid = handle(&acted)?.uid;
+        if uid != actor.uid {
+            return Err(Error::ReplacedDuring {
+                actor: actor.name.clone(),
+                operation,
+                expected_uid: actor.uid.clone(),
+                actual_uid: uid,
+            });
+        }
         Ok(())
     }
 
@@ -221,12 +274,16 @@ impl Actors {
 
     /// Suspend the actor to a new portable snapshot, releasing its worker.
     pub async fn stop(&mut self, actor: &ActorHandle) -> Result<(), Error> {
-        self.client
+        self.inspect(actor).await?;
+        let acted = self
+            .client
             .suspend_actor(pb::SuspendActorRequest {
                 actor: self.reference(&actor.name),
             })
-            .await?;
-        Ok(())
+            .await?
+            .into_inner()
+            .actor;
+        self.confirm(actor, "SuspendActor", acted).await
     }
 
     /// Record the stopped actor's latest snapshot as a durable checkpoint.
@@ -282,6 +339,22 @@ impl Actors {
             Err(status) => return Err(status.into()),
         };
         let metadata = tag.metadata.ok_or(Error::MissingField("tag.metadata"))?;
+        // A tag names no source UID, so check that the actor was not
+        // replaced while it was taken; if it was, the tag may hold the
+        // newer actor's state and is deleted, fenced by its own UID.
+        if let Err(error) = self.confirm(actor, "CreateTag", None).await {
+            let _ = self
+                .client
+                .delete_tag(pb::DeleteTagRequest {
+                    tag: self.reference(&metadata.name),
+                    options: Some(pb::DeleteOptions {
+                        uid: metadata.uid.clone(),
+                        ..Default::default()
+                    }),
+                })
+                .await;
+            return Err(error);
+        }
         Ok(CheckpointRef {
             atespace: metadata.atespace,
             name: metadata.name,
@@ -330,12 +403,16 @@ impl Actors {
     /// Return a running, paused or crashed actor to its latest suspend,
     /// discarding everything since. This is not restore to a chosen checkpoint.
     pub async fn revert(&mut self, actor: &ActorHandle) -> Result<(), Error> {
-        self.client
+        self.inspect(actor).await?;
+        let acted = self
+            .client
             .revert_actor(pb::RevertActorRequest {
                 actor: self.reference(&actor.name),
             })
-            .await?;
-        Ok(())
+            .await?
+            .into_inner()
+            .actor;
+        self.confirm(actor, "RevertActor", acted).await
     }
 
     /// Delete the actor in any state. Deleting an absent actor succeeds.

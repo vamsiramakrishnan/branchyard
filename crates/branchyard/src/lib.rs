@@ -329,6 +329,9 @@ pub struct TaskOptions {
 /// `{"kind": "microsandbox", "image": "...", ...}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// One per branch, built once per command: the size does not matter, and
+// boxing would change how every caller constructs a provider.
+#[allow(clippy::large_enum_variant)]
 pub enum Provider {
     /// A local process as your user; no isolation. The default.
     Local,
@@ -366,10 +369,12 @@ pub struct SandboxOptions {
 /// bridge, copies both back and deletes the actor. See `docs/substrate.md`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SubstrateOptions {
-    /// The `Control` API, as `http://host:port`.
+    /// The `Control` API, as `https://host:port`, or `http://host:port` on
+    /// loopback or with [`SubstrateOptions::insecure`].
     pub endpoint: String,
     /// The router URL of an actor's bridge, with `{atespace}` and `{actor}`
-    /// in place of the names.
+    /// in place of the names: `https://` or `wss://`, or `http://` or
+    /// `ws://` on loopback or with [`SubstrateOptions::insecure`].
     pub router: String,
     /// The atespace actors are created in. Empty means `default`.
     #[serde(default)]
@@ -391,6 +396,23 @@ pub struct SubstrateOptions {
     /// not.
     #[serde(default)]
     pub pass_env: Vec<String>,
+    /// PEM certificate authorities for a TLS `Control` API, and for the
+    /// router unless [`SubstrateOptions::router_ca`] is set. Unset trusts
+    /// the public roots bundled at build time.
+    #[serde(default)]
+    pub ca: Option<PathBuf>,
+    /// A PEM client certificate and key for the `Control` API (mutual TLS).
+    #[serde(default)]
+    pub client_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub client_key: Option<PathBuf>,
+    /// PEM certificate authorities for a TLS router.
+    #[serde(default)]
+    pub router_ca: Option<PathBuf>,
+    /// Allow a `Control` endpoint or router in the clear to a host other
+    /// than loopback, sending credentials and code unencrypted.
+    #[serde(default)]
+    pub insecure: bool,
 }
 
 impl SubstrateOptions {

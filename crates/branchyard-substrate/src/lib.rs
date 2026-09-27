@@ -24,7 +24,7 @@ pub mod transfer;
 
 pub use actors::{ActorHandle, Actors, CheckpointRef, Error};
 pub use capabilities::{capabilities, runs_bridge, state, TemplateError};
-pub use provider::{Config, SubstrateProvider};
+pub use provider::{Config, Quiesce, SubstrateProvider};
 
 /// Types and client generated from the vendored `ateapi.proto`.
 #[allow(clippy::all, missing_docs)]

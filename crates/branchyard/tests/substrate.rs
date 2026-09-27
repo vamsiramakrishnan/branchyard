@@ -58,6 +58,7 @@ fn cluster(f: &Fixture) -> (FakeCluster, SubstrateOptions) {
         workdir: workdir.display().to_string(),
         home: home.display().to_string(),
         pass_env: vec!["BY_TEST_VISIBLE".into()],
+        ..SubstrateOptions::default()
     };
     (fake, options)
 }

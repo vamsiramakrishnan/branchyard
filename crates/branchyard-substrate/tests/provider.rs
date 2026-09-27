@@ -13,7 +13,7 @@ use branchyard_sandbox::{
     Consistency, ExecSpec, Locality, Mount, ProviderError, SandboxProvider, SandboxSpec,
     SandboxState, SnapshotGuarantee, SnapshotScope,
 };
-use branchyard_substrate::{Config, SubstrateProvider};
+use branchyard_substrate::{Config, Quiesce, SubstrateProvider};
 use common::{wait_exec, wait_gone, Cluster, Scratch};
 
 fn setup(name: &str, scratch: &Scratch) -> Setup {
@@ -247,4 +247,161 @@ fn a_name_reused_by_another_actor_is_never_acted_on() {
         SandboxState::Running
     );
     other.destroy("worker").unwrap();
+}
+
+#[test]
+fn an_actor_replaced_during_a_call_is_reported_not_passed_off() {
+    let cluster = Cluster::start("replaced-during");
+    let provider = cluster.provider();
+    let replaced = |result: Result<(), ProviderError>, operation: &str| match result {
+        Err(ProviderError::Runtime(why)) => {
+            assert!(
+                why.contains(&format!("replaced during {operation}")),
+                "{why}"
+            )
+        }
+        other => panic!("{operation}: expected a replacement error, got {other:?}"),
+    };
+
+    // Suspend: the actor is swapped under its name as the call arrives.
+    provider.ensure(&SandboxSpec::new("suspended")).unwrap();
+    cluster.fake.replace_before("SuspendActor", "suspended");
+    replaced(provider.stop("suspended"), "SuspendActor");
+
+    // Resume, when an existing actor is started again.
+    provider.ensure(&SandboxSpec::new("resumed")).unwrap();
+    provider.stop("resumed").unwrap();
+    cluster.fake.replace_before("ResumeActor", "resumed");
+    replaced(
+        provider.ensure(&SandboxSpec::new("resumed")).map(|_| ()),
+        "ResumeActor",
+    );
+
+    // A tag taken while the actor was replaced is deleted again.
+    let full = SnapshotGuarantee {
+        scope: SnapshotScope::Full,
+        consistency: Consistency::Crash,
+        locality: Locality::Portable,
+    };
+    provider.ensure(&SandboxSpec::new("tagged")).unwrap();
+    provider.stop("tagged").unwrap();
+    cluster.fake.replace_before("CreateTag", "tagged");
+    replaced(
+        provider.checkpoint("tagged", &full).map(|_| ()),
+        "CreateTag",
+    );
+    assert!(
+        cluster.fake.tag_names().is_empty(),
+        "{:?}",
+        cluster.fake.tag_names()
+    );
+
+    // Without a replacement the same calls succeed, and a replacement
+    // before a call is refused before anything is done.
+    provider.ensure(&SandboxSpec::new("plain")).unwrap();
+    provider.stop("plain").unwrap();
+    provider.checkpoint("plain", &full).unwrap();
+    let other = cluster.provider();
+    other.destroy("plain").unwrap();
+    other.ensure(&SandboxSpec::new("plain")).unwrap();
+    assert!(matches!(
+        provider.stop("plain"),
+        Err(ProviderError::Runtime(why)) if why.contains("is now")
+    ));
+    assert_eq!(
+        other.inspect("plain").unwrap().unwrap().state,
+        SandboxState::Running
+    );
+    for name in ["suspended", "resumed", "tagged", "plain"] {
+        other.destroy(name).unwrap();
+    }
+}
+
+#[test]
+fn stop_and_checkpoint_wait_for_running_execs_or_refuse() {
+    let cluster = Cluster::start("quiesce");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("busy")).unwrap();
+    let full = SnapshotGuarantee {
+        scope: SnapshotScope::Full,
+        consistency: Consistency::Crash,
+        locality: Locality::Portable,
+    };
+    assert!(provider.status("busy").unwrap().execs.is_empty());
+
+    // A harness in the middle of a tool call: a child at work.
+    let mut process = provider
+        .exec("busy", &sh(Path::new("/"), "sleep 300 & echo $!; wait"))
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(process.take_stdout().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let sleeper: u32 = line.trim().parse().unwrap();
+    wait_exec(sleeper, "sleep");
+    let status = provider.status("busy").unwrap();
+    assert_eq!(status.execs.len(), 1);
+    assert!(status.execs[0].members.contains(&"sleep".to_owned()));
+
+    let busy = |result: Result<(), ProviderError>| match result {
+        Err(ProviderError::Io(error)) => {
+            assert_eq!(error.kind(), io::ErrorKind::ResourceBusy, "{error}");
+            assert!(error.to_string().contains("at work: sh, sleep"), "{error}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    busy(
+        provider
+            .checkpoint_with("busy", &full, Quiesce::Refuse)
+            .map(|_| ()),
+    );
+    busy(provider.stop_with("busy", Quiesce::Wait(Duration::from_millis(300))));
+    // Nothing was stopped: the exec still runs and the actor is up.
+    assert!(common::alive(sleeper));
+    assert_eq!(
+        provider.inspect("busy").unwrap().unwrap().state,
+        SandboxState::Running
+    );
+
+    // Once the work ends, a waiting checkpoint proceeds.
+    let finisher = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        // SAFETY: plain syscall on the test's own sleeper.
+        unsafe { libc_kill(sleeper) };
+        process.wait().unwrap()
+    });
+    let checkpoint = provider
+        .checkpoint_with("busy", &full, Quiesce::Wait(Duration::from_secs(20)))
+        .unwrap();
+    assert!(finisher.join().unwrap().success());
+    assert_eq!(checkpoint.sandbox, "busy");
+    assert_eq!(
+        provider.inspect("busy").unwrap().unwrap().state,
+        SandboxState::Stopped
+    );
+
+    // Forced, it proceeds regardless and ends what runs.
+    provider.ensure(&SandboxSpec::new("busy")).unwrap();
+    let mut process = provider
+        .exec("busy", &sh(Path::new("/"), "sleep 300 & echo $!; wait"))
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(process.take_stdout().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let sleeper: u32 = line.trim().parse().unwrap();
+    provider
+        .checkpoint_with("busy", &full, Quiesce::Force)
+        .unwrap();
+    wait_gone(sleeper);
+    assert!(!process.wait().unwrap().success());
+    provider.destroy("busy").unwrap();
+}
+
+/// SIGTERM to `pid`.
+unsafe fn libc_kill(pid: u32) {
+    extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    kill(pid as i32, 15);
 }
