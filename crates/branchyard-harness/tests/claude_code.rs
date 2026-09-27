@@ -4,8 +4,8 @@
 use branchyard_harness::claude_code::ClaudeCode;
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
-    Driver, Event, NativeSession, Open, Opened, PermissionDecision, PermissionKey, Rejected,
-    SessionMode, TurnOutcome,
+    Driver, Event, McpServer, NativeSession, Open, Opened, PermissionDecision, PermissionKey,
+    Rejected, SessionMode, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -21,6 +21,7 @@ fn open_with(mode: SessionMode) -> (ClaudeCode, Opened) {
             mode,
             cwd: "/workspace".into(),
             model: None,
+            mcp_servers: Vec::new(),
         })
         .unwrap();
     assert_eq!(opened.launch.cwd, "/workspace");
@@ -356,4 +357,78 @@ fn a_result_for_another_turn_is_rejected() {
         closed[..],
         [Event::OutcomeUnknown { turn: 1, .. }, Event::SessionClosed]
     ));
+}
+
+fn branchyard_server() -> McpServer {
+    McpServer {
+        name: "branchyard".into(),
+        command: "/usr/local/bin/by".into(),
+        args: vec!["mcp".into(), "--branch".into(), "b".into()],
+        env: vec![("BRANCHYARD_TOKEN".into(), "t0k".into())],
+    }
+}
+
+#[test]
+fn mcp_servers_are_one_mcp_config_argument_in_the_agent_sdk_shape() {
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let opened = driver
+        .open(Open {
+            mcp_servers: vec![branchyard_server()],
+            ..Open::new(SessionMode::Resume(session("s1")), "/workspace")
+        })
+        .unwrap();
+    let argv = &opened.launch.argv;
+    let at = argv.iter().position(|a| a == "--mcp-config").unwrap();
+    // The Agent SDK passes `--mcp-config JSON.stringify({mcpServers})`, each
+    // value an McpStdioServerConfig.
+    let config: Value = serde_json::from_str(&argv[at + 1]).unwrap();
+    assert_eq!(
+        config,
+        json!({"mcpServers": {"branchyard": {
+            "type": "stdio",
+            "command": "/usr/local/bin/by",
+            "args": ["mcp", "--branch", "b"],
+            "env": {"BRANCHYARD_TOKEN": "t0k"},
+        }}})
+    );
+    assert_eq!(argv.iter().filter(|a| *a == "--mcp-config").count(), 1);
+    assert!(argv.contains(&"--resume".to_owned()));
+    // No servers, no flag.
+    let (_, argv, _) = open(SessionMode::Fresh);
+    assert!(!argv.contains(&"--mcp-config".to_owned()));
+}
+
+#[test]
+fn unusable_mcp_servers_are_rejected_before_launch() {
+    let cases = [
+        McpServer {
+            command: "by".into(),
+            ..branchyard_server()
+        },
+        McpServer {
+            name: "has space".into(),
+            ..branchyard_server()
+        },
+        McpServer {
+            env: vec![("A=B".into(), "c".into())],
+            ..branchyard_server()
+        },
+    ];
+    for server in cases {
+        let mut driver = ClaudeCode::new(vec!["claude".into()]);
+        let open = Open {
+            mcp_servers: vec![server.clone()],
+            ..Open::new(SessionMode::Fresh, "/workspace")
+        };
+        assert!(
+            matches!(driver.open(open), Err(Rejected::InvalidOpen(_))),
+            "{server:?}"
+        );
+    }
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let twice = Open {
+        mcp_servers: vec![branchyard_server(), branchyard_server()],
+        ..Open::new(SessionMode::Fresh, "/workspace")
+    };
+    assert!(matches!(driver.open(twice), Err(Rejected::InvalidOpen(why)) if why.contains("twice")));
 }

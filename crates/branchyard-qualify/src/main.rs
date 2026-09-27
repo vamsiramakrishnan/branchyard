@@ -264,6 +264,7 @@ impl Run<'_> {
             mode,
             cwd: self.cwd().display().to_string(),
             model: None,
+            mcp_servers: Vec::new(),
         };
         let transcript = self
             .config
@@ -492,6 +493,7 @@ fn scenarios(run: &mut Run) {
                 mode: SessionMode::Fork(parent.clone()),
                 cwd: run.cwd().display().to_string(),
                 model: None,
+                mcp_servers: Vec::new(),
             });
             let result = match rejected {
                 Err(error) => Ok(format!("rejected before launch as declared: {error}")),

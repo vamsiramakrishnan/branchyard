@@ -5,6 +5,9 @@
 //! or terminal capabilities, so an agent must use its own tools inside the
 //! sandbox; client requests for those methods are answered with an error.
 //!
+//! MCP servers are sent as stdio servers in `mcpServers` on `session/new`,
+//! `session/resume` and `session/load`, which every ACP agent must accept.
+//!
 //! Resume uses `session/resume` when the agent advertises it, else
 //! `session/load`; updates that `session/load` replays are not reported as a
 //! new turn. Fork is rejected: `session/fork` is an unstable ACP method, and a
@@ -23,9 +26,9 @@ use agent_client_protocol_schema::v1::{
 use serde_json::json;
 
 use crate::{
-    frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open,
-    Opened, Output, PermissionDecision, PermissionKey, PermissionRequest, Rejected, SessionMode,
-    Submitted, TurnOutcome, Turns, Value,
+    frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, McpServer,
+    NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
+    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Value,
 };
 
 /// The ACP protocol version this client speaks.
@@ -36,6 +39,22 @@ enum Pending {
     Initialize,
     Session,
     Prompt(u64),
+}
+
+/// ACP stdio servers: `{name, command, args, env: [{name, value}]}` with no
+/// `type`, the untagged `McpServer::Stdio` variant every agent must accept.
+fn mcp_servers(servers: &[McpServer]) -> Value {
+    servers
+        .iter()
+        .map(|server| {
+            let env: Vec<Value> = server
+                .env
+                .iter()
+                .map(|(name, value)| json!({"name": name, "value": value}))
+                .collect();
+            json!({"name": server.name, "command": server.command, "args": server.args, "env": env})
+        })
+        .collect()
 }
 
 /// An ACP agent session.
@@ -104,17 +123,21 @@ impl Acp {
         }
         let open = self.open.clone().expect("initialize follows open()");
         let capabilities = response.agent_capabilities;
+        let servers = mcp_servers(&open.mcp_servers);
         let (method, mut params) = match &open.mode {
-            SessionMode::Fresh => ("session/new", json!({"cwd": open.cwd, "mcpServers": []})),
+            SessionMode::Fresh => (
+                "session/new",
+                json!({"cwd": open.cwd, "mcpServers": servers}),
+            ),
             SessionMode::Resume(session) if capabilities.session_capabilities.resume.is_some() => (
                 "session/resume",
-                json!({"sessionId": session.as_str(), "cwd": open.cwd, "mcpServers": []}),
+                json!({"sessionId": session.as_str(), "cwd": open.cwd, "mcpServers": servers}),
             ),
             SessionMode::Resume(session) if capabilities.load_session => {
                 self.loading = true;
                 (
                     "session/load",
-                    json!({"sessionId": session.as_str(), "cwd": open.cwd, "mcpServers": []}),
+                    json!({"sessionId": session.as_str(), "cwd": open.cwd, "mcpServers": servers}),
                 )
             }
             SessionMode::Resume(_) => {
@@ -335,6 +358,7 @@ impl Driver for Acp {
             // ACP v1 has no model parameter; selection belongs to the profile.
             return Err(Rejected::Unsupported("model selection over ACP".into()));
         }
+        crate::check_mcp_servers(&open.mcp_servers)?;
         let launch = LaunchSpec {
             argv: self.command.clone(),
             cwd: open.cwd.clone(),

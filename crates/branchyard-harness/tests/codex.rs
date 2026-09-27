@@ -4,8 +4,8 @@
 use branchyard_harness::codex::Codex;
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
-    Driver, Event, NativeSession, Open, Opened, PermissionDecision, PermissionKey, Rejected,
-    SessionMode, TurnOutcome,
+    Driver, Event, McpServer, NativeSession, Open, Opened, PermissionDecision, PermissionKey,
+    Rejected, SessionMode, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -19,6 +19,7 @@ fn fresh() -> Open {
         mode: SessionMode::Fresh,
         cwd: "/workspace".into(),
         model: None,
+        mcp_servers: Vec::new(),
     }
 }
 
@@ -325,4 +326,60 @@ fn errors_outside_a_turn_are_warnings() {
             message: "stream reset".into()
         }]
     );
+}
+
+#[test]
+fn mcp_servers_are_a_thread_config_override_on_every_open_mode() {
+    let server = McpServer {
+        name: "branchyard".into(),
+        command: "/usr/local/bin/by".into(),
+        args: vec!["mcp".into()],
+        env: vec![("BRANCHYARD_TOKEN".into(), "t0k".into())],
+    };
+    let expected = json!({"mcp_servers": {"branchyard": {
+        "command": "/usr/local/bin/by",
+        "args": ["mcp"],
+        "env": {"BRANCHYARD_TOKEN": "t0k"},
+    }}});
+    for mode in [
+        SessionMode::Fresh,
+        SessionMode::Resume(session("t1")),
+        SessionMode::Fork(session("t0")),
+    ] {
+        let mut driver = Codex::new(vec!["codex".into()]);
+        let opened = driver
+            .open(Open {
+                mcp_servers: vec![server.clone()],
+                mode: mode.clone(),
+                ..fresh()
+            })
+            .unwrap();
+        let mut request = Value::Null;
+        let mut answer = answer("t1");
+        handshake(&mut driver, &opened.frames, |frame| {
+            if frame["method"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("thread/"))
+            {
+                request = frame.clone();
+            }
+            answer(frame)
+        });
+        assert_eq!(request["params"]["config"], expected, "{mode:?}");
+    }
+    // No servers, no override.
+    let (_, _, request) = ready(SessionMode::Fresh, "t1");
+    assert!(request["params"].get("config").is_none());
+    let mut driver = Codex::new(vec!["codex".into()]);
+    let relative = Open {
+        mcp_servers: vec![McpServer {
+            command: "by".into(),
+            ..server
+        }],
+        ..fresh()
+    };
+    assert!(matches!(
+        driver.open(relative),
+        Err(Rejected::InvalidOpen(_))
+    ));
 }

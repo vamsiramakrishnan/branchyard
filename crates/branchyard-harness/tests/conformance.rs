@@ -13,6 +13,7 @@ fn fresh() -> Open {
         mode: SessionMode::Fresh,
         cwd: "/workspace".into(),
         model: None,
+        mcp_servers: Vec::new(),
     }
 }
 

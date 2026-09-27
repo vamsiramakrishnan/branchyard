@@ -97,6 +97,82 @@ pub struct Open {
     pub cwd: String,
     /// Harness-specific model name, when the task pins one.
     pub model: Option<String>,
+    /// MCP servers the harness starts for this session, in its native
+    /// configuration shape. Resumes and forks pass them again: harnesses do
+    /// not keep them with the session.
+    pub mcp_servers: Vec<McpServer>,
+}
+
+impl Open {
+    /// A session in `cwd` with no model pinned and no MCP servers.
+    pub fn new(mode: SessionMode, cwd: impl Into<String>) -> Open {
+        Open {
+            mode,
+            cwd: cwd.into(),
+            model: None,
+            mcp_servers: Vec::new(),
+        }
+    }
+}
+
+/// A stdio MCP server for the harness to start, such as Branchyard's own
+/// tools. The harness launches it, so it runs with the harness's identity
+/// and inside the harness's sandbox; nothing here grants it authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServer {
+    /// The harness's name for the server: `[A-Za-z0-9_-]`, at most 64
+    /// bytes. Claude Code names its tools `mcp__<name>__<tool>`.
+    pub name: String,
+    /// Executable. ACP requires an absolute path; the drivers require one
+    /// everywhere so a server never resolves differently per harness.
+    pub command: String,
+    pub args: Vec<String>,
+    /// Variables set for the server process, in addition to whatever the
+    /// harness passes through.
+    pub env: Vec<(String, String)>,
+}
+
+/// Reject server lists a harness could misread: bad or repeated names,
+/// relative commands, or unusable variable names.
+pub(crate) fn check_mcp_servers(servers: &[McpServer]) -> Result<(), Rejected> {
+    let invalid = |why: String| Err(Rejected::InvalidOpen(why));
+    for (index, server) in servers.iter().enumerate() {
+        let name_ok = !server.name.is_empty()
+            && server.name.len() <= 64
+            && server
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !name_ok {
+            return invalid(format!(
+                "MCP server name {:?} is not [A-Za-z0-9_-]{{1,64}}",
+                server.name
+            ));
+        }
+        if servers[..index]
+            .iter()
+            .any(|other| other.name == server.name)
+        {
+            return invalid(format!("MCP server {} is listed twice", server.name));
+        }
+        if !server.command.starts_with('/') {
+            return invalid(format!(
+                "MCP server {} needs an absolute command, not {:?}",
+                server.name, server.command
+            ));
+        }
+        if let Some((var, _)) = server
+            .env
+            .iter()
+            .find(|(var, _)| var.is_empty() || var.contains(['=', '\0']))
+        {
+            return invalid(format!(
+                "MCP server {} sets an invalid variable {var:?}",
+                server.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The process to start inside the sandbox.

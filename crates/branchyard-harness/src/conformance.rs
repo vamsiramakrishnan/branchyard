@@ -18,7 +18,7 @@
 //! let transcript = Transcript::load("tests/fixtures/codex-0.157.1-unauthenticated-turn.jsonl");
 //! let mut driver = Codex::new(vec!["codex".into()]);
 //! let opened = driver
-//!     .open(Open { mode: SessionMode::Fresh, cwd: "/workspace".into(), model: None })
+//!     .open(Open::new(SessionMode::Fresh, "/workspace"))
 //!     .unwrap();
 //! let replayed = Replay::new(&transcript)
 //!     .prompt("Say hello.")
