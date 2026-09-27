@@ -374,9 +374,8 @@ pub fn send(
     }
     if let Target::Remote(remote) = target {
         if json {
-            return Err(Failure::Message(
-                "send --json does not run with --remote yet".into(),
-            ));
+            let sent = remote::send_json(env, remote, branch, prompt, task);
+            return emit(true, sent, |_| String::new());
         }
         return remote::send(env, remote, branch, prompt, task);
     }
@@ -651,7 +650,7 @@ fn required_outside(branch: Option<String>, command: &str) -> Result<String, bra
     })
 }
 
-pub fn spawn(env: &Env, prompt: &str, args: &SpawnArgs) -> Outcome {
+pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outcome {
     let json = args.json;
     let task = &args.task;
     let request = Spawn {
@@ -701,6 +700,10 @@ pub fn spawn(env: &Env, prompt: &str, args: &SpawnArgs) -> Outcome {
         Ok(parent) => parent,
         Err(error) => return fail(json, &error),
     };
+    if let Target::Remote(remote) = target {
+        let result = remote::spawn(env, remote, &parent, prompt, args);
+        return emit(json, result, |i| render::inspection(i, env.style()));
+    }
     let live = Live::start_to(env, task, true, json, None);
     let result = (|| {
         // One yard, so the wait sees the child's thread.
@@ -714,13 +717,16 @@ pub fn spawn(env: &Env, prompt: &str, args: &SpawnArgs) -> Outcome {
     emit(json, result, |i| render::inspection(i, env.style()))
 }
 
-pub fn inspect(env: &Env, branch: Option<String>, json: bool) -> Outcome {
-    let result = match harness_delegate(json)? {
-        Some(delegate) => {
+pub fn inspect(env: &Env, target: &Target, branch: Option<String>, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => {
             let branch = branch.unwrap_or_else(|| delegate.branch().to_owned());
             delegate.inspect(&branch)
         }
-        None => required_outside(branch, "inspect")
+        (None, Target::Remote(remote)) => {
+            required_outside(branch, "inspect").and_then(|b| remote::inspect(remote, &b))
+        }
+        (None, Target::Local) => required_outside(branch, "inspect")
             .and_then(|b| as_user(&b, TaskOptions::default())?.inspect(&b)),
     };
     emit(json, result, |i| render::inspection(i, env.style()))
@@ -728,18 +734,21 @@ pub fn inspect(env: &Env, branch: Option<String>, json: bool) -> Outcome {
 
 pub fn events(
     env: &Env,
+    target: &Target,
     branch: Option<String>,
     cursor: Option<usize>,
     limit: Option<usize>,
     json: bool,
 ) -> Outcome {
     let limit = limit.unwrap_or(50);
-    let result = match harness_delegate(json)? {
-        Some(delegate) => {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => {
             let branch = branch.unwrap_or_else(|| delegate.branch().to_owned());
             delegate.events(&branch, cursor, limit)
         }
-        None => required_outside(branch, "events")
+        (None, Target::Remote(remote)) => required_outside(branch, "events")
+            .and_then(|b| remote::events(remote, &b, cursor, limit)),
+        (None, Target::Local) => required_outside(branch, "events")
             .and_then(|b| as_user(&b, TaskOptions::default())?.events(&b, cursor, limit)),
     };
     emit(json, result, |page| {
@@ -752,11 +761,12 @@ pub fn events(
     })
 }
 
-pub fn integrate(branch: &str, json: bool) -> Outcome {
-    let result = match harness_delegate(json)? {
-        Some(delegate) => delegate.integrate(branch),
+pub fn integrate(target: &Target, branch: &str, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.integrate(branch),
+        (None, Target::Remote(remote)) => remote::integrate(remote, branch),
         // A person integrates a child into the parent that delegated it.
-        None => (|| {
+        (None, Target::Local) => (|| {
             let yard = open_yard()?;
             let info = yard.branch(branch)?.info().clone();
             let parent = info
@@ -804,15 +814,18 @@ pub fn cancel(target: &Target, branch: &str, json: bool) -> Outcome {
     })
 }
 
-pub fn children(env: &Env, branch: Option<String>, json: bool) -> Outcome {
-    let result = match harness_delegate(json)? {
-        Some(delegate) => match branch {
+pub fn children(env: &Env, target: &Target, branch: Option<String>, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => match branch {
             Some(other) if other != delegate.branch() => Err(branchyard::Error::Denied(
                 "inside a harness, by children lists your own branch's descendants".into(),
             )),
             _ => delegate.children(),
         },
-        None => required_outside(branch, "children")
+        (None, Target::Remote(remote)) => {
+            required_outside(branch, "children").and_then(|b| remote::children(remote, &b))
+        }
+        (None, Target::Local) => required_outside(branch, "children")
             .and_then(|b| as_user(&b, TaskOptions::default())?.children()),
     };
     emit(json, result, |c| match c.descendants.is_empty() {
@@ -850,7 +863,7 @@ fn absolute(path: &str) -> std::path::PathBuf {
 }
 
 /// The SDK provider for `--provider`, if given.
-fn provider(task: &TaskArgs) -> Option<Provider> {
+pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
     if let Some(substrate) = &task.substrate {
         return Some(Provider::Substrate(SubstrateOptions {
             endpoint: substrate.endpoint.clone(),

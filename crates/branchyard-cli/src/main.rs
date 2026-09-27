@@ -119,37 +119,18 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Harnesses { json } => commands::harnesses(env, target, json),
         Command::Watch { interval, once } => watch::run(env, target, interval, once),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
-        ref command if matches!(target, Target::Remote(_)) && delegation(command).is_some() => {
-            Err(Failure::Message(format!(
-                "{} acts on a local repository with a branch's delegation authority; \
-                 it does not run with --remote yet",
-                delegation(command).unwrap_or_default()
-            )))
-        }
-        Command::Spawn { prompt, spawn } => commands::spawn(env, &prompt, &spawn),
-        Command::Inspect { branch, json } => commands::inspect(env, branch, json),
+        Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),
+        Command::Inspect { branch, json } => commands::inspect(env, target, branch, json),
         Command::Events {
             branch,
             cursor,
             limit,
             json,
-        } => commands::events(env, branch, cursor, limit, json),
-        Command::Integrate { branch, json } => commands::integrate(&branch, json),
-        Command::Children { branch, json } => commands::children(env, branch, json),
+        } => commands::events(env, target, branch, cursor, limit, json),
+        Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
+        Command::Children { branch, json } => commands::children(env, target, branch, json),
         Command::Help { .. } | Command::Version | Command::Serve { .. } | Command::Mcp { .. } => {
             unreachable!("handled before choosing a target")
         }
     }
-}
-
-/// The name of a delegation command, which runs only in local mode.
-fn delegation(command: &Command) -> Option<&'static str> {
-    Some(match command {
-        Command::Spawn { .. } => "spawn",
-        Command::Inspect { .. } => "inspect",
-        Command::Events { .. } => "events",
-        Command::Integrate { .. } => "integrate",
-        Command::Children { .. } => "children",
-        _ => return None,
-    })
 }

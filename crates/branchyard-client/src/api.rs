@@ -7,7 +7,10 @@
 
 use std::time::Duration;
 
-use branchyard::{Activity, BranchInfo, Budget, HarnessInfo, Merged, Policy, RecordedEvent};
+use branchyard::{
+    Activity, BranchInfo, Budget, Envelope, HarnessInfo, Inspection, Merged, Policy, Provider,
+    RecordedEvent,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -134,6 +137,30 @@ pub struct TaskRequest {
     /// server allows client commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    /// Let the harness delegate within this envelope, like
+    /// [`branchyard::TaskOptions::delegation`]. Refused unless the server
+    /// allows delegation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Envelope>,
+    /// Allow the harness's shell commands that run the server's `by` with a
+    /// delegation subcommand, after the policy's own rules, like
+    /// `by --allow-delegation`. Refused unless the server allows delegation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_delegation: bool,
+    /// Run a profile whose driver cannot route tool approvals, like
+    /// [`branchyard::TaskOptions::unapproved_tools`]. Refused unless the
+    /// server allows unapproved tools.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unapproved_tools: bool,
+    /// Where the harness runs, in [`branchyard::Provider`]'s serde form.
+    /// Anything but `local` is refused unless the server allows that
+    /// provider. Paths and `pass_env` names are the server's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/send`.
@@ -149,6 +176,21 @@ pub struct SendRequest {
     pub check: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    /// Let the harness delegate within this envelope, like
+    /// [`branchyard::TaskOptions::delegation`]. Refused unless the server
+    /// allows delegation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Envelope>,
+    /// Allow the harness's shell commands that run the server's `by` with a
+    /// delegation subcommand, after the policy's own rules, like
+    /// `by --allow-delegation`. Refused unless the server allows delegation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_delegation: bool,
+    /// Run a profile whose driver cannot route tool approvals, like
+    /// [`branchyard::TaskOptions::unapproved_tools`]. Refused unless the
+    /// server allows unapproved tools.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unapproved_tools: bool,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/fork`.
@@ -172,6 +214,24 @@ pub struct ForkRequest {
     pub isolated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    /// Let the harness delegate within this envelope, like
+    /// [`branchyard::TaskOptions::delegation`]. Refused unless the server
+    /// allows delegation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Envelope>,
+    /// Allow the harness's shell commands that run the server's `by` with a
+    /// delegation subcommand, after the policy's own rules, like
+    /// `by --allow-delegation`. Refused unless the server allows delegation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_delegation: bool,
+    /// Run a profile whose driver cannot route tool approvals, like
+    /// [`branchyard::TaskOptions::unapproved_tools`]. Refused unless the
+    /// server allows unapproved tools.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unapproved_tools: bool,
+    /// Without one, the fork keeps its parent's provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/merge`. Without a target, the
@@ -182,6 +242,44 @@ pub struct MergeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
+
+/// `POST /v1/repos/{repo}/branches/{parent}/spawn`: a child of `parent`,
+/// created with the server's authority as a person, like
+/// `by spawn --parent`. The parent's envelope bounds it exactly as it bounds
+/// a local spawn. Needs a server that allows delegation.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnRequest {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// The child's limits; they also bound the parent's side of the call,
+    /// as with `by spawn --parent`.
+    #[serde(default)]
+    pub budget: BudgetSpec,
+    /// Answers the child's tool requests, before the parent's denials.
+    #[serde(default)]
+    pub policy: PolicySpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unapproved_tools: bool,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/integrate`: merge a delegated
+/// child into the parent that delegated it, like `by integrate`. No fields
+/// yet.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrateRequest {}
 
 /// `POST /v1/repos/{repo}/branches/{branch}/cancel`: no fields yet.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +300,10 @@ pub enum OperationKind {
     Send,
     Fork,
     Merge,
+    /// A child created with `POST .../spawn`.
+    Spawn,
+    /// A child merged into its parent with `POST .../integrate`.
+    Integrate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +336,14 @@ pub struct OperationResult {
     pub branches: Vec<BranchInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
+    /// Every branch the operation's branches delegated to, directly or
+    /// below, once they finished: the operation waits for them, as
+    /// `by run` does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descendants: Vec<BranchInfo>,
+    /// A spawned child, inspected once its turn ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection: Option<Inspection>,
 }
 
 /// A long operation, run in the background. Durable on the server from

@@ -16,11 +16,13 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-use branchyard::{BranchEvent, Observer, TaskOptions, Yard};
+use branchyard::{
+    Branch, BranchEvent, Budget, Envelope, Observer, Policy, Provider, Spawn, TaskOptions, Yard,
+};
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, FeedEntry, ForkRequest,
-    HarnessList, MergeRequest, Operation, OperationKind, OperationResult, Removed, RepoEntry,
-    RepoList, SendRequest, TaskRequest,
+    HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind, OperationResult,
+    PolicySpec, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -113,6 +115,117 @@ impl App {
     }
 }
 
+impl App {
+    /// The request's provider, if this server allows it. `local` always
+    /// is; a Substrate key must be an absolute path on this server.
+    fn provider(&self, requested: Option<Provider>) -> Result<Option<Provider>, ApiError> {
+        let Some(provider) = requested else {
+            return Ok(None);
+        };
+        let kind = match &provider {
+            Provider::Local => return Ok(Some(provider)),
+            Provider::Microsandbox(_) => "microsandbox",
+            Provider::Substrate(_) => "substrate",
+        };
+        if !self.config.allow_providers.contains(kind) {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "provider_not_allowed",
+                format!(
+                    "this server does not run harnesses with the {kind} provider; its operator \
+                     can allow it with --allow-provider {kind}"
+                ),
+            )
+            .detail(serde_json::json!({ "provider": kind })));
+        }
+        if let Provider::Substrate(options) = &provider {
+            if !options.key.is_absolute() {
+                return Err(ApiError::bad_request(format!(
+                    "provider.key must be an absolute path on the server, not {}",
+                    options.key.display()
+                )));
+            }
+        }
+        Ok(Some(provider))
+    }
+
+    /// Refuse delegation and unapproved tools unless this server allows
+    /// them.
+    fn opt_ins(
+        &self,
+        delegation: bool,
+        allow_delegation: bool,
+        unapproved_tools: bool,
+    ) -> Result<(), ApiError> {
+        if (delegation || allow_delegation) && !self.config.allow_delegation {
+            return Err(delegation_not_allowed(
+                "this server does not offer delegation to its harnesses; its operator can \
+                 allow it with --allow-delegation",
+            ));
+        }
+        if unapproved_tools && !self.config.allow_unapproved_tools {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "unapproved_tools_not_allowed",
+                "this server does not run profiles whose tools bypass the policy; its operator \
+                 can allow it with --allow-unapproved-tools",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The `by` a delegating harness is told about, for the delegation
+    /// command rule.
+    fn by_path(&self) -> std::path::PathBuf {
+        self.config
+            .by_path
+            .clone()
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_else(|| "by".into())
+    }
+
+    /// The request's policy, with the delegation command rule last when
+    /// asked for, as `by --allow-delegation` adds it.
+    fn policy(&self, spec: &PolicySpec, allow_delegation: bool) -> Policy {
+        let policy = spec.to_policy();
+        match allow_delegation {
+            true => policy.allow_delegation_commands(self.by_path()),
+            false => policy,
+        }
+    }
+
+    /// Options every request that runs a harness shares.
+    #[allow(clippy::too_many_arguments)]
+    fn options(
+        &self,
+        repo: &RepoState,
+        budget: Budget,
+        policy: Policy,
+        check: Option<Vec<String>>,
+        command: Option<Vec<String>>,
+        delegation: Option<Envelope>,
+        unapproved_tools: bool,
+        provider: Option<Provider>,
+    ) -> TaskOptions {
+        TaskOptions {
+            budget,
+            policy,
+            check,
+            observer: Some(observer(&repo.wake)),
+            command,
+            provider,
+            delegation,
+            delegation_cli: self.config.by_path.clone(),
+            unapproved_tools,
+            ..TaskOptions::default()
+        }
+    }
+}
+
+fn delegation_not_allowed(message: &str) -> ApiError {
+    ApiError::new(StatusCode::FORBIDDEN, "delegation_not_allowed", message)
+}
+
 pub fn router(app: Shared) -> Router {
     let v1 = Router::new()
         .route("/v1/repos", get(repos))
@@ -140,6 +253,23 @@ pub fn router(app: Shared) -> Router {
             "/v1/repos/{repo}/branches/{branch}/cancel",
             axum::routing::post(post_cancel),
         )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/spawn",
+            axum::routing::post(post_spawn),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/integrate",
+            axum::routing::post(post_integrate),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/inspection",
+            get(inspection),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/event-page",
+            get(event_page),
+        )
+        .route("/v1/repos/{repo}/branches/{branch}/children", get(children))
         .route("/v1/repos/{repo}/branches/{branch}/diff", get(diff))
         .route("/v1/repos/{repo}/branches/{branch}/events", get(events))
         .route("/v1/repos/{repo}/events/stream", get(stream_events));
@@ -365,11 +495,18 @@ fn observer(wake: &Arc<Notify>) -> Observer {
     Arc::new(move |_: &BranchEvent| wake.notify_one())
 }
 
-fn branch_infos(branches: Vec<branchyard::Branch>) -> OperationResult {
-    OperationResult {
-        branches: branches.iter().map(|b| b.info().clone()).collect(),
-        merged: None,
+/// The branches an operation ran, once every branch they delegated to on
+/// this server has finished, as `by run` waits for them.
+fn finished(branches: Vec<Branch>) -> Result<OperationResult, branchyard::Error> {
+    let mut descendants = Vec::new();
+    for branch in &branches {
+        descendants.extend(branch.wait_subtree()?);
     }
+    Ok(OperationResult {
+        branches: branches.iter().map(|b| b.info().clone()).collect(),
+        descendants,
+        ..OperationResult::default()
+    })
 }
 
 async fn repos(State(app): State<Shared>) -> Json<RepoList> {
@@ -436,6 +573,12 @@ async fn post_task(
         ));
     }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
+    let provider = app.provider(request.provider.clone())?;
+    app.opt_ins(
+        request.delegation.is_some(),
+        request.allow_delegation,
+        request.unapproved_tools,
+    )?;
     let targets: Vec<Option<&str>> = match request.harnesses.is_empty() {
         true => vec![request.harness.as_deref()],
         false => request.harnesses.iter().map(|h| Some(h.as_str())).collect(),
@@ -445,19 +588,17 @@ async fn post_task(
         harness: request.harness.clone(),
         name: request.name.clone(),
         base: request.base.clone(),
-        budget,
-        policy: request.policy.to_policy(),
-        check: request.check.clone(),
-        observer: Some(observer(&repo.wake)),
         isolated: request.isolated,
-        command,
-        // The server runs harnesses locally and offers them no delegation
-        // tools yet.
-        provider: None,
-        delegation: None,
-        delegation_cli: None,
-        delegation_server: None,
-        unapproved_tools: false,
+        ..app.options(
+            &repo,
+            budget,
+            app.policy(&request.policy, request.allow_delegation),
+            request.check.clone(),
+            command,
+            request.delegation.clone(),
+            request.unapproved_tools,
+            provider,
+        )
     };
     let harnesses = request.harnesses.clone();
     let prompt = request.prompt.clone();
@@ -486,7 +627,7 @@ async fn post_task(
                 builder.run_on(&ids)
             }
         };
-        result.map(branch_infos).map_err(|e| *error::sdk(&e).body)
+        result.and_then(finished).map_err(|e| *error::sdk(&e).body)
     });
     let new = NewOperation {
         repo: repo.name.clone(),
@@ -536,21 +677,45 @@ async fn post_send(
         Some(command) => app.command(Some(command), &[])?,
         None => None,
     };
+    app.opt_ins(
+        request.delegation.is_some(),
+        request.allow_delegation,
+        request.unapproved_tools,
+    )?;
     let target = existing(&repo.yard, &branch).await?;
-    let options = TaskOptions {
+    if !app.config.allow_delegation && request.delegation.is_none() {
+        // A send keeps the branch's envelope; this server offers none.
+        let held = target.clone();
+        let envelope = blocking(move || {
+            held.delegate(TaskOptions::default())
+                .and_then(|d| d.inspect(&held.info().name))
+                .map(|i| i.envelope)
+        })
+        .await?
+        .map_err(|e| error::sdk(&e))?;
+        if envelope.is_some_and(|e| e.max_depth > 0) {
+            return Err(delegation_not_allowed(&format!(
+                "{branch} was given delegation, and this server does not offer delegation to \
+                 its harnesses; its operator can allow it with --allow-delegation"
+            )));
+        }
+    }
+    let options = app.options(
+        &repo,
         budget,
-        policy: request.policy.to_policy(),
-        check: request.check.clone(),
-        observer: Some(observer(&repo.wake)),
+        app.policy(&request.policy, request.allow_delegation),
+        request.check.clone(),
         command,
-        ..TaskOptions::default()
-    };
+        request.delegation.clone(),
+        request.unapproved_tools,
+        None,
+    );
     let cursor = sync_feed(&repo.feed).await?;
     let prompt = request.prompt.clone();
     let work = job(repo.feed.clone(), move || {
         target
             .send(&prompt, options)
-            .map(|b| branch_infos(vec![b]))
+            .and_then(|b| finished(vec![b]))
             .map_err(|e| *error::sdk(&e).body)
     });
     let new = NewOperation {
@@ -587,6 +752,12 @@ async fn post_fork(
         return Err(ApiError::bad_request("prompt is empty"));
     }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
+    let provider = app.provider(request.provider.clone())?;
+    app.opt_ins(
+        request.delegation.is_some(),
+        request.allow_delegation,
+        request.unapproved_tools,
+    )?;
     // Without a harness the fork keeps its parent's, and its command.
     let command = match (&request.command, &request.harness) {
         (Some(_), _) => app.command(request.command.clone(), &[])?,
@@ -597,13 +768,17 @@ async fn post_fork(
     let options = TaskOptions {
         harness: request.harness.clone(),
         name: request.name.clone(),
-        budget,
-        policy: request.policy.to_policy(),
-        check: request.check.clone(),
-        observer: Some(observer(&repo.wake)),
         isolated: request.isolated,
-        command,
-        ..TaskOptions::default()
+        ..app.options(
+            &repo,
+            budget,
+            app.policy(&request.policy, request.allow_delegation),
+            request.check.clone(),
+            command,
+            request.delegation.clone(),
+            request.unapproved_tools,
+            provider,
+        )
     };
     let planned = {
         let (yard, options, prompt) = (repo.yard.clone(), options.clone(), request.prompt.clone());
@@ -616,7 +791,7 @@ async fn post_fork(
     let work = job(repo.feed.clone(), move || {
         source
             .fork(&prompt, fresh, options)
-            .map(|b| branch_infos(vec![b]))
+            .and_then(|b| finished(vec![b]))
             .map_err(|e| *error::sdk(&e).body)
     });
     let new = NewOperation {
@@ -696,6 +871,7 @@ async fn post_merge(
         Ok(OperationResult {
             branches,
             merged: Some(merged),
+            ..OperationResult::default()
         })
     });
     let new = NewOperation {
@@ -727,6 +903,233 @@ async fn post_cancel(
         .await?
         .map_err(|e| error::sdk(&e))?;
     Ok(Json(CancelResult { cancelled }))
+}
+
+/// Create a child of `parent` with the server's authority as a person,
+/// bounded by the parent's envelope, and run its first turn: what
+/// `by spawn --parent` does. The operation waits for the parent's subtree,
+/// as the local command does, and its result holds the child's inspection.
+async fn post_spawn(
+    State(app): State<Shared>,
+    Path((repo, parent)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    JsonBody(request, canonical): JsonBody<SpawnRequest>,
+) -> Result<Response, ApiError> {
+    let repo = app.repo(&repo)?.clone();
+    let route = format!("POST /v1/repos/{}/branches/{parent}/spawn", repo.name);
+    let idem = idempotency(&headers, &caller, &route, &canonical)?;
+    if let Some(op) = idem
+        .as_ref()
+        .map(|i| app.registry.replay(i))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(operation_response(op, true));
+    }
+    if !app.config.allow_delegation {
+        return Err(delegation_not_allowed(
+            "this server does not offer delegation, so it does not spawn children; its \
+             operator can allow it with --allow-delegation",
+        ));
+    }
+    app.opt_ins(false, false, request.unapproved_tools)?;
+    if request.prompt.trim().is_empty() {
+        return Err(error::sdk(&branchyard::Error::Denied(
+            "a child needs a prompt".into(),
+        )));
+    }
+    let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
+    let source = existing(&repo.yard, &parent).await?;
+    let planned = match &request.name {
+        Some(name) => vec![name.clone()],
+        None => {
+            let (yard, prompt) = (repo.yard.clone(), request.prompt.clone());
+            blocking(move || yard.task(prompt).planned_names(&[]))
+                .await?
+                .map_err(|e| error::sdk(&e))?
+        }
+    };
+    let options = app.options(
+        &repo,
+        budget.clone(),
+        app.policy(&request.policy, false),
+        request.check.clone(),
+        None,
+        None,
+        request.unapproved_tools,
+        None,
+    );
+    let spawn = Spawn {
+        prompt: request.prompt.clone(),
+        harness: request.harness.clone(),
+        name: request.name.clone(),
+        base: request.base.clone(),
+        budget,
+        check: request.check.clone(),
+        max_depth: request.max_depth,
+        deny: request.deny.clone(),
+        ..Spawn::default()
+    };
+    let cursor = sync_feed(&repo.feed).await?;
+    let yard = repo.yard.clone();
+    let work = job(repo.feed.clone(), move || {
+        let run = || {
+            let delegate = source.delegate(options)?;
+            let spawned = delegate.spawn(spawn)?;
+            source.wait_subtree()?;
+            let inspection = delegate.inspect(&spawned.name)?;
+            let info = yard.branch(&spawned.name)?.info().clone();
+            Ok::<_, branchyard::Error>(OperationResult {
+                branches: vec![info],
+                inspection: Some(inspection),
+                ..OperationResult::default()
+            })
+        };
+        run().map_err(|e| *error::sdk(&e).body)
+    });
+    let new = NewOperation {
+        repo: repo.name.clone(),
+        kind: OperationKind::Spawn,
+        locks: planned.clone(),
+        branches: planned,
+        cursor,
+        idempotency: idem,
+    };
+    let (op, replayed) = app.registry.submit(new, work)?;
+    Ok(operation_response(op, replayed))
+}
+
+/// The branch that delegated `name` and still lists it as a child.
+fn delegator(yard: &Yard, name: &str) -> Result<String, branchyard::Error> {
+    let info = yard.branch(name)?.info().clone();
+    info.parent
+        .filter(|p| {
+            yard.branch(p)
+                .is_ok_and(|p| p.info().children.iter().any(|c| c == name))
+        })
+        .ok_or_else(|| {
+            branchyard::Error::Denied(format!(
+                "{name} was not delegated by another branch; merge it with by merge"
+            ))
+        })
+}
+
+/// Merge a delegated child into the parent that delegated it, with the
+/// server's authority as a person: what `by integrate` does outside a
+/// harness.
+async fn post_integrate(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    JsonBody(IntegrateRequest {}, canonical): JsonBody<IntegrateRequest>,
+) -> Result<Response, ApiError> {
+    let repo = app.repo(&repo)?.clone();
+    let route = format!("POST /v1/repos/{}/branches/{branch}/integrate", repo.name);
+    let idem = idempotency(&headers, &caller, &route, &canonical)?;
+    if let Some(op) = idem
+        .as_ref()
+        .map(|i| app.registry.replay(i))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(operation_response(op, true));
+    }
+    let parent = {
+        let (yard, name) = (repo.yard.clone(), branch.clone());
+        blocking(move || delegator(&yard, &name))
+            .await?
+            .map_err(|e| error::sdk(&e))?
+    };
+    let cursor = sync_feed(&repo.feed).await?;
+    let (yard, name, target) = (repo.yard.clone(), branch.clone(), parent.clone());
+    let wake = repo.wake.clone();
+    let work = job(repo.feed.clone(), move || {
+        let run = || {
+            let options = TaskOptions {
+                observer: Some(observer(&wake)),
+                ..TaskOptions::default()
+            };
+            let merged = yard.branch(&target)?.delegate(options)?.integrate(&name)?;
+            Ok::<_, branchyard::Error>(OperationResult {
+                branches: vec![yard.branch(&name)?.info().clone()],
+                merged: Some(merged),
+                ..OperationResult::default()
+            })
+        };
+        run().map_err(|e| *error::sdk(&e).body)
+    });
+    let new = NewOperation {
+        repo: repo.name.clone(),
+        kind: OperationKind::Integrate,
+        branches: vec![branch.clone()],
+        cursor,
+        locks: vec![branch, parent],
+        idempotency: idem,
+    };
+    let (op, replayed) = app.registry.submit(new, work)?;
+    Ok(operation_response(op, replayed))
+}
+
+/// Act as `branch` with the server's authority, as `by inspect`, `by events`
+/// and `by children` do outside a harness.
+async fn as_person<T: Send + 'static>(
+    app: &App,
+    repo: &str,
+    branch: String,
+    work: impl FnOnce(branchyard::Delegate, &str) -> Result<T, branchyard::Error> + Send + 'static,
+) -> Result<T, ApiError> {
+    let yard = app.repo(repo)?.yard.clone();
+    blocking(move || {
+        let delegate = yard.branch(&branch)?.delegate(TaskOptions::default())?;
+        work(delegate, &branch)
+    })
+    .await?
+    .map_err(|e| error::sdk(&e))
+}
+
+async fn inspection(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+) -> Result<Json<branchyard::Inspection>, ApiError> {
+    as_person(&app, &repo, branch, |d, b| d.inspect(b))
+        .await
+        .map(Json)
+}
+
+/// A whole number from the query, if given.
+fn query_number(query: Option<&str>, name: &str) -> Result<Option<usize>, ApiError> {
+    for pair in query.unwrap_or("").split('&') {
+        if let Some(value) = pair.strip_prefix(name).and_then(|v| v.strip_prefix('=')) {
+            return value
+                .parse()
+                .map(Some)
+                .map_err(|_| ApiError::bad_request(format!("{name} must be a whole number")));
+        }
+    }
+    Ok(None)
+}
+
+async fn event_page(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<branchyard::EventPage>, ApiError> {
+    let cursor = query_number(query.as_deref(), "cursor")?;
+    let limit = query_number(query.as_deref(), "limit")?.unwrap_or(50);
+    as_person(&app, &repo, branch, move |d, b| d.events(b, cursor, limit))
+        .await
+        .map(Json)
+}
+
+async fn children(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+) -> Result<Json<branchyard::Children>, ApiError> {
+    as_person(&app, &repo, branch, |d, _| d.children())
+        .await
+        .map(Json)
 }
 
 async fn branches(
