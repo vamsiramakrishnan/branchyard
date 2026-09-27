@@ -34,6 +34,19 @@ pub(crate) fn refusal(profile: &Profile) -> Option<String> {
 
 /// Queue `text` from `by` for `name`'s running turn.
 pub(crate) fn request(yard: &Yard, name: &str, text: &str, by: &str) -> Result<Steer, Error> {
+    queue(yard, name, text, by, None)
+}
+
+/// [`request`], carrying inbox message `message`: linked to it in the
+/// same store transaction, so the engine marks the message delivered as it
+/// settles this input ([`crate::inbox::SteerDelivery`]).
+pub(crate) fn queue(
+    yard: &Yard,
+    name: &str,
+    text: &str,
+    by: &str,
+    message: Option<u64>,
+) -> Result<Steer, Error> {
     if text.trim().is_empty() {
         return Err(Error::Denied("steered input needs some text".into()));
     }
@@ -56,7 +69,7 @@ pub(crate) fn request(yard: &Yard, name: &str, text: &str, by: &str) -> Result<S
     recover::stale(yard, name)?;
     let id = store
         .backend()
-        .request_steer(name, by, text)?
+        .request_steer(name, by, text, message)?
         .ok_or_else(|| Error::NotRunning(name.to_owned()))?;
     state(&store, name, id)
 }

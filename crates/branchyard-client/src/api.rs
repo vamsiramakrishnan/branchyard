@@ -396,6 +396,35 @@ pub struct CancelResult {
     pub cancelled: Vec<String>,
 }
 
+/// `POST /v1/repos/{repo}/branches/{branch}/ask`: a question to the
+/// branch's parent, like `by ask`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AskRequest {
+    pub text: String,
+    /// Block up to this many seconds for an answer; `None` returns once
+    /// the question is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<f64>,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/report` or `/escalate`: a
+/// message with no answer expected, like `by report` and `by escalate`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextRequest {
+    pub text: String,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/answer`: an answer to one of
+/// the branch's own descendants' messages, like `by answer`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerRequest {
+    pub message_id: u64,
+    pub text: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {

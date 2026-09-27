@@ -30,7 +30,7 @@ use crate::storage::{
     ArtifactRef, ArtifactRow, LockOutcome, NewArtifact, ScratchArea, ScratchLock, ScratchRow,
     StorageBackend,
 };
-use crate::{BranchStatus, Error, RecordedEvent, SteerState};
+use crate::{BranchStatus, Error, Message, RecordedEvent, SteerState};
 
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
@@ -156,6 +156,23 @@ CREATE TABLE IF NOT EXISTS scratch_locks (
     holder TEXT NOT NULL,
     acquired_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_branch TEXT NOT NULL,
+    to_branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    in_reply_to INTEGER,
+    at_ms INTEGER NOT NULL,
+    delivered_ms INTEGER,
+    steer_id INTEGER,
+    delivered_steer INTEGER,
+    awaiting_until_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS messages_to ON messages (to_branch, id);
+CREATE INDEX IF NOT EXISTS messages_steer ON messages (steer_id);
+CREATE INDEX IF NOT EXISTS messages_from ON messages (from_branch, kind);
+CREATE INDEX IF NOT EXISTS messages_reply ON messages (in_reply_to);
 ";
 
 #[derive(Debug)]
@@ -300,8 +317,15 @@ fn steer_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SteerRow> {
         text: r.get(4)?,
         requested_ms: uint(r.get(5)?),
         state: SteerState::from_columns(&r.get::<_, String>(6)?, r.get(7)?),
+        message: r.get::<_, Option<i64>>(8)?.map(uint),
+        message_delivered: r.get::<_, Option<bool>>(9)?.unwrap_or(false),
     })
 }
+
+/// The columns [`steer_row`] reads, from `steers`.
+const STEER_COLUMNS: &str = "id, branch, turn, requested_by, text, at_ms, state, reason, \
+     (SELECT m.id FROM messages m WHERE m.steer_id = steers.id), \
+     (SELECT m.delivered_ms IS NOT NULL FROM messages m WHERE m.steer_id = steers.id)";
 
 fn lease_row(conn: &Connection, name: &str) -> Result<Option<LeaseRow>, Error> {
     conn.query_row(
@@ -1092,7 +1116,13 @@ impl Backend for Sqlite {
         })
     }
 
-    fn request_steer(&self, name: &str, by: &str, text: &str) -> Result<Option<u64>, Error> {
+    fn request_steer(
+        &self,
+        name: &str,
+        by: &str,
+        text: &str,
+        message: Option<u64>,
+    ) -> Result<Option<u64>, Error> {
         self.tx(true, |tx| {
             let Some(incarnation) = incarnation(tx, name)? else {
                 return Err(Error::UnknownBranch(name.to_owned()));
@@ -1108,18 +1138,33 @@ impl Backend for Sqlite {
                 params![incarnation, int(lease.turn), name, by, text, int(now_ms())],
             )
             .map_err(|e| db("steer", e))?;
-            Ok(Some(uint(tx.last_insert_rowid())))
+            let id = tx.last_insert_rowid();
+            if let Some(message) = message {
+                let linked = tx
+                    .execute(
+                        "UPDATE messages SET steer_id = ?2 \
+                         WHERE id = ?1 AND delivered_ms IS NULL",
+                        params![int(message), id],
+                    )
+                    .map_err(|e| db("message", e))?;
+                if linked == 0 {
+                    // Rolls the steer back with the transaction.
+                    return Err(Error::Denied(format!(
+                        "message #{message} is unknown or already delivered"
+                    )));
+                }
+            }
+            Ok(Some(uint(id)))
         })
     }
 
     fn pending_steers(&self, fence: &Fence) -> Result<Vec<SteerRow>, Error> {
         self.query(|conn| {
             let mut statement = conn
-                .prepare(
-                    "SELECT id, branch, turn, requested_by, text, at_ms, state, reason \
-                     FROM steers WHERE incarnation = ?1 AND turn = ?2 AND state = 'pending' \
-                     ORDER BY id",
-                )
+                .prepare(&format!(
+                    "SELECT {STEER_COLUMNS} FROM steers \
+                         WHERE incarnation = ?1 AND turn = ?2 AND state = 'pending' ORDER BY id"
+                ))
                 .map_err(|e| db("steers", e))?;
             let rows = statement
                 .query_map(params![fence.incarnation, int(fence.turn)], steer_row)
@@ -1128,17 +1173,48 @@ impl Backend for Sqlite {
         })
     }
 
-    fn settle_steer(&self, fence: &Fence, id: u64, state: &SteerState) -> Result<(), Error> {
+    fn settle_steer(
+        &self,
+        fence: &Fence,
+        id: u64,
+        state: &SteerState,
+    ) -> Result<Option<u64>, Error> {
         let (name, reason) = state.columns();
         self.tx(true, |tx| {
             check(tx, fence)?;
-            tx.execute(
-                "UPDATE steers SET state = ?4, reason = ?5 \
-                 WHERE id = ?1 AND incarnation = ?2 AND turn = ?3",
-                params![int(id), fence.incarnation, int(fence.turn), name, reason],
-            )
-            .map_err(|e| db("steer", e))?;
-            Ok(())
+            let settled = tx
+                .execute(
+                    "UPDATE steers SET state = ?4, reason = ?5 \
+                     WHERE id = ?1 AND incarnation = ?2 AND turn = ?3",
+                    params![int(id), fence.incarnation, int(fence.turn), name, reason],
+                )
+                .map_err(|e| db("steer", e))?;
+            if settled == 0 {
+                return Ok(None);
+            }
+            match state {
+                SteerState::Pending => Ok(None),
+                SteerState::Delivered | SteerState::Accepted => tx
+                    .query_row(
+                        "UPDATE messages SET delivered_ms = ?2, delivered_steer = ?1 \
+                         WHERE steer_id = ?1 AND delivered_ms IS NULL RETURNING id",
+                        params![int(id), int(now_ms())],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map(|m| m.map(uint))
+                    .map_err(|e| db("message", e)),
+                SteerState::Refused { .. } => {
+                    tx.execute(
+                        "UPDATE messages SET steer_id = NULL, delivered_steer = NULL, \
+                         delivered_ms = CASE WHEN delivered_steer = ?1 THEN NULL \
+                         ELSE delivered_ms END WHERE steer_id = ?1",
+                        params![int(id)],
+                    )
+                    .map_err(|e| db("message", e))?;
+                    Ok(None)
+                }
+            }
         })
     }
 
@@ -1148,8 +1224,7 @@ impl Backend for Sqlite {
                 return Ok(None);
             };
             conn.query_row(
-                "SELECT id, branch, turn, requested_by, text, at_ms, state, reason \
-                 FROM steers WHERE id = ?1 AND incarnation = ?2",
+                &format!("SELECT {STEER_COLUMNS} FROM steers WHERE id = ?1 AND incarnation = ?2"),
                 params![int(id), incarnation],
                 steer_row,
             )
@@ -1260,6 +1335,147 @@ impl Backend for Sqlite {
             .map_err(|e| db("feed", e))
         })
     }
+
+    fn send_message(&self, message: &Message) -> Result<Message, Error> {
+        self.tx(true, |tx| {
+            let at_ms = now_ms();
+            tx.execute(
+                "INSERT INTO messages \
+                 (from_branch, to_branch, kind, text, in_reply_to, at_ms, delivered_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                params![
+                    message.from,
+                    message.to,
+                    message.kind.as_str(),
+                    message.text,
+                    message.in_reply_to.map(int),
+                    int(at_ms),
+                ],
+            )
+            .map_err(|e| db("message", e))?;
+            Ok(Message {
+                id: uint(tx.last_insert_rowid()),
+                at_ms,
+                delivered: false,
+                ..message.clone()
+            })
+        })
+    }
+
+    fn message(&self, id: u64) -> Result<Option<Message>, Error> {
+        self.query(|conn| {
+            conn.query_row(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM messages WHERE id = ?1",
+                params![int(id)],
+                message_from,
+            )
+            .optional()
+            .map_err(|e| db("message", e))
+        })
+    }
+
+    fn inbox(&self, to: &str) -> Result<Vec<Message>, Error> {
+        self.query(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                     delivered_ms FROM messages WHERE to_branch = ?1 ORDER BY id",
+                )
+                .map_err(|e| db("inbox", e))?;
+            let rows = statement
+                .query_map(params![to], message_from)
+                .map_err(|e| db("inbox", e))?;
+            rows.collect::<Result<_, _>>().map_err(|e| db("inbox", e))
+        })
+    }
+
+    fn mark_delivered(&self, ids: &[u64]) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.tx(true, |tx| {
+            let now = int(now_ms());
+            for id in ids {
+                tx.execute(
+                    "UPDATE messages SET delivered_ms = ?2 \
+                     WHERE id = ?1 AND delivered_ms IS NULL",
+                    params![int(*id), now],
+                )
+                .map_err(|e| db("message", e))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn answer_to(&self, question_id: u64) -> Result<Option<Message>, Error> {
+        self.query(|conn| {
+            conn.query_row(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM messages WHERE in_reply_to = ?1 ORDER BY id LIMIT 1",
+                params![int(question_id)],
+                message_from,
+            )
+            .optional()
+            .map_err(|e| db("message", e))
+        })
+    }
+
+    fn message_steer(&self, id: u64) -> Result<Option<u64>, Error> {
+        self.query(|conn| {
+            conn.query_row(
+                "SELECT steer_id FROM messages WHERE id = ?1",
+                params![int(id)],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map(|s| s.flatten().map(uint))
+            .map_err(|e| db("message", e))
+        })
+    }
+
+    fn set_awaiting(&self, id: u64, until_ms: Option<u64>) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                "UPDATE messages SET awaiting_until_ms = ?2 WHERE id = ?1",
+                params![int(id), until_ms.map(int)],
+            )
+            .map_err(|e| db("message", e))?;
+            Ok(())
+        })
+    }
+
+    fn awaiting_answer(&self, from: &str, now_ms: u64) -> Result<bool, Error> {
+        self.query(|conn| {
+            conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM messages q \
+                 WHERE q.from_branch = ?1 AND q.kind = 'question' \
+                 AND q.awaiting_until_ms > ?2 \
+                 AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.in_reply_to = q.id))",
+                params![from, int(now_ms)],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(|e| db("message", e))
+        })
+    }
+}
+
+/// Reads one `messages` row.
+fn message_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+    let kind: String = r.get(3)?;
+    let kind = kind.parse::<crate::MessageKind>().map_err(|_| {
+        rusqlite::Error::InvalidColumnType(3, "kind".into(), rusqlite::types::Type::Text)
+    })?;
+    Ok(Message {
+        id: uint(r.get::<_, i64>(0)?),
+        from: r.get(1)?,
+        to: r.get(2)?,
+        kind,
+        text: r.get(4)?,
+        in_reply_to: r.get::<_, Option<i64>>(5)?.map(uint),
+        at_ms: uint(r.get(6)?),
+        delivered: r.get::<_, Option<i64>>(7)?.is_some(),
+    })
 }
 
 /// One `artifacts` row, in `ARTIFACT_COLUMNS` order.

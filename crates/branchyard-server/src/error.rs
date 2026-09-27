@@ -80,6 +80,7 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
     let (status, code) = match error {
         E::NotARepository(_) => (S::INTERNAL_SERVER_ERROR, "not_a_repository"),
         E::UnknownBranch(_) => (S::NOT_FOUND, "unknown_branch"),
+        E::UnknownMessage(_) => (S::NOT_FOUND, "unknown_message"),
         E::BranchExists(_) => (S::CONFLICT, "branch_exists"),
         E::InvalidName { .. } => (S::BAD_REQUEST, "invalid_name"),
         E::UnknownHarness(_) => (S::BAD_REQUEST, "unknown_harness"),

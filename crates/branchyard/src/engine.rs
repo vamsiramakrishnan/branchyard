@@ -34,9 +34,9 @@ use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
 use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
 use crate::{
-    git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource, Error,
-    Event, NativeSession, PermissionDecision, PermissionRequest, Policy, StallAction, SteerState,
-    TaskOptions, TurnOutcome, Yard,
+    git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource,
+    DeliveredVia, Error, Event, NativeSession, PermissionDecision, PermissionRequest, Policy,
+    StallAction, SteerState, TaskOptions, TurnOutcome, Yard,
 };
 
 /// How long a harness may take to complete its handshake.
@@ -466,10 +466,10 @@ fn run(
     // Stall detection: `last_activity` moves forward on every protocol
     // event, including a permission answer. It is never checked while the
     // engine itself is blocked (delivering a permission answer synchronously
-    // stops the loop from ticking at all) or while a child branch is
-    // running (`delegation::any_child_running`); a future asynchronous wait,
-    // such as an inbox answer, has the same shape and can add its own
-    // exclusion here.
+    // stops the loop from ticking at all), while a child branch is running
+    // (`delegation::any_child_running`), or while the harness is blocked in
+    // `ask --wait` for an answer (`inbox::waiting_for_answer`, recorded in
+    // the store by whichever process runs the wait).
     let mut last_activity = started;
     let mut stalled = false;
     let write_stalled = |value: bool| -> Result<(), Error> {
@@ -539,6 +539,7 @@ fn run(
             if !stalled
                 && idle >= window
                 && !delegation::any_child_running(&store, &record.info.name)
+                && !crate::inbox::waiting_for_answer(&store, &record.info.name)
             {
                 stalled = true;
                 let since_ms = now_ms().saturating_sub(idle.as_millis() as u64);
@@ -612,7 +613,7 @@ fn run(
             Err(error) => break fail(confirmed, error.to_string()),
         };
         recorder.record(Activity::Harness(event.clone()))?;
-        steering.event(&store, fence, &event)?;
+        steering.event(recorder, &store, fence, &event)?;
         last_activity = Instant::now();
         if stalled && matches!(phase, Phase::Running(_)) {
             stalled = false;
@@ -621,14 +622,31 @@ fn run(
         }
         match event {
             Event::Ready if matches!(phase, Phase::Opening) => {
-                recorder.record(Activity::Prompt(turn.prompt.to_owned()))?;
+                // Pending inbox messages are prepended here, at the last
+                // point before the prompt may reach the harness, and
+                // acknowledged (marked delivered) in the same call: a crash
+                // before this point leaves them pending, and one after
+                // never delivers them again (see `crate::inbox`).
+                let (submitted, delivered) = crate::inbox::deliver_at_turn_start(
+                    &store,
+                    &record.info.name,
+                    fence.turn,
+                    turn.prompt,
+                )?;
+                if !delivered.is_empty() {
+                    recorder.record(Activity::MessagesDelivered {
+                        ids: delivered,
+                        via: DeliveredVia::TurnStart,
+                    })?;
+                }
+                recorder.record(Activity::Prompt(submitted.clone()))?;
                 // Journaled first: from here the prompt may have reached the
                 // harness, and recovery must never submit it again.
-                let intent = json!({ "prompt": turn.prompt });
+                let intent = json!({ "prompt": submitted });
                 store
                     .backend()
                     .begin_step(fence, fence.turn, STEP_SUBMIT, &intent)?;
-                match session.submit(turn.prompt) {
+                match session.submit(&submitted) {
                     Ok(n) => {
                         driven.submitted = true;
                         store.backend().finish_step(
@@ -746,7 +764,7 @@ fn run(
             match session.next_event(Duration::ZERO) {
                 Ok(Some(event)) => {
                     recorder.record(Activity::Harness(event.clone()))?;
-                    steering.event(&store, fence, &event)?;
+                    steering.event(recorder, &store, fence, &event)?;
                 }
                 _ => break,
             }
@@ -836,6 +854,18 @@ impl Steering {
         store
             .backend()
             .settle_steer(fence, id, &SteerState::Refused { reason })
+            .map(|_| ())
+    }
+
+    /// Record that steered input `steer` delivered inbox message `message`.
+    fn delivered(recorder: &mut Recorder, steer: u64, message: Option<u64>) -> Result<(), Error> {
+        match message {
+            Some(id) => recorder.record(Activity::MessagesDelivered {
+                ids: vec![id],
+                via: DeliveredVia::Steer { steer },
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Write pending input into a running turn. Before the prompt is
@@ -864,6 +894,10 @@ impl Steering {
                     "{} cannot take input during a running turn",
                     self.profile
                 )),
+                // Its message raced the turn's start and is in the prompt.
+                _ if row.message.is_some() && row.message_delivered => {
+                    Some("its message was delivered at the turn's start".to_owned())
+                }
                 _ => match session.steer(&row.text) {
                     Ok(()) => {
                         self.written.push(row.id);
@@ -872,9 +906,11 @@ impl Steering {
                             by: row.by.clone(),
                             text: row.text.clone(),
                         })?;
-                        store
-                            .backend()
-                            .settle_steer(fence, row.id, &SteerState::Delivered)?;
+                        let message =
+                            store
+                                .backend()
+                                .settle_steer(fence, row.id, &SteerState::Delivered)?;
+                        Self::delivered(recorder, row.id, message)?;
                         None
                     }
                     // The harness cannot take it yet; the next poll retries.
@@ -891,7 +927,13 @@ impl Steering {
     }
 
     /// Settle written input the harness accepted or dropped.
-    fn event(&mut self, store: &Store, fence: &Fence, event: &Event) -> Result<(), Error> {
+    fn event(
+        &mut self,
+        recorder: &mut Recorder,
+        store: &Store,
+        fence: &Fence,
+        event: &Event,
+    ) -> Result<(), Error> {
         let (steer, state) = match event {
             Event::SteerAccepted { steer, .. } => (*steer, SteerState::Accepted),
             Event::SteerRejected { steer, reason, .. } => (
@@ -904,7 +946,10 @@ impl Steering {
         };
         let index = usize::try_from(steer).ok().and_then(|n| n.checked_sub(1));
         match index.and_then(|i| self.written.get(i)) {
-            Some(id) => store.backend().settle_steer(fence, *id, &state),
+            Some(id) => {
+                let message = store.backend().settle_steer(fence, *id, &state)?;
+                Self::delivered(recorder, *id, message)
+            }
             None => Ok(()),
         }
     }

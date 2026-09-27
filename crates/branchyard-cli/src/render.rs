@@ -319,6 +319,44 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             "stalled: no harness activity for its stall window",
         ),
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
+        Activity::Message(message) => {
+            let reply = match message.in_reply_to {
+                Some(id) => format!(" (re #{id})"),
+                None => String::new(),
+            };
+            style.paint(
+                Tone::Cyan,
+                &format!(
+                    "message #{} {} {} -> {}{reply}: {}",
+                    message.id,
+                    message.kind,
+                    message.from,
+                    message.to,
+                    truncate(
+                        &message
+                            .text
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        100
+                    )
+                ),
+            )
+        }
+        Activity::MessagesDelivered { ids, via } => {
+            let ids = ids
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let via = match via {
+                branchyard::DeliveredVia::TurnStart => "at the turn's start".to_owned(),
+                branchyard::DeliveredVia::Steer { steer } => {
+                    format!("into the running turn (steered input {steer})")
+                }
+            };
+            style.paint(Tone::Cyan, &format!("delivered {ids} {via}"))
+        }
     })
 }
 

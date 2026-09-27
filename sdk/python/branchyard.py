@@ -46,6 +46,9 @@ __all__ = [
     "ArtifactRef",
     "ScratchArea",
     "ScratchLock",
+    "Message",
+    "Asked",
+    "Inbox",
     "spawn",
     "inspect",
     "events",
@@ -64,6 +67,11 @@ __all__ = [
     "share_scratch",
     "lock_scratch",
     "unlock_scratch",
+    "ask",
+    "report",
+    "escalate",
+    "answer",
+    "inbox",
 ]
 
 
@@ -218,6 +226,46 @@ class ScratchLock:
     acquired_at: int
 
 
+@dataclasses.dataclass
+class Message:
+    id: int
+    from_: str
+    to: str
+    kind: str
+    text: str
+    in_reply_to: Optional[int]
+    at_ms: int
+    delivered: bool
+
+
+def _message(value: Dict[str, Any]) -> Message:
+    # "from" is a Python keyword; the wire field is renamed on the way in.
+    return Message(
+        id=value["id"],
+        from_=value["from"],
+        to=value["to"],
+        kind=value["kind"],
+        text=value["text"],
+        in_reply_to=value.get("in_reply_to"),
+        at_ms=value["at_ms"],
+        delivered=value.get("delivered", False),
+    )
+
+
+@dataclasses.dataclass
+class Asked:
+    message: Message
+    # The reply, once one arrived within `wait`; `None` without a wait, or
+    # if it passed with no answer yet.
+    answer: Optional[Message]
+
+
+@dataclasses.dataclass
+class Inbox:
+    branch: str
+    messages: List[Message]
+
+
 def _by() -> str:
     return os.environ.get("BRANCHYARD_BY") or "by"
 
@@ -335,6 +383,52 @@ def cancel(branch: str) -> Cancelled:
 def children() -> Children:
     """Your branch's descendants."""
     return _make(Children, _run(["children"]))
+
+
+def ask(text: str, wait: Optional[float] = None) -> Asked:
+    """Ask your parent a question. Without `wait`, returns once it is sent.
+
+    With `wait`, blocks on `by`'s side for up to that many seconds for an
+    answer; a wait that passes with no answer yet is not an error, `answer`
+    is just `None`: check `inbox()` later, or `ask` again.
+    """
+    args = ["ask"]
+    if wait is not None:
+        args += ["--wait", str(wait)]
+    args += ["--", text]
+    value = _run(args)
+    return Asked(
+        message=_message(value["message"]),
+        answer=_message(value["answer"]) if value.get("answer") else None,
+    )
+
+
+def report(text: str) -> Message:
+    """Report to your parent; no answer is expected."""
+    return _message(_run(["report", "--", text]))
+
+
+def escalate(text: str) -> Message:
+    """Escalate to your parent, or, if your rig seat's `escalates_to`
+    allows it, an ancestor further up."""
+    return _message(_run(["escalate", "--", text]))
+
+
+def answer(message_id: int, text: str) -> Message:
+    """Answer a message (usually a question) from one of your own
+    descendants."""
+    return _message(_run(["answer", str(message_id), "--", text]))
+
+
+def inbox(unread: bool = False) -> Inbox:
+    """Every message addressed to you, oldest first; `unread=True` for only
+    what has not yet been delivered to a turn."""
+    args = ["inbox"] + (["--unread"] if unread else [])
+    value = _run(args)
+    return Inbox(
+        branch=value["branch"],
+        messages=[_message(m) for m in value["messages"]],
+    )
 
 
 def wait(branch: str, timeout: Optional[float] = None, poll: float = 1.0) -> Inspection:

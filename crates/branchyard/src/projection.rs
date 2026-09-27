@@ -84,13 +84,30 @@ pub(crate) struct Context {
 }
 
 /// Delegation state shared by a yard's clones.
-#[derive(Default)]
 pub(crate) struct Hub {
     pub contexts: Mutex<HashMap<String, Context>>,
     pub running: Mutex<HashMap<String, JoinHandle<()>>>,
     broker: Mutex<Option<Broker>>,
     /// Checks and reservations for one spawn or send happen together.
     pub spawning: Mutex<()>,
+    /// Set with [`crate::Yard::set_delivery_hook`]; tried before a message
+    /// waits for its recipient's next turn.
+    pub delivery_hook: Mutex<Option<Arc<dyn crate::inbox::DeliveryHook>>>,
+}
+
+impl Default for Hub {
+    /// Every yard delivers a message into its recipient's running turn by
+    /// steering it ([`crate::inbox::SteerDelivery`]) unless a caller sets
+    /// another hook or clears it.
+    fn default() -> Hub {
+        Hub {
+            contexts: Default::default(),
+            running: Default::default(),
+            broker: Default::default(),
+            spawning: Default::default(),
+            delivery_hook: Mutex::new(Some(Arc::new(crate::inbox::SteerDelivery::default()))),
+        }
+    }
 }
 
 impl fmt::Debug for Hub {

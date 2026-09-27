@@ -313,12 +313,14 @@ fn a_harness_in_a_rig_spawns_by_seat_over_mcp() {
             ..Provisioning::default()
         }),
         delegates_to: Vec::new(),
+        escalates_to: Vec::new(),
         instances: 1,
     };
     let seats = Seats {
         rig: "team".into(),
         seat: "lead".into(),
         delegates_to: vec!["worker".into()],
+        escalates_to: Vec::new(),
         table: [("worker".to_owned(), worker)].into_iter().collect(),
     };
     let options = TaskOptions {

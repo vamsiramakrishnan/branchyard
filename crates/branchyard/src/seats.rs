@@ -40,6 +40,11 @@ pub struct Seat {
     /// Seats a child in this seat may spawn in turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delegates_to: Vec<String>,
+    /// Seats above this one in the tree a branch in this seat may
+    /// `escalate` to, besides its parent (which it may always escalate to).
+    /// Each must name an ancestor seat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalates_to: Vec<String>,
     /// Children of this seat one parent may have at once, counting finished
     /// ones until they are removed. At least 1.
     #[serde(default = "one")]
@@ -65,6 +70,10 @@ pub struct Seats {
     /// Seats this branch may spawn.
     #[serde(default)]
     pub delegates_to: Vec<String>,
+    /// Ancestor seats, besides its parent's, this branch's own seat may
+    /// `escalate` to (its seat's `escalates_to`, by name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalates_to: Vec<String>,
     /// Every seat below this branch's, by name.
     #[serde(default)]
     pub table: BTreeMap<String, Seat>,
@@ -103,6 +112,36 @@ impl Seats {
         for name in self.table.keys() {
             if !parents.contains_key(name.as_str()) {
                 return invalid(format!("seat {name} is not below seat {}", self.seat));
+            }
+        }
+        // A seat may only escalate to an ancestor seat, besides its parent
+        // (always allowed, and not named here). The root seat itself has no
+        // ancestor seat in this table to escalate to.
+        if !self.escalates_to.is_empty() {
+            return invalid(format!(
+                "seat {} is the root; it has no ancestor seat to escalate to",
+                self.seat
+            ));
+        }
+        for (name, seat) in &self.table {
+            for target in &seat.escalates_to {
+                // The immediate parent is always allowed and is not what
+                // escalates_to is for; only a seat further up counts.
+                let mut ancestors = BTreeSet::new();
+                let mut walk = parents
+                    .get(name.as_str())
+                    .and_then(|p| parents.get(*p))
+                    .copied();
+                while let Some(next) = walk {
+                    ancestors.insert(next);
+                    walk = parents.get(next).copied();
+                }
+                if !ancestors.contains(target.as_str()) {
+                    return invalid(format!(
+                        "seat {name} escalates to {target}, which is not an ancestor seat \
+                         beyond its parent"
+                    ));
+                }
             }
         }
         // Every seat has one parent and is reachable only if there is no
@@ -184,6 +223,7 @@ impl Seats {
             rig: self.rig.clone(),
             seat: seat.to_owned(),
             delegates_to: self.table[seat].delegates_to.clone(),
+            escalates_to: self.table[seat].escalates_to.clone(),
             table,
         }
     }
@@ -236,6 +276,7 @@ mod tests {
             isolated: false,
             provision: None,
             delegates_to: below.iter().map(|s| (*s).to_owned()).collect(),
+            escalates_to: Vec::new(),
             instances: 1,
         }
     }
@@ -245,6 +286,7 @@ mod tests {
             rig: "r".into(),
             seat: "lead".into(),
             delegates_to: root.iter().map(|s| (*s).to_owned()).collect(),
+            escalates_to: Vec::new(),
             table: table
                 .iter()
                 .map(|(n, s)| ((*n).to_owned(), s.clone()))
