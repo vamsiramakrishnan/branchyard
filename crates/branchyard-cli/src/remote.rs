@@ -81,7 +81,10 @@ pub const REMOTE_DENY_NOTICE: &str = "remote mode cannot ask, so tool permission
 /// the work. `--ask` needs a terminal where the harness runs.
 fn permissions(task: &TaskArgs) -> Result<(PolicySpec, Option<&'static str>), Failure> {
     let local_only = [
-        ("--provider", task.sandbox.is_some() || task.local),
+        (
+            "--provider",
+            task.sandbox.is_some() || task.substrate.is_some() || task.local,
+        ),
         ("--delegate", task.delegate.is_some()),
         ("--allow-delegation", task.allow_delegation),
         ("--allow-unapproved-tools", task.unapproved_tools),

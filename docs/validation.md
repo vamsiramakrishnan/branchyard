@@ -20,6 +20,7 @@ Prepared 16 September 2026. This record describes the initial foundation, not pr
 | Harness identity registry | 27 harnesses; every Herdr manifest (22), Herdr resume source (18), Scion harness (9) and integration target (16) maps to exactly one ID, and Herdr's aliases agree with those mappings |
 | Substrate client generation | `ateapi.proto` compiles unmodified with pinned `protoc` from `protoc-bin-vendored` |
 | Substrate adapter over gRPC | Create/adopt, resume, inspect, suspend, checkpoint, branch, revert and UID-fenced destroy against an in-process fake `Control` service |
+| Substrate provider through the bridge | The provider conformance checks (mount-less mode), per-attempt credential refusal, git and home transfer, and `by run --provider substrate` with the fake ACP agent through merge and recovery, against the in-process fake cluster whose actors run the real `branchyard-bridge` on the test host |
 | Rust formatting and Clippy | Formatting passes; Clippy has no warnings across all targets |
 | Runnable example | `plan_resume` prints an argument vector without starting a harness |
 | Scion shared helper | 59 tests pass |
@@ -46,7 +47,7 @@ This compatibility check is not a passing qualification of the Claude provisione
 - Codex and every ACP harness other than claude-agent-acp against a live binary with credentials. The Codex recording ran without credentials. Claude recordings and qualification runs made real model calls: under about $1 in total by the harnesses' own estimates.
 - Any profile inside a Branchyard sandbox: isolation, egress, credential projection and node recovery.
 - The ten ACP harnesses other than the Claude adapter, and the Codex ACP adapter. Their profiles use launch commands from the integration matrix and are protocol-tested only.
-- Any Agent Substrate cluster. The fake `Control` service models documented behavior only; TLS, authentication, tag readiness and real snapshot semantics are untested.
+- Any Agent Substrate cluster. The fake `Control` service and router model documented behavior only; the router's addressing and WebSocket forwarding, identity projection on restore, TLS, authentication, tag readiness and real snapshot semantics are untested.
 - Runtime isolation, KVM deployment, storage cloning, network enforcement, or startup latency.
 - Any live harness session, provider credential path, ACP exchange, or native driver.
 - The SDK engine and `by` against any real harness, including with the developer's own login, and whether Claude Code or Codex can resume or fork a session from another worktree.

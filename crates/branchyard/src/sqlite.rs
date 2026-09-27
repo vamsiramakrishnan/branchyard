@@ -271,9 +271,21 @@ impl Sqlite {
         let path = dir.join("state.db");
         let conn = Connection::open(&path).map_err(|e| db(&path.display().to_string(), e))?;
         conn.busy_timeout(BUSY).map_err(|e| db("busy timeout", e))?;
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
-            .map_err(|e| db("journal mode", e))?;
+        // Switching a new database to WAL can fail at once with SQLITE_BUSY
+        // while another process switches it, without waiting in the busy
+        // handler; retry within the same bound.
+        let deadline = std::time::Instant::now() + BUSY;
+        let mode: String = loop {
+            match conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0)) {
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::DatabaseBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => break other.map_err(|e| db("journal mode", e))?,
+            }
+        };
         if !mode.eq_ignore_ascii_case("wal") {
             return Err(Error::State(format!(
                 "{} could not use write-ahead logging (journal mode {mode})",
@@ -1041,6 +1053,28 @@ mod tests {
     impl Drop for Temp {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn processes_opening_a_new_store_at_once_all_succeed() {
+        for round in 0..20 {
+            let dir = std::env::temp_dir().join(format!(
+                "branchyard-sqlite-{}-race-{round}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let _temp = Temp(dir.clone());
+            let openers: Vec<_> = (0..4)
+                .map(|_| {
+                    let dir = dir.clone();
+                    std::thread::spawn(move || Sqlite::open(&dir).map(|_| ()))
+                })
+                .collect();
+            for opener in openers {
+                opener.join().unwrap().unwrap();
+            }
         }
     }
 

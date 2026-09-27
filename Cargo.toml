@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/branchyard",
+    "crates/branchyard-bridge",
     "crates/branchyard-cli",
     "crates/branchyard-client",
     "crates/branchyard-controls",

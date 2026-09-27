@@ -6,7 +6,7 @@ Record what you ran in the place each section names. A result that is not record
 
 ## 0. Machine and budget
 
-- Linux or macOS with git, Python 3 and a C compiler; Linux x86_64 or aarch64 with `/dev/kvm` for section 5.
+- Linux or macOS with git, Python 3 and a C compiler; Linux x86_64 or aarch64 with `/dev/kvm` for section 5; Docker, `kind` and `kubectl` for section 6.
 - Rust 1.90 (`rust-toolchain.toml` pins it), and Rust 1.94 only for section 5.
 - The harnesses you want to test, at the versions [compatibility](compatibility.md) lists as checked against (Claude Code 2.1.283 and codex-cli 0.157.1 for the native drivers). Note any other version you use.
 - A throwaway repository with a fast test command, for example a small crate whose `cargo test` takes seconds. Never your real work: harnesses in local mode run as you.
@@ -114,9 +114,32 @@ BY_MSB_IMAGE=alpine:3.20 cargo +1.94 test -p branchyard-microsandbox --features 
 
 **Record:** in [sandbox providers](providers.md); mark the provider qualified only when all of this passed.
 
-## 6. Agent Substrate (cluster)
+## 6. Agent Substrate (cluster; model calls only in the last step)
 
-The Substrate adapter is tested only against an in-process fake. With a cluster (kind works), follow the qualification steps in [Agent Substrate](substrate.md): install Substrate at the pinned revision, run the adapter against its `ateapi` endpoint, time each lifecycle operation cold and warm, and check that tag readiness, UID preconditions and egress policy match the fake. Running harnesses there needs the in-sandbox bridge, which is not built yet.
+The Substrate provider has run only against the in-process fake. On a machine with Docker, `kind` and `kubectl`:
+
+1. **Cluster.** Check out Substrate at the pinned revision (`1d7ca8ced056192a1801d6565251adcaab3eb0c9`) and run `hack/create-kind-cluster.sh` and `hack/install-ate-kind.sh`. Port-forward the `Control` API and the router to this host (plain HTTP; the provider has no TLS yet) and note both URLs. Find how the router addresses an actor and write it as a URL template with `{atespace}` and `{actor}`; the provider cannot know it from the vendored API.
+2. **Key.** `cargo build --release -p branchyard-bridge`, then `target/release/branchyard-bridge keygen --out bridge.key`, which prints the public key.
+3. **Image.** Build a static bridge (`rustup target add x86_64-unknown-linux-musl` and `musl-tools` for `ring`, then `cargo build --release -p branchyard-bridge --target x86_64-unknown-linux-musl`) and an image holding it at `/usr/local/bin/branchyard-bridge`, with `git`, `sh`, `sleep`, `cat`, `printf`, an init such as `tini`, a writable `/workspace`, and later the harness. Push it where the cluster can pull it and note its digest.
+4. **Template.** Create an atespace, then the template from the key:
+
+   ```sh
+   export BY_SUBSTRATE_ENDPOINT=http://127.0.0.1:8080 \
+     BY_SUBSTRATE_ROUTER='http://127.0.0.1:8081/{atespace}/{actor}/' \
+     BY_SUBSTRATE_ATESPACE=branchyard BY_SUBSTRATE_TEMPLATE=by-bridge \
+     BY_SUBSTRATE_KEY=$PWD/bridge.key BY_SUBSTRATE_WORKDIR=/workspace \
+     BY_SUBSTRATE_IMAGE=registry.example/by-bridge@sha256:... \
+     BY_SUBSTRATE_BRIDGE=/usr/local/bin/branchyard-bridge \
+     BY_SUBSTRATE_SANDBOX_CONFIG=gvisor BY_SUBSTRATE_STORAGE=gs://bucket/branchyard
+   cargo test -p branchyard-substrate --test cluster -- --ignored create_bridge_template
+   ```
+
+   Use the router template you found in step 1, and your cluster's `SandboxConfig` name and storage location.
+5. **Cluster tests.** `cargo test -p branchyard-substrate --test cluster -- --ignored --test-threads 1 cluster_` runs the conformance checks without mounts, attempt rotation, and a worktree round trip. All must pass.
+6. **Observe what the fake assumes.** The identity files under `/run/branchyard/identity` after a resume and in a branched actor (new UID); that a superseded or ended credential is refused through the router; that the router forwards WebSocket upgrades and keeps a connection open for a long turn; whether it activates a suspended actor; `stop` ending processes before the suspend. Time create, resume, suspend, tag and branch, cold and warm.
+7. **A harness.** Rebuild the image with a harness installed, recreate the template, then in a throwaway repository: `by run "…" --provider substrate --substrate-endpoint $BY_SUBSTRATE_ENDPOINT --substrate-router "$BY_SUBSTRATE_ROUTER" --substrate-atespace $BY_SUBSTRATE_ATESPACE --substrate-template <it> --substrate-key bridge.key --pass-env ANTHROPIC_API_KEY --yes --budget-usd 1`. The candidate holds the harness's changes, `by merge` works, the actor is gone afterwards (`kubectl ate` or `ListActors`), and a `by send` resumes the session from the carried home. Kill `by` mid-turn and check that `by ls` recovers the branch and deletes the actor.
+
+**Record:** in [Agent Substrate](substrate.md) and [validation](validation.md), with the Substrate revision, the router template, the image digest and which tests passed; mark the provider qualified only when all of this passed.
 
 ## Cleaning up
 

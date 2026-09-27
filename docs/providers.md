@@ -1,6 +1,6 @@
 # Sandbox providers
 
-A provider is where a harness process runs. Branchyard talks to every provider through one vendor-independent contract, `SandboxProvider` in [`branchyard-sandbox`](../crates/branchyard-sandbox/src/provider.rs), from [design §10](design.md#10-protocol-and-extensibility). Two providers implement it: the **local provider**, which is today's local mode behind the contract, and the **Microsandbox provider**, which runs each turn's harness in a microVM. Neither is qualified against the M2 runtime gates in the [implementation plan](implementation-plan.md) yet.
+A provider is where a harness process runs. Branchyard talks to every provider through one vendor-independent contract, `SandboxProvider` in [`branchyard-sandbox`](../crates/branchyard-sandbox/src/provider.rs), from [design §10](design.md#10-protocol-and-extensibility). Three providers implement it: the **local provider**, which is today's local mode behind the contract; the **Microsandbox provider**, which runs each turn's harness in a microVM; and the **Agent Substrate provider**, which runs it in a Kubernetes-hosted actor reached through a router. None is qualified against the M2 runtime gates in the [implementation plan](implementation-plan.md) yet.
 
 ## The contract
 
@@ -24,7 +24,9 @@ The contract is synchronous and uses `std::io` traits, because the runtime aroun
 
 ### Conformance
 
-`branchyard_sandbox::conformance` holds the checks every provider must pass: lifecycle (`ensure` is idempotent, `inspect` follows `stop` and `destroy`), exit status, a missing program failing `exec`, a stdio round trip with separate stdout and stderr, environment and working directory, the workspace mount in both directions, a read-only mount being refused or enforced, `kill` and `teardown` reaching background children, `teardown` naming survivors after the launched process exits, drop tearing down, and `stop` ending processes. They need `sh`, `sleep`, `cat` and `printf` and a Linux `/proc` in the sandbox. They run against the local provider in `cargo test` and against Microsandbox in its ignored tests.
+`branchyard_sandbox::conformance` holds the checks every provider must pass: lifecycle (`ensure` is idempotent, `inspect` follows `stop` and `destroy`), exit status, a missing program failing `exec`, a stdio round trip with separate stdout and stderr, environment and working directory, the workspace mount in both directions, a read-only mount being refused or enforced, `kill` and `teardown` reaching background children, `teardown` naming survivors after the launched process exits, drop tearing down, and `stop` ending processes. They need `sh`, `sleep`, `cat` and `printf` and a Linux `/proc` in the sandbox. They run against the local provider and, through the fake cluster, the Substrate provider in `cargo test`, and against Microsandbox and a real Substrate cluster in ignored tests.
+
+A provider whose sandboxes cannot see host directories at all runs them with `Setup::without_mounts`: sandboxes get no mount and processes work in a directory that exists in every sandbox, and the workspace and read-only mount checks instead require that a spec with a mount is refused, never created with the mount missing. Code then crosses by an explicit transfer the provider documents.
 
 ## Local provider
 
@@ -120,6 +122,10 @@ BY_MSB_IMAGE=alpine:3.20 cargo +1.94 test -p branchyard-microsandbox \
 
 Record the results with the [runtime qualification record](implementation-plan.md#runtime-qualification-record): host CPU and kernel, `msb --version`, the archive digest, the image digest, and which tests passed.
 
-## Agent Substrate
+## Agent Substrate provider
 
-[Agent Substrate](substrate.md) fits the same contract differently. Its API has no exec: an actor runs its image's entry point, and clients reach it through routed network ingress. The [adapter](../crates/branchyard-substrate/src/lib.rs) maps lifecycle, checkpoint and branch, but cannot return a `Process` with independent pipes, so it cannot pass the exec conformance checks or M2's independent-pipes gate. It will join as a routed-ingress provider: it declares `ingress`, not `exec`, and a harness bridge inside the image serves the driver's protocol over a routed connection. That transport is not built.
+`SubstrateProvider` in [`branchyard-substrate`](../crates/branchyard-substrate/src/lib.rs), in the default build. [Agent Substrate](substrate.md)'s API has no exec: an actor runs its template's entry point and is reached through routed network ingress. The template's entry point is therefore the Branchyard bridge ([`branchyard-bridge`](../crates/branchyard-bridge/src/lib.rs)), which accepts WebSocket connections through the router, each carrying a per-attempt credential the host signs, and starts the harness with piped stdio in its own process group. `exec` returns a `Process` whose pipes are backed by that connection; `kill`, `teardown` (naming survivors), `wait` and drop behave as the contract says.
+
+It guarantees, beyond the contract: every attempt's credential is refused once the attempt ends or a newer one starts, even across a bridge restart; operations on a known actor are bound to its UID. It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree. It is not isolated from the router's network path (plain HTTP) and it is tested only against an in-process fake cluster. It declares `exec` for a template that runs the bridge, `ingress`, and checkpoint and branch with the template's commit scope, crash consistency and portability.
+
+`TaskOptions::provider` selects it with `Provider::Substrate(SubstrateOptions)`; the CLI flags are `--provider substrate --substrate-endpoint URL --substrate-router URL --substrate-template NAME --substrate-key FILE [--substrate-atespace NAME] [--substrate-workdir PATH] [--substrate-home PATH] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. [Agent Substrate](substrate.md) documents the bridge protocol, the credentials, the transfer, the template and what remains unqualified; [live testing](testing-live.md#6-agent-substrate-cluster) says how to run it on a kind cluster.

@@ -516,10 +516,12 @@ dependencies = [
 name = "branchyard"
 version = "0.0.1"
 dependencies = [
+ "branchyard-bridge",
  "branchyard-harness",
  "branchyard-microsandbox",
  "branchyard-runtime",
  "branchyard-sandbox",
+ "branchyard-substrate",
  "branchyard-workspace",
  "rusqlite",
  "serde",
@@ -527,13 +529,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-bridge"
+version = "0.0.1"
+dependencies = [
+ "branchyard-sandbox",
+ "libc",
+ "ring",
+]
+
+[[package]]
 name = "branchyard-cli"
 version = "0.0.1"
 dependencies = [
  "branchyard",
+ "branchyard-bridge",
  "branchyard-client",
  "branchyard-mcp",
  "branchyard-server",
+ "branchyard-substrate",
  "serde",
  "serde_json",
 ]
@@ -630,7 +643,9 @@ dependencies = [
 name = "branchyard-substrate"
 version = "0.0.1"
 dependencies = [
+ "branchyard-bridge",
  "branchyard-sandbox",
+ "branchyard-substrate",
  "prost",
  "prost-types",
  "protoc-bin-vendored",

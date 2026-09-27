@@ -1,0 +1,266 @@
+//! Code into and out of an actor through the bridge: a worktree round trip
+//! with every kind of change, the host repository left untouched, nothing
+//! from outside the worktree coming back, and a host worktree that changed
+//! meanwhile refused. Requires `git` and `sh`.
+
+mod common;
+
+use std::fs;
+use std::os::unix::fs::{symlink, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use branchyard_bridge::Endpoint;
+use branchyard_sandbox::{ExecSpec, Process, SandboxProvider, SandboxSpec};
+use branchyard_substrate::transfer::{self, Error};
+use common::Cluster;
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// A repository with a committed file of each kind, plus uncommitted
+/// changes, an untracked file and an ignored one.
+fn repository(dir: &Path) -> PathBuf {
+    let root = dir.join("repo");
+    fs::create_dir_all(root.join("src")).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.name", "Test"]);
+    git(&root, &["config", "user.email", "test@localhost"]);
+    git(
+        &root,
+        &[
+            "config",
+            "remote.origin.url",
+            "https://secret@example.com/r.git",
+        ],
+    );
+    fs::write(root.join("src/keep.txt"), "keep\n").unwrap();
+    fs::write(root.join("src/edit.txt"), "before\n").unwrap();
+    fs::write(root.join("gone.txt"), "delete me\n").unwrap();
+    fs::write(root.join("tool.sh"), "#!/bin/sh\necho tool\n").unwrap();
+    fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "initial"]);
+    // Uncommitted state that must reach the actor.
+    fs::write(root.join("src/keep.txt"), "keep, edited on the host\n").unwrap();
+    fs::write(root.join("untracked.txt"), "untracked\n").unwrap();
+    fs::create_dir_all(root.join("ignored")).unwrap();
+    fs::write(root.join("ignored/cache"), "never sent\n").unwrap();
+    root
+}
+
+fn guest_run(endpoint: &Endpoint, cwd: &Path, script: &str) -> String {
+    let spec = ExecSpec {
+        argv: vec!["sh".into(), "-c".into(), script.into()],
+        cwd: cwd.to_path_buf(),
+        env: [
+            ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ]
+        .into(),
+    };
+    let mut process = endpoint.exec(&spec).unwrap();
+    drop(process.take_stdin());
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut process.take_stdout().unwrap(), &mut out).unwrap();
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut process.take_stderr().unwrap(), &mut err).unwrap();
+    let status = process.wait().unwrap();
+    assert!(status.success(), "{script}: {status}: {err}");
+    out
+}
+
+fn host_state(root: &Path) -> (String, String, String) {
+    (
+        git(root, &["for-each-ref"]),
+        git(root, &["count-objects", "-v"]),
+        git(root, &["config", "--local", "--list"]),
+    )
+}
+
+#[test]
+fn a_worktree_round_trips_every_kind_of_change() {
+    let cluster = Cluster::start("round-trip");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let endpoint = provider.endpoint("actor").unwrap();
+    let root = repository(&cluster.scratch.0);
+    let guest = cluster.scratch.path("guest/workspace");
+    let before = host_state(&root);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+
+    let pushed = transfer::push(&endpoint, &root, &guest).unwrap();
+    assert_eq!(pushed.base, head.trim());
+    // The actor sees the host's files, uncommitted state included, with
+    // HEAD at the host's commit and none of the host's configuration.
+    assert_eq!(
+        fs::read_to_string(guest.join("src/keep.txt")).unwrap(),
+        "keep, edited on the host\n"
+    );
+    assert!(guest.join("untracked.txt").is_file());
+    assert!(!guest.join("ignored").exists());
+    assert_eq!(git(&guest, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&guest, &["symbolic-ref", "--short", "HEAD"]), "main\n");
+    let status = git(&guest, &["status", "--porcelain"]);
+    assert!(status.contains(" M src/keep.txt"), "{status}");
+    assert!(status.contains("?? untracked.txt"), "{status}");
+    let config = git(&guest, &["config", "--local", "--list"]);
+    assert!(!config.contains("secret"), "{config}");
+    assert!(!config.contains("remote."), "{config}");
+
+    // The harness: edits, adds, deletes, changes a mode, writes binary data
+    // and links, commits, and writes outside the worktree.
+    let outside = cluster.scratch.path("guest/outside.txt");
+    guest_run(
+        &endpoint,
+        &guest,
+        &format!(
+            "printf 'after\\n' > src/edit.txt && rm gone.txt && chmod 755 src/keep.txt \
+             && printf '\\000\\001\\377binary' > data.bin && mkdir -p new/dir \
+             && printf 'new\\n' > new/dir/file.txt && ln -s ../src/keep.txt new/link \
+             && ln -s /etc/passwd new/passwd-link && chmod 644 tool.sh \
+             && printf 'escape\\n' > ../outside.txt && printf 'escape\\n' > {} \
+             && mkdir -p ignored && printf 'guest cache\\n' > ignored/guest-cache \
+             && git add -A && git commit -q -m 'harness commit' \
+             && printf 'after commit\\n' > after-commit.txt",
+            cluster.scratch.path("outside-absolute.txt").display()
+        ),
+    );
+
+    let pulled = transfer::pull(&endpoint, &pushed, &root).unwrap();
+    assert!(pulled.changed);
+    let read = |p: &str| fs::read(root.join(p)).unwrap();
+    assert_eq!(read("src/edit.txt"), b"after\n");
+    assert_eq!(read("src/keep.txt"), b"keep, edited on the host\n");
+    assert_eq!(read("data.bin"), b"\x00\x01\xffbinary");
+    assert_eq!(read("new/dir/file.txt"), b"new\n");
+    assert_eq!(read("after-commit.txt"), b"after commit\n");
+    assert_eq!(read("untracked.txt"), b"untracked\n");
+    assert!(!root.join("gone.txt").exists());
+    let mode = |p: &str| fs::metadata(root.join(p)).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode("src/keep.txt") & 0o111, 0o111);
+    assert_eq!(mode("tool.sh") & 0o111, 0);
+    assert_eq!(
+        fs::read_link(root.join("new/link")).unwrap(),
+        Path::new("../src/keep.txt")
+    );
+    // A link comes back as a link, never as what it points to.
+    assert_eq!(
+        fs::read_link(root.join("new/passwd-link")).unwrap(),
+        Path::new("/etc/passwd")
+    );
+    // Nothing from outside the worktree, and nothing ignored, came back.
+    assert!(!root.join("outside.txt").exists());
+    assert!(!root.parent().unwrap().join("outside.txt").exists());
+    assert!(!root.join("ignored/guest-cache").exists());
+    assert_eq!(read("ignored/cache"), b"never sent\n");
+    assert!(outside.exists(), "the harness did write outside");
+
+    // HEAD, refs, objects and config of the host repository are untouched;
+    // the guest's commit arrives only as working-tree changes.
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(host_state(&root), before);
+    let status = git(&root, &["status", "--porcelain"]);
+    assert!(status.contains(" D gone.txt"), "{status}");
+    assert!(status.contains("?? data.bin"), "{status}");
+    provider.destroy("actor").unwrap();
+}
+
+#[test]
+fn an_unchanged_worktree_comes_back_unchanged() {
+    let cluster = Cluster::start("unchanged");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let endpoint = provider.endpoint("actor").unwrap();
+    let root = repository(&cluster.scratch.0);
+    let guest = cluster.scratch.path("guest");
+    let status = git(&root, &["status", "--porcelain"]);
+    let pushed = transfer::push(&endpoint, &root, &guest).unwrap();
+    let pulled = transfer::pull(&endpoint, &pushed, &root).unwrap();
+    assert!(!pulled.changed);
+    assert_eq!(git(&root, &["status", "--porcelain"]), status);
+
+    // A second push into a directory that already holds the repository is
+    // refused rather than mixed with it.
+    assert!(matches!(
+        transfer::push(&endpoint, &root, &guest),
+        Err(Error::Guest(_))
+    ));
+    provider.destroy("actor").unwrap();
+}
+
+#[test]
+fn a_host_worktree_that_changed_meanwhile_is_not_overwritten() {
+    let cluster = Cluster::start("conflict");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let endpoint = provider.endpoint("actor").unwrap();
+    let root = repository(&cluster.scratch.0);
+    let guest = cluster.scratch.path("guest");
+    let pushed = transfer::push(&endpoint, &root, &guest).unwrap();
+    guest_run(&endpoint, &guest, "printf 'guest\\n' > src/edit.txt");
+    fs::write(root.join("src/edit.txt"), "host\n").unwrap();
+    assert!(matches!(
+        transfer::pull(&endpoint, &pushed, &root),
+        Err(Error::WorktreeChanged(_))
+    ));
+    assert_eq!(
+        fs::read_to_string(root.join("src/edit.txt")).unwrap(),
+        "host\n"
+    );
+    provider.destroy("actor").unwrap();
+}
+
+#[test]
+fn a_home_directory_is_replaced_by_the_actors() {
+    let cluster = Cluster::start("home");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let endpoint = provider.endpoint("actor").unwrap();
+    let home = cluster.scratch.path("home");
+    fs::create_dir_all(home.join(".config")).unwrap();
+    fs::write(home.join(".config/settings"), "v1\n").unwrap();
+    fs::write(home.join("stale"), "removed in the actor\n").unwrap();
+    let guest = cluster.scratch.path("guest-home");
+    transfer::push_tree(&endpoint, &home, &guest).unwrap();
+    assert_eq!(
+        fs::read_to_string(guest.join(".config/settings")).unwrap(),
+        "v1\n"
+    );
+    fs::write(guest.join(".config/settings"), "v2\n").unwrap();
+    fs::remove_file(guest.join("stale")).unwrap();
+    symlink("/etc", guest.join("etc-link")).unwrap();
+    transfer::pull_tree(&endpoint, &guest, &home).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(".config/settings")).unwrap(),
+        "v2\n"
+    );
+    assert!(!home.join("stale").exists());
+    assert!(fs::symlink_metadata(home.join("etc-link"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    // A missing home in the actor leaves the host's alone.
+    transfer::pull_tree(&endpoint, &cluster.scratch.path("absent"), &home).unwrap();
+    assert!(home.join(".config/settings").exists());
+    let leftovers: Vec<_> = fs::read_dir(&cluster.scratch.0)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".home."))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    provider.destroy("actor").unwrap();
+}
