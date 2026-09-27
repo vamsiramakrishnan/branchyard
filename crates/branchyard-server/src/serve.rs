@@ -279,9 +279,11 @@ fn start_webhooks(
     let mut tasks = Vec::new();
     for repo in repos.values() {
         for webhook in &config.webhooks {
-            eprintln!(
-                "branchyard-server: notifying {} of {}'s activity, cursor in {place}",
-                webhook.url, repo.name
+            tracing::info!(
+                webhook = %webhook.url,
+                repo = %repo.name,
+                cursor = %place,
+                "notifying webhook of repo activity"
             );
             tasks.push(webhook::spawn(
                 repo.clone(),
@@ -413,11 +415,11 @@ async fn poll(
                 };
                 match yard.resume_graph(&options) {
                     Ok(started) if started.is_empty() => {}
-                    Ok(started) => eprintln!(
-                        "branchyard-server: started {} whose prerequisites had settled",
-                        started.join(", ")
+                    Ok(started) => tracing::info!(
+                        started = %started.join(", "),
+                        "started branch(es) whose prerequisites had settled"
                     ),
-                    Err(e) => eprintln!("branchyard-server: resuming graphs: {e}"),
+                    Err(e) => tracing::error!(error = %e, "resuming graphs"),
                 }
             }
             (feed.sync(), recovered)
@@ -426,15 +428,16 @@ async fn poll(
         match polled {
             Ok((synced, recovered)) => {
                 if let Err(e) = synced {
-                    eprintln!("branchyard-server: feed of {}: {e}", repo.name);
+                    tracing::error!(repo = %repo.name, error = %e, "syncing the feed");
                 }
                 match recovered {
                     Ok(0) => {}
-                    Ok(n) => eprintln!(
-                        "branchyard-server: recovered {n} branch(es) of {} whose engine stopped",
-                        repo.name
+                    Ok(n) => tracing::info!(
+                        repo = %repo.name,
+                        recovered = n,
+                        "recovered branch(es) whose engine stopped"
                     ),
-                    Err(e) => eprintln!("branchyard-server: recovering {}: {e}", repo.name),
+                    Err(e) => tracing::error!(repo = %repo.name, error = %e, "recovering"),
                 }
             }
             Err(_) => return,
@@ -476,7 +479,7 @@ async fn accept_loop(
                 }
                 Err(e) => {
                     // Such as too many open files: back off rather than spin.
-                    eprintln!("branchyard-server: accept: {e}");
+                    tracing::error!(error = %e, "accept");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             },

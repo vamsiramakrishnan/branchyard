@@ -416,9 +416,9 @@ fn default_secret(path: &Path, message: &str) -> Result<(), String> {
         .open(path)
         .map_err(|e| format!("token file {}: {e}", path.display()))?;
     writeln!(file, "{token}").map_err(|e| format!("token file {}: {e}", path.display()))?;
-    eprintln!(
-        "branchyard-server: {}",
-        message.replace("{path}", &path.display().to_string())
+    tracing::info!(
+        message = %message.replace("{path}", &path.display().to_string()),
+        "wrote a secret file"
     );
     Ok(())
 }
@@ -595,24 +595,26 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    // `--quiet` keeps meaning "warn and above" for anyone who does not set
+    // `BRANCHYARD_LOG`/`RUST_LOG` themselves; see `logging::init`.
+    crate::logging::init(flags.quiet);
     let (config, warnings) = match build(flags) {
         Ok(built) => built,
         Err(error) => {
-            eprintln!("{program}: {error}");
+            tracing::error!(%error, "cannot build the configuration");
             return ExitCode::FAILURE;
         }
     };
     for warning in warnings {
-        eprintln!("{program}: warning: {warning}");
+        tracing::warn!(%warning, "configuration warning");
     }
     match config.validate() {
         Ok(None) => {}
         Ok(Some(warning)) => {
-            let rule = "!".repeat(72);
-            eprintln!("{rule}\n{program}: {warning}\n{rule}");
+            tracing::warn!(%warning, "configuration warning");
         }
         Err(error) => {
-            eprintln!("{program}: {error}");
+            tracing::error!(%error, "invalid configuration");
             return ExitCode::FAILURE;
         }
     }
@@ -622,7 +624,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("{program}: cannot start the runtime: {error}");
+            tracing::error!(%error, "cannot start the async runtime");
             return ExitCode::FAILURE;
         }
     };
@@ -631,42 +633,42 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
         let running = match serve::start(config).await {
             Ok(running) => running,
             Err(error) => {
-                eprintln!("{program}: {error}");
+                tracing::error!(%error, "cannot start serving");
                 return ExitCode::FAILURE;
             }
         };
         if running.is_worker() {
             println!("working on {}", repos.join(", "));
             let _ = std::io::stdout().flush();
-            eprintln!(
-                "{program}: running operations queued for {} in the database; harnesses run \
-                 as this user, with no isolation beyond it",
-                repos.join(", ")
+            tracing::info!(
+                repos = %repos.join(", "),
+                "running operations queued in the database; harnesses run as this user, \
+                 with no isolation beyond it"
             );
         } else {
             println!("listening on {}", running.url());
             let _ = std::io::stdout().flush();
-            eprintln!(
-                "{program}: serving {} on {}; harnesses run as this user, with no isolation \
-                 beyond it",
-                repos.join(", "),
-                running.url()
+            tracing::info!(
+                repos = %repos.join(", "),
+                url = %running.url(),
+                "serving; harnesses run as this user, with no isolation beyond it"
             );
         }
         let handle = running.handle();
-        let name = program.to_owned();
         tokio::spawn(async move {
             signal().await;
-            eprintln!("{name}: shutting down; running operations may finish (signal again to stop waiting)");
+            tracing::info!(
+                "shutting down; running operations may finish (signal again to stop waiting)"
+            );
             handle.shutdown();
             signal().await;
             handle.force();
         });
         let stopped = running.wait().await;
         if stopped.interrupted > 0 {
-            eprintln!(
-                "{program}: recorded {} unfinished operation(s) as interrupted",
-                stopped.interrupted
+            tracing::warn!(
+                interrupted = stopped.interrupted,
+                "recorded unfinished operation(s) as interrupted"
             );
         }
         ExitCode::SUCCESS

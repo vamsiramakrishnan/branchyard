@@ -70,7 +70,7 @@ impl PaneMap {
             std::fs::rename(temp, &path)
         };
         if let Err(e) = write() {
-            eprintln!("branchyard-herdr: cannot save {}: {e}", path.display());
+            tracing::error!(path = %path.display(), error = %e, "cannot save the pane map");
         }
     }
 
@@ -112,7 +112,7 @@ pub fn connect(config: &Config) -> Result<Repo, String> {
 pub fn run(config: &Config) -> Result<(), String> {
     let repo = connect(config)?;
     let server = format!("{} {}", repo.client().endpoint(), repo.name());
-    eprintln!("branchyard-herdr: following {server}");
+    tracing::info!(%server, "following");
     let (tx, rx) = mpsc::channel();
     {
         let repo = repo.clone();
@@ -173,9 +173,10 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
                 .and_then(|start| Ok((start, repo.branches()?)));
             match listed {
                 Ok((start, branches)) => {
-                    eprintln!(
-                        "branchyard-herdr: {} branches; following from cursor {start}",
-                        branches.len()
+                    tracing::info!(
+                        branches = branches.len(),
+                        cursor = start,
+                        "listed branches; following from cursor"
                     );
                     cursor = Some(start);
                     snapshot = false;
@@ -189,15 +190,12 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
                         return;
                     }
                     failures += 1;
-                    eprintln!("branchyard-herdr: {e}; retrying");
+                    tracing::warn!(error = %e, "retrying");
                     continue;
                 }
             }
         } else {
-            eprintln!(
-                "branchyard-herdr: reconnecting after cursor {}",
-                cursor.unwrap_or(0)
-            );
+            tracing::info!(cursor = cursor.unwrap_or(0), "reconnecting");
         }
         for item in stream.by_ref() {
             match item {
@@ -210,7 +208,7 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
                 }
                 Err(e) if e.code() == Some("cursor_out_of_range") => {
                     // The server's feed was reset: start over from a listing.
-                    eprintln!("branchyard-herdr: {e}; listing branches again");
+                    tracing::warn!(error = %e, "listing branches again");
                     snapshot = true;
                     cursor = None;
                 }
@@ -218,7 +216,7 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
                     let _ = tx.send(Feed::Fatal(e.to_string()));
                     return;
                 }
-                Err(e) => eprintln!("branchyard-herdr: event stream lost: {e}"),
+                Err(e) => tracing::error!(error = %e, "event stream lost"),
             }
         }
         failures += 1;
@@ -295,18 +293,15 @@ impl<'a> Bridge<'a> {
             }
             match self.show(&branch, &report, &mut changed) {
                 Ok(()) => {
-                    eprintln!(
-                        "branchyard-herdr: {branch}: {}{}",
-                        report.state.as_str(),
-                        report
-                            .message
-                            .as_deref()
-                            .map(|m| format!(" ({m})"))
-                            .unwrap_or_default()
+                    tracing::info!(
+                        %branch,
+                        state = report.state.as_str(),
+                        message = report.message.as_deref().unwrap_or(""),
+                        "reported"
                     );
                     self.reported.insert(branch, report);
                 }
-                Err(e) => eprintln!("branchyard-herdr: {branch}: {e}"),
+                Err(e) => tracing::error!(%branch, error = %e, "reporting"),
             }
         }
         if changed {

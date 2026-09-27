@@ -359,7 +359,7 @@ impl Registry {
                         continue;
                     }
                     Ok(None) => {}
-                    Err(e) => eprintln!("branchyard-server: could not claim an operation: {e}"),
+                    Err(e) => tracing::error!(error = %e, "could not claim an operation"),
                 }
             }
             let wait = self.options.poll.min(renew_every);
@@ -387,10 +387,12 @@ impl Registry {
                 .renew(&self.worker, &id, fence, self.options.lease)
             {
                 Ok(true) => {}
-                Ok(false) => eprintln!(
-                    "branchyard-server: lost the claim on {id}; another worker took it over"
-                ),
-                Err(e) => eprintln!("branchyard-server: could not renew the claim on {id}: {e}"),
+                Ok(false) => {
+                    tracing::warn!(%id, "lost the claim on an operation; another worker took it over")
+                }
+                Err(e) => {
+                    tracing::error!(%id, error = %e, "could not renew the claim on an operation")
+                }
             }
         }
     }
@@ -413,7 +415,7 @@ impl Registry {
             .name(format!("branchyard-{id}"))
             .spawn(move || registry.work(claim, executor));
         if let Err(error) = spawned {
-            eprintln!("branchyard-server: could not start a worker thread for {id}: {error}");
+            tracing::error!(%id, %error, "could not start a worker thread for an operation");
             let _ = self.store.release(&self.worker, &id, fence);
             self.done(&id);
         }
@@ -443,12 +445,12 @@ impl Registry {
         {
             Ok(true) => {}
             Ok(false) => {
-                eprintln!("branchyard-server: lost the claim on {id} before it started");
+                tracing::warn!(%id, "lost the claim on an operation before it started");
                 self.done(&id);
                 return;
             }
             Err(e) => {
-                eprintln!("branchyard-server: could not record {id} as running: {e}");
+                tracing::error!(%id, error = %e, "could not record an operation as running");
                 let _ = self.store.release(&self.worker, &id, fence);
                 self.done(&id);
                 return;
@@ -482,15 +484,16 @@ impl Registry {
             Ok(true) => true,
             Ok(false) => {
                 if !self.lock().closed {
-                    eprintln!(
-                        "branchyard-server: the outcome of {id} was not recorded: another worker \
-                         took its claim over"
+                    tracing::warn!(
+                        %id,
+                        "the outcome of an operation was not recorded: another worker took its \
+                         claim over"
                     );
                 }
                 false
             }
             Err(e) => {
-                eprintln!("branchyard-server: could not record the outcome of {id}: {e}");
+                tracing::error!(%id, error = %e, "could not record the outcome of an operation");
                 false
             }
         }
@@ -667,10 +670,11 @@ impl Drop for Hold {
             .store
             .unhold(&self.repo, &self.branch, &self.token)
         {
-            eprintln!(
-                "branchyard-server: could not release {}; it frees itself within {}s: {e}",
-                self.branch,
-                HOLD_TTL.as_secs()
+            tracing::error!(
+                branch = %self.branch,
+                ttl_s = HOLD_TTL.as_secs(),
+                error = %e,
+                "could not release a hold; it frees itself within the TTL"
             );
         }
     }

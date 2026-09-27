@@ -69,6 +69,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod feed;
+pub mod logging;
 pub mod ops;
 pub mod serve;
 pub mod storage_routes;
