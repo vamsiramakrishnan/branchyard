@@ -1,7 +1,11 @@
-//! Machine-readable output for `--json`. The SDK types carry no serde
-//! derives, so the shapes are spelled out here; they are the CLI's contract.
+//! Machine-readable output for `--json`. The shapes are spelled out here
+//! rather than taken from the SDK's serde forms: they are the CLI's
+//! contract and must not change when the SDK's do.
 
-use branchyard::{BranchInfo, BranchStatus, Event, HarnessInfo, RecordedEvent, TurnOutcome};
+use branchyard::{
+    Activity, BranchInfo, BranchStatus, CandidateInfo, DecisionSource, Event, HarnessInfo,
+    RecordedEvent, TurnOutcome,
+};
 use serde_json::{json, Value};
 
 pub fn status(status: &BranchStatus) -> Value {
@@ -20,6 +24,15 @@ pub fn status(status: &BranchStatus) -> Value {
     }
 }
 
+fn candidate(c: &CandidateInfo) -> Value {
+    json!({
+        "commit": c.commit,
+        "files_changed": c.files_changed,
+        "insertions": c.insertions,
+        "deletions": c.deletions,
+    })
+}
+
 pub fn branch(info: &BranchInfo) -> Value {
     json!({
         "name": info.name,
@@ -31,12 +44,7 @@ pub fn branch(info: &BranchInfo) -> Value {
         "session": info.session,
         "parent": info.parent,
         "base": info.base,
-        "candidate": info.candidate.as_ref().map(|c| json!({
-            "commit": c.commit,
-            "files_changed": c.files_changed,
-            "insertions": c.insertions,
-            "deletions": c.deletions,
-        })),
+        "candidate": info.candidate.as_ref().map(candidate),
         "status": status(&info.status),
         "turns": info.turns,
         "cost_usd": info.cost_usd,
@@ -128,8 +136,39 @@ pub fn event(event: &Event) -> Value {
     }
 }
 
+fn source(source: &DecisionSource) -> Value {
+    match source {
+        DecisionSource::Rule { pattern } => json!({ "kind": "rule", "pattern": pattern }),
+        DecisionSource::Default => json!({ "kind": "default" }),
+        DecisionSource::Asked => json!({ "kind": "asked" }),
+        DecisionSource::Engine => json!({ "kind": "engine" }),
+    }
+}
+
+/// Recorded activity as `{"at_ms": ..., "activity": <kind>, fields...}`;
+/// a harness event keeps its own object under `event`.
 pub fn recorded(recorded: &RecordedEvent) -> Value {
-    json!({ "at_ms": recorded.at_ms, "event": event(&recorded.event) })
+    let mut value = match &recorded.activity {
+        Activity::Harness(e) => json!({ "activity": "harness", "event": event(e) }),
+        Activity::Prompt(text) => json!({ "activity": "prompt", "text": text }),
+        Activity::Decision {
+            tool,
+            allowed,
+            message,
+            source: s,
+        } => json!({
+            "activity": "decision",
+            "tool": tool,
+            "allowed": allowed,
+            "message": message,
+            "source": source(s),
+        }),
+        Activity::Snapshot(c) => json!({ "activity": "snapshot", "candidate": candidate(c) }),
+        Activity::Status(s) => json!({ "activity": "status", "status": status(s) }),
+        Activity::Warning(message) => json!({ "activity": "warning", "message": message }),
+    };
+    value["at_ms"] = json!(recorded.at_ms);
+    value
 }
 
 /// Pretty JSON with a trailing newline.
@@ -142,8 +181,7 @@ pub fn text(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use branchyard::{CandidateInfo, PermissionRequest, Usage};
-    use branchyard_harness::{NativeSession, PermissionKey};
+    use branchyard::{NativeSession, PermissionKey, PermissionRequest, Usage};
     use std::path::PathBuf;
 
     #[test]
@@ -216,9 +254,37 @@ mod tests {
         assert_eq!(
             recorded(&RecordedEvent {
                 at_ms: 5,
-                event: Event::SessionClosed
+                activity: Activity::Harness(Event::SessionClosed)
             }),
-            json!({ "at_ms": 5, "event": { "type": "session_closed" } })
+            json!({ "at_ms": 5, "activity": "harness", "event": { "type": "session_closed" } })
+        );
+        assert_eq!(
+            recorded(&RecordedEvent {
+                at_ms: 6,
+                activity: Activity::Decision {
+                    tool: "Bash".into(),
+                    allowed: false,
+                    message: Some("no".into()),
+                    source: DecisionSource::Rule {
+                        pattern: "Bash".into()
+                    },
+                }
+            }),
+            json!({
+                "at_ms": 6,
+                "activity": "decision",
+                "tool": "Bash",
+                "allowed": false,
+                "message": "no",
+                "source": { "kind": "rule", "pattern": "Bash" },
+            })
+        );
+        assert_eq!(
+            recorded(&RecordedEvent {
+                at_ms: 7,
+                activity: Activity::Status(BranchStatus::Ready)
+            }),
+            json!({ "at_ms": 7, "activity": "status", "status": { "state": "ready" } })
         );
     }
 }

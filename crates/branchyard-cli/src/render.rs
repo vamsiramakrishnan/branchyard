@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use branchyard::{
-    BranchInfo, BranchStatus, CandidateInfo, Event, HarnessInfo, PermissionDecision,
-    PermissionRequest, RecordedEvent, TurnOutcome, Usage,
+    Activity, BranchInfo, BranchStatus, CandidateInfo, Event, HarnessInfo, RecordedEvent,
+    TurnOutcome, Usage,
 };
 use serde_json::Value;
 
@@ -194,18 +194,47 @@ pub fn event_line(event: &Event, style: Style) -> Option<String> {
     })
 }
 
-/// The answer a policy gave, as one line.
-pub fn decision_line(
-    request: &PermissionRequest,
-    decision: &PermissionDecision,
-    style: Style,
-) -> String {
-    match decision {
-        PermissionDecision::Allow => style.paint(Tone::Green, &format!("allowed {}", request.tool)),
-        PermissionDecision::Deny { message } => {
-            style.paint(Tone::Red, &format!("denied {}: {message}", request.tool))
-        }
+/// The answer a permission request got, as one line.
+pub fn decision_line(tool: &str, allowed: bool, message: Option<&str>, style: Style) -> String {
+    match (allowed, message) {
+        (true, _) => style.paint(Tone::Green, &format!("allowed {tool}")),
+        (false, Some(message)) => style.paint(Tone::Red, &format!("denied {tool}: {message}")),
+        (false, None) => style.paint(Tone::Red, &format!("denied {tool}")),
     }
+}
+
+/// One line for recorded activity. Message deltas are text, not lines, and
+/// return `None`.
+pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
+    Some(match activity {
+        Activity::Harness(event) => return event_line(event, style),
+        Activity::Prompt(text) => style.paint(
+            Tone::Bold,
+            &format!(
+                "prompt: {}",
+                truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 100)
+            ),
+        ),
+        Activity::Decision {
+            tool,
+            allowed,
+            message,
+            ..
+        } => decision_line(tool, *allowed, message.as_deref(), style),
+        Activity::Snapshot(candidate) => style.paint(
+            Tone::Green,
+            &format!(
+                "candidate {} ({})",
+                short_commit(&candidate.commit),
+                candidate_text(Some(candidate))
+            ),
+        ),
+        Activity::Status(status) => {
+            let (text, tone) = status_text(status);
+            style.paint(tone, &format!("status: {text}"))
+        }
+        Activity::Warning(message) => style.paint(Tone::Yellow, &format!("warning: {message}")),
+    })
 }
 
 /// Turns a stream of events from one or more branches into terminal text.
@@ -234,10 +263,6 @@ impl Renderer {
         }
     }
 
-    pub fn style(&self) -> Style {
-        self.style
-    }
-
     pub fn event(&mut self, branch: &str, event: &Event) -> String {
         if let Event::MessageDelta { text, .. } = event {
             return self.text(branch, text);
@@ -245,6 +270,29 @@ impl Renderer {
         match event_line(event, self.style) {
             Some(line) => self.line(branch, &line),
             None => String::new(),
+        }
+    }
+
+    /// Live output for one activity. The prompt is not echoed, and status
+    /// changes are left to the closing summary.
+    pub fn activity(&mut self, branch: &str, activity: &Activity) -> String {
+        match activity {
+            Activity::Harness(event) => self.event(branch, event),
+            Activity::Prompt(_) | Activity::Status(_) => String::new(),
+            other => match activity_line(other, self.style) {
+                Some(line) => self.line(branch, &line),
+                None => String::new(),
+            },
+        }
+    }
+
+    /// Fix prefix colors and width for branches known in advance, so the
+    /// first lines already line up.
+    pub fn reserve(&mut self, branches: &[String]) {
+        for branch in branches {
+            let next = BRANCH_TONES[self.tones.len() % BRANCH_TONES.len()];
+            self.tones.entry(branch.clone()).or_insert(next);
+            self.width = self.width.max(branch.chars().count());
         }
     }
 
@@ -763,7 +811,7 @@ pub fn timestamp(at_ms: u64) -> String {
     )
 }
 
-/// `by log`: one timestamped line per event, with consecutive message
+/// `by log`: one timestamped line per activity, with consecutive message
 /// deltas joined into the text they spell.
 pub fn log_text(events: &[RecordedEvent], style: Style) -> String {
     let mut out = String::new();
@@ -771,10 +819,10 @@ pub fn log_text(events: &[RecordedEvent], style: Style) -> String {
     while i < events.len() {
         let stamp = style.paint(Tone::Dim, &timestamp(events[i].at_ms));
         let indent = " ".repeat(24);
-        if let Event::MessageDelta { .. } = events[i].event {
+        if let Activity::Harness(Event::MessageDelta { .. }) = events[i].activity {
             let mut text = String::new();
             while let Some(RecordedEvent {
-                event: Event::MessageDelta { text: delta, .. },
+                activity: Activity::Harness(Event::MessageDelta { text: delta, .. }),
                 ..
             }) = events.get(i)
             {
@@ -788,7 +836,7 @@ pub fn log_text(events: &[RecordedEvent], style: Style) -> String {
             }
             continue;
         }
-        if let Some(line) = event_line(&events[i].event, style) {
+        if let Some(line) = activity_line(&events[i].activity, style) {
             out.push_str(&format!("{stamp}  {line}\n"));
         }
         i += 1;
@@ -799,7 +847,7 @@ pub fn log_text(events: &[RecordedEvent], style: Style) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use branchyard_harness::{NativeSession, PermissionKey};
+    use branchyard::{NativeSession, PermissionKey, PermissionRequest};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -1024,17 +1072,53 @@ mod tests {
 
     #[test]
     fn decisions_render() {
-        let bash = request("Bash", json!({}));
+        assert_eq!(decision_line("Bash", true, None, PLAIN), "allowed Bash");
         assert_eq!(
-            decision_line(&bash, &PermissionDecision::Allow, PLAIN),
-            "allowed Bash"
-        );
-        let deny = PermissionDecision::Deny {
-            message: "Denied by Branchyard policy.".into(),
-        };
-        assert_eq!(
-            decision_line(&bash, &deny, PLAIN),
+            decision_line("Bash", false, Some("Denied by Branchyard policy."), PLAIN),
             "denied Bash: Denied by Branchyard policy."
+        );
+        assert_eq!(decision_line("Bash", false, None, PLAIN), "denied Bash");
+    }
+
+    #[test]
+    fn engine_activity_renders_as_lines() {
+        let decision = Activity::Decision {
+            tool: "Bash".into(),
+            allowed: false,
+            message: Some("no".into()),
+            source: branchyard::DecisionSource::Default,
+        };
+        let cases = [
+            (decision, "denied Bash: no"),
+            (
+                Activity::Prompt("fix  the\ntest".into()),
+                "prompt: fix the test",
+            ),
+            (
+                Activity::Snapshot(CandidateInfo {
+                    commit: "0123456789abcdef".into(),
+                    files_changed: 2,
+                    insertions: 3,
+                    deletions: 1,
+                }),
+                "candidate 0123456789 (2 files +3 -1)",
+            ),
+            (Activity::Status(BranchStatus::Ready), "status: ready"),
+            (
+                Activity::Warning("processes outlived the harness".into()),
+                "warning: processes outlived the harness",
+            ),
+            (Activity::Harness(Event::Ready), "harness ready"),
+        ];
+        for (activity, expected) in cases {
+            assert_eq!(activity_line(&activity, PLAIN).as_deref(), Some(expected));
+        }
+        let mut r = Renderer::new(PLAIN, false);
+        assert_eq!(r.activity("b", &Activity::Prompt("x".into())), "");
+        assert_eq!(r.activity("b", &Activity::Status(BranchStatus::Ready)), "");
+        assert_eq!(
+            r.activity("b", &Activity::Warning("w".into())),
+            "warning: w\n"
         );
     }
 
@@ -1089,6 +1173,16 @@ mod tests {
              x-claude-code │ harness ready\n\
              x-codex       │ left\n"
         );
+    }
+
+    #[test]
+    fn reserved_branches_line_up_from_the_first_line() {
+        let mut r = Renderer::new(PLAIN, true);
+        r.reserve(&["a".into(), "longer-name".into()]);
+        assert_eq!(r.line("a", "x"), "a           │ x\n");
+        let mut color = Renderer::new(Style { color: true }, true);
+        color.reserve(&["b".into(), "a".into()]);
+        assert!(color.line("a", "x").starts_with("\x1b[35m"));
     }
 
     #[test]
@@ -1307,19 +1401,32 @@ mod tests {
 
     #[test]
     fn log_joins_message_deltas() {
-        let at = |at_ms, event| RecordedEvent { at_ms, event };
+        let at = |at_ms, event| RecordedEvent {
+            at_ms,
+            activity: Activity::Harness(event),
+        };
         let events = [
             at(0, Event::Ready),
             at(1, delta("Looking at ")),
             at(2, delta("the test.\nFound it.\n")),
             at(3, Event::SessionClosed),
+            RecordedEvent {
+                at_ms: 4,
+                activity: Activity::Decision {
+                    tool: "Bash".into(),
+                    allowed: true,
+                    message: None,
+                    source: branchyard::DecisionSource::Asked,
+                },
+            },
         ];
         assert_eq!(
             log_text(&events, PLAIN),
             "1970-01-01T00:00:00.000Z  harness ready\n\
              1970-01-01T00:00:00.001Z  Looking at the test.\n\
              \x20                         Found it.\n\
-             1970-01-01T00:00:00.003Z  session closed\n"
+             1970-01-01T00:00:00.003Z  session closed\n\
+             1970-01-01T00:00:00.004Z  allowed Bash\n"
         );
     }
 }

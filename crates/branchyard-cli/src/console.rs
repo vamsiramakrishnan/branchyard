@@ -1,7 +1,8 @@
-//! Live output while branches run, and the permission policy that reports
-//! into it. The engine calls both from any branch's thread, so everything
-//! goes through one mutex: output lines never tear, and a permission prompt
-//! holds the terminal until it is answered.
+//! Live output while branches run, and the permission policy for them. The
+//! engine calls both from any branch's thread, so everything goes through
+//! one mutex: output lines never tear, and a permission prompt holds the
+//! terminal until it is answered. Decisions are printed from the engine's
+//! record of them, whoever made them.
 
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
@@ -10,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use branchyard::{BranchEvent, PermissionDecision, PermissionRequest, Policy};
 
 use crate::args::Permissions;
-use crate::render::{compact_input, decision_line, Renderer};
+use crate::render::{compact_input, Renderer};
 
 /// How permission requests will be answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,20 +77,13 @@ impl Console {
 
     pub fn event(&self, event: &BranchEvent) {
         let mut state = self.lock();
-        let text = state.renderer.event(&event.branch, &event.event);
+        let text = state.renderer.activity(&event.branch, &event.activity);
         state.write(&text);
     }
 
-    pub fn decision(
-        &self,
-        branch: &str,
-        request: &PermissionRequest,
-        decision: &PermissionDecision,
-    ) {
-        let mut state = self.lock();
-        let line = decision_line(request, decision, state.renderer.style());
-        let text = state.renderer.line(branch, &line);
-        state.write(&text);
+    /// See [`Renderer::reserve`].
+    pub fn reserve(&self, branches: &[String]) {
+        self.lock().renderer.reserve(branches);
     }
 
     /// Prompt for one request. Holding the lock serializes prompts across
@@ -104,7 +98,7 @@ impl Console {
             false => format!("{}: {input}", request.tool),
         };
         let question = format!("{branch} wants {what}  [y/N] ");
-        let decision = match (self.prompter)(&question) {
+        match (self.prompter)(&question) {
             Ok(answer) if is_yes(&answer) => PermissionDecision::Allow,
             Ok(_) => PermissionDecision::Deny {
                 message: "Denied at the terminal.".into(),
@@ -112,11 +106,7 @@ impl Console {
             Err(error) => PermissionDecision::Deny {
                 message: format!("Denied: could not ask at the terminal ({error})."),
             },
-        };
-        let line = decision_line(request, &decision, state.renderer.style());
-        let text = state.renderer.line(branch, &line);
-        state.write(&text);
-        decision
+        }
     }
 
     pub fn finish(&self) {
@@ -130,24 +120,14 @@ fn is_yes(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// The policy for `choice`, reporting every decision to `console`.
-///
-/// `--yes` and deny-all still decide through `Policy::allow_all` and
-/// `Policy::deny_all`; the wrapper only observes, because the SDK emits no
-/// event for a decision.
+/// The policy for `choice`. The engine records each decision, and the
+/// console prints it from that record.
 pub fn policy(choice: Choice, console: Arc<Console>) -> Policy {
-    let inner = match choice {
-        Choice::Ask => {
-            return Policy::ask(move |branch, request| console.ask(branch, request));
-        }
+    match choice {
+        Choice::Ask => Policy::ask(move |branch, request| console.ask(branch, request)),
         Choice::AllowAll => Policy::allow_all(),
         Choice::DenyAll { .. } => Policy::deny_all(),
-    };
-    Policy::ask(move |branch, request| {
-        let decision = inner.decide(branch, request);
-        console.decision(branch, request, &decision);
-        decision
-    })
+    }
 }
 
 /// Ask on the controlling terminal, falling back to stderr and stdin.
@@ -173,7 +153,7 @@ pub fn terminal_prompt(question: &str) -> io::Result<String> {
 mod tests {
     use super::*;
     use crate::render::Style;
-    use branchyard_harness::PermissionKey;
+    use branchyard::{Activity, DecisionSource, PermissionKey};
     use serde_json::json;
 
     #[test]
@@ -235,18 +215,33 @@ mod tests {
         }
     }
 
+    fn decision(allowed: bool, source: DecisionSource) -> BranchEvent {
+        BranchEvent {
+            branch: "b".into(),
+            activity: Activity::Decision {
+                tool: "Bash".into(),
+                allowed,
+                message: (!allowed).then(|| "Denied by Branchyard policy.".into()),
+                source,
+            },
+        }
+    }
+
     #[test]
-    fn allow_all_and_deny_all_report_each_decision() {
+    fn allow_all_and_deny_all_decide_without_asking() {
         let questions = Arc::new(Mutex::new(Vec::new()));
         let (console, out) = console("y", questions.clone());
         let allow = policy(Choice::AllowAll, console.clone());
         assert_eq!(allow.decide("b", &bash()), PermissionDecision::Allow);
-        let deny = policy(Choice::DenyAll { notice: true }, console);
+        let deny = policy(Choice::DenyAll { notice: true }, console.clone());
         assert!(matches!(
             deny.decide("b", &bash()),
             PermissionDecision::Deny { .. }
         ));
         assert!(questions.lock().unwrap().is_empty());
+        assert_eq!(out.text(), "", "decisions print from the engine's record");
+        console.event(&decision(true, DecisionSource::Default));
+        console.event(&decision(false, DecisionSource::Default));
         assert_eq!(
             out.text(),
             "allowed Bash\ndenied Bash: Denied by Branchyard policy.\n"
@@ -259,17 +254,18 @@ mod tests {
         let (console, out) = console("Yes\n", questions.clone());
         console.event(&BranchEvent {
             branch: "b".into(),
-            event: branchyard::Event::MessageDelta {
+            activity: Activity::Harness(branchyard::Event::MessageDelta {
                 turn: 1,
                 text: "Running the tests".into(),
-            },
+            }),
         });
-        let ask = policy(Choice::Ask, console);
+        let ask = policy(Choice::Ask, console.clone());
         assert_eq!(ask.decide("fix-flaky", &bash()), PermissionDecision::Allow);
         assert_eq!(
             *questions.lock().unwrap(),
             ["fix-flaky wants Bash: cargo test  [y/N] "]
         );
+        console.event(&decision(true, DecisionSource::Asked));
         assert_eq!(out.text(), "Running the tests\nallowed Bash\n");
     }
 
