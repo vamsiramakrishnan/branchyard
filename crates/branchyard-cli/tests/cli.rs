@@ -663,6 +663,33 @@ fn a_harness_delegates_with_the_python_module() {
 }
 
 #[test]
+fn artifacts_and_scratch_reach_the_python_module() {
+    let repo = Repo::new();
+    let script = "import branchyard as b; \
+                  a = b.publish('a.txt', name='a.txt', labels={'k': 'v'}); \
+                  print('published', a.name, a.labels); \
+                  print('listed', [x.name for x in b.list_artifacts()]); \
+                  s = b.create_scratch('cache'); print('scratch', s.name, s.owner_branch); \
+                  print('reachable', [x.name for x in b.list_scratch()]); \
+                  l = b.lock_scratch('cache'); print('locked', l.holder_branch); \
+                  b.unlock_scratch('cache'); print('unlocked')";
+    let prompt = format!("SH python3 -c \"{script}\"");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "published a.txt {'k': 'v'}",
+        "listed ['a.txt']",
+        "scratch cache root",
+        "reachable ['cache']",
+        "locked root",
+        "unlocked",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+}
+
+#[test]
 fn the_same_commands_act_with_your_authority_outside_a_harness() {
     let repo = Repo::new();
     let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate=2", "--yes"]);
@@ -1027,4 +1054,60 @@ fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
             .contains("already has 3 children, its envelope's max_children"),
         "{third}"
     );
+}
+
+#[test]
+fn artifact_and_scratch_commands_follow_the_delegation_tree() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "WRITE payload.txt=hi", "--name", "root"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let out = repo.by_agent(&["run", "no changes", "--name", "sibling"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let published = repo.json(&[
+        "artifact",
+        "publish",
+        ".branchyard/worktrees/root/payload.txt",
+        "--branch",
+        "root",
+        "--json",
+    ]);
+    let id = published["id"].as_str().unwrap().to_owned();
+    assert_eq!(published["name"], "payload.txt");
+    assert!(!published["digest"].as_str().unwrap().is_empty());
+
+    let listed = repo.json(&["artifact", "list", "--branch", "root", "--json"]);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let listed_sibling = repo.json(&["artifact", "list", "--branch", "sibling", "--json"]);
+    assert_eq!(listed_sibling.as_array().unwrap().len(), 0);
+
+    let out = repo.by(&[
+        "artifact", "share", &id, "--to", "sibling", "--branch", "root",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let listed_sibling = repo.json(&["artifact", "list", "--branch", "sibling", "--json"]);
+    assert_eq!(listed_sibling.as_array().unwrap().len(), 1);
+
+    let out_path = repo.dir.join("out.bin");
+    let out = repo.by(&[
+        "artifact",
+        "get",
+        &id,
+        "--out",
+        out_path.to_str().unwrap(),
+        "--branch",
+        "sibling",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(fs::read_to_string(&out_path).unwrap(), "hi\n");
+
+    let area = repo.json(&["scratch", "create", "cache", "--branch", "root", "--json"]);
+    assert_eq!(area["name"], "cache");
+    let lock = repo.json(&["scratch", "lock", "cache", "--branch", "root", "--json"]);
+    assert_eq!(lock["holder_branch"], "root");
+    let denied = repo.by(&["scratch", "lock", "cache", "--branch", "sibling"]);
+    assert_eq!(denied.status.code(), Some(1));
+    assert!(stderr(&denied).contains("may not"), "{}", stderr(&denied));
+    let out = repo.by(&["scratch", "unlock", "cache", "--branch", "root"]);
+    assert!(out.status.success(), "{}", stderr(&out));
 }

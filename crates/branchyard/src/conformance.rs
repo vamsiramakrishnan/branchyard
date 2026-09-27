@@ -8,6 +8,7 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use crate::state::{now_ms, Acquired, Backend, Begun, Fence, Owner, ProcessRow, Record};
+use crate::storage::StorageBackend;
 use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
 
 const TTL: Duration = Duration::from_secs(30);
@@ -15,6 +16,8 @@ const TTL: Duration = Duration::from_secs(30);
 /// A store for one test, and whatever must outlive it.
 pub(crate) struct Opened {
     pub backend: Arc<dyn Backend>,
+    /// The same backend, as [`StorageBackend`]: see [`crate::storage`].
+    pub storage: Arc<dyn StorageBackend>,
     /// Opens another handle on the same store, as a second engine would.
     pub again: Box<dyn Fn() -> Arc<dyn Backend>>,
     _cleanup: Box<dyn std::any::Any>,
@@ -40,12 +43,14 @@ pub(crate) fn sqlite(name: &str) -> Opened {
     let dir = std::env::temp_dir().join(format!("branchyard-conformance-{}", unique(name)));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let shared = Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap());
     let open = {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn Backend>
     };
     Opened {
-        backend: open(),
+        backend: shared.clone(),
+        storage: shared,
         again: Box::new(open),
         _cleanup: Box::new(Temp(dir)),
     }
@@ -63,10 +68,15 @@ pub(crate) fn postgres_url() -> Option<String> {
 pub(crate) fn postgres(name: &str) -> Option<Opened> {
     let url = postgres_url()?;
     let scope = format!("conformance-{}", unique(name));
-    let open =
-        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn Backend>;
+    let shared = Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap());
+    let open = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn Backend>
+    };
     Some(Opened {
-        backend: open(),
+        backend: shared.clone(),
+        storage: shared,
         again: Box::new(open),
         _cleanup: Box::new(()),
     })
@@ -85,6 +95,13 @@ fn record(name: &str) -> Record {
         "cost_baseline": null
     }))
     .unwrap()
+}
+
+fn record_with_parent(name: &str, parent: Option<&str>) -> Record {
+    let mut record = record(name);
+    record.info.parent = parent.map(str::to_owned);
+    record.info.status = BranchStatus::Ready;
+    record
 }
 
 fn owner(id: &str) -> Owner {
@@ -582,11 +599,133 @@ pub(crate) fn races(s: Opened) {
     }
 }
 
+/// Artifacts and scratch areas: [`crate::storage::StorageBackend`]. Grants
+/// (ancestor, descendant, sibling refused until shared), digest dedup and
+/// refcounting, and a scratch lock reclaimed once its holder stops running.
+pub(crate) fn storage(s: Opened) {
+    use crate::storage::{ArtifactRow, LockOutcome, NewArtifact};
+    let branches = &s.backend;
+    let storage = &s.storage;
+    // root -> a -> aa; root -> b (a sibling of a).
+    for (name, parent) in [
+        ("root", None),
+        ("a", Some("root")),
+        ("aa", Some("a")),
+        ("b", Some("root")),
+    ] {
+        branches
+            .write(&record_with_parent(name, parent), None)
+            .unwrap();
+    }
+    let ancestry_of = |name: &str| -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut cur = name.to_owned();
+        while let Some(record) = branches.read(&cur).unwrap() {
+            match record.info.parent {
+                Some(parent) => {
+                    chain.push(parent.clone());
+                    cur = parent;
+                }
+                None => break,
+            }
+        }
+        chain.reverse();
+        chain
+    };
+
+    // Publishing the same bytes twice from different branches is recorded
+    // as two artifacts sharing one digest; each gets its own id.
+    let new = |publisher: &str| NewArtifact {
+        digest: "d0".into(),
+        size: 3,
+        name: "n".into(),
+        media_type: "text/plain".into(),
+        publisher_branch: publisher.into(),
+        turn: 1,
+        labels: Default::default(),
+        ancestry: ancestry_of(publisher),
+    };
+    let published_by_aa = storage.create_artifact(&new("aa")).unwrap();
+    let published_by_b = storage.create_artifact(&new("b")).unwrap();
+    assert_ne!(published_by_aa.artifact.id, published_by_b.artifact.id);
+    assert_eq!(storage.digest_refcount("d0").unwrap(), 2);
+
+    let readable = |reader: &str, row: &ArtifactRow, shares: &[String]| {
+        reader == row.artifact.publisher_branch
+            || row.ancestry.iter().any(|a| a == reader)
+            || shares.iter().any(|s| s == reader)
+    };
+    // root and a (ancestors of aa) can read; b (a's sibling) cannot until
+    // shared.
+    assert!(readable("root", &published_by_aa, &[]));
+    assert!(readable("a", &published_by_aa, &[]));
+    assert!(!readable("b", &published_by_aa, &[]));
+    assert!(storage
+        .share_artifact(&published_by_aa.artifact.id, "b")
+        .unwrap());
+    let shares = storage
+        .artifact_shares(&published_by_aa.artifact.id)
+        .unwrap();
+    assert!(readable("b", &published_by_aa, &shares));
+    assert!(!storage.share_artifact("unknown", "b").unwrap());
+
+    assert_eq!(storage.artifacts().unwrap().len(), 2);
+    storage
+        .delete_artifact(&published_by_aa.artifact.id)
+        .unwrap();
+    assert_eq!(storage.digest_refcount("d0").unwrap(), 1);
+    assert!(storage
+        .artifact(&published_by_aa.artifact.id)
+        .unwrap()
+        .is_none());
+
+    // Scratch: one writer at a time, reclaimed once the holder is no
+    // longer running.
+    assert!(storage
+        .create_scratch("cache", "aa", &ancestry_of("aa"))
+        .unwrap());
+    assert!(!storage.create_scratch("cache", "b", &[]).unwrap());
+    branches
+        .write(&record_with_parent("aa", Some("a")), None)
+        .unwrap(); // status Ready: not running
+    match storage.scratch_lock("cache", "aa").unwrap().unwrap() {
+        LockOutcome::Granted(lock) => assert_eq!(lock.holder_branch, "aa"),
+        LockOutcome::Held(_) => panic!("a free lock was reported held"),
+    }
+    // Re-entrant for its own holder.
+    assert!(matches!(
+        storage.scratch_lock("cache", "aa").unwrap().unwrap(),
+        LockOutcome::Granted(_)
+    ));
+    // b is a's sibling and not authorized here, but the backend enforces
+    // only the lock, not the grant (the grant is `crate::storage`'s job);
+    // it still finds aa's turn not running, so it reclaims the lock.
+    match storage.scratch_lock("cache", "b").unwrap().unwrap() {
+        LockOutcome::Granted(lock) => assert_eq!(lock.holder_branch, "b"),
+        LockOutcome::Held(_) => panic!("a lock whose holder is not running was still held"),
+    }
+    let mut running = record_with_parent("root", None);
+    running.info.status = BranchStatus::Running;
+    branches.write(&running, None).unwrap();
+    assert!(storage.create_scratch("busy", "root", &[]).unwrap());
+    storage.scratch_lock("busy", "root").unwrap();
+    match storage.scratch_lock("busy", "b").unwrap().unwrap() {
+        LockOutcome::Held(lock) => assert_eq!(lock.holder_branch, "root"),
+        LockOutcome::Granted(_) => panic!("a live holder's lock was reclaimed"),
+    }
+    assert!(!storage.scratch_unlock("busy", "b").unwrap());
+    assert!(storage.scratch_unlock("busy", "root").unwrap());
+    assert!(storage.scratch_lock_state("busy").unwrap().is_none());
+    assert_eq!(storage.scratch_list().unwrap().len(), 2);
+    storage.delete_scratch("busy").unwrap();
+    assert!(storage.scratch("busy").unwrap().is_none());
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
-            concurrent_appends, races);
+            concurrent_appends, races, storage);
     };
     ($open:expr; $($check:ident),*) => {
         $(

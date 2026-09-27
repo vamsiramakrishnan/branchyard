@@ -15,7 +15,7 @@ use branchyard::{
 };
 use serde::Serialize;
 
-use crate::args::{self, shell_quote, SpawnArgs, TaskArgs};
+use crate::args::{self, shell_quote, ArtifactArgs, ScratchArgs, SpawnArgs, TaskArgs};
 use crate::console::{self, Choice, Console};
 use crate::json;
 use crate::remote::{self, Remote};
@@ -977,6 +977,160 @@ pub fn children(env: &Env, target: &Target, branch: Option<String>, json: bool) 
 
 fn short(commit: &str) -> &str {
     commit.get(..10).unwrap_or(commit)
+}
+
+/// This command's acting branch: the harness's own, or `--branch` outside
+/// one.
+fn acting_branch(
+    delegate: &Option<Delegate>,
+    branch: &Option<String>,
+    command: &str,
+) -> Result<String, branchyard::Error> {
+    match (delegate, branch) {
+        (Some(delegate), _) => Ok(delegate.branch().to_owned()),
+        (None, Some(branch)) => Ok(branch.clone()),
+        (None, None) => Err(branchyard::Error::Denied(format!(
+            "outside a harness, by {command} needs --branch"
+        ))),
+    }
+}
+
+pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
+    let json = args.json;
+    if matches!(target, Target::Remote(_)) {
+        return fail(
+            json,
+            &branchyard::Error::Unsupported(
+                "by artifact does not yet reach a server over --remote".into(),
+            ),
+        );
+    }
+    let delegate = harness_delegate(json)?;
+    let branch = match acting_branch(&delegate, &args.branch, "artifact") {
+        Ok(branch) => branch,
+        Err(error) => return fail(json, &error),
+    };
+    let act = match delegate {
+        Some(delegate) => delegate,
+        None => match as_user(&branch, TaskOptions::default()) {
+            Ok(delegate) => delegate,
+            Err(error) => return fail(json, &error),
+        },
+    };
+    match args.action.as_str() {
+        "publish" => {
+            let path = absolute(args.arg.as_deref().expect("checked in args"));
+            let labels = args.labels.iter().cloned().collect();
+            let result = act.publish_artifact(&path, args.name.clone(), labels);
+            emit(json, result, |a| {
+                format!(
+                    "published {} as {} ({} bytes, {})\n",
+                    a.name, a.id, a.size, a.digest
+                )
+            })
+        }
+        "list" => {
+            let result = act.artifacts();
+            emit(json, result, |list: &Vec<branchyard::ArtifactRef>| {
+                if list.is_empty() {
+                    return "no readable artifacts\n".into();
+                }
+                list.iter()
+                    .map(|a| {
+                        format!(
+                            "{} {} {} ({} bytes)\n",
+                            a.id, a.name, a.publisher_branch, a.size
+                        )
+                    })
+                    .collect()
+            })
+        }
+        "get" => {
+            let id = args.arg.clone().expect("checked in args");
+            let out = absolute(args.out.as_deref().expect("checked in args"));
+            let result = act.read_artifact(&id, &out);
+            emit(json, result, |a| {
+                format!("wrote {} bytes of {} to {}\n", a.size, a.id, out.display())
+            })
+        }
+        "share" => {
+            let id = args.arg.clone().expect("checked in args");
+            let to = args.to.clone().expect("checked in args");
+            let result = act.share_artifact(&id, &to).map(|()| Ack { ok: true });
+            emit(json, result, |_| format!("shared {id} with {to}\n"))
+        }
+        other => unreachable!("artifact action {other} was validated in args"),
+    }
+}
+
+/// A trivial success, printed as `{"ok": true}` with `--json` rather than
+/// `null`: the Python module treats a `null` result the same as no output,
+/// which is how a failed subprocess with nothing on stdout looks too.
+#[derive(Serialize)]
+struct Ack {
+    ok: bool,
+}
+
+pub fn scratch(target: &Target, args: &ScratchArgs) -> Outcome {
+    let json = args.json;
+    if matches!(target, Target::Remote(_)) {
+        return fail(
+            json,
+            &branchyard::Error::Unsupported(
+                "by scratch does not yet reach a server over --remote".into(),
+            ),
+        );
+    }
+    let delegate = harness_delegate(json)?;
+    let branch = match acting_branch(&delegate, &args.branch, "scratch") {
+        Ok(branch) => branch,
+        Err(error) => return fail(json, &error),
+    };
+    let act = match delegate {
+        Some(delegate) => delegate,
+        None => match as_user(&branch, TaskOptions::default()) {
+            Ok(delegate) => delegate,
+            Err(error) => return fail(json, &error),
+        },
+    };
+    match args.action.as_str() {
+        "create" => {
+            let result = act.create_scratch(args.name.as_deref().expect("checked in args"));
+            emit(json, result, |a| {
+                format!("created scratch area {}\n", a.name)
+            })
+        }
+        "list" => {
+            let result = act.scratch_areas();
+            emit(json, result, |list: &Vec<branchyard::ScratchArea>| {
+                if list.is_empty() {
+                    return "no reachable scratch areas\n".into();
+                }
+                list.iter()
+                    .map(|a| format!("{} {}\n", a.name, a.owner_branch))
+                    .collect()
+            })
+        }
+        "lock" => {
+            let result = act.lock_scratch(args.name.as_deref().expect("checked in args"));
+            emit(json, result, |l| {
+                format!("{} holds {}\n", l.holder_branch, l.name)
+            })
+        }
+        "unlock" => {
+            let result = act
+                .unlock_scratch(args.name.as_deref().expect("checked in args"))
+                .map(|()| Ack { ok: true });
+            emit(json, result, |_| "unlocked\n".to_owned())
+        }
+        "share" => {
+            let name = args.name.clone().expect("checked in args");
+            let to = args.to.clone().expect("checked in args");
+            let result = act.share_scratch(&name, &to).map(|()| Ack { ok: true });
+            emit(json, result, |_| format!("shared {name} with {to}\n"))
+        }
+        other => unreachable!("scratch action {other} was validated in args"),
+    }
 }
 
 pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {

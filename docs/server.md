@@ -263,6 +263,7 @@ What it is not yet:
 - **Shared with local `by`.** A local `by` on a served repository opens its SQLite `state.db` and sees none of the server's branches; use `by --remote`. Nothing is imported from an existing `state.db` when a repository moves to the database.
 - **TLS to the database.** Connections are plain; keep the database on a trusted network or a Unix socket.
 - **Waits** poll every 100 ms, as SQLite's do across processes; nothing listens for `NOTIFY`.
+- **[Artifacts and scratch areas](storage.md) over HTTP or `by --remote`.** Both are built in local mode and over delegation (a harness's own tools, whether the turn runs locally or on this server); the API has no routes for them yet, so `by --remote artifact` and `by --remote scratch` refuse with `unsupported` rather than pretending to reach the server.
 
 ## Security
 

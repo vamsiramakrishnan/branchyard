@@ -346,6 +346,21 @@ fn run(
     if !placement.is_sandbox() {
         placement.set_env(ENV_ROOT, &turn.yard.root.display().to_string());
         placement.set_env(ENV_BRANCH, &record.info.name);
+        // A local process runs directly on the host filesystem, so every
+        // scratch area this branch may reach is simply its host directory;
+        // see `docs/storage.md`. Microsandbox gets these as mounts instead
+        // (`placement::scratch_mounts`); Substrate gets none (it has no
+        // host mounts and the worktree crosses as a bundle, not scratch
+        // areas too).
+        if let Ok(areas) = crate::storage::authorized_scratch(turn.yard, &record.info.name) {
+            for area in areas {
+                let path = crate::storage::scratch_dir(&store, &area.name);
+                placement.set_env(
+                    &crate::storage::scratch_env_var(&area.name),
+                    &path.display().to_string(),
+                );
+            }
+        }
     }
     if let Some(projection) = &projection {
         for (name, value) in &projection.env {

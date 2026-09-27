@@ -118,6 +118,7 @@ mod seats;
 mod sqlite;
 mod state;
 mod steer;
+mod storage;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -142,6 +143,8 @@ pub use delegation::{
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
 
 /// A repository with Branchyard state. Cheap to clone; clones share state.
 #[derive(Clone, Debug)]
@@ -318,6 +321,83 @@ impl Yard {
     /// their live qualification status.
     pub fn harnesses(&self) -> Vec<HarnessInfo> {
         harness::list()
+    }
+
+    /// Publish the file at `path` as a new immutable artifact of `branch`,
+    /// content-addressed by the blake3 digest of its bytes. See
+    /// [`Branch::publish`] and `docs/storage.md`.
+    pub fn publish_artifact(
+        &self,
+        branch: &str,
+        path: impl AsRef<Path>,
+        name: Option<String>,
+        media_type: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<ArtifactRef, Error> {
+        storage::publish(self, branch, path.as_ref(), name, media_type, labels)
+    }
+
+    /// Every artifact `reader` may read: what it published, what its
+    /// ancestors or descendants published, and what was explicitly shared
+    /// to it with [`Yard::share_artifact`].
+    pub fn artifacts(&self, reader: &str) -> Result<Vec<ArtifactRef>, Error> {
+        storage::list(self, reader)
+    }
+
+    /// Copy artifact `id`'s bytes to `out` for `reader`, checked against
+    /// its recorded digest, and return its provenance.
+    pub fn read_artifact(
+        &self,
+        reader: &str,
+        id: &str,
+        out: impl AsRef<Path>,
+    ) -> Result<ArtifactRef, Error> {
+        storage::get(self, reader, id, out.as_ref())
+    }
+
+    /// Share artifact `id` (published, or already shared, to `actor`) with
+    /// `to`: the explicit grant a sibling of the publisher needs.
+    pub fn share_artifact(&self, actor: &str, id: &str, to: &str) -> Result<(), Error> {
+        storage::share_artifact(self, actor, id, to)
+    }
+
+    /// Create scratch area `name`, a shared directory owned by `owner`,
+    /// visible to its authorized branches at [`Yard::scratch_path`]. See
+    /// `docs/storage.md`.
+    pub fn create_scratch(&self, owner: &str, name: &str) -> Result<ScratchArea, Error> {
+        storage::create_scratch(self, owner, name)
+    }
+
+    /// Every scratch area `reader` may reach.
+    pub fn scratch_areas(&self, reader: &str) -> Result<Vec<ScratchArea>, Error> {
+        storage::authorized_scratch(self, reader)
+    }
+
+    /// Share scratch area `name` (owned, or already shared, to `actor`)
+    /// with `to`.
+    pub fn share_scratch(&self, actor: &str, name: &str, to: &str) -> Result<(), Error> {
+        storage::share_scratch(self, actor, name, to)
+    }
+
+    /// Where scratch area `name` lives on disk in local mode.
+    pub fn scratch_path(&self, name: &str) -> PathBuf {
+        storage::scratch_dir(&self.store(), name)
+    }
+
+    /// Acquire scratch area `name`'s writer lock for `branch`. Refused with
+    /// [`Error::Running`] while another branch's turn holds it.
+    pub fn lock_scratch(&self, branch: &str, name: &str) -> Result<ScratchLock, Error> {
+        storage::lock_scratch(self, branch, name)
+    }
+
+    /// Release scratch area `name`'s lock if `branch` holds it.
+    pub fn unlock_scratch(&self, branch: &str, name: &str) -> Result<(), Error> {
+        storage::unlock_scratch(self, branch, name)
+    }
+
+    /// Scratch area `name`'s writer lock, if one is held.
+    pub fn scratch_lock_state(&self, name: &str) -> Result<Option<ScratchLock>, Error> {
+        storage::scratch_lock_state(self, name)
     }
 }
 
@@ -781,6 +861,29 @@ impl Branch {
     /// log names the SDK caller as its sender.
     pub fn steer(&self, text: &str) -> Result<Steer, Error> {
         self.yard.steer_as(&self.info.name, text, "the SDK caller")
+    }
+
+    /// Publish the file at `path` as a new immutable artifact of this
+    /// branch; see [`Yard::publish_artifact`].
+    pub fn publish(
+        &self,
+        path: impl AsRef<Path>,
+        name: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<ArtifactRef, Error> {
+        self.yard
+            .publish_artifact(&self.info.name, path, name, None, labels)
+    }
+
+    /// Every artifact this branch may read; see [`Yard::artifacts`].
+    pub fn artifacts(&self) -> Result<Vec<ArtifactRef>, Error> {
+        self.yard.artifacts(&self.info.name)
+    }
+
+    /// Copy artifact `id`'s bytes to `out` for this branch; see
+    /// [`Yard::read_artifact`].
+    pub fn read_artifact(&self, id: &str, out: impl AsRef<Path>) -> Result<ArtifactRef, Error> {
+        self.yard.read_artifact(&self.info.name, id, out)
     }
 
     /// Wait until no descendant of this branch is running a turn, then

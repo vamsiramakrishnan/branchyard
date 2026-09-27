@@ -70,16 +70,34 @@ A person acts with their own authority, or the server's, bounded by the branch's
 
 A harness in a rig fills a seat with `by spawn --seat`, `branchyard.spawn(seat=...)`, `Spawn::seat` or the MCP `spawn` tool's `seat`; every surface refuses a spawn without a seat in a rig, a seat outside one, and a seat its own seat does not delegate to, with the same `denied` error.
 
+## Artifacts and scratch areas
+
+See [storage](storage.md). Reads follow the delegation tree: a branch reads what it or its ancestors or descendants published or own; a sibling needs an explicit share. Not yet reached by `by --remote` or the server's HTTP API; local mode and delegation (`by`, Python, `Delegate`, MCP, inside or outside a harness with `--branch`) are built.
+
+| Operation | SDK | by | delegation |
+|---|---|---|---|
+| Publish a file as an artifact | `Yard::publish_artifact`, `Branch::publish` | `artifact publish FILE [--name] [--label K=V]` | `publish_artifact` |
+| List readable artifacts | `Yard::artifacts`, `Branch::artifacts` | `artifact list` | `list_artifacts` |
+| Read an artifact's bytes | `Yard::read_artifact`, `Branch::read_artifact` | `artifact get ID --out PATH` | `get_artifact` |
+| Share an artifact with another branch | `Yard::share_artifact` | `artifact share ID --to BRANCH` | `share_artifact` |
+| Create a scratch area | `Yard::create_scratch` | `scratch create NAME` | `create_scratch` |
+| List reachable scratch areas | `Yard::scratch_areas` | `scratch list` | `list_scratch` |
+| Share a scratch area | `Yard::share_scratch` | `scratch share NAME --to BRANCH` | `share_scratch` |
+| Acquire a scratch area's writer lock | `Yard::lock_scratch` | `scratch lock NAME` | `lock_scratch` |
+| Release a scratch area's writer lock | `Yard::unlock_scratch` | `scratch unlock NAME` | `unlock_scratch` |
+| A turn's authorized scratch areas | n/a: set automatically | `BRANCHYARD_SCRATCH_<NAME>` (local), a mount (Microsandbox); none (Substrate) | same |
+
 ## Storage
 
 | Store | SDK | by | server |
 |---|---|---|---|
 | SQLite, `.branchyard/state.db` | `Yard::open` | yes | the default, with `DATA-DIR/state.db` for operations |
 | PostgreSQL | `Yard::open_postgres`, `postgres` feature | no: local `by` opens `state.db` | `--database`, `postgres` feature |
+| Artifact bytes | `.branchyard/artifacts/` | same | the server's data directory (planned; not yet served remotely) |
 
 ## Output types
 
-Every result a surface returns is the SDK's serde form: `BranchInfo`, `RecordedEvent`, `Activity`, `Merged`, `HarnessInfo`, `Inspection`, `Spawned`, `Sent`, `Steer`, `EventPage`, `Children`, `Cancelled`, `Recovery`, `FeedPage`. `by --json` prints them through serde, except `by log --json`, whose flattened event shape is the CLI's own.
+Every result a surface returns is the SDK's serde form: `BranchInfo`, `RecordedEvent`, `Activity`, `Merged`, `HarnessInfo`, `Inspection`, `Spawned`, `Sent`, `Steer`, `EventPage`, `Children`, `Cancelled`, `Recovery`, `FeedPage`, `ArtifactRef`, `ScratchArea`, `ScratchLock`. `by --json` prints them through serde, except `by log --json`, whose flattened event shape is the CLI's own.
 
 ## Added with steering
 

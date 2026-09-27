@@ -293,6 +293,7 @@ pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result
         }
     }
     store.delete(name)?;
+    crate::storage::gc_after_removal(&store, name)?;
     if !options.keep_credentials {
         remove_credentials(&store, &record)?;
     }

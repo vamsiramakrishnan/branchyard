@@ -260,6 +260,8 @@ Keep cross-tenant content deduplication off by default. Even a content hash is n
 
 A database lease cannot fence an arbitrary live filesystem writer. Revoke its access or confirm termination before assigning another writer. Cross-host live sharing requires a backend that explicitly supports it; otherwise use artifacts.
 
+**Status.** Artifacts and scratch areas are built in local mode: content-addressed, immutable artifacts with reads following the delegation tree (an explicit share for a sibling), and scratch areas with a writer lock reclaimed once its holder's turn ends rather than fenced against a live filesystem writer, exactly as this section says a lease cannot do. See [storage](storage.md).
+
 For networking, reuse the runtime's enforcement and credential facilities. No per-sandbox cloud NIC, public IP, load balancer or DNS provisioning is required in the intended deployment. Publish previews through existing ingress infrastructure and an authenticated sandbox-to-route mapping.
 
 Microsandbox's host-held credential mechanism can substitute secrets for approved destinations. Its documented boundary includes TLS inspection requirements and limitations for guest-side request signing. Test each harness authentication path; do not repeat the repository's strongest marketing claims as guarantees. [Credential mechanism](https://docs.microsandbox.dev/sandboxes/secrets)
