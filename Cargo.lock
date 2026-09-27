@@ -633,6 +633,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "uuid",
  "webpki-roots",
 ]
 
@@ -649,6 +650,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
