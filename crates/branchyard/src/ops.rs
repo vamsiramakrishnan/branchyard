@@ -10,7 +10,9 @@ use serde_json::json;
 
 use crate::record::Recorder;
 use crate::state::{now_ms, Begun, Lease, Record, Store, Taken};
-use crate::{git, names, recover, Activity, BranchStatus, Error, Merged, RecordedEvent, Yard};
+use crate::{
+    git, names, recover, Activity, BranchStatus, Error, Merged, RecordedEvent, RemoveOptions, Yard,
+};
 
 /// How long a branch's check may run during a merge.
 pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -269,7 +271,7 @@ fn integration_error(error: IntegrationError, target: &str) -> Error {
     }
 }
 
-pub(crate) fn remove(yard: &Yard, name: &str) -> Result<(), Error> {
+pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result<(), Error> {
     let store = yard.store();
     let (record, lease) = hold(yard, name)?;
     // Journaled so a removal cut short says so; repeating it finishes it.
@@ -291,8 +293,33 @@ pub(crate) fn remove(yard: &Yard, name: &str) -> Result<(), Error> {
         }
     }
     store.delete(name)?;
+    if !options.keep_credentials {
+        remove_credentials(&store, &record)?;
+    }
     remove_home(&store, &record)?;
     Ok(())
+}
+
+/// Remove the credentials provisioning wrote in the branch's private home,
+/// before the home itself goes or while a fork keeps it. A branch still
+/// running in a shared home keeps them until its turn ends; its next turn
+/// provisions them again anyway.
+fn remove_credentials(store: &Store, record: &Record) -> Result<(), Error> {
+    let Some(home) = &record.home else {
+        return Ok(());
+    };
+    if !home.is_dir() {
+        return Ok(());
+    }
+    let running = store.list()?.iter().any(|other| {
+        other.home.as_ref() == Some(home) && other.info.status == BranchStatus::Running
+    });
+    if running {
+        return Ok(());
+    }
+    branchyard_provision::apply::remove_credentials(home)
+        .map(|_| ())
+        .map_err(|e| Error::State(format!("could not remove the credentials in its home: {e}")))
 }
 
 /// Delete an isolated home no remaining branch uses. Forks share their

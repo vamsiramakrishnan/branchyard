@@ -25,8 +25,7 @@ use serde_json::{json, Map, Value};
 use crate::auth::{Method, Spec};
 use crate::edit::{path, Edit, JsonEdit};
 use crate::{
-    json_text, needs_private_home, unsupported, unused, Context, EnvVar, Installed, McpServer,
-    Plan, Provisioner, Refused, INSTALLED_PATH,
+    needs_private_home, unsupported, unused, Context, McpServer, Plan, Provisioner, Refused,
 };
 
 const MCP_CONFIG: &str = ".gemini/config/mcp_config.json";
@@ -87,7 +86,7 @@ impl Provisioner for Antigravity {
         if let Some(resolved) = AUTH.select(&given, context.auth.as_deref())? {
             plan.auth = Some(resolved.method.to_owned());
             let key = resolved.env_key.expect("an env method has a key");
-            plan.set_env(EnvVar::secret(key, context.secret(key).unwrap_or_default()));
+            plan.secret_env(key, key, context.secret(key).unwrap_or_default(), true);
         }
         plan.unused_secrets = unused(context, &AUTH.names());
 
@@ -119,9 +118,7 @@ impl Provisioner for Antigravity {
                     comment_lines: false,
                 },
             );
-            let installed = Installed { mcp_servers: names };
-            let record = serde_json::to_value(&installed).expect("serializes");
-            plan.edit(INSTALLED_PATH, false, Edit::Put(json_text(&record)));
+            plan.installed_mcp_servers = Some(names);
         }
 
         // Instructions: Branchyard's block in GEMINI.md.

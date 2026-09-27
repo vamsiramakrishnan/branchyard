@@ -253,6 +253,7 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             auth,
             files,
             env,
+            secrets,
             unused_secrets,
         } => {
             let mut parts = Vec::new();
@@ -267,6 +268,17 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             }
             if !unused_secrets.is_empty() {
                 parts.push(format!("unused secrets {}", unused_secrets.join(", ")));
+            }
+            let exposed: Vec<&str> = secrets
+                .iter()
+                .filter(|d| d.tool_env)
+                .map(|d| d.secret.as_str())
+                .collect();
+            if !exposed.is_empty() {
+                parts.push(format!(
+                    "{} in the environment of its tool commands",
+                    exposed.join(", ")
+                ));
             }
             style.paint(Tone::Dim, &format!("provisioned: {}", parts.join("; ")))
         }

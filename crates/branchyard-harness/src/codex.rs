@@ -372,6 +372,9 @@ impl Driver for Codex {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
         crate::check_mcp_servers(&open.mcp_servers)?;
+        // Codex has `url` servers in `config.toml`, but their thread
+        // override has not been checked against codex-cli.
+        crate::refuse_remote_mcp(&open, "Codex")?;
         let mut argv = self.command.clone();
         argv.push("app-server".into());
         let launch = LaunchSpec {

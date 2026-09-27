@@ -45,6 +45,9 @@ pub enum Edit {
     Block(Option<String>),
     /// Set `NAME=value` lines of a dotenv file, keeping other lines.
     Dotenv(Vec<(String, String)>),
+    /// Remove the lines of a dotenv file that define these names, and the
+    /// file if nothing but blank lines is left.
+    DotenvUnset(Vec<String>),
 }
 
 /// A change to a JSON object at a key path.
@@ -58,6 +61,8 @@ pub enum JsonEdit {
     Push(Vec<String>, Value),
     /// Remove the key if present.
     Remove(Vec<String>),
+    /// Remove the key if it holds exactly this value.
+    RemoveIf(Vec<String>, Value),
 }
 
 /// A change to a TOML document's top level.
@@ -113,13 +118,16 @@ impl Edit {
         match self {
             Edit::Put(text) => Ok(Some(text.clone())),
             Edit::Remove => Ok(None),
+            // Edits that leave a missing file empty do not create it.
             Edit::Json {
                 edits,
                 comment_lines,
-            } => json(current, edits, *comment_lines).map(Some),
+            } => json(current, edits, *comment_lines)
+                .map(|text| (current.is_some() || text != "{}\n").then_some(text)),
             Edit::Toml(edits) => Ok(Some(toml_document(current.unwrap_or(""), edits))),
             Edit::Block(text) => instructions::merge_block(current, text.as_deref()),
             Edit::Dotenv(pairs) => dotenv(current.unwrap_or(""), pairs).map(Some),
+            Edit::DotenvUnset(names) => Ok(current.and_then(|text| dotenv_unset(text, names))),
         }
     }
 }
@@ -200,6 +208,11 @@ fn json(current: Option<&str>, edits: &[JsonEdit], comment_lines: bool) -> Resul
                 }
             }
             JsonEdit::Remove(path) => remove(&mut root, path),
+            JsonEdit::RemoveIf(path, value) => {
+                if lookup(&root, path) == Some(value) {
+                    remove(&mut root, path);
+                }
+            }
         }
     }
     match (current, &root) {
@@ -223,6 +236,11 @@ fn slot<'a>(root: &'a mut Value, path: &[String]) -> &'a mut Value {
             .or_insert(Value::Null);
     }
     current
+}
+
+fn lookup<'a>(root: &'a Value, path: &[String]) -> Option<&'a Value> {
+    path.iter()
+        .try_fold(root, |current, key| current.get(key.as_str()))
 }
 
 fn remove(root: &mut Value, path: &[String]) {
@@ -271,6 +289,30 @@ fn toml_document(current: &str, edits: &[TomlEdit]) -> String {
     normalized
 }
 
+/// Whether a dotenv line defines `name`, with or without `export`.
+fn defines(line: &str, name: &str) -> bool {
+    let line = line.trim_start();
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    line.strip_prefix(name)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+fn dotenv_unset(current: &str, names: &[String]) -> Option<String> {
+    let kept: Vec<&str> = current
+        .lines()
+        .filter(|line| !names.iter().any(|name| defines(line, name)))
+        .collect();
+    if kept.iter().all(|line| line.trim().is_empty()) {
+        return None;
+    }
+    let mut text = kept.join("\n");
+    text.push('\n');
+    match text == current {
+        true => Some(current.to_owned()),
+        false => Some(text),
+    }
+}
+
 fn dotenv(current: &str, pairs: &[(String, String)]) -> Result<String, String> {
     let mut lines: Vec<String> = current.lines().map(str::to_owned).collect();
     for (name, value) in pairs {
@@ -278,12 +320,7 @@ fn dotenv(current: &str, pairs: &[(String, String)]) -> Result<String, String> {
             return Err(format!("the value for {name} spans lines"));
         }
         let line = format!("{name}={value}");
-        let defines = |l: &String| {
-            let l = l.trim_start();
-            let l = l.strip_prefix("export ").unwrap_or(l);
-            l.strip_prefix(name.as_str())
-                .is_some_and(|rest| rest.trim_start().starts_with('='))
-        };
+        let defines = |l: &String| defines(l, name);
         match lines.iter().position(defines) {
             Some(index) => {
                 lines[index] = line;
@@ -382,6 +419,25 @@ mod tests {
             out,
             "model = \"a\"\nmodel_reasoning_effort = \"high\"\n\n\
              [projects.\"/workspace\"]\ntrust_level = \"trusted\"\n"
+        );
+    }
+
+    #[test]
+    fn dotenv_lines_are_unset_and_an_empty_file_removed() {
+        let unset = |current: &str, names: &[&str]| {
+            Edit::DotenvUnset(names.iter().map(|n| (*n).to_owned()).collect())
+                .apply(Some(current))
+                .unwrap()
+        };
+        assert_eq!(
+            unset("# mine\nA=1\nexport B=2\nC=3\n", &["A", "B"]).as_deref(),
+            Some("# mine\nC=3\n")
+        );
+        assert_eq!(unset("A=1\n\n", &["A"]), None);
+        assert_eq!(unset("C=3\n", &["A"]).as_deref(), Some("C=3\n"));
+        assert_eq!(
+            Edit::DotenvUnset(vec!["A".into()]).apply(None).unwrap(),
+            None
         );
     }
 

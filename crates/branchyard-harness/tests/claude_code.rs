@@ -1,11 +1,11 @@
 //! Claude Code driver against a recorded Claude Code 2.1.283 session and
 //! frames shaped by the Agent SDK's published stdout protocol types.
 
-use branchyard_harness::claude_code::ClaudeCode;
+use branchyard_harness::claude_code::{mcp_config, ClaudeCode};
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
     Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
-    PermissionKey, Rejected, SessionMode, TurnOutcome,
+    PermissionKey, Rejected, RemoteMcpServer, RemoteTransport, SessionMode, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -23,6 +23,8 @@ fn open_with(mode: SessionMode) -> (ClaudeCode, Opened) {
             model: None,
             mcp_servers: Vec::new(),
             instructions: None,
+            mcp_config_file: None,
+            remote_mcp_servers: Vec::new(),
         })
         .unwrap();
     assert_eq!(opened.launch.cwd, "/workspace");
@@ -371,20 +373,10 @@ fn branchyard_server() -> McpServer {
 
 #[test]
 fn mcp_servers_are_one_mcp_config_argument_in_the_agent_sdk_shape() {
-    let mut driver = ClaudeCode::new(vec!["claude".into()]);
-    let opened = driver
-        .open(Open {
-            mcp_servers: vec![branchyard_server()],
-            ..Open::new(SessionMode::Resume(session("s1")), "/workspace")
-        })
-        .unwrap();
-    let argv = &opened.launch.argv;
-    let at = argv.iter().position(|a| a == "--mcp-config").unwrap();
     // The Agent SDK passes `--mcp-config JSON.stringify({mcpServers})`, each
-    // value an McpStdioServerConfig.
-    let config: Value = serde_json::from_str(&argv[at + 1]).unwrap();
+    // value an McpStdioServerConfig; that is also the file's content.
     assert_eq!(
-        config,
+        serde_json::from_str::<Value>(&mcp_config(&[branchyard_server()], &[])).unwrap(),
         json!({"mcpServers": {"branchyard": {
             "type": "stdio",
             "command": "/usr/local/bin/by",
@@ -392,11 +384,140 @@ fn mcp_servers_are_one_mcp_config_argument_in_the_agent_sdk_shape() {
             "env": {"BRANCHYARD_TOKEN": "t0k"},
         }}})
     );
+    // Given a file, the argument is its path: nothing of the servers is on
+    // the command line.
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let opened = driver
+        .open(Open {
+            mcp_servers: vec![branchyard_server()],
+            mcp_config_file: Some("/home/b/.branchyard/claude-mcp.json".into()),
+            ..Open::new(SessionMode::Resume(session("s1")), "/workspace")
+        })
+        .unwrap();
+    let argv = &opened.launch.argv;
+    let at = argv.iter().position(|a| a == "--mcp-config").unwrap();
+    assert_eq!(argv[at + 1], "/home/b/.branchyard/claude-mcp.json");
     assert_eq!(argv.iter().filter(|a| *a == "--mcp-config").count(), 1);
+    assert!(!argv.iter().any(|a| a.contains("t0k")), "{argv:?}");
     assert!(argv.contains(&"--resume".to_owned()));
+    // Without a file, variables would be on the command line: refused.
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let inline = driver.open(Open {
+        mcp_servers: vec![branchyard_server()],
+        ..Open::new(SessionMode::Fresh, "/workspace")
+    });
+    assert!(
+        matches!(&inline, Err(Rejected::InvalidOpen(why)) if why.contains("mcp_config_file")),
+        "{inline:?}"
+    );
+    // A relative file is refused too.
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let relative = driver.open(Open {
+        mcp_config_file: Some("claude-mcp.json".into()),
+        ..Open::new(SessionMode::Fresh, "/workspace")
+    });
+    assert!(matches!(relative, Err(Rejected::InvalidOpen(_))));
+    // Servers without variables may still go inline.
+    let plain = McpServer {
+        env: Vec::new(),
+        ..branchyard_server()
+    };
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let opened = driver
+        .open(Open {
+            mcp_servers: vec![plain.clone()],
+            ..Open::new(SessionMode::Fresh, "/workspace")
+        })
+        .unwrap();
+    let argv = &opened.launch.argv;
+    let at = argv.iter().position(|a| a == "--mcp-config").unwrap();
+    assert_eq!(argv[at + 1], mcp_config(&[plain], &[]));
     // No servers, no flag.
     let (_, argv, _) = open(SessionMode::Fresh);
     assert!(!argv.contains(&"--mcp-config".to_owned()));
+}
+
+fn remote() -> RemoteMcpServer {
+    RemoteMcpServer {
+        name: "search".into(),
+        transport: RemoteTransport::Http,
+        url: "https://mcp.example.com/mcp".into(),
+        headers: vec![("Authorization".into(), "Bearer h3ader".into())],
+    }
+}
+
+#[test]
+fn remote_mcp_servers_go_in_the_file_with_their_headers() {
+    let sse = RemoteMcpServer {
+        name: "events".into(),
+        transport: RemoteTransport::Sse,
+        headers: Vec::new(),
+        ..remote()
+    };
+    // The shape Claude Code 2.1.283 connected to, headers included, when
+    // checked against a local MCP server.
+    assert_eq!(
+        serde_json::from_str::<Value>(&mcp_config(&[], &[remote(), sse.clone()])).unwrap(),
+        json!({"mcpServers": {
+            "search": {"type": "http", "url": "https://mcp.example.com/mcp",
+                       "headers": {"Authorization": "Bearer h3ader"}},
+            "events": {"type": "sse", "url": "https://mcp.example.com/mcp", "headers": {}},
+        }})
+    );
+    assert!(!format!("{:?}", remote()).contains("h3ader"));
+    // Headers never go on the command line.
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let inline = driver.open(Open {
+        remote_mcp_servers: vec![remote()],
+        ..Open::new(SessionMode::Fresh, "/workspace")
+    });
+    assert!(matches!(inline, Err(Rejected::InvalidOpen(_))));
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let opened = driver
+        .open(Open {
+            remote_mcp_servers: vec![remote()],
+            mcp_config_file: Some("/home/b/mcp.json".into()),
+            ..Open::new(SessionMode::Fresh, "/workspace")
+        })
+        .unwrap();
+    assert!(!opened.launch.argv.iter().any(|a| a.contains("h3ader")));
+    // Bad URLs, headers and repeated names are refused.
+    for bad in [
+        RemoteMcpServer {
+            url: "ftp://x".into(),
+            ..remote()
+        },
+        RemoteMcpServer {
+            headers: vec![("Bad Header".into(), "x".into())],
+            ..remote()
+        },
+        RemoteMcpServer {
+            headers: vec![("X".into(), "a\r\nInjected: 1".into())],
+            ..remote()
+        },
+    ] {
+        let mut driver = ClaudeCode::new(vec!["claude".into()]);
+        let open = Open {
+            remote_mcp_servers: vec![bad.clone()],
+            mcp_config_file: Some("/home/b/mcp.json".into()),
+            ..Open::new(SessionMode::Fresh, "/workspace")
+        };
+        assert!(
+            matches!(driver.open(open), Err(Rejected::InvalidOpen(_))),
+            "{bad:?}"
+        );
+    }
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let twice = driver.open(Open {
+        mcp_servers: vec![McpServer {
+            name: "search".into(),
+            ..branchyard_server()
+        }],
+        remote_mcp_servers: vec![remote()],
+        mcp_config_file: Some("/home/b/mcp.json".into()),
+        ..Open::new(SessionMode::Fresh, "/workspace")
+    });
+    assert!(matches!(twice, Err(Rejected::InvalidOpen(why)) if why.contains("twice")));
 }
 
 #[test]
@@ -419,6 +540,7 @@ fn unusable_mcp_servers_are_rejected_before_launch() {
         let mut driver = ClaudeCode::new(vec!["claude".into()]);
         let open = Open {
             mcp_servers: vec![server.clone()],
+            mcp_config_file: Some("/home/b/mcp.json".into()),
             ..Open::new(SessionMode::Fresh, "/workspace")
         };
         assert!(
@@ -429,6 +551,7 @@ fn unusable_mcp_servers_are_rejected_before_launch() {
     let mut driver = ClaudeCode::new(vec!["claude".into()]);
     let twice = Open {
         mcp_servers: vec![branchyard_server(), branchyard_server()],
+        mcp_config_file: Some("/home/b/mcp.json".into()),
         ..Open::new(SessionMode::Fresh, "/workspace")
     };
     assert!(matches!(driver.open(twice), Err(Rejected::InvalidOpen(why)) if why.contains("twice")));

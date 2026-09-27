@@ -1270,6 +1270,8 @@ fn provision(
             .collect(),
         auth: seat.auth.clone(),
         mcp_servers: seat.mcp.clone(),
+        // A rig declares only stdio servers.
+        remote_mcp_servers: Vec::new(),
         instructions: Some(text),
         model: seat.model.clone(),
         effort: seat.effort,

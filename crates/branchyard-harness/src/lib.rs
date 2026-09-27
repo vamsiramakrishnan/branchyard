@@ -109,6 +109,18 @@ pub struct Open {
     pub mcp_servers: Vec<McpServer>,
     /// Standing instructions that are not part of any prompt.
     pub instructions: Option<Instructions>,
+    /// A file, as the harness sees it, already holding `mcp_servers` in the
+    /// harness's configuration format, for a driver that would otherwise
+    /// pass them on its command line, where every process on the host can
+    /// read them: Claude Code's stream-json driver, whose file is
+    /// [`claude_code::mcp_config`]. The caller writes it, readable only by
+    /// the harness's user. Other drivers pass their servers over stdin and
+    /// ignore it.
+    pub mcp_config_file: Option<String>,
+    /// HTTP and SSE MCP servers the harness connects to, for a driver that
+    /// supports them (Claude Code's stream-json, and ACP agents that
+    /// advertise them); every other driver refuses them.
+    pub remote_mcp_servers: Vec<RemoteMcpServer>,
 }
 
 impl Open {
@@ -120,6 +132,8 @@ impl Open {
             model: None,
             mcp_servers: Vec::new(),
             instructions: None,
+            mcp_config_file: None,
+            remote_mcp_servers: Vec::new(),
         }
     }
 }
@@ -165,9 +179,60 @@ pub struct McpServer {
     pub env: Vec<(String, String)>,
 }
 
+/// An MCP server the harness reaches over HTTP: MCP's streamable HTTP
+/// transport, or the older SSE one. Header values often carry tokens, so
+/// `Debug` shows only their names.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RemoteMcpServer {
+    /// As for [`McpServer::name`].
+    pub name: String,
+    pub transport: RemoteTransport,
+    /// `http://` or `https://`.
+    pub url: String,
+    /// Sent with every request, such as `Authorization`.
+    pub headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for RemoteMcpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteMcpServer")
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("url", &self.url)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| format!("{name}: <redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// How a [`RemoteMcpServer`] is reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteTransport {
+    /// Streamable HTTP.
+    Http,
+    Sse,
+}
+
+impl RemoteTransport {
+    /// The name Claude Code's configuration and ACP use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RemoteTransport::Http => "http",
+            RemoteTransport::Sse => "sse",
+        }
+    }
+}
+
 /// Refuse MCP servers and standing instructions for a driver that has no
 /// verified way to pass them, rather than dropping them silently.
 pub(crate) fn refuse_projection(open: &Open, harness: &str) -> Result<(), Rejected> {
+    refuse_remote_mcp(open, harness)?;
     if !open.mcp_servers.is_empty() {
         return Err(Rejected::Unsupported(format!(
             "Branchyard cannot yet give {harness} MCP servers"
@@ -181,18 +246,96 @@ pub(crate) fn refuse_projection(open: &Open, harness: &str) -> Result<(), Reject
     Ok(())
 }
 
+/// Refuse HTTP and SSE MCP servers for a driver that cannot pass them.
+pub(crate) fn refuse_remote_mcp(open: &Open, harness: &str) -> Result<(), Rejected> {
+    match open.remote_mcp_servers.first() {
+        Some(server) => Err(Rejected::Unsupported(format!(
+            "Branchyard cannot yet give {harness} an HTTP or SSE MCP server ({})",
+            server.name
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// [`check_mcp_servers`] for both of an open's lists, whose names must not
+/// repeat across them, and the remote servers' URLs and headers.
+pub(crate) fn check_all_mcp_servers(open: &Open) -> Result<(), Rejected> {
+    check_mcp_servers(&open.mcp_servers)?;
+    let invalid = |why: String| Err(Rejected::InvalidOpen(why));
+    for (index, server) in open.remote_mcp_servers.iter().enumerate() {
+        if !valid_server_name(&server.name) {
+            return invalid(format!(
+                "MCP server name {:?} is not [A-Za-z0-9_-]{{1,64}}",
+                server.name
+            ));
+        }
+        let repeated = open.mcp_servers.iter().any(|s| s.name == server.name)
+            || open.remote_mcp_servers[..index]
+                .iter()
+                .any(|s| s.name == server.name);
+        if repeated {
+            return invalid(format!("MCP server {} is listed twice", server.name));
+        }
+        if let Err(why) = check_remote_url(&server.url) {
+            return invalid(format!("MCP server {}: {why}", server.name));
+        }
+        for (name, value) in &server.headers {
+            if let Err(why) = check_header(name, value) {
+                return invalid(format!("MCP server {}: {why}", server.name));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An `http://` or `https://` URL with a host and no whitespace.
+pub fn check_remote_url(url: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"));
+    match rest {
+        Some(rest)
+            if !rest.is_empty()
+                && !rest.starts_with('/')
+                && !rest.contains(char::is_whitespace) =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "the URL must be http:// or https://HOST/..., not {url:?}"
+        )),
+    }
+}
+
+/// An HTTP header name (a token) and a value without line breaks.
+pub fn check_header(name: &str, value: &str) -> Result<(), String> {
+    let token = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    if !token {
+        return Err(format!("{name:?} is not an HTTP header name"));
+    }
+    if value.contains(['\r', '\n', '\0']) {
+        return Err(format!("the value of header {name} spans lines"));
+    }
+    Ok(())
+}
+
+fn valid_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// Reject server lists a harness could misread: bad or repeated names,
 /// relative commands, or unusable variable names.
 pub(crate) fn check_mcp_servers(servers: &[McpServer]) -> Result<(), Rejected> {
     let invalid = |why: String| Err(Rejected::InvalidOpen(why));
     for (index, server) in servers.iter().enumerate() {
-        let name_ok = !server.name.is_empty()
-            && server.name.len() <= 64
-            && server
-                .name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-        if !name_ok {
+        if !valid_server_name(&server.name) {
             return invalid(format!(
                 "MCP server name {:?} is not [A-Za-z0-9_-]{{1,64}}",
                 server.name
