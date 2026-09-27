@@ -23,9 +23,12 @@
 //! `docs/writing-a-driver.md` describes the process.
 
 pub mod acp;
+pub mod amp;
+pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod conformance;
+pub mod pi;
 pub mod profiles;
 
 use std::fmt;

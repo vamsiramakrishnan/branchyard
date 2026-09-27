@@ -12,17 +12,17 @@ Capabilities are what the driver offers before negotiation. ACP resume is used o
 | Claude Code (`claude-code`) | `claude-code-acp` | ACP v1 | alternate | if advertised | no | yes | yes | no | claude-agent-acp 0.81.2 | [9 of 9 pass](qualification/claude-code-acp.json), 2026-09-26, 0.81.2 |
 | Codex (`codex`) | `codex-app-server` | Codex App Server | default | yes | yes | yes | yes | yes | codex-cli 0.157.1 | not qualified |
 | Codex (`codex`) | `codex-acp` | ACP v1 | alternate | if advertised | no | yes | yes | no | — | not qualified |
-| Antigravity (`antigravity`) | — | — | — | — | — | — | — | — | — | not implemented: native NDJSON streaming CLI; needs its own driver |
+| Antigravity (`antigravity`) | `antigravity-stream-json` | Antigravity stream-json | default | yes | no | no | no | yes | Antigravity CLI 1.2.11 | not qualified |
 | Oh My Pi (`oh-my-pi`) | `oh-my-pi-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
 | DeepSeek Harness (`deepseek-harness`) | `deepseek-harness-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
 | Gemini CLI (`gemini-cli`) | `gemini-cli-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
 | OpenCode (`opencode`) | `opencode-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
-| Pi (`pi`) | — | — | — | — | — | — | — | — | — | not implemented: native RPC mode; needs its own driver |
+| Pi (`pi`) | `pi-rpc` | Pi RPC | default | yes | yes | yes | no | yes | pi 0.87.1 | not qualified |
 | Goose (`goose`) | `goose-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
-| Aider (`aider`) | — | — | — | — | — | — | — | — | — | not implemented: batch process without a persistent protocol |
+| Aider (`aider`) | — | — | — | — | — | — | — | — | — | not implemented: batch process without a persistent protocol; needs a separate batch profile, not a session driver |
 | Cursor CLI (`cursor`) | `cursor-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
 | GitHub Copilot CLI (`github-copilot`) | `github-copilot-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
-| Amp (`amp`) | — | — | — | — | — | — | — | — | — | not implemented: native NDJSON streaming CLI; needs its own driver |
+| Amp (`amp`) | `amp-stream-json` | Amp stream-json | default | yes | no | no | no | yes | documentation only, not recorded | not qualified |
 | Qwen Code (`qwen-code`) | `qwen-code-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
 | Kimi CLI (`kimi-cli`) | `kimi-cli-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
 | Hermes (`hermes`) | `hermes-acp` | ACP v1 | default | if advertised | no | yes | yes | no | — | not qualified |
