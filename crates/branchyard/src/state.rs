@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BranchInfo, Error};
+use crate::{BranchInfo, Error, Provider};
 
 pub(crate) const DIR: &str = ".branchyard";
 
@@ -31,6 +31,9 @@ pub(crate) struct Record {
     /// For a forked session, the parent's cumulative cost at the fork,
     /// which the harness keeps reporting as part of the fork's.
     pub cost_baseline: Option<f64>,
+    /// Where the harness runs; `None` is local.
+    #[serde(default)]
+    pub provider: Option<Provider>,
 }
 
 pub(crate) struct Store {

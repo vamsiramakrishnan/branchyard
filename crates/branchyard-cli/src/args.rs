@@ -34,6 +34,19 @@ pub struct TaskArgs {
     pub isolated: bool,
     /// Executable and fixed arguments replacing the profile's.
     pub command: Option<Vec<String>>,
+    /// `--provider microsandbox` and its options; `None` keeps the default.
+    pub sandbox: Option<SandboxArgs>,
+    /// `--provider local`.
+    pub local: bool,
+}
+
+/// Options for `--provider microsandbox`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SandboxArgs {
+    pub image: String,
+    pub cpus: Option<u8>,
+    pub memory_mib: Option<u32>,
+    pub pass_env: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -182,6 +195,31 @@ const COMMAND: Flag = Flag {
     value: Some("\"PATH ARGS\""),
     help: "Launch this instead of the profile's executable, for development and testing",
 };
+const PROVIDER: Flag = Flag {
+    long: "provider",
+    value: Some("local|microsandbox"),
+    help: "Where the harness runs (default: local, or the branch's own)",
+};
+const IMAGE: Flag = Flag {
+    long: "image",
+    value: Some("REF"),
+    help: "OCI image with the harness installed (microsandbox)",
+};
+const CPUS: Flag = Flag {
+    long: "cpus",
+    value: Some("N"),
+    help: "Virtual CPUs for the sandbox (microsandbox)",
+};
+const MEMORY: Flag = Flag {
+    long: "memory",
+    value: Some("MIB"),
+    help: "Sandbox memory in MiB (microsandbox)",
+};
+const PASS_ENV: Flag = Flag {
+    long: "pass-env",
+    value: Some("NAME,NAME,..."),
+    help: "Variables to copy into the sandbox, such as API keys; nothing else is (microsandbox)",
+};
 const YES: Flag = Flag {
     long: "yes",
     value: None,
@@ -225,6 +263,11 @@ pub static COMMANDS: &[Spec] = &[
             ASK,
             ISOLATED,
             COMMAND,
+            PROVIDER,
+            IMAGE,
+            CPUS,
+            MEMORY,
+            PASS_ENV,
         ],
     },
     Spec {
@@ -243,6 +286,11 @@ pub static COMMANDS: &[Spec] = &[
             ASK,
             ISOLATED,
             COMMAND,
+            PROVIDER,
+            IMAGE,
+            CPUS,
+            MEMORY,
+            PASS_ENV,
         ],
     },
     Spec {
@@ -266,6 +314,11 @@ pub static COMMANDS: &[Spec] = &[
             ASK,
             ISOLATED,
             COMMAND,
+            PROVIDER,
+            IMAGE,
+            CPUS,
+            MEMORY,
+            PASS_ENV,
         ],
     },
     Spec {
@@ -569,6 +622,7 @@ impl Matches {
                 Some(argv)
             }
         };
+        let provider = self.provider()?;
         // `fan` reads `--harness` as a list; it is not one harness.
         let harness = match self.spec.name {
             "fan" => None,
@@ -585,7 +639,75 @@ impl Matches {
             permissions,
             isolated: self.switch("isolated"),
             command,
+            sandbox: provider.clone().flatten(),
+            local: provider == Some(None),
         })
+    }
+
+    /// `Some(None)` for `--provider local`, `Some(Some(..))` for
+    /// microsandbox, `None` when not given.
+    #[allow(clippy::option_option)]
+    fn provider(&self) -> Result<Option<Option<SandboxArgs>>, UsageError> {
+        let sandbox_flags = ["image", "cpus", "memory", "pass-env"];
+        let given: Vec<&str> = sandbox_flags
+            .into_iter()
+            .filter(|flag| self.switch(flag))
+            .collect();
+        match self.value("provider") {
+            None | Some("local") => {
+                if let Some(flag) = given.first() {
+                    return Err(self.error(format!("--{flag} needs --provider microsandbox")));
+                }
+                Ok(self.value("provider").map(|_| None))
+            }
+            Some("microsandbox") => {
+                let image = self
+                    .value("image")
+                    .filter(|image| !image.trim().is_empty())
+                    .ok_or_else(|| self.error("--provider microsandbox needs --image"))?;
+                let cpus = match self.value("cpus") {
+                    None => None,
+                    Some(text) => match text.parse::<u8>() {
+                        Ok(cpus) if cpus > 0 => Some(cpus),
+                        _ => {
+                            return Err(self.error(format!(
+                                "--cpus needs a whole number from 1 to 255, not '{text}'"
+                            )))
+                        }
+                    },
+                };
+                let memory_mib = match self.value("memory") {
+                    None => None,
+                    Some(text) => match text.parse::<u32>() {
+                        Ok(mib) if mib > 0 => Some(mib),
+                        _ => {
+                            return Err(self.error(format!(
+                                "--memory needs a positive whole number of MiB, not '{text}'"
+                            )))
+                        }
+                    },
+                };
+                let mut pass_env = Vec::new();
+                if let Some(list) = self.value("pass-env") {
+                    for name in list.split(',').map(str::trim) {
+                        if name.is_empty() || name.contains('=') {
+                            return Err(self
+                                .error(format!("--pass-env takes variable names, not '{list}'")));
+                        }
+                        pass_env.push(name.to_owned());
+                    }
+                }
+                Ok(Some(Some(SandboxArgs {
+                    image: image.to_owned(),
+                    cpus,
+                    memory_mib,
+                    pass_env,
+                })))
+            }
+            Some(other) => Err(self.error(format!(
+                "--provider is local or microsandbox, not '{other}'"
+            ))),
+        }
     }
 }
 
@@ -752,8 +874,55 @@ mod tests {
                     permissions: Permissions::Yes,
                     isolated: true,
                     command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
+                    sandbox: None,
+                    local: false,
                 },
             }
+        );
+    }
+
+    #[test]
+    fn provider_flags_select_and_configure_a_sandbox() {
+        let Command::Run { task, .. } = parse_str(
+            "run go --provider microsandbox --image ghcr.io/x/claude:1 --cpus 2 \
+             --memory 4096 --pass-env 'ANTHROPIC_API_KEY, GH_TOKEN'",
+        )
+        .unwrap() else {
+            panic!("not run")
+        };
+        assert_eq!(
+            task.sandbox,
+            Some(SandboxArgs {
+                image: "ghcr.io/x/claude:1".into(),
+                cpus: Some(2),
+                memory_mib: Some(4096),
+                pass_env: vec!["ANTHROPIC_API_KEY".into(), "GH_TOKEN".into()],
+            })
+        );
+        assert!(!task.local);
+        let Command::Fork { task, .. } = parse_str("fork b go --provider local").unwrap() else {
+            panic!("not fork")
+        };
+        assert!(task.local && task.sandbox.is_none());
+        assert_eq!(
+            err("run go --provider microsandbox"),
+            "--provider microsandbox needs --image"
+        );
+        assert_eq!(
+            err("run go --image alpine"),
+            "--image needs --provider microsandbox"
+        );
+        assert_eq!(
+            err("run go --provider local --cpus 2"),
+            "--cpus needs --provider microsandbox"
+        );
+        assert!(err("run go --provider docker").contains("local or microsandbox"));
+        assert!(err("run go --provider microsandbox --image a --cpus 0").contains("--cpus"));
+        assert!(err("run go --provider microsandbox --image a --memory 1g").contains("--memory"));
+        assert!(err("run go --provider microsandbox --image a --pass-env A=1").contains("names"));
+        assert_eq!(
+            err("send b go --provider local"),
+            "unknown option --provider"
         );
     }
 
