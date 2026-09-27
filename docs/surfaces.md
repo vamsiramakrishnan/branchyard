@@ -6,7 +6,7 @@ Surfaces:
 
 - **SDK**: the Rust crate `branchyard` (`Yard`, `Branch`, `TaskBuilder`, `Delegate`), in-process.
 - **by**: the `by` command on a local repository.
-- **by --remote**: the `by` command against a server.
+- **by --remote**: the `by` command against a server: `--remote URL` (or `BRANCHYARD_REMOTE`), with `--token-file`, `--repo` and `--ca-file` (or their `BRANCHYARD_*` variables), before or after the command.
 - **HTTP**: the server's API (`by serve`; see [the server reference](server.md)).
 - **client**: `branchyard-client`, the typed Rust client of that API.
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
@@ -174,6 +174,19 @@ A server-only addition: identity, scopes and quotas are meaningful only where mo
 | `GET /v1/operations/{id}` on another tenant's operation | reachable by any token | `404 unknown_operation`, indistinguishable from an ID that never existed |
 | `GET /v1/operations?idempotency_key=`, `Idempotency-Key` | scoped to the token name | scoped to the principal within its tenant; another tenant's operation is `404 unknown_operation` |
 | `by worker` | needed a token like a server | needs no `tokens` or `credentials`: it runs each operation as the principal recorded when it was admitted |
+
+## Changed with the clap command line
+
+Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See the [README](../README.md#command-line).
+
+| Surface | Before | Now |
+|---|---|---|
+| Global options (`--remote`, `--token-file`, `--repo`, `--ca-file`) | before the command only | before or after it; variables read by clap's `env`, blank ones still unset |
+| `graph`, `rig`, `artifact`, `scratch` actions | one flag set shared by every action | real subcommands, each with only its own flags (`artifact list --out` is refused); `--json`, and `--branch` for `artifact` and `scratch`, may still come before the action, as the Python module passes them |
+| Usage errors | `by: MESSAGE` and `Try 'by help CMD'.`, exit 2 | clap's `error: MESSAGE`, a `tip:` where one helps (a similar command or flag, quoting a prompt), the command's usage line, exit 2 |
+| `--help` | anywhere on the command line, it won over any other mistake | it wins over missing arguments and everything after it; an unknown flag before it is reported instead |
+| `--check`, `--command` and `PAGER` splitting | own POSIX-like splitter | `shlex`, which also drops a `#` comment starting a word |
+| New | none | `by completions <bash\|zsh\|fish\|powershell\|elvish>`, `by man`, short flags, durations with units, `$` in `--budget-usd` |
 
 ## Changed from 4609ca1
 

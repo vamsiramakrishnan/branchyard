@@ -19,11 +19,11 @@ branchyard-server token new --tenant acme --scopes read,run --repo app
 # paste that object into the configuration's "credentials" array
 ```
 
-Flags (`by serve --help` or `branchyard-server --help`):
+Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped there under TLS, what requests may do, operations and webhooks; everything after `by serve` is the server's, so its `--repo` and `--token-file` are these, not `by`'s global ones):
 
 | Flag | Meaning |
 |---|---|
-| `--config FILE` | JSON configuration, below. Flags override it |
+| `-c`, `--config FILE` | JSON configuration, below. Flags override it |
 | `--listen ADDR` | `IP:port`; default `127.0.0.1:8421`. Port 0 picks one; the server prints `listening on URL` to stdout |
 | `--repo NAME=PATH` | Serve the repository at `PATH` as `NAME` (repeatable). Default: the repository containing the current directory, named after its directory |
 | `--data-dir DIR` | Operation registry and activity feeds. Default: `.branchyard/server` in the first repository |
@@ -43,7 +43,7 @@ Flags (`by serve --help` or `branchyard-server --help`):
 | `--max-running N` | Operations this process runs at once; more wait queued. Default 8 |
 | `--operation-lease SECS` | How long a claim on a queued operation lasts without renewal before another worker takes it over; renewed every third of it. Default 30 |
 | `--shutdown-grace SECS` | At shutdown, how long running operations may finish. Default 60 |
-| `--quiet` | Do not log requests |
+| `-q`, `--quiet` | Do not log requests |
 
 Configuration file (relative paths resolve against the file's directory; unknown keys are errors):
 

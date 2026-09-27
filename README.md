@@ -59,6 +59,33 @@ by merge make-the-flaky-parser-test-deterministic
 
 Work runs on the server: interrupting `by` stops watching, not the turn, `by cancel` stops the turn, and a retried request with the same idempotency key never runs twice. Operation status and the activity feed survive a server restart; a turn still running when the server stops is recorded as interrupted, and its branch is recovered when the server starts again; an operation still queued runs then. Plain HTTP binds only to loopback unless TLS is configured or `--insecure-bind` is given. By default the server uses the local process provider, so **harnesses run as the server's user with no isolation**, and every token holder can direct them. Its operator can allow the Microsandbox and Substrate providers (`--allow-provider`), delegation for its harnesses and remote `by spawn`, `inspect`, `events`, `integrate` and `children` (`--allow-delegation`), and unapproved tools (`--allow-unapproved-tools`); `by --remote` then takes the same flags as local `by`. `by serve --database postgres://…` keeps branch state, operations and their dispatch queue in PostgreSQL (the `postgres` feature), where several servers and `by worker` processes may share them; an operation admitted before a crash runs once, on whichever worker claims it. See [the server reference](docs/server.md) for the API, authentication, deployment and what is durable.
 
+## Command line
+
+`by --help` lists the commands by group; `by help <command>` (or `by <command> --help`, `-h` for a summary) shows a command's options under headings such as *Checks and limits*, *Permissions*, *Launch*, *Provisioning* and *Global options*, with examples for the main commands. Nested commands have their own help: `by help graph apply`, `by artifact publish --help`. A mistyped command or flag gets a suggestion (`by mrege` → `merge`), and a usage error exits with status 2, a failed command with 1.
+
+The global options choose where commands run, and may come before or after the command; each falls back to its variable, and a flag wins over its variable:
+
+| Option | Variable |
+|---|---|
+| `--remote URL` | `BRANCHYARD_REMOTE` |
+| `--token-file FILE` | `BRANCHYARD_TOKEN_FILE` |
+| `--repo NAME` | `BRANCHYARD_REPO` |
+| `--ca-file FILE` | `BRANCHYARD_CA_FILE` |
+
+Short forms: `-n` for `--name`, `-b` for `--base`, `-y` for `--yes`, `-f` for `log --follow`, `-o` for `artifact get|export --out`, `-V` for `--version`. Durations take a unit: `--max-minutes 90s`, `--stall-after 2h`, `watch --interval 250ms` (a bare number keeps its old unit); `--budget-usd` also takes `$2.50`. `--check` and `--command` are split like a POSIX shell, including `#` comments.
+
+Shell completions and a man page are generated from the same definitions:
+
+```sh
+by completions bash > ~/.local/share/bash-completion/completions/by
+by completions zsh > "${fpath[1]}/_by"
+by completions fish > ~/.config/fish/completions/by.fish
+by completions powershell >> $PROFILE      # or elvish
+by man | man -l -
+```
+
+`by serve` and `by worker` hand everything after them to the server's own parser, so `by serve --help` is the server's help and `--repo NAME=PATH` there is the server's flag, not the global one. `branchyard-server`, `branchyard-bridge`, `branchyard-herdr`, `branchyard-mcp` and `branchyard-qualify` parse their command lines the same way (clap), each with `--help`.
+
 ## Watching branches
 
 `by watch` shows every branch as a tree, forks under their parents, with status, harness, current activity (the tool running, a pending permission request, the last line of the message), turns, cost and age:
@@ -180,7 +207,7 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | `branchyard-qualify` | Runs driver qualification scenarios against real harness binaries; see [driver qualification](docs/qualification/README.md) |
 | `branchyard-workspace` | Git worktree branches, candidate commits and validated merges: compare-and-swap on the target, checks in a temporary worktree, conflicts returned for repair; 18 tests |
 | `branchyard-runtime` | Runs a driver against a harness process through any sandbox provider, and the local provider: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 30 hermetic tests, including the provider conformance checks, against a fake ACP agent |
-| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log` (with `--follow`), `merge`, `rm`, `cancel`, `send --steer`, `harnesses`, `watch`, `serve`, `rig`, `artifact`, `scratch`, `graph`, and the delegation commands, each also in remote mode; 94 tests, 35 of them running the built binary against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent, and 1 more on PostgreSQL |
+| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log` (with `--follow`), `merge`, `rm`, `cancel`, `send --steer`, `harnesses`, `watch`, `serve`, `rig`, `artifact`, `scratch`, `graph`, and the delegation commands, each also in remote mode, with a [clap](https://docs.rs/clap) command line, shell completions and a man page; 105 tests, 40 of them running the built binary against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent, and 1 more on PostgreSQL |
 | `branchyard-server` | The server: bearer-token authentication with tenant identity (principals with scopes and repository ownership, hashed credentials, `token new`) and per-tenant quotas counted in the admission's transaction, durable operations with idempotency keys, admitted as a durable enqueue and run by workers under fenced leases, cancellation, steering a running turn, a resumable SSE activity feed read from the engine's store, recovery, one server per data directory or several (and `by worker` processes) on one PostgreSQL database, TLS and graceful shutdown, operator opt-ins for providers, delegation and unapproved tools, secrets resolved from the operator's own table, delegation endpoints including graph proposals (a spawn that waits is queued work like any other, and every server and worker resumes graphs on its recovery tick), rig seats checked on submission, artifacts and scratch areas over HTTP (`--max-artifact-bytes`), and a PostgreSQL store; 81 tests, 41 over real HTTP against a fake ACP agent (including adversarial webhook receivers that hang, close without answering or refuse forever, none of which delay an operation or the feed, and identity, scopes, tenant isolation and quotas: `tests/tenants.rs`), and 12 more on PostgreSQL (including a spawn that waits run by a worker alone, and two servers and a worker starting one dependent once) (with the feature, 1 SQLite-only parity test is left out); see [the server reference](docs/server.md) |
 | `branchyard-client` | The remote SDK: typed blocking client for every endpoint, including artifacts and scratch areas (digest-verified downloads), SSE parsing and reconnect by cursor; 13 tests |
 | `branchyard-herdr` | The [Herdr plugin](plugins/herdr/README.md)'s binary: a bridge from the server's event stream to one Herdr tab per branch and `herdr pane report-agent` states, with merge, cancel and send actions; 11 tests, 2 of them against a spawned server, the fake ACP agent and a fake `herdr`; not run against a real Herdr |
