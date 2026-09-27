@@ -1,0 +1,16 @@
+{
+  "name": "branchyard",
+  "description": "Delegate work to child branches with Branchyard: spawn, watch, integrate and cancel children within your envelope.",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Branchyard",
+    "shortDescription": "Delegate work to child branches",
+    "longDescription": "Delegate parts of a coding task to child branches with Branchyard: spawn a child on its own git branch and harness, watch its status and cost, integrate its validated result, and cancel it. Requires an installed `by` CLI on a Branchyard branch (BRANCHYARD_BRANCH set).",
+    "developerName": "Branchyard contributors",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Use Branchyard to delegate part of this task to a child branch."]
+  }
+}
