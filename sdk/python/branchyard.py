@@ -85,6 +85,8 @@ class Spawned:
     depth: int
     status: Dict[str, Any]
     budget: Dict[str, Any]
+    # The rig seat the child fills; None when it was spawned without one.
+    seat: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -104,6 +106,9 @@ class Inspection:
     remaining_usd: Optional[float]
     envelope: Optional[Dict[str, Any]]
     last_message: str
+    # In a rig: the seat the branch fills and the seats it may spawn.
+    seat: Optional[str] = None
+    seats: Optional[List[str]] = None
 
     @property
     def running(self) -> bool:
@@ -188,9 +193,16 @@ def spawn(
     check: Optional[str] = None,
     max_depth: Optional[int] = None,
     deny: Optional[List[str]] = None,
+    seat: Optional[str] = None,
 ) -> Spawned:
-    """Create a child branch and start it; returns once it has started."""
+    """Create a child branch and start it; returns once it has started.
+
+    In a rig, `seat` names the seat to fill: it sets the child's harness,
+    limits, check and instructions, and the other arguments may only narrow
+    them. `inspect().seats` lists the seats you may spawn.
+    """
     options = {
+        "--seat": seat,
         "--harness": harness,
         "--name": name,
         "--base": base,

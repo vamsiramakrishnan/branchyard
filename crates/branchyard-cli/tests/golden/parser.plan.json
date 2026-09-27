@@ -1,0 +1,102 @@
+{
+  "rig": "parser",
+  "description": "Rewrite a parser: tokenizer and formatter in parallel, the tokenizer tested separately",
+  "root": {
+    "seat": "lead",
+    "name": "parser",
+    "harness": "claude-code",
+    "profile": "claude-code-stream-json",
+    "budget": {
+      "max_usd": 8.0,
+      "max_turns": 30,
+      "max_minutes": null
+    },
+    "policy": {
+      "default": "allow",
+      "deny": [
+        "WebFetch"
+      ],
+      "allow": [],
+      "delegation_commands": true
+    },
+    "check": [
+      "cargo",
+      "test",
+      "-p",
+      "parser"
+    ],
+    "isolated": false,
+    "provision": {
+      "instructions": "# Rig parser: seat lead\n\nYou fill seat `lead` in the Branchyard rig `parser`. Your role: Split the parser rewrite, delegate the tokenizer and the formatter, and integrate both.\n\nYou delegate only by seat, and only to these seats. Spawn a child with `by spawn --seat SEAT \"<task>\"` (Python: `branchyard.spawn(task, seat=SEAT)`; MCP: the spawn tool's `seat`). The seat sets the child's harness, budget, check and instructions; you may give it less budget, not more. Integrate a finished child with `by integrate <child>`.\n\n- `tokenizer` (codex, $4.00 each, 12 turns): Port the tokenizer to the new API; have its tests written by your tester.\n- `formatter` (claude-code, $2.00 each, 10 turns): Port the formatter to the new API and keep its output byte-identical.\n\n## From guidance/team.md\n\n# Team norms\n\n- Keep each change small enough to review in one sitting.\n- Run the tests that cover what you touched before you finish.\n- Say what you did not do, and why, in your last message.\n"
+    },
+    "delegation": {
+      "max_depth": 2,
+      "max_children": 2,
+      "harnesses": [
+        "claude-code",
+        "codex",
+        "gemini-cli"
+      ]
+    }
+  },
+  "seats": {
+    "rig": "parser",
+    "seat": "lead",
+    "delegates_to": [
+      "tokenizer",
+      "formatter"
+    ],
+    "table": {
+      "formatter": {
+        "harness": "claude-code",
+        "budget": {
+          "max_usd": 2.0,
+          "max_turns": 10,
+          "max_minutes": null
+        },
+        "provision": {
+          "instructions": "# Rig parser: seat formatter\n\nYou fill seat `formatter` in the Branchyard rig `parser`. Your role: Port the formatter to the new API and keep its output byte-identical.\n\nYou do not delegate: do your task on your own branch and leave the result there.\n\n## From guidance/team.md\n\n# Team norms\n\n- Keep each change small enough to review in one sitting.\n- Run the tests that cover what you touched before you finish.\n- Say what you did not do, and why, in your last message.\n\n## From guidance/build.md\n\n# Changing code\n\n- You need not commit: Branchyard snapshots your worktree when your turn ends.\n- Keep the public API of the parser crate unchanged unless your task says otherwise.\n",
+          "model": "medium"
+        },
+        "instances": 1
+      },
+      "tester": {
+        "harness": "gemini-cli",
+        "budget": {
+          "max_usd": 1.0,
+          "max_turns": 6,
+          "max_minutes": null
+        },
+        "deny": [
+          "web_fetch"
+        ],
+        "provision": {
+          "instructions": "# Rig parser: seat tester\n\nYou fill seat `tester` in the Branchyard rig `parser`. Your role: Write tests for the tokenizer your parent is porting; do not change the tokenizer.\n\nYou do not delegate: do your task on your own branch and leave the result there.\n\n## From guidance/team.md\n\n# Team norms\n\n- Keep each change small enough to review in one sitting.\n- Run the tests that cover what you touched before you finish.\n- Say what you did not do, and why, in your last message.\n"
+        },
+        "instances": 1
+      },
+      "tokenizer": {
+        "harness": "codex",
+        "budget": {
+          "max_usd": 4.0,
+          "max_turns": 12,
+          "max_minutes": null
+        },
+        "check": [
+          "cargo",
+          "test",
+          "-p",
+          "parser",
+          "tokenizer"
+        ],
+        "provision": {
+          "instructions": "# Rig parser: seat tokenizer\n\nYou fill seat `tokenizer` in the Branchyard rig `parser`. Your role: Port the tokenizer to the new API; have its tests written by your tester.\n\nYou delegate only by seat, and only to these seats. Spawn a child with `by spawn --seat SEAT \"<task>\"` (Python: `branchyard.spawn(task, seat=SEAT)`; MCP: the spawn tool's `seat`). The seat sets the child's harness, budget, check and instructions; you may give it less budget, not more. Integrate a finished child with `by integrate <child>`.\n\n- `tester` (gemini-cli, $1.00 each, 6 turns): Write tests for the tokenizer your parent is porting; do not change the tokenizer.\n\n## From guidance/team.md\n\n# Team norms\n\n- Keep each change small enough to review in one sitting.\n- Run the tests that cover what you touched before you finish.\n- Say what you did not do, and why, in your last message.\n\n## From guidance/build.md\n\n# Changing code\n\n- You need not commit: Branchyard snapshots your worktree when your turn ends.\n- Keep the public API of the parser crate unchanged unless your task says otherwise.\n"
+        },
+        "delegates_to": [
+          "tester"
+        ],
+        "instances": 1
+      }
+    }
+  }
+}

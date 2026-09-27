@@ -1,0 +1,47 @@
+# A lead that splits a change, delegates the implementation and a review,
+# and integrates the result.
+#
+#   by rig check examples/rigs/feature.toml
+#   by rig run examples/rigs/feature.toml "Add a --json flag to the export command"
+#
+# See docs/rigs.md for every field.
+version = 1
+name = "feature"
+root = "lead"
+description = "A lead delegates the implementation and a review, then integrates"
+
+# Delivered to every seat's harness as standing instructions, never
+# written into a worktree. Paths are relative to this file.
+[startup]
+files = ["guidance/team.md"]
+
+[seats.lead]
+description = "Plan the change, delegate it, have it reviewed, and integrate what passes."
+harness = "claude-code"
+model = "large"
+budget = { max_usd = 6, max_turns = 20, max_minutes = 60 }
+check = "cargo test"
+delegates_to = ["implementer", "reviewer"]
+
+[seats.lead.policy]
+default = "allow"
+deny = ["WebFetch", "WebSearch"]
+# Let the lead's `by spawn --seat ...` and `by integrate ...` run without
+# a prompt; nothing else is added.
+delegation_commands = true
+
+[seats.implementer]
+description = "Make one well-scoped change with tests, and leave it committed on your branch."
+harness = "codex"
+effort = "high"
+budget = { max_usd = 2, max_turns = 10 }
+# Two implementers may run side by side.
+instances = 2
+
+[seats.reviewer]
+description = "Review a candidate your lead names; report problems, do not edit files."
+harness = "claude-code"
+model = "medium"
+budget = { max_usd = 1, max_turns = 4 }
+policy = { deny = ["Edit", "Write", "MultiEdit", "NotebookEdit"] }
+startup = { files = ["guidance/reviewer.md"] }

@@ -7,7 +7,9 @@ mod common;
 use std::fs;
 use std::time::{Duration, Instant};
 
-use branchyard::{Activity, BranchStatus, Budget, Envelope, TaskOptions};
+use branchyard::{
+    Activity, BranchStatus, Budget, ChildBudget, Envelope, Provisioning, Seat, Seats, TaskOptions,
+};
 use common::{text, Client, Fixture};
 use serde_json::{json, Value};
 
@@ -256,4 +258,73 @@ fn the_server_refuses_a_forged_token_while_the_real_one_works() {
     // Revoked with the turn.
     let (error, said) = real.call("inspect", json!({}));
     assert!(error, "{said}");
+}
+
+#[test]
+fn a_harness_in_a_rig_spawns_by_seat_over_mcp() {
+    let f = Fixture::new();
+    let worker = Seat {
+        harness: "gemini-cli".into(),
+        budget: ChildBudget::default(),
+        check: None,
+        deny: Vec::new(),
+        isolated: false,
+        provision: Some(Provisioning {
+            instructions: Some("You write files.".into()),
+            ..Provisioning::default()
+        }),
+        delegates_to: Vec::new(),
+        instances: 1,
+    };
+    let seats = Seats {
+        rig: "team".into(),
+        seat: "lead".into(),
+        delegates_to: vec!["worker".into()],
+        table: [("worker".to_owned(), worker)].into_iter().collect(),
+    };
+    let options = TaskOptions {
+        seats: Some(seats.clone()),
+        ..f.delegating(seats.envelope())
+    };
+    let prompt = [
+        "MCP inspect {}",
+        r#"MCP spawn {"prompt": "x"}"#,
+        r#"MCP spawn {"prompt": "x", "seat": "boss"}"#,
+        // Escaped, so the agent reads the keyword only in the child's prompt.
+        r#"MCP spawn {"prompt": "\u0049NSTRUCTED", "seat": "worker"}"#,
+        "MCP wait root-worker",
+        r#"MCP propose_integration {"branch": "root-worker"}"#,
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(options)
+        .name("root")
+        .run()
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let said = reply(&f, "root");
+    let me = result(&said, "inspect");
+    assert_eq!(me["seat"], "lead");
+    assert_eq!(me["seats"], json!(["worker"]));
+    let errors: Vec<&str> = said
+        .lines()
+        .filter(|line| line.contains(" error: "))
+        .collect();
+    assert_eq!(errors.len(), 3, "{said}");
+    assert!(
+        errors[0].contains("spawns only by seat: one of worker"),
+        "{said}"
+    );
+    assert!(
+        errors[1].contains("may spawn only worker, not boss"),
+        "{said}"
+    );
+    // Nothing to merge: the worker changed no file.
+    assert!(errors[2].contains("root-worker"), "{said}");
+    let spawned = result(&said, "spawn");
+    assert_eq!(spawned["name"], "root-worker");
+    assert_eq!(spawned["seat"], "worker");
+    assert_eq!(reply(&f, "root-worker"), "instructed=true");
 }

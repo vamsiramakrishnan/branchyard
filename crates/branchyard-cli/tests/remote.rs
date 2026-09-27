@@ -929,3 +929,125 @@ fn by_serve_keeps_its_state_in_postgres() {
     assert_eq!(branches[0]["status"]["state"], "ready");
     assert!(!there.join(".branchyard/state.db").exists());
 }
+
+/// A rig of the fake agent for both sides: a lead that may spawn two
+/// workers.
+const TEAM: &str = r#"
+version = 1
+name = "team"
+root = "lead"
+
+[seats.lead]
+harness = "gemini-cli"
+delegates_to = ["worker"]
+policy = { default = "allow", delegation_commands = true }
+
+[seats.worker]
+description = "Writes files."
+instances = 2
+policy = { deny = ["Edit"] }
+"#;
+
+#[test]
+fn rig_runs_print_what_local_ones_do() {
+    let dir = Dir::new();
+    let here = dir.repo("here");
+    let there = dir.repo("there");
+    let spec = dir.0.join("team.toml");
+    fs::write(&spec, TEAM).unwrap();
+    let spec = spec.display().to_string();
+    let agent = fake_agent().display().to_string();
+    let prompt = [
+        "SH by spawn --seat worker 'WRITE w.txt=w' --wait --json",
+        "SH by integrate team-worker --json",
+    ]
+    .join("\n");
+    let run = ["rig", "run", &spec, &prompt, "--command", &agent, "--json"];
+
+    // A rig's root delegates, so the operator must allow delegation.
+    let plain = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let refused = plain.by(&dir.0, &run);
+    assert_eq!(refused.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["kind"], "delegation_not_allowed");
+    drop(plain);
+
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &["--allow-client-commands", "--allow-delegation"],
+    );
+    let l = command(BY, &here).args(run).output().unwrap();
+    let r = server.by(&dir.0, &run);
+    assert!(l.status.success(), "{}", text(&l.stderr));
+    assert!(
+        r.status.success(),
+        "{}\n{}",
+        text(&r.stdout),
+        text(&r.stderr)
+    );
+    let (lj, rj) = (json(&l.stdout, &here), json(&r.stdout, &there));
+    assert_eq!(lj, rj);
+    assert_eq!(rj["root"]["children"], serde_json::json!(["team-worker"]));
+    assert_eq!(rj["descendants"][0]["status"]["state"], "merged");
+    assert_eq!(
+        command("git", &there)
+            .args(["show", "by/team:w.txt"])
+            .output()
+            .unwrap()
+            .stdout,
+        b"w\n"
+    );
+
+    // Filling a seat as a person: the same JSON, and the same refusals.
+    for args in [
+        &[
+            "spawn",
+            "WRITE x.txt=x",
+            "--parent",
+            "team",
+            "--seat",
+            "worker",
+            "--yes",
+            "--json",
+        ][..],
+        &["spawn", "x", "--parent", "team", "--yes", "--json"],
+        &[
+            "spawn", "x", "--parent", "team", "--seat", "boss", "--yes", "--json",
+        ],
+        &["inspect", "team", "--json"],
+    ] {
+        let l = command(BY, &here).args(args).output().unwrap();
+        let r = server.by(&dir.0, args);
+        assert_eq!(
+            l.status.code(),
+            r.status.code(),
+            "{args:?}\n{}",
+            text(&r.stderr)
+        );
+        assert_eq!(json(&l.stdout, &here), json(&r.stdout, &there), "{args:?}");
+    }
+    let inspected: Value = serde_json::from_slice(
+        &server
+            .by(&dir.0, &["inspect", "team-worker-2", "--json"])
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(inspected["seat"], "worker");
+
+    // A seat's secrets are names the operator must define, like a task's.
+    let secret = dir.0.join("secret.toml");
+    fs::write(
+        &secret,
+        TEAM.replace("name = \"team\"", "name = \"vault\"").replace(
+            "instances = 2",
+            "instances = 2\nisolated = true\nsecrets = [\"UNDEFINED_KEY\"]",
+        ),
+    )
+    .unwrap();
+    let secret = secret.display().to_string();
+    let refused = server.by(&dir.0, &["rig", "run", &secret, "go", "--json"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["kind"], "secret_not_allowed", "{refused}");
+}

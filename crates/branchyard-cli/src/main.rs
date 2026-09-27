@@ -9,6 +9,7 @@ mod console;
 mod json;
 mod remote;
 mod render;
+mod rig;
 mod watch;
 
 use std::io;
@@ -129,6 +130,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::events(env, target, branch, cursor, limit, json),
         Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
         Command::Children { branch, json } => commands::children(env, target, branch, json),
+        Command::Rig(args) => commands::rig(env, target, &args),
         Command::Help { .. } | Command::Version | Command::Serve { .. } | Command::Mcp { .. } => {
             unreachable!("handled before choosing a target")
         }

@@ -1,0 +1,45 @@
+# Three levels: a lead, two kinds of implementer in a pod that shares
+# guidance, and a tester below the tokenizer seat.
+#
+#   by rig check examples/rigs/parser.toml
+version = 1
+name = "parser"
+root = "lead"
+description = "Rewrite a parser: tokenizer and formatter in parallel, the tokenizer tested separately"
+
+[startup]
+files = ["guidance/team.md"]
+
+[pods.build]
+description = "The seats that change code"
+# An optional file is skipped when it is missing.
+startup = { files = [{ path = "guidance/build.md", required = false }] }
+
+[seats.lead]
+description = "Split the parser rewrite, delegate the tokenizer and the formatter, and integrate both."
+harness = "claude-code"
+budget = { max_usd = 8, max_turns = 30 }
+check = ["cargo", "test", "-p", "parser"]
+delegates_to = ["tokenizer", "formatter"]
+policy = { default = "allow", deny = ["WebFetch"], delegation_commands = true }
+
+[seats.tokenizer]
+description = "Port the tokenizer to the new API; have its tests written by your tester."
+pod = "build"
+harness = "codex"
+budget = { max_usd = 4, max_turns = 12 }
+check = "cargo test -p parser tokenizer"
+delegates_to = ["tester"]
+
+[seats.tester]
+description = "Write tests for the tokenizer your parent is porting; do not change the tokenizer."
+harness = "gemini-cli"
+budget = { max_usd = 1, max_turns = 6 }
+policy = { deny = ["web_fetch"] }
+
+[seats.formatter]
+description = "Port the formatter to the new API and keep its output byte-identical."
+pod = "build"
+harness = "claude-code"
+model = "medium"
+budget = { max_usd = 2, max_turns = 10 }
