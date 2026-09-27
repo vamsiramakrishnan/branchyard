@@ -59,7 +59,8 @@ delegate: spawn child branches with their own harness and budget, watch them wit
 and events, continue them with send, merge a finished child into your own branch with \
 propose_integration (its check must pass), stop them with cancel, and list them with \
 children. Children run in parallel; spawn returns once a child has started. You act only as your own branch and only \
-on your descendants. inspect with no branch shows your remaining budget.";
+on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
+may spawn.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {
@@ -142,6 +143,7 @@ pub fn tools() -> Vec<Tool> {
                     "max_children": {"type": "integer", "minimum": 0},
                     "harnesses": {"type": "array", "items": {"type": "string"}, "description": "Harnesses the child may delegate to; each must be allowed to you"},
                     "deny": {"type": "array", "items": {"type": "string"}, "description": "Tool names the child is denied outright; a trailing * matches a prefix"},
+                    "seat": {"type": "string", "description": "In a rig, the seat to fill; it sets the child's harness, limits, check and instructions. Required in a rig, and must be one of your seats (inspect shows them); refused outside one"},
                 },
                 "required": ["prompt"],
                 "additionalProperties": false,

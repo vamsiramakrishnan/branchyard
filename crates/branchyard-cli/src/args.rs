@@ -108,6 +108,23 @@ pub struct SpawnArgs {
     pub wait: bool,
     pub max_depth: Option<u32>,
     pub deny: Vec<String>,
+    /// `--seat`: the rig seat the child fills.
+    pub seat: Option<String>,
+    pub json: bool,
+}
+
+/// `by rig check FILE` or `by rig run FILE PROMPT`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RigArgs {
+    /// `run` with its prompt; `None` for `check`.
+    pub prompt: Option<String>,
+    pub file: String,
+    /// The root branch's name, instead of the rig's.
+    pub name: Option<String>,
+    pub base: Option<String>,
+    /// The root's executable, for development and testing.
+    pub command: Option<Vec<String>>,
+    pub unapproved_tools: bool,
     pub json: bool,
 }
 
@@ -198,6 +215,7 @@ pub enum Command {
         branch: Option<String>,
         json: bool,
     },
+    Rig(RigArgs),
     /// General help, or one command's.
     Help {
         topic: Option<&'static Spec>,
@@ -538,6 +556,11 @@ const DENY: Flag = Flag {
     value: Some("TOOL,TOOL,..."),
     help: "Tools the child is denied outright; a trailing * matches a prefix",
 };
+const SEAT: Flag = Flag {
+    long: "seat",
+    value: Some("NAME"),
+    help: "In a rig, the seat the child fills; it sets the child's harness, limits, check and instructions",
+};
 const CURSOR: Flag = Flag {
     long: "cursor",
     value: Some("N"),
@@ -813,6 +836,7 @@ pub static COMMANDS: &[Spec] = &[
         summary: "Delegate to a new child branch of this branch",
         flags: &[
             PARENT,
+            SEAT,
             HARNESS,
             NAME,
             BASE,
@@ -858,6 +882,12 @@ pub static COMMANDS: &[Spec] = &[
         positionals: &["branch?"],
         summary: "List the branches a branch delegated to",
         flags: &[JSON],
+    },
+    Spec {
+        name: "rig",
+        positionals: &["check|run", "file", "prompt?"],
+        summary: "Check a rig spec and print its plan, or run its root seat with a prompt",
+        flags: &[NAME, BASE, COMMAND, ALLOW_UNAPPROVED_TOOLS, JSON],
     },
     Spec {
         name: "mcp",
@@ -985,6 +1015,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                     }
                     None => Vec::new(),
                 },
+                seat: m.value("seat").map(str::to_owned),
                 json: m.switch("json"),
             },
         },
@@ -1010,6 +1041,50 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             branch: optional.next(),
             json: m.switch("json"),
         },
+        "rig" => {
+            let action = next();
+            let file = next();
+            let prompt = optional.next();
+            let prompt = match (action.as_str(), prompt) {
+                ("check", None) => None,
+                ("check", Some(extra)) => {
+                    return Err(m.error(format!(
+                        "rig check takes a file only, not '{extra}'; to run it, use rig run"
+                    )))
+                }
+                ("run", Some(prompt)) if !prompt.trim().is_empty() => Some(prompt),
+                ("run", _) => return Err(m.error("rig run needs a prompt for the root seat")),
+                (other, _) => {
+                    return Err(m.error(format!("unknown rig action '{other}'; use check or run")))
+                }
+            };
+            if prompt.is_none() {
+                for flag in ["name", "base", "command", "allow-unapproved-tools"] {
+                    if m.switch(flag) {
+                        return Err(m.error(format!("--{flag} applies to rig run")));
+                    }
+                }
+            }
+            let command = match m.value("command") {
+                None => None,
+                Some(line) => {
+                    let argv = split_words(line).map_err(|e| m.error(format!("--command: {e}")))?;
+                    if argv.is_empty() {
+                        return Err(m.error("--command needs an executable"));
+                    }
+                    Some(argv)
+                }
+            };
+            Command::Rig(RigArgs {
+                prompt,
+                file,
+                name: m.value("name").map(str::to_owned),
+                base: m.value("base").map(str::to_owned),
+                command,
+                unapproved_tools: m.switch("allow-unapproved-tools"),
+                json: m.switch("json"),
+            })
+        }
         "mcp" => {
             let mut args = Vec::new();
             for flag in ["root", "branch"] {

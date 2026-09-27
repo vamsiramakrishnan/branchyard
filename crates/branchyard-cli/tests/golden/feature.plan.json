@@ -1,0 +1,83 @@
+{
+  "rig": "feature",
+  "description": "A lead delegates the implementation and a review, then integrates",
+  "root": {
+    "seat": "lead",
+    "name": "feature",
+    "harness": "claude-code",
+    "profile": "claude-code-stream-json",
+    "budget": {
+      "max_usd": 6.0,
+      "max_turns": 20,
+      "max_minutes": 60.0
+    },
+    "policy": {
+      "default": "allow",
+      "deny": [
+        "WebFetch",
+        "WebSearch"
+      ],
+      "allow": [],
+      "delegation_commands": true
+    },
+    "check": [
+      "cargo",
+      "test"
+    ],
+    "isolated": false,
+    "provision": {
+      "instructions": "# Rig feature: seat lead\n\nYou fill seat `lead` in the Branchyard rig `feature`. Your role: Plan the change, delegate it, have it reviewed, and integrate what passes.\n\nYou delegate only by seat, and only to these seats. Spawn a child with `by spawn --seat SEAT \"<task>\"` (Python: `branchyard.spawn(task, seat=SEAT)`; MCP: the spawn tool's `seat`). The seat sets the child's harness, budget, check and instructions; you may give it less budget, not more. Integrate a finished child with `by integrate <child>`.\n\n- `implementer` (codex, up to 2 at once, $2.00 each, 10 turns): Make one well-scoped change with tests, and leave it committed on your branch.\n- `reviewer` (claude-code, $1.00 each, 4 turns): Review a candidate your lead names; report problems, do not edit files.\n\n## From guidance/team.md\n\n# Team norms\n\n- Keep each change small enough to review in one sitting.\n- Run the tests that cover what you touched before you finish.\n- Say what you did not do, and why, in your last message.\n",
+      "model": "large"
+    },
+    "delegation": {
+      "max_depth": 1,
+      "max_children": 3,
+      "harnesses": [
+        "claude-code",
+        "codex"
+      ]
+    }
+  },
+  "seats": {
+    "rig": "feature",
+    "seat": "lead",
+    "delegates_to": [
+      "implementer",
+      "reviewer"
+    ],
+    "table": {
+      "implementer": {
+        "harness": "codex",
+        "budget": {
+          "max_usd": 2.0,
+          "max_turns": 10,
+          "max_minutes": null
+        },
+        "provision": {
+          "instructions": "# Rig feature: seat implementer\n\nYou fill seat `implementer` in the Branchyard rig `feature`. Your role: Make one well-scoped change with tests, and leave it committed on your branch.\n\nYou do not delegate: do your task on your own branch and leave the result there.\n\n## From guidance/team.md\n\n# Team norms\n\n- Keep each change small enough to review in one sitting.\n- Run the tests that cover what you touched before you finish.\n- Say what you did not do, and why, in your last message.\n",
+          "effort": "high"
+        },
+        "instances": 2
+      },
+      "reviewer": {
+        "harness": "claude-code",
+        "budget": {
+          "max_usd": 1.0,
+          "max_turns": 4,
+          "max_minutes": null
+        },
+        "deny": [
+          "Edit",
+          "Write",
+          "MultiEdit",
+          "NotebookEdit"
+        ],
+        "provision": {
+          "instructions": "# Rig feature: seat reviewer\n\nYou fill seat `reviewer` in the Branchyard rig `feature`. Your role: Review a candidate your lead names; report problems, do not edit files.\n\nYou do not delegate: do your task on your own branch and leave the result there.\n\n## From guidance/team.md\n\n# Team norms\n\n- Keep each change small enough to review in one sitting.\n- Run the tests that cover what you touched before you finish.\n- Say what you did not do, and why, in your last message.\n\n## From guidance/reviewer.md\n\n# Reviewing\n\nRead the candidate's diff against its base (`git diff <base>..<branch>`).\nReport correctness problems first, then missing tests, then style. Quote the\nfile and line. Do not edit files: your branch is not merged.\n",
+          "model": "medium"
+        },
+        "instances": 1
+      }
+    }
+  }
+}

@@ -112,6 +112,7 @@ mod provisioning;
 mod record;
 mod recover;
 mod run;
+mod seats;
 mod sqlite;
 mod state;
 
@@ -135,6 +136,7 @@ pub use delegation::{
     Spawned,
 };
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
+pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 
 /// A repository with Branchyard state. Cheap to clone; clones share state.
@@ -275,7 +277,30 @@ impl Yard {
     pub fn harnesses(&self) -> Vec<HarnessInfo> {
         harness::list()
     }
+}
 
+/// The profile a harness or profile ID selects, from the built-in
+/// registry, without looking for its executable.
+pub fn harness_profile(id: &str) -> Result<HarnessProfile, Error> {
+    let profile = harness::select(Some(id))?;
+    Ok(HarnessProfile {
+        harness: profile.harness.to_owned(),
+        profile: profile.id.to_owned(),
+        tool_approvals: profile.driver().capabilities().tool_approvals,
+    })
+}
+
+/// A harness profile as [`harness_profile`] resolves it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessProfile {
+    pub harness: String,
+    pub profile: String,
+    /// Whether its driver routes tool permission requests to the policy;
+    /// without it, a task needs [`TaskOptions::unapproved_tools`].
+    pub tool_approvals: bool,
+}
+
+impl Yard {
     /// Act as the branch whose running turn was issued `token`. The token
     /// is the authority and names the branch: it is issued when a
     /// delegating turn starts and revoked when it ends. Works in the
@@ -356,6 +381,12 @@ pub struct TaskOptions {
     /// parent's. Secrets need a home private to the branch:
     /// [`TaskOptions::isolated`] or a sandbox provider.
     pub provision: Option<Provisioning>,
+    /// Make the branch the root of a rig: the seat it occupies and the
+    /// seats below it, which its harness then spawns by name (see
+    /// `docs/rigs.md`). Needs [`TaskOptions::delegation`], which still
+    /// bounds every child. Stored with the branch; a send without one keeps
+    /// the branch's.
+    pub seats: Option<Seats>,
 }
 
 /// Where a branch's harness runs.

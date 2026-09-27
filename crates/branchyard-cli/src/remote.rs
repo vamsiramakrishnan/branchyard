@@ -19,14 +19,15 @@ use branchyard::{
 };
 use branchyard_client::api::{
     BudgetSpec, ErrorBody, ForkRequest, MergeRequest, Operation, OperationResult, OperationState,
-    PolicySpec, SendRequest, SpawnRequest, TaskRequest,
+    PolicyMode, PolicySpec, RuleSpec, SendRequest, SpawnRequest, TaskRequest,
 };
 use branchyard_client::{new_key, Client, Repo};
 
-use crate::args::{Globals, Permissions, SpawnArgs, TaskArgs};
+use crate::args::{Globals, Permissions, RigArgs, SpawnArgs, TaskArgs};
 use crate::commands::{self, branch_outcome, print, Env, Failure, Outcome};
 use crate::console::Console;
 use crate::render::{self, Renderer};
+use crate::rig::{Fallback, RigPlan};
 
 pub struct Remote {
     pub client: Client,
@@ -328,6 +329,7 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
         provision: provision(task)?,
+        seats: None,
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -383,6 +385,7 @@ pub fn fan(
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
         provision: provision(task)?,
+        seats: None,
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -521,6 +524,7 @@ pub fn spawn(
         max_depth: args.max_depth,
         deny: args.deny.clone(),
         unapproved_tools: task.unapproved_tools,
+        seat: args.seat.clone(),
     };
     let op = remote
         .repo
@@ -592,4 +596,87 @@ pub fn merge(remote: &Remote, branch: &str, into: Option<&str>) -> Outcome {
         &merged.previous,
         &merged.commit,
     )
+}
+
+/// `by rig run` on the server: the lowered plan as one task request, with
+/// its seats. Needs a server that allows delegation, since a rig's root
+/// delegates.
+pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigArgs) -> Outcome {
+    let root = &plan.root;
+    let (mode, notice) = match root.policy.default {
+        Fallback::Allow => (PolicyMode::Allow, None),
+        Fallback::Deny => (PolicyMode::Deny, Some(REMOTE_DENY_NOTICE)),
+        Fallback::Ask => {
+            let error = branchyard::Error::Unsupported(
+                "policy.default = \"ask\" is not available in remote mode, where the harness \
+                 runs on the server; use allow or deny"
+                    .into(),
+            );
+            return rig_failed(args.json, error);
+        }
+    };
+    let rules = root
+        .policy
+        .deny
+        .iter()
+        .map(|tool| RuleSpec {
+            tool: tool.clone(),
+            allow: false,
+        })
+        .chain(root.policy.allow.iter().map(|tool| RuleSpec {
+            tool: tool.clone(),
+            allow: true,
+        }))
+        .collect();
+    let request = TaskRequest {
+        prompt: prompt.to_owned(),
+        harness: Some(root.harness.clone()),
+        harnesses: Vec::new(),
+        name: Some(args.name.clone().unwrap_or_else(|| root.name.clone())),
+        base: args.base.clone(),
+        budget: BudgetSpec {
+            max_usd: root.budget.max_usd,
+            max_turns: root.budget.max_turns,
+            max_seconds: root.budget.max_minutes.map(|m| m * 60.0),
+        },
+        policy: PolicySpec { mode, rules },
+        check: root.check.clone(),
+        isolated: root.isolated,
+        command: args.command.clone(),
+        delegation: root.delegation.clone(),
+        allow_delegation: root.policy.delegation_commands,
+        unapproved_tools: args.unapproved_tools,
+        provider: None,
+        provision: Some(root.provision.clone()),
+        seats: plan.seats.clone(),
+    };
+    let op = match remote.repo.submit_task(&request, &new_key()) {
+        Ok(op) => op,
+        Err(error) if args.json => return rig_failed(true, sdk_error(error)),
+        Err(error) => return Err(error.into()),
+    };
+    announce(remote, notice, None);
+    if !args.json {
+        return finish_one(env, remote, &op, true);
+    }
+    let result = match follow_result(env, remote, &op) {
+        Ok(result) => result,
+        Err(error) => return rig_failed(true, error),
+    };
+    let Some(info) = result.branches.first() else {
+        return Err(Failure::Message("the server returned no branch".into()));
+    };
+    // Read again, as local mode does: the root gained its children.
+    let root = remote.repo.branch(&info.name)?;
+    commands::print_rig_run(&plan.rig, &root, &result.descendants)
+}
+
+fn rig_failed(json: bool, error: branchyard::Error) -> Outcome {
+    if json {
+        let value =
+            serde_json::json!({"error": {"kind": error.kind(), "message": error.to_string()}});
+        print(&crate::json::text(&value))?;
+        return Err(Failure::Reported);
+    }
+    Err(Failure::Sdk(error))
 }

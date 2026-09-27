@@ -189,14 +189,30 @@ fn new_home_private(options: &TaskOptions) -> bool {
     options.isolated || placement::sandboxed(options.provider.as_ref())
 }
 
-/// The grant for a branch the caller starts: the envelope, with nothing
-/// imposed by a parent. Checks that the MCP server can be found first.
-fn root_grant(options: &TaskOptions) -> Result<Option<Grant>, Error> {
+/// The grant for a branch the caller starts: the envelope and any seats,
+/// with nothing imposed by a parent. Checks that the MCP server can be
+/// found first, and that the seats are a tree whose provisioning can be
+/// honored when the branch's home is `private`.
+fn root_grant(options: &TaskOptions, private: bool) -> Result<Option<Grant>, Error> {
     let Some(envelope) = &options.delegation else {
+        if options.seats.is_some() {
+            return Err(seats_need_delegation());
+        }
         return Ok(None);
     };
     crate::projection::tools(options)?;
-    Ok(Some(Grant::root(envelope.clone())))
+    if let Some(seats) = &options.seats {
+        seats.validate()?;
+        seats.check_provisioning(private)?;
+    }
+    Ok(Some(Grant {
+        seats: options.seats.clone(),
+        ..Grant::root(envelope.clone())
+    }))
+}
+
+fn seats_need_delegation() -> Error {
+    Error::Unsupported("seats need a delegation envelope to spawn them within".into())
 }
 
 pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Branch, Error> {
@@ -206,7 +222,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
         options.provider.as_ref(),
         options.unapproved_tools,
     )?;
-    let grant = root_grant(options)?;
+    let grant = root_grant(options, new_home_private(options))?;
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
@@ -266,7 +282,7 @@ pub(crate) fn run_on(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let grant = root_grant(options)?;
+    let grant = root_grant(options, new_home_private(options))?;
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
@@ -459,15 +475,30 @@ pub(crate) fn prepare_send(
         record.provision = options.provision.clone();
     }
     crate::provisioning::check(record.provision.as_ref(), record.home.is_some())?;
-    // A delegated child keeps the envelope its parent gave it.
+    // A delegated child keeps the envelope and seats its parent gave it.
     if let (Some(envelope), 0) = (&options.delegation, record.info.depth) {
         crate::projection::tools(options)?;
+        if let Some(seats) = &options.seats {
+            seats.validate()?;
+            seats.check_provisioning(record.home.is_some())?;
+        }
         record.grant = Some(match record.grant.take() {
             Some(grant) => Grant {
                 envelope: envelope.clone(),
+                seats: options.seats.clone().or(grant.seats),
                 ..grant
             },
-            None => Grant::root(envelope.clone()),
+            None => Grant {
+                seats: options.seats.clone(),
+                ..Grant::root(envelope.clone())
+            },
+        });
+    } else if options.seats.is_some() {
+        return Err(match record.info.depth {
+            0 => seats_need_delegation(),
+            _ => Error::Denied(format!(
+                "{name} is a delegated child; its seats come from its parent's rig"
+            )),
         });
     }
     record.info.status = BranchStatus::Running;
@@ -547,13 +578,13 @@ pub(crate) fn fork(
             &launch_command,
         )?;
     }
-    let grant = root_grant(options)?;
+    let private =
+        options.isolated || parent.home.is_some() || placement::sandboxed(provider.as_ref());
+    let grant = root_grant(options, private)?;
     // Checked before the name is reserved, so a refusal holds no name. The
     // fork has a private home when its parent had one, when it runs
     // isolated, or when its provider is a sandbox (`create` gives it one).
     let provision = options.provision.clone().or(parent.provision.clone());
-    let private =
-        options.isolated || parent.home.is_some() || placement::sandboxed(provider.as_ref());
     crate::provisioning::check(provision.as_ref(), private)?;
     let reserved =
         names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);

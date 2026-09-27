@@ -708,3 +708,229 @@ fn by_mcp_needs_a_token() {
         stderr(&out)
     );
 }
+
+/// The example rigs, from the repository root.
+fn example(name: &str) -> String {
+    format!("{}/../../examples/rigs/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn rig_check_prints_the_plan_and_names_what_it_refuses() {
+    let repo = Repo::new();
+    let text = repo.by(&["rig", "check", &example("feature.toml")]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    let text = stdout(&text);
+    for expected in [
+        "rig feature: ",
+        "root   lead as branch feature, claude-code (claude-code-stream-json)",
+        "envelope depth 1, 3 children, harnesses claude-code, codex",
+        "implementer (under lead), codex (codex-app-server), up to 2 at once",
+        "deny Edit, Write, MultiEdit, NotebookEdit",
+    ] {
+        assert!(text.contains(expected), "{expected:?} missing from\n{text}");
+    }
+    // --json prints the plan the golden file holds.
+    let json = repo.by(&["rig", "check", &example("parser.toml"), "--json"]);
+    assert!(json.status.success(), "{}", stderr(&json));
+    let golden = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/parser.plan.json"
+    ))
+    .unwrap();
+    assert_eq!(stdout(&json), golden);
+
+    let spec = repo.dir.join("bad.toml");
+    fs::write(
+        &spec,
+        "version = 1\nname = \"bad\"\nroot = \"lead\"\n[seats.lead]\ncollaborates_with = [\"x\"]\n",
+    )
+    .unwrap();
+    let spec = spec.display().to_string();
+    let refused = repo.by(&["rig", "check", &spec]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(
+        stderr(&refused),
+        format!(
+            "by: {spec}: line 5: seats.lead.collaborates_with: not supported: Branchyard has no \
+             messaging between branches; a branch acts only on its descendants\n"
+        )
+    );
+    let refused = repo.by(&["rig", "run", &spec, "go", "--json"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "invalid_rig");
+    assert_eq!(error["error"]["field"], "seats.lead.collaborates_with");
+    assert_eq!(error["error"]["line"], 5);
+    assert!(repo.json(&["ls", "--json"]).as_array().unwrap().is_empty());
+
+    for usage in [
+        &["rig", "run", &spec][..],
+        &["rig", "check", &spec, "extra"],
+        &["rig", "start", &spec],
+        &["rig", "check", &spec, "--name", "x"],
+    ] {
+        assert_eq!(repo.by(usage).status.code(), Some(2), "{usage:?}");
+    }
+    // Profiles that cannot route permissions need consent before anything runs.
+    fs::write(
+        repo.dir.join("pi.toml"),
+        "version = 1\nname = \"pi\"\nroot = \"lead\"\n[seats.lead]\nharness = \"pi\"\n",
+    )
+    .unwrap();
+    let pi = repo.dir.join("pi.toml").display().to_string();
+    let check = stdout(&repo.by(&["rig", "check", &pi]));
+    assert!(
+        check.contains("needs --allow-unapproved-tools: lead"),
+        "{check}"
+    );
+    let run = repo.by(&["rig", "run", &pi, "go"]);
+    assert_eq!(run.status.code(), Some(1));
+    assert!(
+        stderr(&run).contains("--allow-unapproved-tools"),
+        "{}",
+        stderr(&run)
+    );
+}
+
+/// A rig of the fake agent: a lead that may spawn two workers and a
+/// reviewer.
+const TEAM: &str = r#"
+version = 1
+name = "team"
+root = "lead"
+
+[seats.lead]
+harness = "gemini-cli"
+delegates_to = ["worker", "reviewer"]
+policy = { default = "allow", deny = ["WebFetch"] }
+
+[seats.worker]
+description = "Writes files."
+instances = 2
+
+[seats.reviewer]
+description = "Reviews, never edits."
+policy = { deny = ["Edit"] }
+"#;
+
+#[test]
+fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
+    let repo = Repo::new();
+    let spec = repo.dir.join("team.toml");
+    fs::write(&spec, TEAM).unwrap();
+    let script = "import branchyard as b; c = b.spawn('INSTRUC' + 'TED', seat='reviewer'); \
+                  print('seat', c.seat, c.name); d = b.wait(c.name, timeout=60, poll=0.05); \
+                  print('reviewed', d.status['state'], d.last_message, d.seat)";
+    let prompt = [
+        "SH by inspect --json".to_owned(),
+        "SH by spawn --seat worker 'WRITE w.txt=w' --wait --json".into(),
+        "SH by spawn 'say free' --json".into(),
+        format!("SH python3 -c \"{script}\""),
+        "SH by integrate team-worker --json".into(),
+    ]
+    .join("\n");
+    let agent = fake_agent().display().to_string();
+    let spec = spec.display().to_string();
+    let out = repo.by(&["rig", "run", &spec, &prompt, "--command", &agent, "--json"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(
+        stderr(&out).contains(
+            "by: rig team: root seat lead on gemini-cli; it may spawn seats worker, reviewer"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["rig"], "team");
+    assert_eq!(result["root"]["name"], "team");
+    assert_eq!(
+        result["root"]["children"],
+        serde_json::json!(["team-worker", "team-reviewer"])
+    );
+    let descendants: Vec<(&str, &str)> = result["descendants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["name"].as_str().unwrap(),
+                d["status"]["state"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        descendants,
+        [("team-worker", "merged"), ("team-reviewer", "no_changes")]
+    );
+
+    let said = reply(&repo, "team");
+    let (_, me) = sh_json(&said, 0);
+    assert_eq!(me["seat"], "lead");
+    assert_eq!(me["seats"], serde_json::json!(["worker", "reviewer"]));
+    assert_eq!(me["envelope"]["max_children"], 3);
+    let (code, worker) = sh_json(&said, 1);
+    assert_eq!(
+        (code, worker["status"]["state"].as_str()),
+        (0, Some("ready"))
+    );
+    assert_eq!(worker["seat"], "worker");
+    let (code, free) = sh_json(&said, 2);
+    assert_eq!(code, 1);
+    assert!(
+        free["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("spawns only by seat: one of worker, reviewer"),
+        "{free}"
+    );
+    // The reviewer got its seat's instructions and nothing else.
+    assert!(said.contains("seat reviewer team-reviewer"), "{said}");
+    assert!(
+        said.contains("reviewed no_changes instructed=true reviewer"),
+        "{said}"
+    );
+    let (code, merged) = sh_json(&said, 4);
+    assert_eq!((code, merged["target"].as_str()), (0, Some("by/team")));
+    assert_eq!(repo.git(&["show", "by/team:w.txt"]), "w\n");
+    // Nothing was written into a worktree but the harnesses' own work.
+    let status = repo.git(&[
+        "-C",
+        ".branchyard/worktrees/team-reviewer",
+        "status",
+        "--short",
+    ]);
+    assert_eq!(status, "");
+
+    let inspected = stdout(&repo.by(&["inspect", "team"]));
+    assert!(
+        inspected.contains("lead; spawns seats: worker, reviewer"),
+        "{inspected}"
+    );
+
+    // Outside a harness, a person fills a seat the same way.
+    let second = repo.json(&[
+        "spawn",
+        "WRITE x.txt=x",
+        "--parent",
+        "team",
+        "--seat",
+        "worker",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(second["name"], "team-worker-2");
+    assert_eq!(second["seat"], "worker");
+    let third = repo.by(&[
+        "spawn", "x", "--parent", "team", "--seat", "worker", "--yes", "--json",
+    ]);
+    assert_eq!(third.status.code(), Some(1));
+    let third: Value = serde_json::from_slice(&third.stdout).unwrap();
+    // The envelope still bounds everything: three seats' worth of children.
+    assert!(
+        third["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already has 3 children, its envelope's max_children"),
+        "{third}"
+    );
+}

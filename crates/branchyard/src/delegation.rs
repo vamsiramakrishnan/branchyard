@@ -47,6 +47,7 @@ use crate::projection::{lock, same_token, ENV_BRANCH, ENV_ROOT, ENV_TOKEN};
 use crate::record::{self, Recorder};
 use crate::recover;
 use crate::run::{self, NewBranch, Prepared};
+use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
 use crate::{
     git, harness, names, ops, Activity, BranchInfo, BranchStatus, Budget, CandidateInfo, Error,
@@ -172,6 +173,10 @@ pub(crate) struct Grant {
     /// Set for delegated children only.
     #[serde(default)]
     pub limits: Option<Limits>,
+    /// For a branch in a rig: its seat and the seats it may spawn. Such a
+    /// branch spawns only by seat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seats: Option<Seats>,
 }
 
 impl Grant {
@@ -180,6 +185,7 @@ impl Grant {
             envelope,
             deny: Vec::new(),
             limits: None,
+            seats: None,
         }
     }
 
@@ -215,6 +221,13 @@ pub struct Spawn {
     /// Tool patterns the child's policy denies outright, like
     /// [`Policy::deny`].
     pub deny: Vec<String>,
+    /// A seat of the parent's rig to fill: the seat sets the child's
+    /// harness, check, isolation and provisioning, and its limits and
+    /// denials, which the fields above may only narrow. A branch in a rig
+    /// must name one of the seats its own seat delegates to; any other
+    /// branch may not name one. Unset `name` defaults to
+    /// `<parent>-<seat>`.
+    pub seat: Option<String>,
 }
 
 impl Spawn {
@@ -240,6 +253,7 @@ impl Spawn {
         set("max_depth", json!(self.max_depth));
         set("max_children", json!(self.max_children));
         set("harnesses", json!(self.harnesses));
+        set("seat", json!(self.seat));
         if !self.deny.is_empty() {
             set("deny", json!(self.deny));
         }
@@ -300,6 +314,9 @@ pub struct Spawned {
     pub depth: u32,
     pub status: BranchStatus,
     pub budget: ChildBudget,
+    /// The seat it fills, for a child spawned by seat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat: Option<String>,
 }
 
 /// A descendant whose next turn was started.
@@ -349,6 +366,12 @@ pub struct Inspection {
     /// The harness's text since the branch's last prompt, truncated from
     /// the front.
     pub last_message: String,
+    /// The rig seat the branch occupies, if it is in a rig.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat: Option<String>,
+    /// The seats it may spawn, if it is in a rig.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seats: Vec<String>,
 }
 
 /// Recorded events from `cursor` on.
@@ -874,6 +897,15 @@ impl Local {
         if request.prompt.trim().is_empty() {
             return Err(Error::Denied("a child needs a prompt".into()));
         }
+        let seated = self.seat(&caller, &grant, request)?;
+        let filled;
+        let request = match &seated {
+            Some((name, seat, below)) => {
+                filled = fill(request, name, seat, below)?;
+                &filled
+            }
+            None => request,
+        };
         let own = profiles::by_id(&caller.info.profile)
             .ok_or_else(|| Error::UnknownHarness(caller.info.profile.clone()))?;
         let profile = match &request.harness {
@@ -900,6 +932,7 @@ impl Local {
             envelope,
             deny,
             limits: Some(limits.clone()),
+            seats: seated.as_ref().map(|(_, _, below)| below.clone()),
         };
         if child_grant.can_spawn() {
             crate::projection::tools(&self.options)?;
@@ -912,19 +945,28 @@ impl Local {
         let launch = harness::command(profile, command.as_deref());
         harness::check_approvals(profile, self.options.unapproved_tools)?;
         harness::check_available(profile.harness, &launch)?;
+        let seat = seated.as_ref().map(|(_, seat, _)| seat);
+        let isolated =
+            caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
+        let provision = match seat.and_then(|s| s.provision.clone()) {
+            Some(own) => Some(own),
+            None => caller.provision.clone(),
+        };
+        crate::provisioning::check(
+            provision.as_ref(),
+            isolated || crate::placement::sandboxed(caller.provider.as_ref()),
+        )?;
         let base = match &request.base {
             Some(rev) => run::resolve_base(&self.yard, Some(rev))?,
             None => self.current_work(&caller, "snapshot before delegating")?,
         };
-        let name = names::reserve(
-            &store,
-            &self.yard.root,
-            request.name.as_deref(),
-            &request.prompt,
-            &[],
-        )?
-        .remove(0);
-        let isolated = caller.home.is_some() || self.options.isolated;
+        // A seat's child is named after its parent and seat by default.
+        let stem = match (&seated, &request.name) {
+            (Some((seat, _, _)), None) => format!("{}-{seat}", self.branch),
+            _ => request.prompt.clone(),
+        };
+        let name =
+            names::reserve(&store, &self.yard.root, request.name.as_deref(), &stem, &[])?.remove(0);
         let record = run::create(
             &self.yard,
             NewBranch {
@@ -940,7 +982,7 @@ impl Local {
                 provider: caller.provider.clone(),
                 grant: Some(child_grant),
                 depth: caller.info.depth + 1,
-                provision: caller.provision.clone(),
+                provision,
             },
         )
         .inspect_err(|_| store.release(&name))?;
@@ -971,7 +1013,74 @@ impl Local {
                 max_turns: limits.max_turns,
                 max_minutes: limits.max_duration_ms.map(|ms| ms as f64 / 60_000.0),
             },
+            seat: seated.map(|(name, _, _)| name),
         })
+    }
+
+    /// The seat `request` fills, with the seats below it; `None` for a
+    /// branch outside a rig that names none. A branch in a rig must name
+    /// one its own seat delegates to, and may not fill it more often than
+    /// the seat's instances allow.
+    fn seat(
+        &self,
+        caller: &Record,
+        grant: &Grant,
+        request: &Spawn,
+    ) -> Result<Option<(String, Seat, Seats)>, Error> {
+        let seats = match (&grant.seats, &request.seat) {
+            (None, None) => return Ok(None),
+            (None, Some(seat)) => {
+                return Err(Error::Denied(format!(
+                    "{} is not in a rig, so it has no seat {seat} to fill; spawn without a seat",
+                    self.branch
+                )))
+            }
+            (Some(seats), None) => {
+                return Err(Error::Denied(format!(
+                    "{} fills seat {} of rig {}, so it spawns only by seat: one of {}",
+                    self.branch,
+                    seats.seat,
+                    seats.rig,
+                    listed(&seats.delegates_to)
+                )))
+            }
+            (Some(seats), Some(_)) => seats,
+        };
+        let name = request.seat.clone().unwrap_or_default();
+        let seat = match seats.table.get(&name) {
+            Some(seat) if seats.delegates_to.contains(&name) => seat.clone(),
+            _ => {
+                return Err(Error::Denied(format!(
+                    "seat {} of rig {} may spawn only {}, not {name}",
+                    seats.seat,
+                    seats.rig,
+                    listed(&seats.delegates_to)
+                )))
+            }
+        };
+        let store = self.store();
+        let filled = caller
+            .info
+            .children
+            .iter()
+            .filter_map(|child| store.read(child).ok())
+            .filter(|child| {
+                child
+                    .grant
+                    .as_ref()
+                    .and_then(|g| g.seats.as_ref())
+                    .is_some_and(|s| s.seat == name)
+            })
+            .count();
+        if filled >= seat.instances as usize {
+            return Err(Error::Denied(format!(
+                "{} already has {filled} child{} in seat {name}, the seat's instances",
+                self.branch,
+                if filled == 1 { "" } else { "ren" }
+            )));
+        }
+        let below = seats.below(&name);
+        Ok(Some((name, seat, below)))
     }
 
     /// The child's limits, checked against what this branch has left.
@@ -1139,6 +1248,11 @@ impl Local {
         };
         let events = record::read(&store, branch)?;
         let info = record.info.clone();
+        let seats = record.grant.as_ref().and_then(|g| g.seats.as_ref());
+        let (seat, may_spawn) = match seats {
+            Some(seats) => (Some(seats.seat.clone()), seats.delegates_to.clone()),
+            None => (None, Vec::new()),
+        };
         Ok(Inspection {
             subtree_cost_usd: subtree_spent(&store, &record, &mut BTreeSet::new()),
             name: info.name,
@@ -1155,6 +1269,8 @@ impl Local {
             remaining_usd: remaining_usd.map(|r| r.max(0.0)),
             envelope: record.grant.map(|g| g.envelope),
             last_message: last_message(&events),
+            seat,
+            seats: may_spawn,
         })
     }
 
@@ -1238,6 +1354,89 @@ impl Local {
     }
 }
 
+/// Names for messages: `a, b` or `none`.
+fn listed(names: &[String]) -> String {
+    match names.is_empty() {
+        true => "none".into(),
+        false => names.join(", "),
+    }
+}
+
+/// `request` with what `seat` fixes filled in. The request may narrow the
+/// seat's limits, envelope and denials, and may not change its harness,
+/// check or delegation harnesses.
+fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn, Error> {
+    let fixed = |what: &str| {
+        Err(Error::Denied(format!(
+            "seat {name} fixes the child's {what}; spawn it without one"
+        )))
+    };
+    if let Some(asked) = &request.harness {
+        if harness::select(Some(asked))?.id != harness::select(Some(&seat.harness))?.id {
+            return fixed("harness");
+        }
+    }
+    if request.check.is_some() {
+        return fixed("check");
+    }
+    if request.harnesses.is_some() {
+        return fixed("delegation harnesses");
+    }
+    let limit = seat.budget.to_budget()?;
+    let asked = &request.budget;
+    fn narrower<T: PartialOrd + Copy + fmt::Debug>(
+        what: &str,
+        seat: &str,
+        asked: Option<T>,
+        limit: Option<T>,
+    ) -> Result<Option<T>, Error> {
+        match (asked, limit) {
+            (Some(a), Some(l)) if a > l => Err(Error::Denied(format!(
+                "{what} {a:?} exceeds seat {seat}'s {l:?}"
+            ))),
+            (a, l) => Ok(a.or(l)),
+        }
+    }
+    let budget = Budget {
+        max_usd: narrower("max_usd", name, asked.max_usd, limit.max_usd)?,
+        max_turns: narrower("max_turns", name, asked.max_turns, limit.max_turns)?,
+        max_duration: narrower(
+            "a duration of",
+            name,
+            asked.max_duration,
+            limit.max_duration,
+        )?,
+    };
+    let envelope = below.envelope();
+    let mut deny = seat.deny.clone();
+    for pattern in &request.deny {
+        if !deny.contains(pattern) {
+            deny.push(pattern.clone());
+        }
+    }
+    Ok(Spawn {
+        prompt: request.prompt.clone(),
+        harness: Some(seat.harness.clone()),
+        name: request.name.clone(),
+        base: request.base.clone(),
+        budget,
+        check: seat.check.clone(),
+        max_depth: Some(
+            request
+                .max_depth
+                .map_or(envelope.max_depth, |d| d.min(envelope.max_depth)),
+        ),
+        max_children: Some(
+            request
+                .max_children
+                .map_or(envelope.max_children, |c| c.min(envelope.max_children)),
+        ),
+        harnesses: Some(envelope.harnesses),
+        deny,
+        seat: Some(name.to_owned()),
+    })
+}
+
 /// The text of the last turn, at most [`LAST_MESSAGE_MAX`] characters.
 fn last_message(events: &[RecordedEvent]) -> String {
     let start = events
@@ -1272,6 +1471,7 @@ struct SpawnArgs {
     harnesses: Option<Vec<String>>,
     #[serde(default)]
     deny: Vec<String>,
+    seat: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1334,6 +1534,7 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
                 max_children: args.max_children,
                 harnesses: args.harnesses,
                 deny: args.deny,
+                seat: args.seat,
             })?)
         }
         "inspect" => {
@@ -1426,6 +1627,7 @@ mod tests {
                     max_usd: Some(max_usd),
                     ..Limits::default()
                 }),
+                seats: None,
             }),
         }
     }

@@ -700,3 +700,65 @@ fn secrets_are_named_by_the_request_and_resolved_by_the_server() {
         );
     }
 }
+
+#[test]
+fn a_rigs_seats_are_checked_when_its_task_is_submitted() {
+    let f = Fixture::new();
+    let seat = branchyard::Seat {
+        harness: "gemini-cli".into(),
+        budget: branchyard::ChildBudget::default(),
+        check: None,
+        deny: Vec::new(),
+        isolated: true,
+        provision: Some(branchyard::Provisioning {
+            secrets: vec![branchyard::SecretSource::parse("OPENAI_API_KEY").unwrap()],
+            ..branchyard::Provisioning::default()
+        }),
+        delegates_to: Vec::new(),
+        instances: 1,
+    };
+    let seats = branchyard::Seats {
+        rig: "team".into(),
+        seat: "lead".into(),
+        delegates_to: vec!["worker".into()],
+        table: [("worker".to_owned(), seat)].into_iter().collect(),
+    };
+    let submit = |client: &Client, seats: branchyard::Seats, delegation: bool| {
+        let request = branchyard_client::api::TaskRequest {
+            delegation: delegation.then(|| seats.envelope()),
+            seats: Some(seats),
+            ..task("x", "rig")
+        };
+        client
+            .repo("app")
+            .submit_task(&request, &new_key())
+            .unwrap_err()
+    };
+    // Seats are delegation, so the operator must allow it.
+    let plain = Server::start(f.config());
+    let error = submit(&plain.client(), seats.clone(), true);
+    assert_eq!(error.code(), Some("delegation_not_allowed"), "{error}");
+    drop(plain);
+
+    let mut config = f.config();
+    config.allow_delegation = true;
+    let server = Server::start(config);
+    let client = server.client();
+    let error = submit(&client, seats.clone(), false);
+    assert_eq!(error.code(), Some("invalid_request"), "{error}");
+    assert!(
+        error.to_string().contains("need a delegation envelope"),
+        "{error}"
+    );
+    let mut loose = seats.clone();
+    loose.delegates_to.clear();
+    let error = submit(&client, loose, true);
+    assert_eq!(error.code(), Some("invalid_request"), "{error}");
+    assert!(
+        error.to_string().contains("worker is not below seat lead"),
+        "{error}"
+    );
+    // A seat's secrets are the server's to define, like a task's.
+    let error = submit(&client, seats, true);
+    assert_eq!(error.code(), Some("secret_not_allowed"), "{error}");
+}

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use branchyard::{
     Activity, BranchInfo, Budget, Envelope, HarnessInfo, Inspection, Merged, Policy, Provider,
-    Provisioning, RecordedEvent,
+    Provisioning, RecordedEvent, Seats,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -164,6 +164,12 @@ pub struct TaskRequest {
     /// runs, refused unless it allows client commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<Provisioning>,
+    /// Make the branch a rig's root, like [`branchyard::TaskOptions::seats`]:
+    /// the seats its harness may spawn by name, within `delegation`. Refused
+    /// unless the server allows delegation. Each seat's provisioning is
+    /// held to the same rules as `provision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seats: Option<Seats>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -293,6 +299,11 @@ pub struct SpawnRequest {
     pub deny: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub unapproved_tools: bool,
+    /// The seat of the parent's rig the child fills, like
+    /// [`branchyard::Spawn::seat`]. Without a name, the child is named
+    /// `<parent>-<seat>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat: Option<String>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/integrate`: merge a delegated

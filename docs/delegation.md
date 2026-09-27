@@ -61,7 +61,7 @@ Inside a delegating harness, each command acts as the harness's branch, on its d
 
 | Command | Inside a harness | Outside a harness |
 |---|---|---|
-| `by spawn "<prompt>" [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--wait]` | Creates a child of this branch and returns once it has started; `--wait` waits for its turn to end | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
+| `by spawn "<prompt>" [--seat S] [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--wait]` | Creates a child of this branch and returns once it has started; `--wait` waits for its turn to end | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
 | `by inspect [<branch>]` | This branch, or a descendant | Any branch |
 | `by events [<branch>] [--cursor N] [--limit N]` | Same | Any branch |
 | `by send <branch> "<prompt>"` | Starts a descendant's next turn and returns | Runs the turn in the foreground, as before |
@@ -77,8 +77,8 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 
 | Command | Result |
 |---|---|
-| `spawn` | `Spawned`: `{name, git_branch, harness, profile, base, depth, status, budget: {max_usd, max_turns, max_minutes}}`. With `--wait`, or outside a harness: `Inspection` |
-| `inspect` | `Inspection`: `{name, status, harness, profile, parent, children, depth, turns, candidate, cost_usd, subtree_cost_usd, max_usd, remaining_usd, envelope, last_message}` |
+| `spawn` | `Spawned`: `{name, git_branch, harness, profile, base, depth, status, budget: {max_usd, max_turns, max_minutes}}`, and `seat` for a child spawned by seat. With `--wait`, or outside a harness: `Inspection` |
+| `inspect` | `Inspection`: `{name, status, harness, profile, parent, children, depth, turns, candidate, cost_usd, subtree_cost_usd, max_usd, remaining_usd, envelope, last_message}`, and for a branch in a rig its `seat` and the `seats` it may spawn |
 | `events` | `EventPage`: `{branch, events: [{at_ms, activity}], next_cursor, total}` |
 | `send` | `Sent`: `{name, status}` |
 | `integrate` | `Merged`: `{branch, target, previous, commit}` |
@@ -125,7 +125,7 @@ me.integrate(&done.name)?;
 
 ## MCP tools
 
-`spawn`, `inspect`, `events`, `send`, `propose_integration`, `cancel` and `children`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
+`spawn`, `inspect`, `events`, `send`, `propose_integration`, `cancel` and `children`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays; `seat` names a rig seat). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
 
 ## The envelope
 
@@ -141,6 +141,10 @@ me.integrate(&done.name)?;
 A child's limits and denials are stored with it and bound every later turn, whoever sends it.
 
 Branchyard also ships an opt-in permission rule, `Policy::allow_delegation_commands(by_path)` or `--allow-delegation`. It allows exactly the harness's shell commands that run `by` (by name, or the exposed path) with one of the seven delegation subcommands, as a single simple command: plain or quoted words, no variables, substitutions, globs, redirections, pipes or command lists. It looks through one `sh -c` or `bash -lc` wrapper, which is how Codex reports commands. Like any rule it is ordered, so an earlier deny, such as one a parent imposed, still wins. The subcommands act within the envelope, so the rule grants nothing beyond it. It trusts `PATH` to resolve `by` to the one the engine put first; a harness that can rewrite its `PATH` can already run anything.
+
+## Seats
+
+A branch started from a [rig](rigs.md) (`by rig run`, or `TaskOptions::seats`) spawns only by seat: `by spawn --seat NAME`, `branchyard.spawn(..., seat=NAME)`, `Spawn::seat`, or the MCP tool's `seat`, and only the seats its own seat `delegates_to`. The seat fixes the child's harness, check, isolation and instructions and sets limits and denials the request may only narrow; the envelope above still bounds everything. A branch outside a rig cannot name a seat. See [rigs](rigs.md#spawning-by-seat).
 
 ## Authority and its limits
 

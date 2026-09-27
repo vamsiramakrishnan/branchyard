@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use branchyard::{
-    Branch, BranchEvent, Budget, Envelope, Observer, Policy, Provider, Provisioning, Spawn,
+    Branch, BranchEvent, Budget, Envelope, Observer, Policy, Provider, Provisioning, Seats, Spawn,
     TaskOptions, Yard,
 };
 use branchyard_client::api::{
@@ -191,6 +191,18 @@ impl App {
             ));
         }
         Ok(Some(spec))
+    }
+
+    /// A rig's seats, with each seat's provisioning held to the rules of
+    /// [`App::provision`].
+    fn seats(&self, requested: Option<Seats>) -> Result<Option<Seats>, ApiError> {
+        let Some(mut seats) = requested else {
+            return Ok(None);
+        };
+        for seat in seats.table.values_mut() {
+            seat.provision = self.provision(seat.provision.take())?;
+        }
+        Ok(Some(seats))
     }
 
     /// Refuse delegation and unapproved tools unless this server allows
@@ -619,10 +631,20 @@ async fn post_task(
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let provider = app.provider(request.provider.clone())?;
     app.opt_ins(
-        request.delegation.is_some(),
+        request.delegation.is_some() || request.seats.is_some(),
         request.allow_delegation,
         request.unapproved_tools,
     )?;
+    if let Some(seats) = &request.seats {
+        if request.delegation.is_none() {
+            return Err(ApiError::bad_request(
+                "seats need a delegation envelope to spawn them within",
+            ));
+        }
+        seats
+            .validate()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
     let targets: Vec<Option<&str>> = match request.harnesses.is_empty() {
         true => vec![request.harness.as_deref()],
         false => request.harnesses.iter().map(|h| Some(h.as_str())).collect(),
@@ -634,6 +656,7 @@ async fn post_task(
         base: request.base.clone(),
         isolated: request.isolated,
         provision: app.provision(request.provision.clone())?,
+        seats: app.seats(request.seats.clone())?,
         ..app.options(
             &repo,
             budget,
@@ -990,7 +1013,21 @@ async fn post_spawn(
     }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let source = existing(&repo.yard, &parent).await?;
-    let planned = match &request.name {
+    // A seat's child is named `<parent>-<seat>` by default, as the engine
+    // names it; the name is fixed here so the operation locks and reports
+    // the branch it creates.
+    let name = match (&request.name, &request.seat) {
+        (Some(name), _) => Some(name.clone()),
+        (None, Some(seat)) => {
+            let (yard, stem) = (repo.yard.clone(), format!("{parent}-{seat}"));
+            let names = blocking(move || yard.task(stem).planned_names(&[]))
+                .await?
+                .map_err(|e| error::sdk(&e))?;
+            names.into_iter().next()
+        }
+        (None, None) => None,
+    };
+    let planned = match &name {
         Some(name) => vec![name.clone()],
         None => {
             let (yard, prompt) = (repo.yard.clone(), request.prompt.clone());
@@ -1012,12 +1049,13 @@ async fn post_spawn(
     let spawn = Spawn {
         prompt: request.prompt.clone(),
         harness: request.harness.clone(),
-        name: request.name.clone(),
+        name,
         base: request.base.clone(),
         budget,
         check: request.check.clone(),
         max_depth: request.max_depth,
         deny: request.deny.clone(),
+        seat: request.seat.clone(),
         ..Spawn::default()
     };
     let cursor = sync_feed(&repo.feed).await?;

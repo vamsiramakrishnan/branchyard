@@ -64,6 +64,20 @@ exits non-zero with `{"error": {"kind", "message"}}` on refusal. Run `by`
 by name or as `$BRANCHYARD_BY`; call it as a single command without pipes,
 `&&` or substitutions, so a permission policy can recognize it.
 
+## In a rig
+
+If your instructions say you fill a seat in a rig, or `by inspect` shows a
+`seat`, you spawn only by seat, and only the seats listed in its `seats`:
+
+```sh
+by spawn --seat implementer "Port the tokenizer to the new API; run its tests"
+by spawn --seat reviewer "Review the tokenizer candidate on by/parser-implementer" --wait
+```
+
+The seat sets the child's harness, budget, check and instructions; you
+may pass a smaller budget, never a larger one. In Python, pass `seat=`;
+the MCP `spawn` tool takes `seat`.
+
 ## With Python
 
 The `branchyard` module is on `PYTHONPATH`; it runs `by --json` for you.
