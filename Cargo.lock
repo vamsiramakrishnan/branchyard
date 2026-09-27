@@ -567,6 +567,7 @@ dependencies = [
  "branchyard-bridge",
  "branchyard-harness",
  "branchyard-microsandbox",
+ "branchyard-provision",
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-substrate",

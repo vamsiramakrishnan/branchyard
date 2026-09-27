@@ -17,6 +17,7 @@
 //!   "allow_delegation": false,
 //!   "by_path": "/usr/local/bin/by",
 //!   "allow_unapproved_tools": false,
+//!   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
 //!   "database": "postgres://branchyard@db/branchyard"
 //! }
 //! ```
@@ -87,6 +88,10 @@ pub struct Config {
     /// Accept `unapproved_tools`, which runs profiles whose tools bypass
     /// the request's policy. Off by default.
     pub allow_unapproved_tools: bool,
+    /// Secrets a request may name, and where this server reads each: a
+    /// variable of its own environment or a file. A request names secrets
+    /// only; it never chooses a source. Empty by default.
+    pub secrets: BTreeMap<String, branchyard::SecretSource>,
     /// A PostgreSQL URL: keep branch state and operations there instead of
     /// SQLite. Only in a build with the `postgres` feature.
     pub database: Option<String>,
@@ -116,6 +121,7 @@ impl Config {
             allow_delegation: false,
             by_path: None,
             allow_unapproved_tools: false,
+            secrets: BTreeMap::new(),
             database: None,
             poll_interval: Duration::from_millis(500),
             log_requests: true,
@@ -260,6 +266,8 @@ struct FileConfig {
     by_path: Option<PathBuf>,
     #[serde(default)]
     allow_unapproved_tools: bool,
+    #[serde(default)]
+    secrets: BTreeMap<String, String>,
     database: Option<String>,
 }
 
@@ -295,6 +303,7 @@ pub struct Partial {
     pub allow_delegation: bool,
     pub by_path: Option<PathBuf>,
     pub allow_unapproved_tools: bool,
+    pub secrets: BTreeMap<String, branchyard::SecretSource>,
     pub database: Option<String>,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
@@ -402,9 +411,43 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         allow_delegation: file.allow_delegation,
         by_path: file.by_path.map(resolve),
         allow_unapproved_tools: file.allow_unapproved_tools,
+        secrets: file
+            .secrets
+            .into_iter()
+            .map(|(name, source)| {
+                let secret = parse_secret(&format!("{name}={source}"))
+                    .map_err(|e| format!("config {}: {e}", path.display()))?;
+                Ok((name, resolve_secret(secret, dir)))
+            })
+            .collect::<Result<_, String>>()?,
         database: file.database,
         warnings,
     })
+}
+
+/// `NAME`, `NAME=VAR` or `NAME=@FILE`, always with its source: a bare
+/// name is the server's variable of that name.
+pub fn parse_secret(text: &str) -> Result<branchyard::SecretSource, String> {
+    let mut secret = branchyard::SecretSource::parse(text)?;
+    secret
+        .from
+        .get_or_insert_with(|| branchyard::SecretFrom::Env {
+            var: secret.name.clone(),
+        });
+    Ok(secret)
+}
+
+/// A secret's relative file, against `dir`.
+pub fn resolve_secret(
+    mut secret: branchyard::SecretSource,
+    dir: &Path,
+) -> branchyard::SecretSource {
+    if let Some(branchyard::SecretFrom::File { path }) = &mut secret.from {
+        if path.is_relative() {
+            *path = dir.join(&*path);
+        }
+    }
+    secret
 }
 
 pub fn parse_listen(text: &str) -> Result<SocketAddr, String> {
@@ -472,13 +515,26 @@ mod tests {
             &path,
             r#"{"listen": "127.0.0.1:0", "data_dir": "data", "repos": {"app": "repo"},
                 "tokens": [{"name": "ci", "token_file": "t.token"}],
-                "harness_commands": {"codex": ["/bin/codex"]}}"#,
+                "harness_commands": {"codex": ["/bin/codex"]},
+                "secrets": {"ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@codex.json"}}"#,
         )
         .unwrap();
         let partial = load_file(&path).unwrap();
         assert_eq!(partial.data_dir, Some(dir.join("data")));
         assert_eq!(partial.repos, [("app".to_owned(), dir.join("repo"))]);
         assert_eq!(partial.tokens[0].secret, "0123456789abcdef");
+        assert_eq!(
+            partial.secrets["CODEX_AUTH"].from,
+            Some(branchyard::SecretFrom::File {
+                path: dir.join("codex.json")
+            })
+        );
+        assert_eq!(
+            partial.secrets["ANTHROPIC_API_KEY"].from,
+            Some(branchyard::SecretFrom::Env {
+                var: "ANTHROPIC_API_KEY".into()
+            })
+        );
         fs::write(&path, r#"{"listen": "127.0.0.1:0", "lisen": 1}"#).unwrap();
         assert!(load_file(&path).unwrap_err().contains("lisen"));
         let _ = fs::remove_dir_all(dir);

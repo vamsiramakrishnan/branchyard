@@ -633,3 +633,70 @@ fn plain_http_binds_only_to_loopback() {
             .is_err()
     );
 }
+
+#[test]
+fn secrets_are_named_by_the_request_and_resolved_by_the_server() {
+    let f = Fixture::new();
+    std::env::set_var("BY_TEST_SERVER_GEMINI", "server-side-gemini-secret");
+    let mut config = f.config();
+    config.secrets.insert(
+        "GEMINI_API_KEY".into(),
+        branchyard::SecretSource::parse("GEMINI_API_KEY=BY_TEST_SERVER_GEMINI").unwrap(),
+    );
+    let server = Server::start(config);
+    let client = server.client();
+    let provision = |secret: &str| branchyard::Provisioning {
+        secrets: vec![branchyard::SecretSource::parse(secret).unwrap()],
+        model: Some("gemini-server-model".into()),
+        ..branchyard::Provisioning::default()
+    };
+    let request = branchyard_client::api::TaskRequest {
+        isolated: true,
+        provision: Some(provision("GEMINI_API_KEY")),
+        ..task(
+            "SH test ${#GEMINI_API_KEY} -eq 25 && echo key-from-server\n\
+             SH cat \"$HOME/.gemini/settings.json\"",
+            "served",
+        )
+    };
+    let done = run(&client, &request);
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    let said = common_text(&client.repo("app"), "served");
+    assert!(said.contains("key-from-server"), "{said}");
+    assert!(said.contains("gemini-server-model"), "{said}");
+    let events = client.repo("app").events("served", 0).unwrap();
+    assert!(!serde_json::to_string(&events.events)
+        .unwrap()
+        .contains("server-side-gemini-secret"));
+
+    // A request never picks a source, names only secrets the server
+    // defines, and runs no MCP server unless client commands are allowed.
+    let refusals = [
+        (provision("GEMINI_API_KEY=HOME"), 400, "invalid_request"),
+        (provision("OPENAI_API_KEY"), 403, "secret_not_allowed"),
+        (
+            branchyard::Provisioning {
+                mcp_servers: vec![branchyard::McpServerSpec::parse("x=/bin/sh").unwrap()],
+                ..branchyard::Provisioning::default()
+            },
+            403,
+            "command_not_allowed",
+        ),
+    ];
+    for (provision, status, code) in refusals {
+        let request = branchyard_client::api::TaskRequest {
+            isolated: true,
+            provision: Some(provision),
+            ..task("x", "refused")
+        };
+        let error = client
+            .repo("app")
+            .submit_task(&request, &new_key())
+            .unwrap_err();
+        assert_eq!(error.code(), Some(code), "{error}");
+        assert!(
+            matches!(error, branchyard_client::Error::Api { status: s, .. } if s == status),
+            "{error:?}"
+        );
+    }
+}

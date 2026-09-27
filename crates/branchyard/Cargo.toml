@@ -18,6 +18,7 @@ postgres = ["dep:postgres", "dep:tokio"]
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-harness = { path = "../branchyard-harness" }
 branchyard-microsandbox = { path = "../branchyard-microsandbox" }
+branchyard-provision = { path = "../branchyard-provision" }
 branchyard-runtime = { path = "../branchyard-runtime" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
 branchyard-substrate = { path = "../branchyard-substrate" }

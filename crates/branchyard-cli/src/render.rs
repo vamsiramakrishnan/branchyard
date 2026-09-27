@@ -249,6 +249,27 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             let verb = if *refused { "refused" } else { "delegated" };
             style.paint(tone, &format!("{verb}: {tool}{target}: {outcome}"))
         }
+        Activity::Provisioned {
+            auth,
+            files,
+            env,
+            unused_secrets,
+        } => {
+            let mut parts = Vec::new();
+            if let Some(auth) = auth {
+                parts.push(format!("auth {auth}"));
+            }
+            if !files.is_empty() {
+                parts.push(format!("wrote {}", files.join(", ")));
+            }
+            if !env.is_empty() {
+                parts.push(format!("set {}", env.join(", ")));
+            }
+            if !unused_secrets.is_empty() {
+                parts.push(format!("unused secrets {}", unused_secrets.join(", ")));
+            }
+            style.paint(Tone::Dim, &format!("provisioned: {}", parts.join("; ")))
+        }
         Activity::Recovered { reason, killed } => {
             let killed = match killed.is_empty() {
                 true => String::new(),

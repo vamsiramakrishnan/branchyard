@@ -39,6 +39,9 @@ Options:
   --by-path PATH            The by a delegating harness gets (default: this by, or by
                             beside this executable, or on PATH)
   --allow-unapproved-tools  Accept requests to run profiles whose tools bypass the policy
+  --secret NAME[=VAR|=@FILE]
+                            A secret requests may name, read from this server's
+                            variable NAME or VAR, or from FILE; repeatable
   --database URL            Keep branch state and operations in PostgreSQL
                             (postgres://...); needs a build with the postgres feature
   --max-running N           Operations running at once (default: 8)
@@ -68,6 +71,7 @@ struct Flags {
     allow_delegation: bool,
     by_path: Option<PathBuf>,
     allow_unapproved_tools: bool,
+    secrets: Vec<branchyard::SecretSource>,
     database: Option<String>,
     max_running: Option<usize>,
     shutdown_grace: Option<Duration>,
@@ -138,6 +142,12 @@ fn parse(args: &[String]) -> Result<Flags, String> {
                     config::check_provider_name(name)?;
                     flags.allow_providers.push(name.to_owned());
                 }
+            }
+            "--secret" => {
+                let secret = config::parse_secret(&value("NAME[=VAR|=@FILE]")?)
+                    .map_err(|e| format!("--secret: {e}"))?;
+                let dir = std::env::current_dir().map_err(|e| e.to_string())?;
+                flags.secrets.push(config::resolve_secret(secret, &dir));
             }
             "--by-path" => {
                 once(flags.by_path.is_some())?;
@@ -296,6 +306,10 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.allow_delegation = partial.allow_delegation || flags.allow_delegation;
     config.by_path = flags.by_path.or(partial.by_path);
     config.allow_unapproved_tools = partial.allow_unapproved_tools || flags.allow_unapproved_tools;
+    config.secrets = partial.secrets;
+    config
+        .secrets
+        .extend(flags.secrets.into_iter().map(|s| (s.name.clone(), s)));
     config.database = flags.database.or(partial.database);
     config.log_requests = !flags.quiet;
     Ok((config, warnings))

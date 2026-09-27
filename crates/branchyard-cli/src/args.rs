@@ -48,6 +48,11 @@ pub struct TaskArgs {
     /// `--allow-unapproved-tools`: run a profile whose tools Branchyard's
     /// policy never sees.
     pub unapproved_tools: bool,
+    /// `--secret`, `--auth`, `--mcp`, `--model`, `--effort` and
+    /// `--telemetry`; `None` when none was given.
+    pub provision: Option<branchyard::Provisioning>,
+    /// `--instructions FILE`, read when the command runs.
+    pub instructions: Option<String>,
 }
 
 /// Options for `--provider microsandbox`.
@@ -549,6 +554,45 @@ const INTO: Flag = Flag {
     help: "Local branch to merge into (default: the current branch)",
 };
 
+const SECRET: Flag = Flag {
+    long: "secret",
+    value: Some("NAME[=VAR|=@FILE]"),
+    help: "A credential for the harness, such as ANTHROPIC_API_KEY, from the variable of that name, VAR, or FILE; written only into its private home (--isolated or a sandbox). Repeatable",
+};
+const AUTH: Flag = Flag {
+    long: "auth",
+    value: Some("METHOD"),
+    help: "The authentication method when the secrets allow several: api-key, oauth-token, auth-file, vertex-ai",
+};
+const MCP: Flag = Flag {
+    long: "mcp",
+    value: Some("NAME=COMMAND"),
+    help: "A stdio MCP server for the harness, COMMAND an absolute path with its arguments. Repeatable",
+};
+const INSTRUCTIONS: Flag = Flag {
+    long: "instructions",
+    value: Some("FILE"),
+    help: "Standing instructions for the harness, read from FILE",
+};
+const MODEL: Flag = Flag {
+    long: "model",
+    value: Some("NAME"),
+    help: "The model, or a size alias (small, medium, large, extra-large) where the harness defines one",
+};
+const EFFORT: Flag = Flag {
+    long: "effort",
+    value: Some("LEVEL"),
+    help: "Reasoning effort: low, medium, high, xhigh, or 0-100",
+};
+const TELEMETRY: Flag = Flag {
+    long: "telemetry",
+    value: Some("URL|off"),
+    help: "Send the harness's OpenTelemetry to this OTLP/gRPC collector, or turn it off",
+};
+
+/// Flags that may be given more than once.
+const REPEATABLE: &[&str] = &["secret", "mcp"];
+
 pub static COMMANDS: &[Spec] = &[
     Spec {
         name: "run",
@@ -586,6 +630,13 @@ pub static COMMANDS: &[Spec] = &[
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
+            SECRET,
+            AUTH,
+            MCP,
+            INSTRUCTIONS,
+            MODEL,
+            EFFORT,
+            TELEMETRY,
         ],
     },
     Spec {
@@ -624,6 +675,13 @@ pub static COMMANDS: &[Spec] = &[
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
+            SECRET,
+            AUTH,
+            MCP,
+            INSTRUCTIONS,
+            MODEL,
+            EFFORT,
+            TELEMETRY,
         ],
     },
     Spec {
@@ -641,6 +699,13 @@ pub static COMMANDS: &[Spec] = &[
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
+            SECRET,
+            AUTH,
+            MCP,
+            INSTRUCTIONS,
+            MODEL,
+            EFFORT,
+            TELEMETRY,
             JSON,
         ],
     },
@@ -679,6 +744,13 @@ pub static COMMANDS: &[Spec] = &[
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
+            SECRET,
+            AUTH,
+            MCP,
+            INSTRUCTIONS,
+            MODEL,
+            EFFORT,
+            TELEMETRY,
         ],
     },
     Spec {
@@ -1005,7 +1077,9 @@ impl Matches {
                         .iter()
                         .find(|flag| flag.long == name)
                         .ok_or_else(|| m.error(format!("unknown option --{name}")))?;
-                    if m.flags.iter().any(|(seen, _)| *seen == flag.long) {
+                    if m.flags.iter().any(|(seen, _)| *seen == flag.long)
+                        && !REPEATABLE.contains(&flag.long)
+                    {
                         return Err(m.error(format!("--{name} given twice")));
                     }
                     let value = match (flag.value, inline) {
@@ -1053,6 +1127,15 @@ impl Matches {
             message: message.into(),
             command: Some(self.spec.name),
         }
+    }
+
+    /// Every value of a repeatable flag, in order.
+    fn values(&self, name: &str) -> Vec<&str> {
+        self.flags
+            .iter()
+            .filter(|(flag, _)| *flag == name)
+            .filter_map(|(_, value)| value.as_deref())
+            .collect()
     }
 
     fn value(&self, name: &str) -> Option<&str> {
@@ -1157,6 +1240,7 @@ impl Matches {
                 }
             },
         };
+        let provision = self.provision()?;
         // `fan` reads `--harness` as a list; it is not one harness.
         let harness = match self.spec.name {
             "fan" => None,
@@ -1185,7 +1269,40 @@ impl Matches {
             delegate,
             allow_delegation: self.switch("allow-delegation"),
             unapproved_tools: self.switch("allow-unapproved-tools"),
+            provision,
+            instructions: self.value("instructions").map(str::to_owned),
         })
+    }
+
+    /// The provisioning flags; `None` when none was given. `--instructions`
+    /// is read later, from its file.
+    fn provision(&self) -> Result<Option<branchyard::Provisioning>, UsageError> {
+        use branchyard::{Effort, McpServerSpec, Provisioning, SecretSource, Telemetry};
+        let mut spec = Provisioning::default();
+        for text in self.values("secret") {
+            spec.secrets
+                .push(SecretSource::parse(text).map_err(|e| self.error(format!("--secret: {e}")))?);
+        }
+        for text in self.values("mcp") {
+            spec.mcp_servers
+                .push(McpServerSpec::parse(text).map_err(|e| self.error(format!("--mcp: {e}")))?);
+        }
+        spec.auth = self.value("auth").map(str::to_owned);
+        spec.model = match self.value("model") {
+            Some(model) if model.trim().is_empty() => {
+                return Err(self.error("--model needs a model name"))
+            }
+            model => model.map(str::to_owned),
+        };
+        if let Some(text) = self.value("effort") {
+            spec.effort =
+                Some(Effort::parse(text).map_err(|e| self.error(format!("--effort: {e}")))?);
+        }
+        if let Some(text) = self.value("telemetry") {
+            spec.telemetry =
+                Some(Telemetry::parse(text).map_err(|e| self.error(format!("--telemetry: {e}")))?);
+        }
+        Ok((!spec.is_empty() || self.switch("instructions")).then_some(spec))
     }
 
     /// The chosen provider and its options; `None` when `--provider` was
@@ -1479,9 +1596,50 @@ mod tests {
                     delegate: None,
                     allow_delegation: false,
                     unapproved_tools: false,
+                    provision: None,
+                    instructions: None,
                 },
             }
         );
+    }
+
+    #[test]
+    fn provisioning_flags_repeat_and_parse() {
+        let Command::Run { task, .. } = parse_str(
+            "run go --isolated --secret ANTHROPIC_API_KEY --secret CODEX_AUTH=@/run/auth.json \
+             --secret OPENAI_API_KEY=MY_KEY --mcp 'docs=/usr/bin/docs-mcp --stdio' \
+             --auth api-key --model large --effort 80 --telemetry http://127.0.0.1:4317 \
+             --instructions rules.md",
+        )
+        .unwrap() else {
+            panic!("not run")
+        };
+        let spec = task.provision.unwrap();
+        assert_eq!(spec.secrets.len(), 3);
+        assert_eq!(
+            spec.secrets[1].from,
+            Some(branchyard::SecretFrom::File {
+                path: "/run/auth.json".into()
+            })
+        );
+        assert_eq!(spec.mcp_servers[0].args, ["--stdio"]);
+        assert_eq!(spec.auth.as_deref(), Some("api-key"));
+        assert_eq!(spec.effort, Some(branchyard::Effort::Xhigh));
+        assert_eq!(spec.telemetry.unwrap().endpoint(), "http://127.0.0.1:4317");
+        assert_eq!(task.instructions.as_deref(), Some("rules.md"));
+        let Command::Send { task, .. } = parse_str("send b go").unwrap() else {
+            panic!("not send")
+        };
+        assert!(task.provision.is_none());
+        for (line, error) in [
+            ("run go --mcp docs=relative", "absolute command"),
+            ("run go --secret 1BAD", "--secret"),
+            ("run go --effort max", "--effort"),
+            ("run go --telemetry collector:4317", "--telemetry"),
+            ("run go --model a --model b", "--model given twice"),
+        ] {
+            assert!(err(line).contains(error), "{line}: {}", err(line));
+        }
     }
 
     #[test]

@@ -148,6 +148,18 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "outcome": outcome,
             "refused": refused,
         }),
+        Activity::Provisioned {
+            auth,
+            files,
+            env,
+            unused_secrets,
+        } => json!({
+            "activity": "provisioned",
+            "auth": auth,
+            "files": files,
+            "env": env,
+            "unused_secrets": unused_secrets,
+        }),
         Activity::Recovered { reason, killed } => json!({
             "activity": "recovered",
             "reason": reason,
