@@ -372,3 +372,233 @@ fn a_stall_notification_reaches_a_webhook() {
     let _ = common::wait(&client, &op.id);
     server.stop();
 }
+
+/// Read one HTTP request's headers and body off `stream`, however the
+/// caller means to answer it (or not). Shared by the adversarial receivers
+/// below.
+fn read_request(stream: &std::net::TcpStream) -> Option<Vec<u8>> {
+    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let mut line = String::new();
+    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+        return None;
+    }
+    let mut content_length = 0usize;
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return None;
+        }
+        let text = line.trim_end();
+        if text.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = text.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                content_length = v.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body).ok()?;
+    Some(body)
+}
+
+/// A receiver that reads a delivery in full and then never answers,
+/// holding the connection open: the "receiver that hangs" a webhook target
+/// can be. Every accepted connection is kept alive on its own thread so
+/// the accept loop is never blocked by one slow peer.
+struct HangingReceiver {
+    addr: SocketAddr,
+    accepted: Arc<AtomicU32>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HangingReceiver {
+    fn start() -> HangingReceiver {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicU32::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (a, s) = (accepted.clone(), stop.clone());
+        std::thread::spawn(move || loop {
+            if s.load(Ordering::Relaxed) {
+                return;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let a = a.clone();
+                    std::thread::spawn(move || {
+                        if read_request(&stream).is_some() {
+                            a.fetch_add(1, Ordering::Relaxed);
+                        }
+                        // Never write a response; hold the connection open
+                        // well past the client's request timeout and this
+                        // test's own duration, then let it drop.
+                        std::thread::sleep(Duration::from_secs(120));
+                    });
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        });
+        HangingReceiver {
+            addr,
+            accepted,
+            stop,
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}/hook", self.addr)
+    }
+
+    fn accepted(&self) -> u32 {
+        self.accepted.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for HangingReceiver {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A receiver that reads a delivery in full and then closes the
+/// connection without writing any response at all: the "receiver that
+/// closes mid-response" case (from the client's side, a connection that
+/// disappears before the reply arrives looks the same whether it was
+/// closed gracefully or reset).
+struct ResettingReceiver {
+    addr: SocketAddr,
+    accepted: Arc<AtomicU32>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ResettingReceiver {
+    fn start() -> ResettingReceiver {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicU32::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (a, s) = (accepted.clone(), stop.clone());
+        std::thread::spawn(move || loop {
+            if s.load(Ordering::Relaxed) {
+                return;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if read_request(&stream).is_some() {
+                        a.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Close without writing a byte of response: the
+                    // client's connection ends before any status line
+                    // arrives, however the OS reports that shutdown.
+                    drop(stream);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        });
+        ResettingReceiver {
+            addr,
+            accepted,
+            stop,
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}/hook", self.addr)
+    }
+
+    fn accepted(&self) -> u32 {
+        self.accepted.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ResettingReceiver {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Failure-direction: a webhook target that accepts the connection, reads
+/// the whole delivery and then never answers must never delay or fail the
+/// operation whose activity it was delivering, nor stall the feed for
+/// other branches. See `docs/lifecycle.md` "Webhook failure direction".
+#[test]
+fn a_hanging_receiver_never_delays_the_operation_or_the_feed() {
+    let f = Fixture::new();
+    let receiver = HangingReceiver::start();
+    let mut config = f.config();
+    config.webhooks = vec![webhook(&receiver.url(), SECRET, &[])];
+    let server = Server::start(config);
+    let client = server.client();
+
+    let start = std::time::Instant::now();
+    let op = run(&client, &task("WRITE a.txt=1", "one"));
+    assert_eq!(op.state, branchyard_client::api::OperationState::Succeeded);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the operation waited on the stuck webhook: {:?}",
+        start.elapsed()
+    );
+
+    eventually("the hanging receiver to have accepted the delivery", || {
+        receiver.accepted() > 0
+    });
+
+    // The feed keeps advancing for a second branch while the first
+    // delivery's connection is still stuck open.
+    let start = std::time::Instant::now();
+    let op = run(&client, &task("WRITE b.txt=1", "two"));
+    assert_eq!(op.state, branchyard_client::api::OperationState::Succeeded);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "a second operation also waited on the stuck webhook: {:?}",
+        start.elapsed()
+    );
+    server.stop();
+}
+
+/// Failure-direction: a webhook target that resets the connection instead
+/// of answering must never delay or fail the operation either, and the
+/// server keeps retrying without blocking anything else.
+#[test]
+fn a_receiver_that_resets_the_connection_never_delays_the_operation() {
+    std::env::set_var("BY_TEST_WEBHOOK_RETRY_MS", "5");
+    std::env::set_var("BY_TEST_WEBHOOK_MAX_ATTEMPTS", "3");
+    let f = Fixture::new();
+    let receiver = ResettingReceiver::start();
+    let mut config = f.config();
+    config.webhooks = vec![webhook(&receiver.url(), SECRET, &[])];
+    let server = Server::start(config);
+    let client = server.client();
+
+    let start = std::time::Instant::now();
+    let op = run(&client, &task("WRITE a.txt=1", "one"));
+    assert_eq!(op.state, branchyard_client::api::OperationState::Succeeded);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the operation waited on the resetting webhook: {:?}",
+        start.elapsed()
+    );
+
+    eventually(
+        "the resetting receiver to have been hit at least once",
+        || receiver.accepted() > 0,
+    );
+
+    let op = run(&client, &task("WRITE b.txt=1", "two"));
+    assert_eq!(
+        op.state,
+        branchyard_client::api::OperationState::Succeeded,
+        "the feed and later operations are unaffected by a webhook that only ever resets"
+    );
+    server.stop();
+}

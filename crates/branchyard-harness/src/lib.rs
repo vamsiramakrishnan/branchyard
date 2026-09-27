@@ -697,6 +697,18 @@ pub trait Driver {
         &[]
     }
 
+    /// The protocol boundary [`Driver::steer`] delivers input at, named as
+    /// `docs/harness-integration.md` "Steering a running turn" documents
+    /// each profile's mechanism (for example `claude_next_model_call`,
+    /// `codex_turn_steer`, `pi_steer`, `acp_session_steering`). The engine
+    /// records this on a delivered inbox message so `by log`/JSON says where
+    /// a steered message actually landed. Meaningful only when
+    /// [`Capabilities::steer`] is true; the default is `"unsupported"` for
+    /// drivers that refuse every steer.
+    fn steer_boundary(&self) -> &'static str {
+        "unsupported"
+    }
+
     /// Build the launch and the frames that start the handshake.
     fn open(&mut self, open: Open) -> Result<Opened, Rejected>;
 

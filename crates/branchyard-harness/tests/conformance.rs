@@ -116,6 +116,37 @@ fn every_profile_follows_the_steering_contract() {
     assert!(!steering.contains(&"antigravity-stream-json"));
 }
 
+/// [`Driver::steer_boundary`] names the protocol boundary a steer lands at,
+/// per `docs/harness-integration.md` "Steering a running turn"; a driver
+/// that refuses every steer reports `"unsupported"` rather than a guess.
+#[test]
+fn every_profile_names_its_steer_boundary() {
+    for (id, boundary) in [
+        ("claude-code-stream-json", "claude_next_model_call"),
+        ("codex-app-server", "codex_turn_steer"),
+        ("pi-rpc", "pi_steer"),
+        ("claude-code-acp", "acp_session_steering"),
+        ("codex-acp", "acp_session_steering"),
+        ("amp-stream-json", "unsupported"),
+        ("antigravity-stream-json", "unsupported"),
+    ] {
+        let profile = PROFILES.iter().find(|p| p.id == id).expect(id);
+        let driver = profile.driver();
+        assert_eq!(
+            driver.steer_boundary(),
+            boundary,
+            "{id} should report its steering boundary as {boundary:?}"
+        );
+        // Only a driver that actually offers steer should claim a boundary
+        // other than the unsupported default.
+        assert_eq!(
+            driver.steer_boundary() != "unsupported",
+            driver.capabilities().steer,
+            "{id}'s boundary and its steer capability disagree"
+        );
+    }
+}
+
 #[test]
 fn transcripts_parse_notes_and_rows_and_refuse_other_shapes() {
     let transcript = Transcript::parse(

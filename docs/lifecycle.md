@@ -34,6 +34,19 @@ An operator running `by serve` can have a target notified of a served repository
 
 This is a server-only addition: there is no SDK, local-CLI or delegation surface for it, since it notifies something outside the process running the engine, not a caller inside it. A caller that wants activity inside its own process already has `Yard::events_since`/`wait_for_events`; a caller in another process has the SSE feed or `by watch`.
 
+### Webhook failure direction
+
+A webhook is a best-effort, advisory channel: **its failure never fails or delays an operation, a turn, or the feed.** [`webhook::spawn`](../crates/branchyard-server/src/webhook.rs) runs each configured target on its own `tokio::spawn`ed task, reading the served repository's feed by cursor; nothing an operation, a turn's engine, or the feed itself does waits on that task, calls into it synchronously, or holds a lock it also needs. A target that hangs after accepting the connection, resets the connection, or answers `500` forever only ever slows *that task's own* retries (bounded backoff, `REQUEST_TIMEOUT` per attempt, a dead-letter note to the server's log after `MAX_ATTEMPTS`, both overridable for tests) — it never slows the operation whose activity it was delivering, a different branch's turn, or the feed's cursor for another webhook or a live SSE reader. This mirrors Straitjacket's own relay design, which answers a cross-harness call at most once and never blocks the primary call on it (`docs/comparison.md` Absorption plan → Straitjacket); Branchyard's webhook direction is the same idea applied to its notification channel, not ported code.
+
+Adversarial tests in [`crates/branchyard-server/tests/webhook.rs`](../crates/branchyard-server/tests/webhook.rs) assert this directly, each timing the operation rather than only checking it eventually succeeds:
+
+- `a_hanging_receiver_never_delays_the_operation_or_the_feed`: a receiver that reads a delivery in full and never answers, holding the connection open. The operation whose activity it was delivering completes well under the connection's stuck lifetime, and a second branch's operation completes just as fast while the first delivery's connection is still open.
+- `a_receiver_that_resets_the_connection_never_delays_the_operation`: a receiver that reads a delivery and closes the connection without writing a response at all (a connection reset, from the client's side, looks the same whether closed gracefully or reset). The operation completes promptly, and a later operation is unaffected by a webhook that only ever fails this way.
+- `a_receiver_that_never_succeeds_is_dead_lettered_and_the_cursor_still_advances`: a receiver answering `500` forever exhausts its retries and is dead-lettered, but the cursor still moves past it, so a second branch's activity is still attempted (not merely queued) within a reasonable time.
+- `a_failing_receiver_is_retried_and_still_delivers`: two failures followed by success still gets the delivery through, without anything upstream noticing the retries happened.
+
+Any future best-effort or advisory channel (a notification hook, a future audit sink) should keep this same shape: its own task, its own retry and give-up policy, and no call from the primary path into it that could block on it.
+
 ## Reincarnation
 
 A branch's harness, model, or profile sometimes needs to change under work that is otherwise going fine — a new harness version fixes a bug the branch was working around, a cheaper model would do for what is left, a harness known to fork sessions turns out not to for this working directory. `Branch::send` cannot change harness, and `Branch::fork` keeps the same conversation (or refuses, when the harness cannot fork). Reincarnation is the third option: a new branch from the old one's latest candidate, always with a **fresh session**, whose first prompt is a **generated handoff brief** rather than something you write.

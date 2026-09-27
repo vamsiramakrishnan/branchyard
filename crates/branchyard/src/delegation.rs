@@ -635,6 +635,39 @@ impl Delegate {
         }
     }
 
+    /// Export the artifacts in `ids` into a portable bundle at `out`; see
+    /// `docs/storage.md` "Portable bundles". Refused over the delegation
+    /// server, which has no bundle endpoint: run `by artifact export`
+    /// locally instead.
+    pub fn export_artifacts(
+        &self,
+        ids: &[String],
+        out: &Path,
+    ) -> Result<Vec<crate::BundleEntry>, Error> {
+        match &self.via {
+            Via::Local(local) => local.export_artifacts(ids, out),
+            Via::Remote(_) => Err(Error::Unsupported(
+                "artifact bundles are exported only locally (`by artifact export`), not through \
+                 the delegation server"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Import a bundle written by [`Delegate::export_artifacts`], owned by
+    /// this branch. Refused over the delegation server, for the same
+    /// reason as [`Delegate::export_artifacts`].
+    pub fn import_artifacts(&self, path: &Path) -> Result<Vec<crate::ArtifactRef>, Error> {
+        match &self.via {
+            Via::Local(local) => local.import_artifacts(path),
+            Via::Remote(_) => Err(Error::Unsupported(
+                "artifact bundles are imported only locally (`by artifact import`), not through \
+                 the delegation server"
+                    .into(),
+            )),
+        }
+    }
+
     /// Create scratch area `name`, owned by this branch.
     pub fn create_scratch(&self, name: &str) -> Result<crate::ScratchArea, Error> {
         match &self.via {
@@ -1614,6 +1647,20 @@ impl Local {
 
     fn share_artifact(&self, id: &str, to: &str) -> Result<(), Error> {
         crate::storage::share_artifact(&self.yard, &self.branch, id, to)
+    }
+
+    fn export_artifacts(
+        &self,
+        ids: &[String],
+        out: &Path,
+    ) -> Result<Vec<crate::BundleEntry>, Error> {
+        let out = self.in_worktree(out)?;
+        crate::bundle::export_artifacts(&self.yard, &self.branch, ids, &out)
+    }
+
+    fn import_artifacts(&self, path: &Path) -> Result<Vec<crate::ArtifactRef>, Error> {
+        let path = self.in_worktree(path)?;
+        crate::bundle::import_artifacts(&self.yard, &self.branch, &path)
     }
 
     fn create_scratch(&self, name: &str) -> Result<crate::ScratchArea, Error> {
