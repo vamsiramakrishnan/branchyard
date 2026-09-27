@@ -82,6 +82,11 @@ impl Repo {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("NO_COLOR", "1")
+            // Never a person's own ~/.config/branchyard/config.toml.
+            .env(
+                "BRANCHYARD_USER_CONFIG",
+                "/nonexistent/branchyard-config.toml",
+            )
             .env("PAGER", "cat");
         // Never inherit a delegating harness's identity from whoever runs
         // the tests.

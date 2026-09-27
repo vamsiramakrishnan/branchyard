@@ -136,11 +136,19 @@ pub(crate) fn secret_choices(facts: &Facts, harnesses: &[String]) -> (Vec<Choice
             names.push(name.clone());
         }
     }
-    let set: Vec<String> = names
+    // Suggested: the harnesses' own credentials that are set here; other
+    // set variables are offered, not chosen.
+    let set: Vec<String> = harnesses
         .iter()
-        .filter(|n| facts.variables.contains(*n))
-        .cloned()
-        .collect();
+        .flat_map(|h| harness_secrets(h).iter())
+        .filter(|n| facts.variables.contains(**n))
+        .map(|n| (*n).to_owned())
+        .fold(Vec::new(), |mut acc, n| {
+            if !acc.contains(&n) {
+                acc.push(n);
+            }
+            acc
+        });
     let choices = names
         .iter()
         .map(|name| {

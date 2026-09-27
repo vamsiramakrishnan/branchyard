@@ -5,12 +5,17 @@
 
 mod args;
 mod commands;
+mod config_cmd;
 mod console;
+mod defaults;
+mod init;
 mod json;
 mod remote;
 mod render;
 mod rig;
+mod setup_io;
 mod watch;
+mod wizard;
 
 use std::io;
 use std::process::ExitCode;
@@ -44,6 +49,16 @@ fn main() -> ExitCode {
         }
     };
     let globals = globals.with_env(|name| std::env::var(name).ok());
+    // branchyard.toml and the user configuration, under flags and variables.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (globals, command) =
+        match defaults::apply(&cwd, &|name| std::env::var(name).ok(), globals, command) {
+            Ok(applied) => applied,
+            Err(error) => {
+                eprintln!("by: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
     if let Command::Serve { args } = &command {
         if globals.remote.is_some() {
             eprintln!(
@@ -77,10 +92,19 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         Command::Help { topic: Some(spec) } if spec.name == "serve" || spec.name == "worker" => {
             return commands::print(branchyard_server::cli::USAGE)
         }
+        Command::Help { topic: Some(spec) } if spec.name == "init" => {
+            return commands::print(init::USAGE)
+        }
+        Command::Help { topic: Some(spec) } if spec.name == "config" => {
+            return commands::print(config_cmd::USAGE)
+        }
         Command::Help { topic: Some(spec) } => return commands::print(&args::command_help(spec)),
         Command::Version => return commands::print(&format!("by {}\n", env!("CARGO_PKG_VERSION"))),
         // Started by the engine for one branch, always beside it.
         Command::Mcp { args } => return commands::mcp(&args),
+        // Setup needs no repository or server: it may be what creates them.
+        Command::Init { args } => return init::main(env, &args),
+        Command::Config { args } => return config_cmd::main(&args),
         _ => {}
     }
     let target = match &globals.remote {
@@ -183,7 +207,12 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Rig(args) => commands::rig(env, target, &args),
         Command::Artifact(args) => commands::artifact(target, &args),
         Command::Scratch(args) => commands::scratch(target, &args),
-        Command::Help { .. } | Command::Version | Command::Serve { .. } | Command::Mcp { .. } => {
+        Command::Help { .. }
+        | Command::Version
+        | Command::Serve { .. }
+        | Command::Mcp { .. }
+        | Command::Init { .. }
+        | Command::Config { .. } => {
             unreachable!("handled before choosing a target")
         }
     }

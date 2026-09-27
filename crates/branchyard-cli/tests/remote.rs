@@ -105,6 +105,11 @@ fn command(program: &str, dir: &Path) -> Command {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("NO_COLOR", "1")
+        // Never a person's own ~/.config/branchyard/config.toml.
+        .env(
+            "BRANCHYARD_USER_CONFIG",
+            "/nonexistent/branchyard-config.toml",
+        )
         .env("PAGER", "cat")
         .env_remove("BRANCHYARD_REMOTE")
         .env_remove("BRANCHYARD_TOKEN_FILE")

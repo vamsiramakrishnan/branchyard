@@ -602,6 +602,7 @@ dependencies = [
  "branchyard",
  "branchyard-bridge",
  "branchyard-client",
+ "branchyard-harness",
  "branchyard-mcp",
  "branchyard-server",
  "branchyard-setup",

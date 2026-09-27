@@ -252,6 +252,14 @@ pub enum Command {
     Mcp {
         args: Vec<String>,
     },
+    /// `by init`: the arguments for the setup front-ends (`crate::init`).
+    Init {
+        args: Vec<String>,
+    },
+    /// `by config`: the arguments for `crate::config_cmd`.
+    Config {
+        args: Vec<String>,
+    },
     Spawn {
         prompt: String,
         spawn: SpawnArgs,
@@ -1216,6 +1224,18 @@ pub static COMMANDS: &[Spec] = &[
         flags: &[ROOT, BRANCH],
     },
     Spec {
+        name: "init",
+        positionals: &[],
+        summary: "Set up Branchyard by interview: project defaults, a server, a rig, a deployment, skills",
+        flags: &[],
+    },
+    Spec {
+        name: "config",
+        positionals: &[],
+        summary: "Show, locate or validate branchyard.toml and the user configuration",
+        flags: &[],
+    },
+    Spec {
         name: "help",
         positionals: &[],
         summary: "Show help for by or one command",
@@ -1241,6 +1261,14 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         // The server parses its own options, and prints its own help.
         return Ok(Command::Serve {
             args: args[1..].to_vec(),
+        });
+    }
+    if first == "init" || first == "config" {
+        // Parsed by their own modules, which print their own help.
+        let args = args[1..].to_vec();
+        return Ok(match first.as_str() {
+            "init" => Command::Init { args },
+            _ => Command::Config { args },
         });
     }
     if first == "worker" {

@@ -1,0 +1,339 @@
+//! Configuration defaults under the flags. [`apply`] is the one call site:
+//! it fills what the command line and the `BRANCHYARD_*` variables left
+//! unset from the merged user and project files (`branchyard.toml`). The
+//! per-field rules live in [`apply_task`], [`apply_globals`] and
+//! [`serve_args`], so another parser can call them directly.
+//!
+//! - New branches (`run`, `fan`) take every default: harness, model,
+//!   effort, auth, limits, check, permissions, isolation, provider,
+//!   instructions, MCP servers, and secrets when the branch has a private
+//!   home (isolated or sandboxed).
+//! - `send`, `fork`, `reincarnate` and `spawn` take only `permissions`: the
+//!   rest would override what the branch or its seat already has.
+//! - `serve` and `worker` take `serve.config` as `--config`.
+//! - Nothing is read inside a harness running on a branch
+//!   (`BRANCHYARD_BRANCH` set): its `by` acts for that branch, whose
+//!   options the engine already set.
+
+use std::path::Path;
+use std::time::Duration;
+
+use branchyard_setup::config::{Effective, PermissionsMode, ProjectConfig, ProviderKind};
+
+use crate::args::{Command, Globals, Permissions, SandboxArgs, TaskArgs};
+
+/// Which defaults a command takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// A new top-level branch: every default.
+    NewBranch,
+    /// An existing branch, a fork or a delegated child: `permissions` only.
+    Continue,
+}
+
+/// Fill `globals` and `command` from the configuration files under `cwd`.
+/// `env` reads variables (only `BRANCHYARD_BRANCH` here).
+pub fn apply(
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    mut globals: Globals,
+    mut command: Command,
+) -> Result<(Globals, Command), String> {
+    if env("BRANCHYARD_BRANCH").is_some_and(|v| !v.is_empty()) {
+        return Ok((globals, command));
+    }
+    if matches!(
+        command,
+        Command::Init { .. }
+            | Command::Config { .. }
+            | Command::Help { .. }
+            | Command::Version
+            | Command::Mcp { .. }
+    ) {
+        return Ok((globals, command));
+    }
+    let located = crate::setup_io::locate(cwd);
+    if !located.project_exists && !located.user.is_file() {
+        return Ok((globals, command));
+    }
+    // Files only: the variables are already in `globals`, and win.
+    let Effective { config, .. } = crate::setup_io::load(cwd, None)
+        .map_err(|e| format!("{e}\n(fix it, or check it with `by config validate`)"))?;
+    match &mut command {
+        Command::Serve { args } => {
+            *args = serve_args(&config, std::mem::take(args));
+            return Ok((globals, command));
+        }
+        Command::Run { task, .. } => apply_task(&config, task, Scope::NewBranch)?,
+        Command::Fan { task, .. } => {
+            apply_task(&config, task, Scope::NewBranch)?;
+            // fan's harnesses are its --harness list.
+            task.harness = None;
+        }
+        Command::Send { task, .. }
+        | Command::Fork { task, .. }
+        | Command::Reincarnate { task, .. } => apply_task(&config, task, Scope::Continue)?,
+        Command::Spawn { spawn, .. } => apply_task(&config, &mut spawn.task, Scope::Continue)?,
+        _ => {}
+    }
+    apply_globals(&config, &mut globals);
+    Ok((globals, command))
+}
+
+/// `[remote]` for what `--remote`, `--token-file`, `--ca-file`, `--repo`
+/// and their variables left unset. The rest of `[remote]` applies only
+/// when its `url` is the server in use.
+pub fn apply_globals(config: &ProjectConfig, globals: &mut Globals) {
+    let remote = &config.remote;
+    let same_server = match (&globals.remote, &remote.url) {
+        (None, Some(_)) => {
+            globals.remote = remote.url.clone();
+            true
+        }
+        (Some(given), Some(url)) => given.trim_end_matches('/') == url.trim_end_matches('/'),
+        (_, None) => globals.remote.is_none(),
+    };
+    if !same_server || globals.remote.is_none() {
+        return;
+    }
+    if globals.token_file.is_none() {
+        globals.token_file = remote.token_file.clone();
+    }
+    if globals.ca_file.is_none() {
+        globals.ca_file = remote.ca_file.clone();
+    }
+    if globals.repo.is_none() {
+        globals.repo = remote.repo.clone();
+    }
+}
+
+/// `by serve` and `by worker`: `serve.config` as `--config` unless one is
+/// given, or the arguments ask for help or `token new`.
+pub fn serve_args(config: &ProjectConfig, args: Vec<String>) -> Vec<String> {
+    let Some(path) = &config.serve.config else {
+        return args;
+    };
+    let explicit = args
+        .iter()
+        .any(|a| a == "--config" || a.starts_with("--config=") || a == "-h" || a == "--help");
+    if explicit || args.first().map(String::as_str) == Some("token") {
+        return args;
+    }
+    let mut with = vec!["--config".to_owned(), path.clone()];
+    with.extend(args);
+    with
+}
+
+/// Fill what the flags left unset in `task`.
+pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> Result<(), String> {
+    let d = &config.defaults;
+    if task.permissions == Permissions::Unset {
+        task.permissions = match d.permissions {
+            Some(PermissionsMode::Ask) => Permissions::Ask,
+            Some(PermissionsMode::Yes) => Permissions::Yes,
+            None => Permissions::Unset,
+        };
+    }
+    if scope == Scope::Continue {
+        return Ok(());
+    }
+    if task.harness.is_none() {
+        task.harness = d.harness.clone();
+    }
+    if task.check.is_none() {
+        if let Some(check) = &d.check {
+            task.check = Some(
+                branchyard_setup::config::split_words(check)
+                    .map_err(|e| format!("defaults.check: {e}"))?,
+            );
+        }
+    }
+    task.budget_usd = task.budget_usd.or(d.budget_usd);
+    task.max_turns = task.max_turns.or(d.max_turns);
+    if task.max_duration.is_none() {
+        task.max_duration = d
+            .max_minutes
+            .and_then(|minutes| Duration::try_from_secs_f64(minutes * 60.0).ok());
+    }
+    if d.isolated == Some(true) {
+        task.isolated = true;
+    }
+    let chose_provider = task.sandbox.is_some() || task.substrate.is_some() || task.local;
+    if !chose_provider && d.provider == Some(ProviderKind::Microsandbox) {
+        if let Some(sandbox) = &config.microsandbox {
+            task.sandbox = Some(SandboxArgs {
+                image: sandbox.image.clone(),
+                cpus: sandbox.cpus,
+                memory_mib: sandbox.memory_mib,
+                pass_env: sandbox.pass_env.clone(),
+            });
+        }
+    }
+    if task.instructions.is_none() {
+        task.instructions = d.instructions.clone();
+    }
+    // Provisioning: fill each unset part; add servers and secrets the
+    // flags did not name.
+    let private_home = task.isolated || task.sandbox.is_some() || task.substrate.is_some();
+    let secrets = match private_home {
+        true => config.secret_sources().map_err(|e| e.to_string())?,
+        false => Vec::new(),
+    };
+    let mcp: Vec<branchyard::McpServerSpec> = config
+        .mcp
+        .iter()
+        .map(|(name, command)| branchyard::McpServerSpec::parse(&format!("{name}={command}")))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("mcp: {e}"))?;
+    let effort = match &d.effort {
+        Some(text) => {
+            Some(branchyard::Effort::parse(text).map_err(|e| format!("defaults.effort: {e}"))?)
+        }
+        None => None,
+    };
+    let wanted = d.model.is_some()
+        || effort.is_some()
+        || d.auth.is_some()
+        || !secrets.is_empty()
+        || !mcp.is_empty();
+    if wanted {
+        let spec = task.provision.get_or_insert_with(Default::default);
+        if spec.model.is_none() {
+            spec.model = d.model.clone();
+        }
+        if spec.effort.is_none() {
+            spec.effort = effort;
+        }
+        if spec.auth.is_none() {
+            spec.auth = d.auth.clone();
+        }
+        for secret in secrets {
+            if !spec.secrets.iter().any(|s| s.name == secret.name) {
+                spec.secrets.push(secret);
+            }
+        }
+        for server in mcp {
+            if !spec.mcp_servers.iter().any(|s| s.name == server.name) {
+                spec.mcp_servers.push(server);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(text: &str) -> ProjectConfig {
+        branchyard_setup::config::parse(text).unwrap()
+    }
+
+    const FILE: &str = r#"
+[defaults]
+harness = "codex"
+model = "large"
+effort = "high"
+budget_usd = 5
+max_turns = 9
+max_minutes = 2
+permissions = "ask"
+isolated = true
+check = "cargo test -p x"
+[secrets]
+OPENAI_API_KEY = "MY_OPENAI"
+[mcp]
+docs = "/bin/docs --stdio"
+[remote]
+url = "http://127.0.0.1:9"
+token_file = "/t/token"
+[serve]
+config = "/srv/server.json"
+"#;
+
+    #[test]
+    fn a_new_branch_takes_every_default_the_flags_left_unset() {
+        let config = config(FILE);
+        let mut task = TaskArgs {
+            budget_usd: Some(1.0),
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut task, Scope::NewBranch).unwrap();
+        assert_eq!(task.harness.as_deref(), Some("codex"));
+        assert_eq!(task.budget_usd, Some(1.0), "the flag wins");
+        assert_eq!(task.max_turns, Some(9));
+        assert_eq!(task.max_duration, Some(Duration::from_secs(120)));
+        assert_eq!(task.permissions, Permissions::Ask);
+        assert!(task.isolated);
+        assert_eq!(
+            task.check.as_deref(),
+            Some(&["cargo".to_owned(), "test".into(), "-p".into(), "x".into()][..])
+        );
+        let spec = task.provision.unwrap();
+        assert_eq!(spec.model.as_deref(), Some("large"));
+        assert_eq!(spec.secrets.len(), 1);
+        assert_eq!(spec.secrets[0].name, "OPENAI_API_KEY");
+        assert_eq!(spec.mcp_servers[0].name, "docs");
+    }
+
+    #[test]
+    fn continuing_takes_only_permissions() {
+        let config = config(FILE);
+        let mut task = TaskArgs::default();
+        apply_task(&config, &mut task, Scope::Continue).unwrap();
+        assert_eq!(task.permissions, Permissions::Ask);
+        assert_eq!(task.harness, None);
+        assert_eq!(task.provision, None);
+        let mut yes = TaskArgs {
+            permissions: Permissions::Yes,
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut yes, Scope::Continue).unwrap();
+        assert_eq!(yes.permissions, Permissions::Yes, "the flag wins");
+    }
+
+    #[test]
+    fn secrets_need_a_private_home() {
+        let config =
+            config("[secrets]\nOPENAI_API_KEY = \"OPENAI_API_KEY\"\n[defaults]\nmodel = \"m\"");
+        let mut task = TaskArgs::default();
+        apply_task(&config, &mut task, Scope::NewBranch).unwrap();
+        assert!(task.provision.unwrap().secrets.is_empty());
+    }
+
+    #[test]
+    fn remote_settings_follow_their_server_only() {
+        let config = config(FILE);
+        let mut globals = Globals::default();
+        apply_globals(&config, &mut globals);
+        assert_eq!(globals.remote.as_deref(), Some("http://127.0.0.1:9"));
+        assert_eq!(globals.token_file.as_deref(), Some("/t/token"));
+        let mut other = Globals {
+            remote: Some("https://elsewhere".into()),
+            ..Globals::default()
+        };
+        apply_globals(&config, &mut other);
+        assert_eq!(other.token_file, None, "another server's token is not used");
+    }
+
+    #[test]
+    fn serve_gets_the_configured_file_unless_given_one() {
+        let config = config(FILE);
+        assert_eq!(
+            serve_args(&config, vec![]),
+            ["--config", "/srv/server.json"]
+        );
+        assert_eq!(
+            serve_args(&config, vec!["--config".into(), "x".into()]),
+            ["--config", "x"]
+        );
+        assert_eq!(
+            serve_args(&config, vec!["token".into(), "new".into()]),
+            ["token", "new"]
+        );
+        assert_eq!(
+            serve_args(&config, vec!["--worker".into()]),
+            ["--config", "/srv/server.json", "--worker"]
+        );
+    }
+}
