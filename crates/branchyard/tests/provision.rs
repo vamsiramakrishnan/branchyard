@@ -236,6 +236,33 @@ fn requests_that_cannot_be_honored_are_refused_before_a_branch_exists() {
 }
 
 #[test]
+fn a_fork_refused_for_its_provisioning_holds_no_name() {
+    let f = Fixture::new();
+    let parent = f.task("WRITE a.txt=1").name("parent").run().unwrap();
+    // A secret for a fork that would run with your own home.
+    let refused = TaskOptions {
+        isolated: false,
+        name: Some("kid".into()),
+        ..codex(&f, "BY_TEST_OPENAI_FORK", OPENAI_SECRET)
+    };
+    let error = parent.fork("x", true, refused).unwrap_err();
+    assert!(error.to_string().contains("--isolated"), "{error}");
+    assert!(f.yard.branch("kid").is_err());
+    // The name is free for a fork that can be honored.
+    let kid = parent
+        .fork(
+            "WHOAMI",
+            true,
+            TaskOptions {
+                name: Some("kid".into()),
+                ..codex(&f, "BY_TEST_OPENAI_FORK", OPENAI_SECRET)
+            },
+        )
+        .unwrap();
+    assert_eq!(kid.info().name, "kid");
+}
+
+#[test]
 fn a_secret_that_is_not_set_fails_the_turn_by_name() {
     let f = Fixture::new();
     let branch = f

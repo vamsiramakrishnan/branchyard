@@ -253,6 +253,40 @@ fn a_provisioned_home_goes_into_the_actor_and_comes_back() {
 }
 
 #[test]
+fn a_local_branch_forks_into_an_actor_with_its_secrets() {
+    let f = Fixture::new();
+    let (fake, substrate) = cluster(&f);
+    // A branch that ran with your own home, then a fork into an actor,
+    // which gets a private home of its own for the secret.
+    let parent = f.task("WRITE a.txt=1").name("local").run().unwrap();
+    std::env::set_var(
+        "BY_TEST_SUBSTRATE_FORK_OPENAI",
+        "sk-proj-fork-SECRET-0123456789",
+    );
+    let fork = parent
+        .fork(
+            "SH stat -c '%a' \"$HOME/.codex/auth.json\"",
+            true,
+            TaskOptions {
+                harness: Some("codex-acp".into()),
+                name: Some("in-actor".into()),
+                provision: Some(Provisioning {
+                    secrets: vec![SecretSource::parse(
+                        "OPENAI_API_KEY=BY_TEST_SUBSTRATE_FORK_OPENAI",
+                    )
+                    .unwrap()],
+                    ..Provisioning::default()
+                }),
+                policy: Policy::allow_all(),
+                ..options(&f, &substrate)
+            },
+        )
+        .unwrap();
+    assert!(text(&fork.events().unwrap()).contains("600"));
+    assert!(fake.actor_names().is_empty());
+}
+
+#[test]
 fn delegation_is_refused_to_a_harness_in_an_actor() {
     let f = Fixture::new();
     let (fake, substrate) = cluster(&f);

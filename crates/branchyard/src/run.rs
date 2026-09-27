@@ -548,6 +548,13 @@ pub(crate) fn fork(
         )?;
     }
     let grant = root_grant(options)?;
+    // Checked before the name is reserved, so a refusal holds no name. The
+    // fork has a private home when its parent had one, when it runs
+    // isolated, or when its provider is a sandbox (`create` gives it one).
+    let provision = options.provision.clone().or(parent.provision.clone());
+    let private =
+        options.isolated || parent.home.is_some() || placement::sandboxed(provider.as_ref());
+    crate::provisioning::check(provision.as_ref(), private)?;
     let reserved =
         names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
     // A forked session lives in the parent's home when it ran isolated.
@@ -556,8 +563,6 @@ pub(crate) fn fork(
         _ if options.isolated || parent.home.is_some() => Some(store.home(&reserved)),
         _ => None,
     };
-    let provision = options.provision.clone().or(parent.provision.clone());
-    crate::provisioning::check(provision.as_ref(), home.is_some())?;
     let cost_baseline = match (forking, parent.info.cost_usd, parent.cost_baseline) {
         (false, _, _) | (true, None, None) => None,
         (true, own, baseline) => Some(own.unwrap_or(0.0) + baseline.unwrap_or(0.0)),
