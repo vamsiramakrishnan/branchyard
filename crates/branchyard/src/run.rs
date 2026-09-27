@@ -45,8 +45,10 @@ pub(crate) fn launch(
     id: Option<&str>,
     command: Option<&[String]>,
     provider: Option<&Provider>,
+    unapproved_tools: bool,
 ) -> Result<Launch, Error> {
     let profile = harness::select(id)?;
+    harness::check_approvals(profile, unapproved_tools)?;
     let command = harness::command(profile, command);
     placement::check(provider)?;
     if !placement::sandboxed(provider) {
@@ -153,6 +155,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
         options.harness.as_deref(),
         options.command.as_deref(),
         options.provider.as_ref(),
+        options.unapproved_tools,
     )?;
     let grant = root_grant(options)?;
     let base = resolve_base(yard, options.base.as_deref())?;
@@ -204,6 +207,7 @@ pub(crate) fn run_on(
                 Some(id),
                 options.command.as_deref(),
                 options.provider.as_ref(),
+                options.unapproved_tools,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -339,6 +343,7 @@ pub(crate) fn prepare_send(
     if options.provider.is_some() {
         record.provider = options.provider.clone();
     }
+    harness::check_approvals(profile, options.unapproved_tools)?;
     let command = harness::command(profile, record.command.as_deref());
     placement::check(record.provider.as_ref())?;
     if !placement::sandboxed(record.provider.as_ref()) {
@@ -430,6 +435,7 @@ pub(crate) fn fork(
         (None, true) => parent.command.clone(),
         (None, false) => None,
     };
+    harness::check_approvals(profile, options.unapproved_tools)?;
     let launch_command = harness::command(profile, command.as_deref());
     let provider = options.provider.clone().or(parent.provider.clone());
     placement::check(provider.as_ref())?;

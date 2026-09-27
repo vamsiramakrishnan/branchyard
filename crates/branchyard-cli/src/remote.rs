@@ -80,6 +80,18 @@ pub const REMOTE_DENY_NOTICE: &str = "remote mode cannot ask, so tool permission
 /// The policy to send, and the notice to print once the server accepts
 /// the work. `--ask` needs a terminal where the harness runs.
 fn permissions(task: &TaskArgs) -> Result<(PolicySpec, Option<&'static str>), Failure> {
+    let local_only = [
+        ("--provider", task.sandbox.is_some() || task.local),
+        ("--delegate", task.delegate.is_some()),
+        ("--allow-delegation", task.allow_delegation),
+        ("--allow-unapproved-tools", task.unapproved_tools),
+    ];
+    if let Some((flag, _)) = local_only.iter().find(|(_, given)| *given) {
+        return Err(Failure::Message(format!(
+            "{flag} is not available in remote mode yet; the server runs harnesses locally, \
+             without delegation, and only with profiles that route tool approvals"
+        )));
+    }
     match task.permissions {
         Permissions::Yes => Ok((PolicySpec::allow_all(), None)),
         Permissions::Ask => Err(Failure::Message(

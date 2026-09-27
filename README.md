@@ -39,7 +39,7 @@ by merge make-the-flaky-parser-test-deterministic-codex   # runs the check on th
 by rm make-the-flaky-parser-test-deterministic-claude-code
 ```
 
-Every tool permission request reaches Branchyard for profiles that route them (the Antigravity, Pi and Amp profiles do not; see [harness integration](docs/harness-integration.md#implemented-drivers)): `--ask` prompts on the terminal, `--yes` allows each one, and with neither flag and no terminal they are denied. `by log` shows each decision. These commands are tested end to end against a fake ACP agent; they have not yet run against a real harness. Resuming or forking a session in another worktree may fail for harnesses that keep sessions per directory, such as Claude Code; the branch then reports the failure rather than starting over silently.
+Every tool permission request reaches Branchyard. The Antigravity, Pi and Amp profiles cannot route them, so `by` refuses them unless you pass `--allow-unapproved-tools` (see [harness integration](docs/harness-integration.md#implemented-drivers)). `--ask` prompts on the terminal, `--yes` allows each one, and with neither flag and no terminal they are denied. `by log` shows each decision. These commands are tested end to end against a fake ACP agent; they have not yet run against a real harness. Resuming or forking a session in another worktree may fail for harnesses that keep sessions per directory, such as Claude Code; the branch then reports the failure rather than starting over silently.
 
 ## Remote mode
 

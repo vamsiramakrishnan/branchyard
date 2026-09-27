@@ -869,6 +869,7 @@ impl Local {
             false => None,
         };
         let launch = harness::command(profile, command.as_deref());
+        harness::check_approvals(profile, self.options.unapproved_tools)?;
         harness::check_available(profile.harness, &launch)?;
         let base = match &request.base {
             Some(rev) => run::resolve_base(&self.yard, Some(rev))?,

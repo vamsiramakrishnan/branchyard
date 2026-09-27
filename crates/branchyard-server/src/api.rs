@@ -455,6 +455,7 @@ async fn post_task(
         delegation: None,
         delegation_cli: None,
         delegation_server: None,
+        unapproved_tools: false,
     };
     let harnesses = request.harnesses.clone();
     let prompt = request.prompt.clone();

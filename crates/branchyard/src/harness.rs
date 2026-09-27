@@ -68,6 +68,21 @@ pub(crate) fn command(profile: &Profile, over: Option<&[String]>) -> Vec<String>
     }
 }
 
+/// Refuse a profile whose driver cannot route tool permission requests to
+/// Branchyard, unless the task allows it: its tools would run under the
+/// harness's own configuration, not the task's policy.
+pub(crate) fn check_approvals(profile: &Profile, allowed: bool) -> Result<(), Error> {
+    if allowed || profile.driver().capabilities().tool_approvals {
+        return Ok(());
+    }
+    Err(Error::Unsupported(format!(
+        "{} does not route tool permission requests to Branchyard, so its tools would run \
+         without your policy; allow that explicitly (--allow-unapproved-tools, \
+         TaskOptions::unapproved_tools) or choose another profile",
+        profile.id
+    )))
+}
+
 /// Fail with [`Error::HarnessUnavailable`] unless `command[0]` is an
 /// executable file, by path or on `PATH`.
 pub(crate) fn check_available(harness: &str, command: &[String]) -> Result<(), Error> {

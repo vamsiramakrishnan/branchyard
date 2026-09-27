@@ -733,3 +733,30 @@ fn a_session_the_harness_cannot_find_fails_precisely() {
     assert_eq!(info.turns, 1, "no turn was submitted");
     assert_eq!(info.session.as_deref(), Some("missing-1"));
 }
+
+#[test]
+fn profiles_that_route_no_tool_approvals_need_an_explicit_opt_in() {
+    let f = Fixture::new();
+    for profile in ["antigravity-stream-json", "pi-rpc", "amp-stream-json"] {
+        let refused = f.task("go").harness(profile).run();
+        assert!(
+            matches!(&refused, Err(Error::Unsupported(why))
+                if why.contains("does not route tool permission requests")),
+            "{profile}: {refused:?}"
+        );
+        // With the opt-in it gets as far as looking for the executable.
+        let admitted = f
+            .task("go")
+            .harness(profile)
+            .unapproved_tools(true)
+            .command(["/nonexistent/branchyard-harness"])
+            .run();
+        assert!(
+            matches!(&admitted, Err(Error::HarnessUnavailable { .. })),
+            "{profile}: {admitted:?}"
+        );
+    }
+    let fan = f.task("go").run_on(&["gemini-cli", "pi"]);
+    assert!(matches!(fan, Err(Error::Unsupported(_))), "{fan:?}");
+    assert!(f.yard.branches().unwrap().is_empty(), "nothing was created");
+}

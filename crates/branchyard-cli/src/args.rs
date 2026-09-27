@@ -43,6 +43,9 @@ pub struct TaskArgs {
     /// `--allow-delegation`: auto-allow the harness's own `by` delegation
     /// commands.
     pub allow_delegation: bool,
+    /// `--allow-unapproved-tools`: run a profile whose tools Branchyard's
+    /// policy never sees.
+    pub unapproved_tools: bool,
 }
 
 /// Options for `--provider microsandbox`.
@@ -404,6 +407,11 @@ const BRANCH: Flag = Flag {
     value: Some("NAME"),
     help: "The branch whose turn this server serves",
 };
+const ALLOW_UNAPPROVED_TOOLS: Flag = Flag {
+    long: "allow-unapproved-tools",
+    value: None,
+    help: "Run a profile that does not route tool permission requests to Branchyard (Antigravity, Pi, Amp); its tools run under the harness's own configuration",
+};
 const ALLOW_DELEGATION: Flag = Flag {
     long: "allow-delegation",
     value: None,
@@ -469,6 +477,7 @@ pub static COMMANDS: &[Spec] = &[
             PASS_ENV,
             DELEGATE,
             ALLOW_DELEGATION,
+            ALLOW_UNAPPROVED_TOOLS,
         ],
     },
     Spec {
@@ -494,6 +503,7 @@ pub static COMMANDS: &[Spec] = &[
             PASS_ENV,
             DELEGATE,
             ALLOW_DELEGATION,
+            ALLOW_UNAPPROVED_TOOLS,
         ],
     },
     Spec {
@@ -510,6 +520,7 @@ pub static COMMANDS: &[Spec] = &[
             COMMAND,
             DELEGATE,
             ALLOW_DELEGATION,
+            ALLOW_UNAPPROVED_TOOLS,
             JSON,
         ],
     },
@@ -535,6 +546,7 @@ pub static COMMANDS: &[Spec] = &[
             PASS_ENV,
             DELEGATE,
             ALLOW_DELEGATION,
+            ALLOW_UNAPPROVED_TOOLS,
         ],
     },
     Spec {
@@ -606,6 +618,7 @@ pub static COMMANDS: &[Spec] = &[
             MAX_MINUTES,
             MAX_DEPTH,
             DENY,
+            ALLOW_UNAPPROVED_TOOLS,
             WAIT,
             YES,
             ASK,
@@ -1032,6 +1045,7 @@ impl Matches {
             local: provider == Some(None),
             delegate,
             allow_delegation: self.switch("allow-delegation"),
+            unapproved_tools: self.switch("allow-unapproved-tools"),
         })
     }
 
@@ -1277,6 +1291,7 @@ mod tests {
                     local: false,
                     delegate: None,
                     allow_delegation: false,
+                    unapproved_tools: false,
                 },
             }
         );
@@ -1421,6 +1436,11 @@ mod tests {
             panic!("not run")
         };
         assert!(task.allow_delegation);
+        let Command::Send { task, .. } = parse_str("send b go --allow-unapproved-tools").unwrap()
+        else {
+            panic!("not send")
+        };
+        assert!(task.unapproved_tools);
     }
 
     #[test]

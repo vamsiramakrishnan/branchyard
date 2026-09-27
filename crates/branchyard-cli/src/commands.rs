@@ -195,6 +195,7 @@ impl Live {
             delegation: task.delegate.map(Envelope::depth),
             delegation_cli: exe,
             delegation_server: None,
+            unapproved_tools: task.unapproved_tools,
         }
     }
 

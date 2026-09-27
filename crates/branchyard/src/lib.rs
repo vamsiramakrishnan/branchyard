@@ -241,6 +241,12 @@ pub struct TaskOptions {
     /// engine appends `--root <root> --branch <name>` and passes the token
     /// in [`ENV_TOKEN`]. Children use their parent's.
     pub delegation_server: Option<Vec<String>>,
+    /// Run a profile whose driver cannot route tool permission requests
+    /// to Branchyard, such as the Antigravity, Pi and Amp profiles. Its
+    /// tools then run under the harness's own configuration, and
+    /// [`TaskOptions::policy`] never sees them. Off by default: such a
+    /// profile is refused, for every run, send, fork and delegated spawn.
+    pub unapproved_tools: bool,
     /// Where the harness runs. `None` runs a new branch as a local process
     /// and keeps a branch's own provider for its sends and forks. Stored
     /// with the branch.
@@ -331,6 +337,12 @@ impl TaskBuilder {
     /// See [`TaskOptions::isolated`].
     pub fn isolated(mut self, isolated: bool) -> Self {
         self.options.isolated = isolated;
+        self
+    }
+
+    /// See [`TaskOptions::unapproved_tools`].
+    pub fn unapproved_tools(mut self, allowed: bool) -> Self {
+        self.options.unapproved_tools = allowed;
         self
     }
 
