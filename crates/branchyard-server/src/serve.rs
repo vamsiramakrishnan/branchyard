@@ -155,6 +155,12 @@ fn tls_acceptor(files: &TlsFiles) -> Result<TlsAcceptor, String> {
 /// serving. Needs a multi-threaded Tokio runtime.
 pub async fn start(config: Config) -> Result<Running, String> {
     config.validate()?;
+    // Installed once per process, idempotently: our own TLS acceptor
+    // already picks `ring` explicitly, but the webhook client's `reqwest`
+    // (built with `rustls-no-provider`, so as never to also pull in
+    // `aws-lc-rs` and leave two providers linked) needs a default
+    // installed before it is built.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?;
     let lock = branchyard::DirLock::acquire(&config.data_dir, "a Branchyard server")

@@ -23,7 +23,7 @@ hex = "0.4"
 hmac = "0.13"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "server", "server-graceful"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
 rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
 postgres = { version = "0.19", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
