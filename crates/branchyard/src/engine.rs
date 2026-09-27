@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::delegation;
+use crate::graph;
 use crate::placement::Placement;
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
@@ -163,15 +164,18 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Interrupted;
         } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
             record.info.status = BranchStatus::BudgetExceeded { limit };
+        } else if let Err(reason) = graph::bind(turn.yard, &record) {
+            record.info.status = BranchStatus::Failed { reason };
         } else {
-            let driven = drive(&mut recorder, &turn, &record, &bounds, &lease)?;
+            let driven = drive(&mut recorder, &turn, &record, &bounds, &lease);
+            graph::unbind(turn.yard, &record);
             conclude(
                 turn.yard,
                 turn.prompt,
                 &fence,
                 &mut record,
                 &mut recorder,
-                driven,
+                driven?,
             )?;
         }
         Ok(())
@@ -180,7 +184,7 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         Ok(()) => recorder.finish(lease, &record),
         Err(error) => Err(error),
     };
-    match result {
+    let result = match result {
         Ok(()) => Ok(Branch {
             yard: turn.yard.clone(),
             info: record.info,
@@ -193,7 +197,10 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             let _ = store.backend().finish(&fence, Some(&record), None);
             Err(error)
         }
-    }
+    };
+    // Siblings waiting for this branch may start, or be blocked, now.
+    graph::settled(turn.yard, &fence.branch, Some(turn.options));
+    result
 }
 
 /// Journal a step whose intent and outcome are recorded together, after

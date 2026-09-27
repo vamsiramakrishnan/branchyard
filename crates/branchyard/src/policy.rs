@@ -46,7 +46,7 @@ pub(crate) fn decide(
 }
 
 /// `by` subcommands that act as the calling branch.
-pub(crate) const DELEGATION_SUBCOMMANDS: [&str; 7] = [
+pub(crate) const DELEGATION_SUBCOMMANDS: [&str; 8] = [
     "spawn",
     "inspect",
     "events",
@@ -54,6 +54,7 @@ pub(crate) const DELEGATION_SUBCOMMANDS: [&str; 7] = [
     "integrate",
     "cancel",
     "children",
+    "graph",
 ];
 
 /// Whether `input["command"]` runs `by` with a delegation subcommand and

@@ -293,6 +293,8 @@ pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result
         }
     }
     store.delete(name)?;
+    // What waited for it can never start now.
+    crate::graph::settled(yard, name, None);
     crate::storage::gc_after_removal(&store)?;
     if !options.keep_credentials {
         remove_credentials(&store, &record)?;

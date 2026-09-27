@@ -33,6 +33,7 @@ use postgres::error::SqlState;
 use postgres::{Client, NoTls, Row, Transaction};
 use serde_json::Value;
 
+use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
     now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
     ReservationRow, SteerRow, StepRow,
@@ -41,7 +42,7 @@ use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
     NewScratch, ScratchArea, ScratchLock, ScratchRow, Share, StorageBackend,
 };
-use crate::{BranchStatus, Error, Message, RecordedEvent, SteerState};
+use crate::{Activity, BranchStatus, Error, Message, RecordedEvent, SteerState};
 
 /// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
 const SCHEMA: i64 = 2;
@@ -214,6 +215,22 @@ CREATE INDEX IF NOT EXISTS by_messages_to ON by_messages (repo, to_branch, id);
 CREATE INDEX IF NOT EXISTS by_messages_steer ON by_messages (steer_id);
 CREATE INDEX IF NOT EXISTS by_messages_from ON by_messages (repo, from_branch, kind);
 CREATE INDEX IF NOT EXISTS by_messages_reply ON by_messages (repo, in_reply_to);
+CREATE TABLE IF NOT EXISTS by_graph_revisions (
+    repo TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    revision BIGINT NOT NULL,
+    PRIMARY KEY (repo, parent)
+);
+CREATE TABLE IF NOT EXISTS by_graph_edges (
+    repo TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    dependent TEXT NOT NULL,
+    prerequisite TEXT NOT NULL,
+    after TEXT NOT NULL,
+    PRIMARY KEY (repo, dependent, prerequisite)
+);
+CREATE INDEX IF NOT EXISTS by_graph_edges_prerequisite ON by_graph_edges (repo, prerequisite);
+CREATE INDEX IF NOT EXISTS by_graph_edges_parent ON by_graph_edges (repo, parent);
 ";
 
 fn steer_row(r: &Row) -> SteerRow {
@@ -594,6 +611,94 @@ impl Postgres {
         Ok(uint(seq))
     }
 
+    /// Take `record`'s lease for a new turn and write it, unless a lease
+    /// on this incarnation is held: then that lease.
+    fn grant(
+        &self,
+        tx: &mut Transaction<'_>,
+        record: &Record,
+        incarnation: i64,
+        owner: &Owner,
+        ttl: Duration,
+    ) -> R<Result<Fence, LeaseRow>> {
+        let name = &record.info.name;
+        let current = self.lease_row(tx, name)?;
+        if let Some(row) = &current {
+            if row.owner.is_some() && row.incarnation == incarnation {
+                return Ok(Err(row.clone()));
+            }
+        }
+        let generation = current.map_or(1, |row| row.generation + 1);
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO by_leases (repo, branch, incarnation, generation, turn, owner, host, \
+             pid, pid_start, acquired_ms, expires_ms, deadline_ms) \
+             VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, NULL) \
+             ON CONFLICT (repo, branch) DO UPDATE SET incarnation = $3, generation = $4, \
+             turn = $4, owner = $5, host = $6, pid = $7, pid_start = $8, \
+             acquired_ms = $9, expires_ms = $10, deadline_ms = NULL",
+            &[
+                &self.repo,
+                name,
+                &incarnation,
+                &int(generation),
+                &owner.id,
+                &owner.host,
+                &i64::from(owner.pid),
+                &owner.start,
+                &int(now),
+                &int(now + ttl.as_millis() as u64),
+            ],
+        )
+        .map_err(db("acquire"))?;
+        self.put(tx, record)?;
+        tx.execute(
+            "DELETE FROM by_reservations WHERE repo = $1 AND name = $2",
+            &[&self.repo, name],
+        )
+        .map_err(db("acquire"))?;
+        Ok(Ok(Fence {
+            branch: name.clone(),
+            incarnation,
+            generation,
+            turn: generation,
+        }))
+    }
+
+    /// Whether a live lease on `name`'s current incarnation is held.
+    fn held(&self, tx: &mut Transaction<'_>, name: &str) -> R<bool> {
+        let incarnation = self.incarnation(tx, name)?;
+        Ok(self
+            .lease_row(tx, name)?
+            .is_some_and(|row| row.owner.is_some() && Some(row.incarnation) == incarnation))
+    }
+
+    fn graph_revision_in(&self, tx: &mut Transaction<'_>, parent: &str) -> R<u64> {
+        Ok(tx
+            .query_opt(
+                "SELECT revision FROM by_graph_revisions WHERE repo = $1 AND parent = $2",
+                &[&self.repo, &parent],
+            )
+            .map_err(db("graph revision"))?
+            .map_or(0, |r| uint(r.get(0))))
+    }
+
+    fn edges(&self, filter: &str, value: &str) -> Result<Vec<Dependency>, Error> {
+        let sql = format!(
+            "SELECT dependent, prerequisite, after FROM by_graph_edges \
+             WHERE repo = $1 AND {filter} = $2 ORDER BY dependent, prerequisite"
+        );
+        let rows = self.query(|client| client.query(&sql, &[&self.repo, &value]))?;
+        Ok(rows
+            .iter()
+            .map(|r| Dependency {
+                dependent: r.get(0),
+                prerequisite: r.get(1),
+                after: after_from(&r.get::<_, String>(2)),
+            })
+            .collect())
+    }
+
     fn lease_row(&self, tx: &mut Transaction<'_>, name: &str) -> R<Option<LeaseRow>> {
         Ok(tx
             .query_opt(
@@ -603,6 +708,20 @@ impl Postgres {
             )
             .map_err(db("lease"))?
             .map(|r| lease_from(&r)))
+    }
+}
+
+fn after_text(after: After) -> &'static str {
+    match after {
+        After::Settled => "settled",
+        After::Integrated => "integrated",
+    }
+}
+
+fn after_from(text: &str) -> After {
+    match text {
+        "integrated" => After::Integrated,
+        _ => After::Settled,
     }
 }
 
@@ -812,6 +931,15 @@ impl Backend for Postgres {
             ] {
                 tx.execute(sql, &[&incarnation]).map_err(db("delete"))?;
             }
+            // Its own dependencies and graph go; what depends on it keeps
+            // the row, and is blocked for want of it.
+            for sql in [
+                "DELETE FROM by_graph_edges WHERE repo = $1 AND dependent = $2",
+                "DELETE FROM by_graph_revisions WHERE repo = $1 AND parent = $2",
+            ] {
+                tx.execute(sql, &[&self.repo, &name])
+                    .map_err(db("delete"))?;
+            }
             Ok(())
         })
     }
@@ -837,47 +965,10 @@ impl Backend for Postgres {
             if reserver.is_some_and(|reserver| reserver != owner.id) {
                 return Err(Error::BranchExists(name.clone()).into());
             }
-            let current = self.lease_row(tx, name)?;
-            if let Some(row) = &current {
-                if row.owner.is_some() && row.incarnation == incarnation {
-                    return Ok(Acquired::Held(row.clone()));
-                }
+            match self.grant(tx, record, incarnation, owner, ttl)? {
+                Ok(fence) => Ok(Acquired::Granted(fence)),
+                Err(row) => Ok(Acquired::Held(row)),
             }
-            let generation = current.map_or(1, |row| row.generation + 1);
-            let now = now_ms();
-            tx.execute(
-                "INSERT INTO by_leases (repo, branch, incarnation, generation, turn, owner, host, \
-                 pid, pid_start, acquired_ms, expires_ms, deadline_ms) \
-                 VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, NULL) \
-                 ON CONFLICT (repo, branch) DO UPDATE SET incarnation = $3, generation = $4, \
-                 turn = $4, owner = $5, host = $6, pid = $7, pid_start = $8, \
-                 acquired_ms = $9, expires_ms = $10, deadline_ms = NULL",
-                &[
-                    &self.repo,
-                    name,
-                    &incarnation,
-                    &int(generation),
-                    &owner.id,
-                    &owner.host,
-                    &i64::from(owner.pid),
-                    &owner.start,
-                    &int(now),
-                    &int(now + ttl.as_millis() as u64),
-                ],
-            )
-            .map_err(db("acquire"))?;
-            self.put(tx, record)?;
-            tx.execute(
-                "DELETE FROM by_reservations WHERE repo = $1 AND name = $2",
-                &[&self.repo, name],
-            )
-            .map_err(db("acquire"))?;
-            Ok(Acquired::Granted(Fence {
-                branch: name.clone(),
-                incarnation,
-                generation,
-                turn: generation,
-            }))
         })
     }
 
@@ -1780,6 +1871,171 @@ impl Postgres {
             }
             None => Ok(false),
         }
+    }
+}
+
+impl GraphBackend for Postgres {
+    fn graph_revision(&self, parent: &str) -> Result<u64, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+                "SELECT revision FROM by_graph_revisions WHERE repo = $1 AND parent = $2",
+                &[&self.repo, &parent],
+            )
+        })?;
+        Ok(row.map_or(0, |r| uint(r.get(0))))
+    }
+
+    fn dependencies(&self, parent: &str) -> Result<Vec<Dependency>, Error> {
+        self.edges("parent", parent)
+    }
+
+    fn prerequisites(&self, dependent: &str) -> Result<Vec<Dependency>, Error> {
+        self.edges("dependent", dependent)
+    }
+
+    fn dependents(&self, prerequisite: &str) -> Result<Vec<Dependency>, Error> {
+        self.edges("prerequisite", prerequisite)
+    }
+
+    fn commit_graph(&self, commit: &GraphCommit) -> Result<u64, Error> {
+        let parent = &commit.parent;
+        self.tx(true, |tx| {
+            let current = self.graph_revision_in(tx, parent)?;
+            if let Some(expected) = commit.expected.filter(|e| *e != current) {
+                return Err(Error::StaleRevision {
+                    branch: parent.clone(),
+                    expected,
+                    actual: current,
+                }
+                .into());
+            }
+            let mut owner = self
+                .stored_record(tx, parent)?
+                .ok_or_else(|| Error::UnknownBranch(parent.clone()))?;
+            for record in &commit.create {
+                let name = &record.info.name;
+                if self.incarnation(tx, name)?.is_some() {
+                    return Err(Error::BranchExists(name.clone()).into());
+                }
+                self.put(tx, record)?;
+                if !owner.info.children.contains(name) {
+                    owner.info.children.push(name.clone());
+                }
+            }
+            tx.execute(
+                "UPDATE by_branches SET record = $3 WHERE repo = $1 AND name = $2",
+                &[&self.repo, parent, &encode(parent, &owner)?],
+            )
+            .map_err(db("commit graph"))?;
+            let created: Vec<&String> = commit.create.iter().map(|r| &r.info.name).collect();
+            let touched: std::collections::BTreeSet<&String> = commit
+                .add
+                .iter()
+                .map(|d| &d.dependent)
+                .chain(commit.remove.iter().map(|d| &d.dependent))
+                .filter(|name| !created.contains(name))
+                .collect();
+            for name in touched {
+                let mut record = self
+                    .stored_record(tx, name)?
+                    .ok_or_else(|| Error::UnknownBranch(name.clone()))?;
+                if !crate::graph::unstarted(&record.info.status) || self.held(tx, name)? {
+                    return Err(Error::Denied(format!(
+                        "{name} has already started, so its dependencies can no longer change"
+                    ))
+                    .into());
+                }
+                if record.info.status != BranchStatus::Waiting {
+                    record.info.status = BranchStatus::Waiting;
+                    self.put(tx, &record)?;
+                    self.insert_event(
+                        tx,
+                        name,
+                        &RecordedEvent {
+                            at_ms: now_ms(),
+                            activity: Activity::Status(BranchStatus::Waiting),
+                        },
+                    )?;
+                }
+            }
+            for d in &commit.remove {
+                let removed = tx
+                    .execute(
+                        "DELETE FROM by_graph_edges WHERE repo = $1 AND parent = $2 \
+                         AND dependent = $3 AND prerequisite = $4",
+                        &[&self.repo, parent, &d.dependent, &d.prerequisite],
+                    )
+                    .map_err(db("commit graph"))?;
+                if removed == 0 {
+                    return Err(Error::Denied(format!(
+                        "{} does not depend on {}",
+                        d.dependent, d.prerequisite
+                    ))
+                    .into());
+                }
+            }
+            for d in &commit.add {
+                let inserted = tx
+                    .execute(
+                        "INSERT INTO by_graph_edges (repo, parent, dependent, prerequisite, \
+                         after) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                        &[
+                            &self.repo,
+                            parent,
+                            &d.dependent,
+                            &d.prerequisite,
+                            &after_text(d.after),
+                        ],
+                    )
+                    .map_err(db("commit graph"))?;
+                if inserted == 0 {
+                    return Err(Error::Denied(format!(
+                        "{} already depends on {}",
+                        d.dependent, d.prerequisite
+                    ))
+                    .into());
+                }
+            }
+            let next = current + 1;
+            tx.execute(
+                "INSERT INTO by_graph_revisions (repo, parent, revision) VALUES ($1, $2, $3) \
+                 ON CONFLICT (repo, parent) DO UPDATE SET revision = $3",
+                &[&self.repo, parent, &int(next)],
+            )
+            .map_err(db("commit graph"))?;
+            Ok(next)
+        })
+    }
+
+    fn claim(&self, record: &Record, owner: &Owner, ttl: Duration) -> Result<Option<Fence>, Error> {
+        let name = &record.info.name;
+        self.tx(true, |tx| {
+            let waiting = self
+                .stored_record(tx, name)?
+                .is_some_and(|stored| stored.info.status == BranchStatus::Waiting);
+            let Some(incarnation) = self.incarnation(tx, name)? else {
+                return Ok(None);
+            };
+            if !waiting {
+                return Ok(None);
+            }
+            Ok(self.grant(tx, record, incarnation, owner, ttl)?.ok())
+        })
+    }
+
+    fn settle_waiting(&self, record: &Record, event: &RecordedEvent) -> Result<bool, Error> {
+        let name = &record.info.name;
+        self.tx(true, |tx| {
+            let waiting = self
+                .stored_record(tx, name)?
+                .is_some_and(|stored| stored.info.status == BranchStatus::Waiting);
+            if !waiting || self.held(tx, name)? {
+                return Ok(false);
+            }
+            self.put(tx, record)?;
+            self.insert_event(tx, name, event)?;
+            Ok(true)
+        })
     }
 }
 

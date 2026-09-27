@@ -93,9 +93,19 @@ const STEP_CREATE: &str = "create";
 /// cannot be created leaves the branch `Failed`.
 pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<(Record, Lease), Error> {
     let store = yard.store();
+    let record = new_record(&store, new)?;
+    let lease = match store.acquire(&record)? {
+        Taken::Granted(lease) => lease,
+        Taken::Stale => return Err(Error::Running(record.info.name.clone())),
+    };
+    materialize(yard, record, lease)
+}
+
+/// The record of a branch not yet created, `running` its first turn.
+pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Result<Record, Error> {
     let branch = names::validate(new.name)?;
     let created_ms = now_ms();
-    let mut record = Record {
+    Ok(Record {
         info: BranchInfo {
             name: new.name.to_owned(),
             git_branch: branch.branch(),
@@ -121,26 +131,37 @@ pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<(Record, Lease),
         command: new.command,
         home: new
             .home
-            .or_else(|| placement::private_home(new.provider.as_ref(), &store, new.name)),
+            .or_else(|| placement::private_home(new.provider.as_ref(), store, new.name)),
         cost_baseline: new.cost_baseline,
         provider: new.provider,
         grant: new.grant,
         provision: new.provision,
-    };
-    let lease = match store.acquire(&record)? {
-        Taken::Granted(lease) => lease,
-        Taken::Stale => return Err(Error::Running(new.name.to_owned())),
-    };
+        bindings: Vec::new(),
+        start_base: None,
+    })
+}
+
+/// Create the worktree of a branch whose first turn holds `lease`, from
+/// `record.info.base`, as a journaled step. A worktree that cannot be
+/// created leaves the branch `Failed`.
+pub(crate) fn materialize(
+    yard: &Yard,
+    mut record: Record,
+    lease: Lease,
+) -> Result<(Record, Lease), Error> {
+    let store = yard.store();
+    let branch = names::validate(&record.info.name)?;
+    let base = record.info.base.clone();
     let fence = lease.fence().clone();
     let settled = (|| {
-        let intent = json!({ "base": new.base, "worktree": record.info.worktree });
+        let intent = json!({ "base": base, "worktree": record.info.worktree });
         store
             .backend()
             .begin_step(&fence, fence.turn, STEP_CREATE, &intent)?;
         let created = {
             let _lock = git::lock();
             yard.repo
-                .create_branch(&branch, &Commit(new.base), &record.info.worktree)
+                .create_branch(&branch, &Commit(base.clone()), &record.info.worktree)
         };
         let outcome = match created {
             Ok(workspace) => {
@@ -412,6 +433,21 @@ pub(crate) fn prepare_send(
     }
     if idle && record.info.status == BranchStatus::Running {
         return Err(Error::Running(name.to_owned()));
+    }
+    match &record.info.status {
+        BranchStatus::Waiting => {
+            return Err(Error::Denied(format!(
+                "{name} is waiting for its prerequisites and has not started; it starts when \
+                 they settle, or change its dependencies with a graph proposal"
+            )))
+        }
+        BranchStatus::Blocked { reason } => {
+            return Err(Error::Denied(format!(
+                "{name} never started and is blocked: {reason}; remove or replace the \
+                 dependency with a graph proposal to start it"
+            )))
+        }
+        _ => {}
     }
     let profile = profiles::by_id(&record.info.profile)
         .ok_or_else(|| Error::UnknownHarness(record.info.profile.clone()))?;

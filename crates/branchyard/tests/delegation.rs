@@ -626,6 +626,7 @@ fn seat(below: &[&str]) -> Seat {
         delegates_to: below.iter().map(|s| (*s).to_owned()).collect(),
         escalates_to: Vec::new(),
         instances: 1,
+        bindings: Vec::new(),
     }
 }
 

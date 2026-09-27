@@ -58,8 +58,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use branchyard::{
-    ArtifactRef, Asked, BranchInfo, Children, EventPage, HarnessInfo, Inbox, Inspection, Message,
-    ScratchArea, ScratchLock, Steer,
+    ArtifactRef, Asked, BranchInfo, Children, EventPage, Graph, GraphApplied, HarnessInfo, Inbox,
+    Inspection, Message, ScratchArea, ScratchLock, Steer,
 };
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
@@ -67,9 +67,9 @@ use serde::Serialize;
 
 use api::{
     AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, Diff,
-    ErrorBody, ErrorResponse, FeedEntry, ForkRequest, HarnessList, IntegrateRequest, MergeRequest,
-    Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
-    SteerRequest, TaskRequest, TextRequest,
+    ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest,
+    MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest,
+    SpawnRequest, SteerRequest, TaskRequest, TextRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -537,6 +537,22 @@ impl Repo {
     /// `by children`.
     pub fn children(&self, branch: &str) -> Result<Children, Error> {
         self.client.get(&self.branch_path(branch, "/children"))
+    }
+
+    /// `branch`'s graph: its children, the dependencies among them, and
+    /// its graph revision; like `by graph show`.
+    pub fn graph(&self, branch: &str) -> Result<Graph, Error> {
+        self.client.get(&self.branch_path(branch, "/graph"))
+    }
+
+    /// Apply a graph proposal to `branch`'s children with the server's
+    /// authority as a person, like `by graph apply --parent`. All or
+    /// nothing; a stale `expected_revision` is `409 stale_revision`. A
+    /// retry after a lost connection is refused the same way once the
+    /// first attempt committed, so a proposal never applies twice.
+    pub fn apply_graph(&self, branch: &str, request: &GraphRequest) -> Result<GraphApplied, Error> {
+        self.client
+            .post(&self.branch_path(branch, "/graph"), request, &new_key())
     }
 
     /// Every message addressed to `branch`, oldest first; like `by inbox`.

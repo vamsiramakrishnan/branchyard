@@ -55,6 +55,11 @@ pub fn report(status: &BranchStatus, pending: Option<&str>) -> Report {
         BranchStatus::BudgetExceeded { limit } => {
             (HerdrState::Idle, Some(format!("budget exceeded: {limit}")))
         }
+        BranchStatus::Waiting => (
+            HerdrState::Idle,
+            Some("waiting for its prerequisites".to_owned()),
+        ),
+        BranchStatus::Blocked { reason } => (HerdrState::Idle, Some(format!("blocked: {reason}"))),
     };
     Report {
         state,

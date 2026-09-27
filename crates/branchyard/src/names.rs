@@ -89,6 +89,26 @@ pub(crate) fn plan(
     })
 }
 
+/// The one name [`reserve`] would take now for a single branch, skipping
+/// the names in `exclude` (others planned alongside it).
+pub(crate) fn plan_one(
+    store: &Store,
+    root: &Path,
+    explicit: Option<&str>,
+    prompt: &str,
+    exclude: &std::collections::BTreeSet<String>,
+) -> Result<String, Error> {
+    let mut names = search(store, root, explicit, prompt, &[], |names| {
+        for name in names {
+            if exclude.contains(name) || !free(store, root, name)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })?;
+    Ok(names.remove(0))
+}
+
 /// Reserve every name for one task, all or none.
 pub(crate) fn reserve(
     store: &Store,

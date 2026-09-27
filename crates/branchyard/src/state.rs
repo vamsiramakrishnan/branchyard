@@ -18,7 +18,9 @@
 //! when the branch is created. A reservation whose engine is gone from this
 //! host, or that is older than [`RESERVATION_TTL`], is reclaimed by
 //! recovery. A record's `children`
-//! belong to [`Store::add_child`]: every other write keeps the list in the
+//! belong to [`Store::add_child`] and to a graph commit that creates
+//! children ([`crate::graph::GraphBackend::commit_graph`], which is how the
+//! engine adds them): every other write keeps the list in the
 //! store, so a turn that ends after it spawned children cannot drop them.
 
 use std::collections::HashMap;
@@ -32,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::delegation::Grant;
+use crate::graph::GraphBackend;
 use crate::storage::StorageBackend;
 use crate::{proc, BranchInfo, Error, Message, Provider, RecordedEvent, SteerState};
 
@@ -78,6 +81,15 @@ pub(crate) struct Record {
     /// What to provision before each turn; secrets by source, never value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<branchyard_provision::Provisioning>,
+    /// Scratch areas the branch is bound to for every turn; see
+    /// `crate::graph`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<crate::graph::Binding>,
+    /// For a `waiting` branch created with an explicit base, that base,
+    /// resolved when it was planned; without one it starts from its
+    /// parent's branch as it is when it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_base: Option<String>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current
@@ -311,6 +323,9 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn list(&self) -> Result<Vec<Record>, Error>;
     /// Replace the record, keeping the stored `children`.
     fn write(&self, record: &Record, fence: Option<&Fence>) -> Result<(), Error>;
+    /// Children are added by a graph commit; this remains for tests and
+    /// tools that build a tree directly.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn add_child(&self, parent: &str, child: &str) -> Result<(), Error>;
     /// Delete the branch's record, lease, steps, processes, cancels and
     /// steered input. Its events stay in the feed.
@@ -505,6 +520,9 @@ pub(crate) struct Store {
     /// coerced to a second trait object so that feature does not enlarge
     /// [`Backend`]. See [`crate::storage`].
     storage: Arc<dyn StorageBackend>,
+    /// Dependencies and graph revisions: the same backend again, as for
+    /// `storage`. See [`crate::graph`].
+    graph: Arc<dyn GraphBackend>,
     owner: Arc<Owner>,
     signal: Arc<Signal>,
 }
@@ -529,7 +547,8 @@ impl Store {
         Ok(Store {
             dir,
             backend: backend.clone(),
-            storage: backend,
+            storage: backend.clone(),
+            graph: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -549,7 +568,8 @@ impl Store {
         Ok(Store {
             dir,
             backend: backend.clone(),
-            storage: backend,
+            storage: backend.clone(),
+            graph: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -571,6 +591,11 @@ impl Store {
     /// Artifact and scratch-area metadata; see [`crate::storage`].
     pub fn storage(&self) -> &dyn StorageBackend {
         self.storage.as_ref()
+    }
+
+    /// Dependencies and graph revisions; see [`crate::graph`].
+    pub fn graph(&self) -> &dyn GraphBackend {
+        self.graph.as_ref()
     }
 
     pub fn worktree(&self, name: &str) -> PathBuf {
@@ -615,6 +640,7 @@ impl Store {
     }
 
     /// Append `child` to `parent`'s children.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn add_child(&self, parent: &str, child: &str) -> Result<(), Error> {
         self.backend.add_child(parent, child)
     }

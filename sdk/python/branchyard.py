@@ -35,6 +35,7 @@ __all__ = [
     "NotRunningError",
     "SteerRefusedError",
     "NotFoundError",
+    "StaleRevisionError",
     "Spawned",
     "Inspection",
     "EventPage",
@@ -49,6 +50,8 @@ __all__ = [
     "Message",
     "Asked",
     "Inbox",
+    "Graph",
+    "GraphApplied",
     "spawn",
     "inspect",
     "events",
@@ -57,6 +60,8 @@ __all__ = [
     "integrate",
     "cancel",
     "children",
+    "graph",
+    "apply_graph",
     "wait",
     "publish",
     "list_artifacts",
@@ -104,12 +109,17 @@ class NotFoundError(BranchyardError):
     """No such branch."""
 
 
+class StaleRevisionError(BranchyardError):
+    """A graph proposal was made against a revision that moved on; read `graph()` again."""
+
+
 _KINDS = {
     "denied": DeniedError,
     "running": RunningError,
     "not_running": NotRunningError,
     "steer_refused": SteerRefusedError,
     "unknown_branch": NotFoundError,
+    "stale_revision": StaleRevisionError,
 }
 
 
@@ -125,6 +135,8 @@ class Spawned:
     budget: Dict[str, Any]
     # The rig seat the child fills; None when it was spawned without one.
     seat: Optional[str] = None
+    # The siblings it waits for; it is {"state": "waiting"} until they settle.
+    depends_on: Optional[List[str]] = None
 
 
 @dataclasses.dataclass
@@ -147,10 +159,21 @@ class Inspection:
     # In a rig: the seat the branch fills and the seats it may spawn.
     seat: Optional[str] = None
     seats: Optional[List[str]] = None
+    # Its own graph's revision (None while 0), what it waits for, and the
+    # scratch areas it is bound to; see docs/graph.md.
+    graph_revision: Optional[int] = None
+    depends_on: Optional[List[Dict[str, Any]]] = None
+    bindings: Optional[List[Dict[str, Any]]] = None
+    stalled: Optional[bool] = None
 
     @property
     def running(self) -> bool:
         return self.status.get("state") == "running"
+
+    @property
+    def waiting(self) -> bool:
+        """Created with prerequisites that have not all settled yet."""
+        return self.status.get("state") == "waiting"
 
 
 @dataclasses.dataclass
@@ -195,6 +218,24 @@ class Cancelled:
 class Children:
     branch: str
     descendants: List[Dict[str, Any]]
+
+
+@dataclasses.dataclass
+class Graph:
+    """A branch's children, the dependencies among them, and its revision."""
+
+    branch: str
+    revision: int
+    children: List[Dict[str, Any]]
+    dependencies: List[Dict[str, Any]]
+
+
+@dataclasses.dataclass
+class GraphApplied:
+    branch: str
+    revision: int
+    spawned: List[Spawned]
+    dependencies: List[Dict[str, Any]]
 
 
 @dataclasses.dataclass
@@ -312,12 +353,20 @@ def spawn(
     max_depth: Optional[int] = None,
     deny: Optional[List[str]] = None,
     seat: Optional[str] = None,
+    depends_on: Optional[List[str]] = None,
+    after: Optional[str] = None,
+    bindings: Optional[Dict[str, str]] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
     In a rig, `seat` names the seat to fill: it sets the child's harness,
     limits, check and instructions, and the other arguments may only narrow
     them. `inspect().seats` lists the seats you may spawn.
+
+    With `depends_on` (other children of yours), the child is created
+    waiting and starts once each has settled, or, with
+    `after="integrated"`, once you integrated each. `bindings` maps scratch
+    area names to "read_only" or "exclusive_write". See docs/graph.md.
     """
     options = {
         "--seat": seat,
@@ -330,12 +379,37 @@ def spawn(
         "--check": check,
         "--max-depth": max_depth,
         "--deny": ",".join(deny) if deny else None,
+        "--depends-on": ",".join(depends_on) if depends_on else None,
+        "--after": after,
     }
     flags: List[str] = []
     for flag, value in options.items():
         if value is not None:
             flags += [flag, str(value)]
+    for scratch, access in (bindings or {}).items():
+        flags += ["--bind", f"{scratch}:{access}"]
     return _make(Spawned, _run(["spawn", *flags, "--", prompt]))
+
+
+def graph(branch: Optional[str] = None) -> Graph:
+    """Your graph (or a descendant's): children, dependencies, revision."""
+    return _make(Graph, _run(["graph", "show"] + ([branch] if branch else [])))
+
+
+def apply_graph(edits: List[Dict[str, Any]], expected_revision: int) -> GraphApplied:
+    """Apply a graph proposal to your children, all or nothing.
+
+    `edits` are dicts tagged by "kind": {"kind": "spawn", "prompt": ...,
+    "name": ..., "depends_on": [...], ...}, {"kind": "add_dependency",
+    "dependent": ..., "prerequisite": ...} or {"kind": "remove_dependency",
+    ...}. `expected_revision` is `graph().revision`; if the graph moved on,
+    nothing changes and StaleRevisionError is raised.
+    """
+    value = _run(["graph", "apply", "--edits", json.dumps(edits),
+                  "--expected-revision", str(expected_revision)])
+    applied = _make(GraphApplied, value)
+    applied.spawned = [_make(Spawned, s) for s in value.get("spawned", [])]
+    return applied
 
 
 def inspect(branch: Optional[str] = None) -> Inspection:
@@ -432,11 +506,12 @@ def inbox(unread: bool = False) -> Inbox:
 
 
 def wait(branch: str, timeout: Optional[float] = None, poll: float = 1.0) -> Inspection:
-    """Inspect `branch` until it is not running; RunningError after `timeout` seconds."""
+    """Inspect `branch` until it is neither running nor waiting for its
+    prerequisites; RunningError after `timeout` seconds."""
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
         state = inspect(branch)
-        if not state.running:
+        if not state.running and not state.waiting:
             return state
         if deadline is not None and time.monotonic() >= deadline:
             raise RunningError("running", f"{branch} is still running after {timeout}s")

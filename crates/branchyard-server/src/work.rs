@@ -466,6 +466,9 @@ pub(crate) fn spawn_parts(
         max_depth: request.max_depth,
         deny: request.deny.clone(),
         seat: request.seat.clone(),
+        depends_on: request.depends_on.clone(),
+        after: request.after,
+        bindings: request.bindings.clone(),
         ..Spawn::default()
     };
     Ok((options, spawn))
