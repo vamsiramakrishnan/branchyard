@@ -6,7 +6,7 @@ There is one set of operations and one authority model. Four surfaces reach them
 
 | Surface | Use it when |
 |---|---|
-| `by spawn`, `by inspect`, `by events`, `by send`, `by integrate`, `by cancel`, `by children` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
+| `by spawn`, `by inspect`, `by events`, `by send` (and `by send --steer`), `by integrate`, `by cancel`, `by children` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
 | The Python module `branchyard` | The harness writes Python to orchestrate: loops, fan-out, waiting. It runs `by --json` for you. |
 | The Rust SDK, `branchyard::Delegate` | You write the meta-harness in Rust, in or out of a harness. |
 | Branchyard's MCP server (`by mcp`) | The harness cannot run commands, or its shell cannot reach the repository, but it can call MCP tools. |
@@ -65,11 +65,12 @@ Inside a delegating harness, each command acts as the harness's branch, on its d
 | `by inspect [<branch>]` | This branch, or a descendant | Any branch |
 | `by events [<branch>] [--cursor N] [--limit N]` | Same | Any branch |
 | `by send <branch> "<prompt>"` | Starts a descendant's next turn and returns | Runs the turn in the foreground, as before |
+| `by send <branch> --steer "<text>"` | Adds the text to a descendant's running turn without interrupting it, and waits up to 10 s for delivery | Any branch's running turn, in any process |
 | `by integrate <branch>` | Merges a descendant into this branch | Merges a delegated child into its parent |
 | `by cancel <branch>` | Stops a descendant's turn and every turn below it | Any branch and its subtree |
 | `by children [<branch>]` | This branch's descendants | Any branch's |
 
-Every command takes `--json`. With it, stdout holds exactly one JSON value, and harness activity goes to stderr. A failure prints `{"error": {"kind": "...", "message": "..."}}` and exits 1. Kinds are stable: `denied` (envelope, budget or authority), `running`, `unknown_branch`, `no_candidate`, `conflict`, `check_failed`, `target_moved`, `dirty_target`, `unsupported`, `state`, and the rest of `branchyard::Error::kind`.
+Every command takes `--json`. With it, stdout holds exactly one JSON value, and harness activity goes to stderr. A failure prints `{"error": {"kind": "...", "message": "..."}}` and exits 1. Kinds are stable: `denied` (envelope, budget or authority), `running`, `not_running`, `steer_refused`, `unknown_branch`, `no_candidate`, `conflict`, `check_failed`, `target_moved`, `dirty_target`, `unsupported`, `state`, and the rest of `branchyard::Error::kind`.
 
 ### JSON shapes
 
@@ -81,6 +82,7 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 | `inspect` | `Inspection`: `{name, status, harness, profile, parent, children, depth, turns, candidate, cost_usd, subtree_cost_usd, max_usd, remaining_usd, envelope, last_message}`, and for a branch in a rig its `seat` and the `seats` it may spawn |
 | `events` | `EventPage`: `{branch, events: [{at_ms, activity}], next_cursor, total}` |
 | `send` | `Sent`: `{name, status}` |
+| `send --steer` / `steer` | `Steer`: `{id, branch, by, text, requested_at_ms, state}`, `state` `{"state": "delivered" \| "accepted" \| "pending"}`; a refusal is the error `steer_refused`, carrying the `Steer` |
 | `integrate` | `Merged`: `{branch, target, previous, commit}` |
 | `cancel` | `Cancelled`: `{cancelled: [branch]}` |
 | `children` | `Children`: `{branch, descendants: [BranchInfo]}` |
@@ -89,7 +91,7 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 
 ## Python
 
-The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotFoundError` or `BranchyardError`, each with the `kind`.
+The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError` or `BranchyardError`, each with the `kind`. `branchyard.steer(branch, text)` adds to a running child's turn.
 
 ```python
 import branchyard
@@ -125,7 +127,7 @@ me.integrate(&done.name)?;
 
 ## MCP tools
 
-`spawn`, `inspect`, `events`, `send`, `propose_integration`, `cancel` and `children`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays; `seat` names a rig seat). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
+`spawn`, `inspect`, `events`, `send`, `steer` (`{branch, text}`), `propose_integration`, `cancel` and `children`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays; `seat` names a rig seat). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
 
 ## The envelope
 
@@ -175,6 +177,8 @@ Without `--allow-delegation`, the server refuses an envelope, `allow_delegation`
 Children run on threads of the process that runs their parent's turn, whether that process is `by run` or your own program. A spawn returns once the child's record exists and its thread has started. While any of its turns may delegate, the engine listens on a Unix socket in `.branchyard/delegation/`, or in the temporary directory when that path is too long; `by`, the Python module and the MCP server reach it there. A socket, unlike a loopback port, stays reachable from a sandbox without network that can still see the repository.
 
 `by cancel` records a durable cancel request for the running turn (see [durability](durability.md#cancellation-and-deadlines)), which the engine running it checks every 100 ms, in whichever process that is; the turn is interrupted like a budget stop, and ends `interrupted`. A request is bound to the turn it was asked of and never stops a later one. A branch none of whose turns submitted a prompt, such as a child cancelled before its harness opened a session, has no conversation to continue: a later `send` starts a fresh session with only the prompt it sends, and records a warning that says so. A branch that ran a prompt and has no session is still refused.
+
+`by send --steer`, `branchyard.steer(branch, text)`, `Delegate::steer` and the MCP `steer` tool add input to a descendant's running turn instead of waiting for it to end: queued durably and bound to that turn like a cancel, written to its harness by the engine running it, and recorded in the child's log as `steered` by the parent, and in the parent's as a `steer` delegation. They wait up to 10 seconds for delivery and return the `Steer`. When the harness takes the input depends on its protocol ([harness integration](harness-integration.md#steering-a-running-turn)): Claude Code, Pi and Codex before their next model call, claude-agent-acp at once, interrupting the response in progress but not the turn. A child whose harness cannot take input mid-turn (Amp, Antigravity, an ACP agent without the steering extension) is refused with the reason, never interrupted in its place; a child with no running turn is `not_running`, and `send` continues it instead. The child's budget and permissions do not change.
 
 A child's own spend counts against every ancestor through the reservations. `inspect` reports `subtree_cost_usd`, the reported spend of a branch and its descendants.
 
