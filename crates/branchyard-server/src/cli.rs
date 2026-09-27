@@ -89,11 +89,7 @@ fn token_new(args: &[String], program: &str) -> ExitCode {
         }
     }
     let name = name.unwrap_or_else(|| format!("token-{}", &branchyard_client::new_key()[..8]));
-    let secret = format!(
-        "{}{}",
-        branchyard_client::new_key(),
-        branchyard_client::new_key()
-    );
+    let secret = new_token();
     let hash = sha256_hex(secret.as_bytes());
     eprintln!("{program}: token (printed once; give it to the client, never store it): {secret}");
     let credential = serde_json::json!({
@@ -111,6 +107,16 @@ fn token_new(args: &[String], program: &str) -> ExitCode {
         "{program}: add the object above to your configuration's top-level 'credentials' array"
     );
     ExitCode::SUCCESS
+}
+
+/// A fresh random bearer token or secret, as `token new` and a default
+/// token file get: two random keys.
+pub fn new_token() -> String {
+    format!(
+        "{}{}",
+        branchyard_client::new_key(),
+        branchyard_client::new_key()
+    )
 }
 
 pub const USAGE: &str = "\
@@ -166,6 +172,8 @@ Options:
                             renewal before another worker takes it over (default: 30)
   --shutdown-grace SECS     At shutdown, wait this long for running operations (default: 60)
   --quiet                   Do not log requests
+  --check                   Load and check the configuration as serving would, print
+                            any warnings, and exit without serving or writing a file
   -h, --help                Show this help
 
 On start it prints 'listening on URL' to stdout. SIGINT or SIGTERM begins a
@@ -200,6 +208,7 @@ struct Flags {
     webhooks: Vec<FlagWebhook>,
     webhook_insecure: bool,
     quiet: bool,
+    check: bool,
     help: bool,
 }
 
@@ -267,6 +276,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
             "--insecure-bind" if inline.is_none() => flags.insecure_bind = true,
             "--allow-client-commands" if inline.is_none() => flags.allow_client_commands = true,
             "--quiet" if inline.is_none() => flags.quiet = true,
+            "--check" if inline.is_none() => flags.check = true,
             "--allow-delegation" if inline.is_none() => flags.allow_delegation = true,
             "--allow-unapproved-tools" if inline.is_none() => flags.allow_unapproved_tools = true,
             "--allow-provider" => {
@@ -400,11 +410,7 @@ fn default_secret(path: &Path, message: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let token = format!(
-        "{}{}",
-        branchyard_client::new_key(),
-        branchyard_client::new_key()
-    );
+    let token = new_token();
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -456,8 +462,25 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         && !flags.worker
     {
         let path = data_dir.join("token");
-        default_token(&path)?;
-        token_files.push(path);
+        if flags.check {
+            // A check writes nothing: note the token serving would create,
+            // and check the rest as if it existed.
+            if !path.exists() {
+                warnings.push(format!(
+                    "serving would create a token in {}",
+                    path.display()
+                ));
+                tokens.push(Token {
+                    name: "default".into(),
+                    secret: new_token(),
+                });
+            } else {
+                token_files.push(path);
+            }
+        } else {
+            default_token(&path)?;
+            token_files.push(path);
+        }
     }
     for (i, path) in token_files.iter().enumerate() {
         let secret = config::read_token_file(path, &mut warnings)?;
@@ -525,6 +548,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     for (i, webhook) in flags.webhooks.into_iter().enumerate() {
         let secret = match webhook.secret_file {
             Some(path) => config::read_token_file(&path, &mut warnings)?,
+            None if flags.check => new_token(),
             None => {
                 let path = config.data_dir.join(format!("webhook-{i}.secret"));
                 default_secret(
@@ -546,7 +570,38 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         });
     }
     config.webhook_insecure = partial.webhook_insecure || flags.webhook_insecure;
+    if flags.check {
+        for (name, path) in &config.repos {
+            if !path.is_dir() {
+                warnings.push(format!(
+                    "repository {name}: {} is not a directory",
+                    path.display()
+                ));
+            }
+        }
+        if let Some(tls) = &config.tls {
+            for path in [&tls.cert, &tls.key] {
+                if !path.is_file() {
+                    warnings.push(format!("TLS file {} does not exist yet", path.display()));
+                }
+            }
+        }
+    }
     Ok((config, warnings))
+}
+
+/// `--check`: build and validate the configuration `args` describe as
+/// serving would, without writing anything. Returns its warnings, or why
+/// it would not serve. `by init server` checks every configuration it
+/// writes with this.
+pub fn check(args: &[String]) -> Result<Vec<String>, String> {
+    let mut flags = parse(args)?;
+    flags.check = true;
+    let (config, mut warnings) = build(flags)?;
+    if let Some(warning) = config.validate()? {
+        warnings.push(warning);
+    }
+    Ok(warnings)
 }
 
 /// Wait for SIGINT or SIGTERM.
@@ -594,6 +649,21 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     if flags.help {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
+    }
+    if flags.check {
+        return match check(args) {
+            Ok(warnings) => {
+                for warning in &warnings {
+                    eprintln!("{program}: warning: {warning}");
+                }
+                println!("configuration ok");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{program}: {error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     let (config, warnings) = match build(flags) {
         Ok(built) => built,
@@ -826,6 +896,39 @@ mod tests {
         assert!(config.tokens.is_empty() && config.credentials.is_empty());
         assert!(!dir.join("data/token").exists());
         assert!(config.validate().is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_validates_without_writing_anything() {
+        let dir = std::env::temp_dir().join(format!("branchyard-cli-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let file = dir.join("config.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({ "data_dir": "data", "repos": { "app": "app" } }).to_string(),
+        )
+        .unwrap();
+        let line = format!("--config {}", file.display());
+        let warnings = check(&args(&line)).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("would create a token")),
+            "{warnings:?}"
+        );
+        assert!(!dir.join("data").exists(), "a check writes nothing");
+        std::fs::write(
+            &file,
+            serde_json::json!({ "listen": "0.0.0.0:8421", "data_dir": "data", "repos": { "app": "app" } })
+                .to_string(),
+        )
+        .unwrap();
+        assert!(check(&args(&line)).unwrap_err().contains("--insecure-bind"));
+        let insecure = format!("{line} --insecure-bind");
+        assert!(check(&args(&insecure))
+            .unwrap()
+            .iter()
+            .any(|w| w.contains("WARNING")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1628,6 +1628,13 @@ pub struct Merged {
     pub commit: String,
 }
 
+/// Known harness profiles, whether their executable is on `PATH`, and
+/// their live qualification status, without opening a repository (what
+/// [`Yard::harnesses`] returns).
+pub fn harnesses() -> Vec<HarnessInfo> {
+    harness::list()
+}
+
 /// Known harness profile and local availability.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
