@@ -14,6 +14,8 @@ Every statement about an upstream project cites a path in its repository at the 
 
 Warp's application code, where all its agent code lives (`app/`), is AGPL-3.0; only its UI framework crates are MIT. Warp is surveyed for ideas only: nothing from it is ported, and Branchyard files contain none of its code ([vendoring](vendoring.md#warp-preserve-the-license-boundary)).
 
+Desktop agent workbenches (emdash, Superset, Conductor) are compared for developer experience separately, in [devex](devex.md).
+
 ## Summary
 
 | | Runs | Drives harnesses by | Approvals | Topology | Merging | Licence |
