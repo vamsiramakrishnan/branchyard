@@ -46,6 +46,7 @@
 pub mod api;
 pub mod http;
 pub mod sse;
+pub mod storage_api;
 
 use std::fmt;
 use std::io::{BufReader, Read};
@@ -55,7 +56,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use branchyard::{
-    Asked, BranchInfo, Children, EventPage, HarnessInfo, Inbox, Inspection, Message, Steer,
+    ArtifactRef, Asked, BranchInfo, Children, EventPage, HarnessInfo, Inbox, Inspection, Message,
+    ScratchArea, ScratchLock, Steer,
 };
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
@@ -69,9 +71,15 @@ use api::{
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
+use storage_api::{
+    Ack, ArtifactList, CreateScratchRequest, Empty, LockState, ScratchList, ShareRequest,
+    DIGEST_HEADER,
+};
 
 /// Largest response body read into memory.
 const MAX_BODY: usize = 256 * 1024 * 1024;
+/// A downloaded artifact's response headers and raw bytes.
+type BinaryResponse = (Vec<(String, String)>, Vec<u8>);
 /// Attempts for one idempotent `POST`.
 const POST_ATTEMPTS: u32 = 3;
 
@@ -250,12 +258,28 @@ impl Client {
         extra: &[(&str, String)],
         timeout: Duration,
     ) -> Result<Response, Error> {
+        let content_type = body.is_some().then_some("application/json");
+        self.call_raw(method, path, body, content_type, extra, timeout)
+    }
+
+    /// Like [`Client::call`], but with `content_type` instead of always
+    /// `application/json`: artifact bytes are not JSON. `None` sends the
+    /// body (if any) with no `Content-Type` at all.
+    fn call_raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+        extra: &[(&str, String)],
+        timeout: Duration,
+    ) -> Result<Response, Error> {
         let mut headers = vec![
             ("Authorization", format!("Bearer {}", self.token)),
             ("Accept", "application/json".to_owned()),
         ];
-        if body.is_some() {
-            headers.push(("Content-Type", "application/json".to_owned()));
+        if let Some(content_type) = content_type {
+            headers.push(("Content-Type", content_type.to_owned()));
         }
         headers.extend(extra.iter().cloned());
         let target = format!("{}{path}", self.endpoint.prefix);
@@ -272,6 +296,51 @@ impl Client {
             },
         )
         .map_err(|e| self.transport(e))
+    }
+
+    /// `GET path`, returning its response headers and raw body (not JSON):
+    /// an artifact's downloaded bytes, up to `limit`.
+    fn get_binary(&self, path: &str, limit: usize) -> Result<BinaryResponse, Error> {
+        let response = self.call("GET", path, None, &[], self.timeout)?;
+        let status = response.status;
+        let headers = response.headers.clone();
+        let body = response.read_body(limit).map_err(|e| self.transport(e))?;
+        match (200..300).contains(&status) {
+            true => Ok((headers, body)),
+            false => Err(api_error(status, &body)),
+        }
+    }
+
+    /// `POST path` with a raw (non-JSON) body, retried with the same
+    /// idempotency key when the connection fails, like [`Client::post`].
+    fn post_raw<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &[u8],
+        content_type: &str,
+        key: &str,
+    ) -> Result<T, Error> {
+        let headers = [("Idempotency-Key", key.to_owned())];
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let result = self
+                .call_raw(
+                    "POST",
+                    path,
+                    Some(body),
+                    Some(content_type),
+                    &headers,
+                    self.timeout,
+                )
+                .and_then(|response| self.decode(response));
+            match result {
+                Err(Error::Transport { .. }) if attempt < POST_ATTEMPTS => {
+                    std::thread::sleep(Duration::from_millis(250 * 4u64.pow(attempt - 1)));
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Read a JSON body, or the structured error.
@@ -737,6 +806,197 @@ impl Iterator for EventStream {
                 }
             }
         }
+    }
+}
+
+// =====================================================================
+// Storage: artifacts and scratch areas over HTTP (see `docs/storage.md`).
+// Kept in its own section, with its wire types in `storage_api`, so this
+// feature's client methods are easy to merge alongside unrelated work
+// elsewhere in this crate (inbox messages, branch lifecycle).
+//
+// A caller's `path`, for `publish_artifact` and `read_artifact`, is
+// always the *caller's own local file*: unlike a `--substrate-key`-style
+// path, which names a file on the server, the bytes here travel over the
+// HTTP call itself. `read_artifact` writes to a local path the same way
+// local mode does; `publish_artifact` reads its bytes from one.
+// =====================================================================
+
+/// A query parameter's value, percent-encoded like every path segment.
+fn push_query(query: &mut String, key: &str, value: &str) {
+    query.push(if query.is_empty() { '?' } else { '&' });
+    query.push_str(key);
+    query.push('=');
+    query.push_str(&encode(value));
+}
+
+impl Repo {
+    fn artifacts_path(&self, branch: &str, rest: &str) -> String {
+        self.branch_path(branch, &format!("/artifacts{rest}"))
+    }
+
+    fn scratch_path(&self, branch: &str, rest: &str) -> String {
+        self.branch_path(branch, &format!("/scratch{rest}"))
+    }
+
+    /// Publish `bytes` as a new immutable artifact of `branch`, acting
+    /// with the server's authority as a person, like
+    /// `by artifact publish --branch`. `name` defaults to the digest;
+    /// `media_type` to `application/octet-stream`.
+    pub fn publish_artifact(
+        &self,
+        branch: &str,
+        bytes: &[u8],
+        name: Option<&str>,
+        media_type: Option<&str>,
+        labels: &[(String, String)],
+        key: &str,
+    ) -> Result<ArtifactRef, Error> {
+        let mut query = String::new();
+        if let Some(name) = name {
+            push_query(&mut query, "name", name);
+        }
+        if let Some(media_type) = media_type {
+            push_query(&mut query, "media_type", media_type);
+        }
+        for (k, v) in labels {
+            push_query(&mut query, "label", &format!("{k}={v}"));
+        }
+        let path = format!("{}{query}", self.artifacts_path(branch, ""));
+        self.client.post_raw(
+            &path,
+            bytes,
+            media_type.unwrap_or("application/octet-stream"),
+            key,
+        )
+    }
+
+    /// Every artifact `branch` may read; like `by artifact list --branch`.
+    pub fn artifacts(&self, branch: &str) -> Result<Vec<ArtifactRef>, Error> {
+        Ok(self
+            .client
+            .get::<ArtifactList>(&self.artifacts_path(branch, ""))?
+            .artifacts)
+    }
+
+    /// Artifact `id`'s provenance and bytes, verified against its recorded
+    /// digest and size, for `branch`; like `by artifact get --branch`. The
+    /// caller writes the bytes wherever it likes (unlike local mode's
+    /// `--out`, which names a path resolved against the acting branch's
+    /// own worktree, `out` here is never sent: only the bytes cross the
+    /// wire, and the caller's own filesystem is its own).
+    pub fn read_artifact(&self, branch: &str, id: &str) -> Result<(ArtifactRef, Vec<u8>), Error> {
+        let meta: ArtifactRef = self
+            .client
+            .get(&self.artifacts_path(branch, &format!("/{}", encode(id))))?;
+        let (headers, bytes) = self.client.get_binary(
+            &self.artifacts_path(branch, &format!("/{}/content", encode(id))),
+            MAX_BODY,
+        )?;
+        let digest = blake3::hash(&bytes).to_hex().to_string();
+        let header_digest = headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(DIGEST_HEADER))
+            .map(|(_, v)| v.as_str());
+        if bytes.len() as u64 != meta.size
+            || digest != meta.digest
+            || header_digest.is_some_and(|h| h != meta.digest)
+        {
+            return Err(Error::Protocol(format!(
+                "downloaded artifact {id} does not match its recorded size or digest"
+            )));
+        }
+        Ok((meta, bytes))
+    }
+
+    /// Share artifact `id`, readable by `branch`, with `to`; like
+    /// `by artifact share --branch`.
+    pub fn share_artifact(&self, branch: &str, id: &str, to: &str, key: &str) -> Result<(), Error> {
+        self.client
+            .post::<Ack>(
+                &self.artifacts_path(branch, &format!("/{}/share", encode(id))),
+                &ShareRequest { to: to.to_owned() },
+                key,
+            )
+            .map(|_| ())
+    }
+
+    /// Create scratch area `name`, owned by `branch`; like
+    /// `by scratch create --branch`.
+    pub fn create_scratch(
+        &self,
+        branch: &str,
+        name: &str,
+        key: &str,
+    ) -> Result<ScratchArea, Error> {
+        self.client.post(
+            &self.scratch_path(branch, ""),
+            &CreateScratchRequest {
+                name: name.to_owned(),
+            },
+            key,
+        )
+    }
+
+    /// Every scratch area `branch` may reach; like
+    /// `by scratch list --branch`.
+    pub fn scratch_areas(&self, branch: &str) -> Result<Vec<ScratchArea>, Error> {
+        Ok(self
+            .client
+            .get::<ScratchList>(&self.scratch_path(branch, ""))?
+            .areas)
+    }
+
+    /// Share scratch area `name`, reachable by `branch`, with `to`; like
+    /// `by scratch share --branch`.
+    pub fn share_scratch(
+        &self,
+        branch: &str,
+        name: &str,
+        to: &str,
+        key: &str,
+    ) -> Result<(), Error> {
+        self.client
+            .post::<Ack>(
+                &self.scratch_path(branch, &format!("/{}/share", encode(name))),
+                &ShareRequest { to: to.to_owned() },
+                key,
+            )
+            .map(|_| ())
+    }
+
+    /// Acquire scratch area `name`'s writer lock for `branch`; like
+    /// `by scratch lock --branch`. Refused with `running` while another
+    /// branch's turn holds it.
+    pub fn lock_scratch(&self, branch: &str, name: &str, key: &str) -> Result<ScratchLock, Error> {
+        self.client.post(
+            &self.scratch_path(branch, &format!("/{}/lock", encode(name))),
+            &Empty::default(),
+            key,
+        )
+    }
+
+    /// Release scratch area `name`'s lock if `branch` holds it; like
+    /// `by scratch unlock --branch`.
+    pub fn unlock_scratch(&self, branch: &str, name: &str, key: &str) -> Result<(), Error> {
+        self.client
+            .post::<Ack>(
+                &self.scratch_path(branch, &format!("/{}/unlock", encode(name))),
+                &Empty::default(),
+                key,
+            )
+            .map(|_| ())
+    }
+
+    /// Scratch area `name`'s writer lock, if one is held, whether or not
+    /// its turn is still running. Not scoped to a branch: like
+    /// [`branchyard::Yard::scratch_lock_state`], it is not access
+    /// controlled.
+    pub fn scratch_lock_state(&self, name: &str) -> Result<Option<ScratchLock>, Error> {
+        Ok(self
+            .client
+            .get::<LockState>(&self.path(&format!("/scratch/{}/lock", encode(name))))?
+            .lock)
     }
 }
 

@@ -2,7 +2,7 @@
 
 Two primitives for branches that collaborate rather than work in isolation: immutable **artifacts**, published once and read by authorized branches, and **scratch areas**, a named shared directory with one writer at a time. Both follow design §7's "Shared workspace: authorized participants; enforced single writer per mutable scope", and both are implemented in [`crates/branchyard/src/storage.rs`](../crates/branchyard/src/storage.rs), tested hermetically against the fake ACP agent, SQLite and PostgreSQL.
 
-> **Status.** Built and tested in local mode: publish, list, get, share, GC, the delegation surfaces (`by`, Python, `Delegate`, MCP) inside and outside a harness, and a scratch lock reclaimed once its holder's turn ends, across two `Yard` handles on one repository. **Not yet built:** `by --remote`, the server's HTTP API, and a Substrate actor's access to a scratch area (it has no host mounts; see below). Metadata is a small trait, `StorageBackend`, kept separate from the branch-lifecycle `Backend` trait so this feature's tables do not enlarge it; both SQLite and PostgreSQL implement it on the same connection as their `Backend`, and one conformance suite (`storage` in [`conformance.rs`](../crates/branchyard/src/conformance.rs)) runs against both.
+> **Status.** Built and tested in local mode and remotely: publish, list, get, share, GC, the delegation surfaces (`by`, Python, `Delegate`, MCP) inside and outside a harness, a scratch lock reclaimed once its holder's turn ends, across two `Yard` handles on one repository, and now `by --remote artifact`/`by --remote scratch`, the server's HTTP API and `branchyard-client`, acting with the server's authority as a person exactly as local `by artifact … --branch B` does (see [Remote mode](#remote-mode) below). **Not yet built:** a Substrate actor's access to a scratch area (it has no host mounts; see below). Metadata is a small trait, `StorageBackend`, kept separate from the branch-lifecycle `Backend` trait so this feature's tables do not enlarge it; both SQLite and PostgreSQL implement it on the same connection as their `Backend`, and one conformance suite (`storage` in [`conformance.rs`](../crates/branchyard/src/conformance.rs)) runs against both.
 
 ## Artifacts
 
@@ -52,14 +52,45 @@ The ancestor check does not need the publisher's branch record to still exist: a
 | Surface | Publish | List | Get | Share |
 |---|---|---|---|---|
 | `by` | `by artifact publish FILE [--name N] [--label K=V]... [--branch B]` | `by artifact list [--branch B]` | `by artifact get ID --out PATH [--branch B]` | `by artifact share ID --to BRANCH [--branch B]` |
+| `by --remote` | same, `--branch` required | same, `--branch` required | same, `--branch` required | same, `--branch` required |
 | Python | `branchyard.publish(path, name=, labels=)` | `branchyard.list_artifacts()` | `branchyard.get_artifact(id, out)` | `branchyard.share_artifact(id, to)` |
 | Rust `Delegate` | `Delegate::publish_artifact` | `Delegate::artifacts` | `Delegate::read_artifact` | `Delegate::share_artifact` |
 | MCP | `publish_artifact` | `list_artifacts` | `get_artifact` | `share_artifact` |
 | SDK | `Yard::publish_artifact`, `Branch::publish` | `Yard::artifacts`, `Branch::artifacts` | `Yard::read_artifact`, `Branch::read_artifact` | `Yard::share_artifact` |
+| HTTP | `POST …/branches/{b}/artifacts` (body: bytes) | `GET …/branches/{b}/artifacts` | `GET …/branches/{b}/artifacts/{id}` (metadata), `GET …/artifacts/{id}/content` (bytes) | `POST …/artifacts/{id}/share` |
+| client | `Repo::publish_artifact` | `Repo::artifacts` | `Repo::read_artifact` | `Repo::share_artifact` |
 
-`--branch` names the acting branch outside a harness (as `spawn --parent` does); inside a harness it is the harness's own and `--branch` is refused if it names anyone else. A path a delegation surface gives (`by artifact publish`, the Python module, `Delegate`, MCP) is resolved against the acting branch's own worktree when relative, so a harness can `by artifact publish output.txt` from its own working directory; the SDK's `Yard::publish_artifact` takes any path directly, since it is not run from inside a worktree.
+`--branch` names the acting branch outside a harness (as `spawn --parent` does); inside a harness it is the harness's own and `--branch` is refused if it names anyone else. A path a delegation surface gives (`by artifact publish`, the Python module, `Delegate`, MCP) is resolved against the acting branch's own worktree when relative, so a harness can `by artifact publish output.txt` from its own working directory; the SDK's `Yard::publish_artifact` takes any path directly, since it is not run from inside a worktree. `by --remote artifact`/`by --remote scratch` always act as a person (there is no harness to delegate as inside `by --remote`, unlike local mode inside a harness), so `--branch` is required rather than defaulting to the harness's own.
 
-`by --remote`, the HTTP API and `branchyard-client` do not reach artifacts yet: `by artifact` and `by scratch` against `--remote` refuse with a clear `unsupported` error rather than pretending to work. A size limit for a future remote upload/download path is defined as [`storage::DEFAULT_ARTIFACT_LIMIT`] (512 MiB), intended to be configurable by the server's operator, as the task asked; it is not enforced yet because nothing uploads over the network yet.
+### Remote mode
+
+`by --remote artifact …`, `by --remote scratch …`, the server's HTTP API and `branchyard-client` reach artifacts and scratch areas, acting with the server's authority as a person, bounded exactly like local `by artifact … --branch B`: `{branch}` in each route's path is the acting branch, checked against the same read-authorization rule as local mode (ancestor, descendant, self, or explicit share). `by --remote` prints the same JSON as local mode for every operation (tested by comparing, since artifact ids are per-repository sequence numbers, identical across two freshly created, identical repositories run through the same sequence of commands).
+
+**A path is always the caller's own local file, never the server's.** Unlike `--substrate-key`-style flags, which name an absolute path *on the server*, a path here (`by artifact publish FILE`, `by artifact get ID --out PATH`) resolves against the machine running `by --remote`: publishing reads the file from disk and sends its bytes in the request body; getting writes the downloaded bytes to the given local path. The bytes always cross the network; there is no way to tell the server to read or write its own filesystem directly, which is the point — a remote caller has no other access to the repository's files at all.
+
+The HTTP API:
+
+| Method and path | Does |
+|---|---|
+| `POST /v1/repos/{repo}/branches/{branch}/artifacts` | Publish the request body as a new artifact of `branch`. `name`, `media_type` and repeated `label` are query parameters (the body is not JSON); `201` with the `ArtifactRef`. `413 body_too_large` over `max_artifact_bytes` |
+| `GET /v1/repos/{repo}/branches/{branch}/artifacts` | Every artifact `branch` may read: `{"artifacts": [ArtifactRef]}` |
+| `GET /v1/repos/{repo}/branches/{branch}/artifacts/{id}` | Artifact `id`'s provenance only, checked against `branch`'s grant: `ArtifactRef` |
+| `GET /v1/repos/{repo}/branches/{branch}/artifacts/{id}/content` | Its bytes, streamed, with `Content-Type`, `Content-Length` and a digest header (`x-branchyard-artifact-digest`) the client checks against the metadata it already fetched |
+| `POST /v1/repos/{repo}/branches/{branch}/artifacts/{id}/share` | `{"to": "BRANCH"}`; `{"ok": true}` |
+| `POST /v1/repos/{repo}/branches/{branch}/scratch` | `{"name": "NAME"}`; create, owned by `branch`: the `ScratchArea` |
+| `GET /v1/repos/{repo}/branches/{branch}/scratch` | Every scratch area `branch` may reach: `{"areas": [ScratchArea]}` |
+| `POST /v1/repos/{repo}/branches/{branch}/scratch/{name}/share` | `{"to": "BRANCH"}`; `{"ok": true}` |
+| `POST /v1/repos/{repo}/branches/{branch}/scratch/{name}/lock` | Acquire the writer lock for `branch`: the `ScratchLock`, or `409 running` naming the holder |
+| `POST /v1/repos/{repo}/branches/{branch}/scratch/{name}/unlock` | Release it if `branch` holds it: `{"ok": true}` |
+| `GET /v1/repos/{repo}/scratch/{name}/lock` | The current holder, if any (not scoped to a branch: like `Yard::scratch_lock_state`, this is not access controlled): `{"lock": ScratchLock?}` |
+
+A publish accepts `Idempotency-Key` like the other mutating routes, but through its own in-memory cache (`storage_routes::StorageIdem`), not the operation registry's durable one: publish finishes within the request, so it needs nothing like an operation to poll, and this cache does not survive a restart (like branch locks; see `docs/server.md`'s "What is durable" table). The other storage routes (`create`, the shares, lock, unlock) do not check an idempotency key: each is naturally safe to repeat — a share or an unlock is a no-op the second time, a lock is re-entrant for its own holder, and a repeated `create` gets a clear "already exists" the caller can treat as success.
+
+`max_artifact_bytes` (`by serve --max-artifact-bytes N`, or the configuration file's `max_artifact_bytes`) bounds a publish's upload; the default is 256 MiB. [`storage::DEFAULT_ARTIFACT_LIMIT`] (512 MiB) is a separate, local-mode-only constant with no enforcement point (nothing bounds a local `by artifact publish`'s file size); the two are unrelated on purpose, since the server's limit protects its own memory and disk, not local mode.
+
+### Scratch areas through the server
+
+`create`/`list`/`share`/`lock`/`unlock` all reach the server; the directory itself does not. A scratch area's directory lives on the server host (`.branchyard/scratch/NAME/` in the served repository), and a remote caller has no route that reads or writes it directly — only a harness the server runs sees it (through `BRANCHYARD_SCRATCH_<NAME>`, exactly as in local mode), or, in the future, a small `get`/`put` of one file added if that turns out to be worth the surface. Until then, a remote caller synchronizes on the lock (so its own out-of-band access to a shared resource is fenced the same cooperative way local mode's is) but exchanges the area's actual bytes some other way — a task's own file transfer tools, or an artifact published from inside a turn that runs there.
 
 ## Scratch areas
 
@@ -130,11 +161,15 @@ Both backends implement `StorageBackend` on the same struct, and so the same con
 | [`crates/branchyard-cli/tests/cli.rs`](../crates/branchyard-cli/tests/cli.rs) | `by artifact`/`by scratch` end to end outside a harness, and through the Python module inside one |
 | [`engine.rs`](../crates/branchyard/src/engine.rs), [`placement.rs`](../crates/branchyard/src/placement.rs) | Scratch-area environment variables (local) and mounts (Microsandbox) added to a turn's environment |
 | [`ops.rs`](../crates/branchyard/src/ops.rs) | `gc_after_removal` called from `remove` |
+| [`branchyard-server/src/storage_routes.rs`](../crates/branchyard-server/src/storage_routes.rs) | The HTTP routes above, the upload size limit, the publish idempotency cache |
+| [`branchyard-client/src/storage_api.rs`](../crates/branchyard-client/src/storage_api.rs), [`lib.rs`](../crates/branchyard-client/src/lib.rs) | Wire types, and `Repo`'s artifact/scratch methods, digest-verified on download |
+| [`branchyard-server/tests/storage.rs`](../crates/branchyard-server/tests/storage.rs) | Over real HTTP: publish/list/get with digest verification, dedup, the size limit, grants (ancestor, sibling refused until shared), a scratch lock's contention across two clients, restart survival |
+| [`branchyard-cli/tests/remote.rs`](../crates/branchyard-cli/tests/remote.rs) | `artifact_and_scratch_commands_print_what_local_ones_do`: `by --remote artifact`/`scratch` against the built binaries, JSON compared against local mode command for command |
 
 ## Not guaranteed
 
 - **Filesystem fencing of a scratch area's writer.** As stated above: the lock is a cooperative policy for callers that go through it, not an OS-level mount fence. Design §7 is explicit that a database lease cannot do this; nothing here claims otherwise.
-- **`by --remote`, the server's HTTP API, and `branchyard-client`** for artifacts or scratch areas. Both refuse clearly (`unsupported`) rather than silently no-op.
+- **A remote caller's direct access to a scratch area's directory.** It lives on the server host; `create`/`list`/`share`/`lock`/`unlock` reach it over HTTP, but there is no `get`/`put` of the directory's files (see "Scratch areas through the server" above) — only a harness the server runs sees it.
 - **A Substrate actor's access to a scratch area.** No transfer path exists yet; it simply gets none.
-- **Cross-tenant deduplication or existence leaks.** Not applicable yet, since artifacts are scoped to one repository's store; design §7's caution applies once a server holds several tenants' artifacts in shared storage.
-- **An artifact upload/download size limit enforced anywhere.** `DEFAULT_ARTIFACT_LIMIT` is defined for the remote path this document says is not built.
+- **The publish idempotency cache surviving a restart.** It is in memory, like branch locks; a retried publish after a restart in between records a duplicate provenance row over the same deduplicated bytes (harmless: the bytes are stored once either way).
+- **Cross-repository or cross-tenant deduplication, or existence leaks.** Each served repository's artifacts stay in its own `.branchyard/`; design §7's caution applies once a server holds several tenants' artifacts in genuinely shared storage, which this is not.

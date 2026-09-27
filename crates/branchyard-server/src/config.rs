@@ -33,6 +33,10 @@ use serde::Deserialize;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8421";
 
+/// Default [`Config::max_artifact_bytes`]: sane for occasional build
+/// outputs and logs, raised by the operator for larger ones.
+pub const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+
 /// A bearer token. Its secret never appears in `Debug` output or logs.
 #[derive(Clone)]
 pub struct Token {
@@ -131,6 +135,10 @@ pub struct Config {
     /// Serve plain HTTP on a non-loopback address. Only from the flag.
     pub insecure_bind: bool,
     pub max_body_bytes: usize,
+    /// Largest artifact a `POST .../artifacts` upload may publish; larger
+    /// ones are refused with `413 body_too_large` before being written
+    /// anywhere. See `docs/storage.md`.
+    pub max_artifact_bytes: u64,
     /// Operations running at once; more wait queued.
     pub max_running: usize,
     /// How long shutdown waits for running operations.
@@ -181,6 +189,7 @@ impl Config {
             tls: None,
             insecure_bind: false,
             max_body_bytes: 1024 * 1024,
+            max_artifact_bytes: DEFAULT_MAX_ARTIFACT_BYTES,
             max_running: 8,
             shutdown_grace: Duration::from_secs(60),
             harness_commands: BTreeMap::new(),
@@ -239,6 +248,9 @@ impl Config {
         }
         if self.max_body_bytes < 1024 {
             return Err("max_body_bytes must be at least 1024".into());
+        }
+        if self.max_artifact_bytes < 1024 {
+            return Err("max_artifact_bytes must be at least 1024".into());
         }
         let mut ids: Vec<&str> = self.webhooks.iter().map(|w| w.id.as_str()).collect();
         ids.sort_unstable();
@@ -340,6 +352,7 @@ struct FileConfig {
     tokens: Vec<FileToken>,
     tls: Option<FileTls>,
     max_body_bytes: Option<usize>,
+    max_artifact_bytes: Option<u64>,
     max_running: Option<usize>,
     shutdown_grace_seconds: Option<f64>,
     #[serde(default)]
@@ -398,6 +411,7 @@ pub struct Partial {
     pub tokens: Vec<Token>,
     pub tls: Option<TlsFiles>,
     pub max_body_bytes: Option<usize>,
+    pub max_artifact_bytes: Option<u64>,
     pub max_running: Option<usize>,
     pub shutdown_grace: Option<Duration>,
     pub harness_commands: BTreeMap<String, Vec<String>>,
@@ -508,6 +522,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             key: resolve(t.key),
         }),
         max_body_bytes: file.max_body_bytes,
+        max_artifact_bytes: file.max_artifact_bytes,
         max_running: file.max_running,
         shutdown_grace,
         harness_commands: file.harness_commands,
