@@ -190,6 +190,16 @@ impl App {
                  request's own commands with allow_client_commands",
             ));
         }
+        // A remote server receives its headers, which are the server's
+        // secrets: a request choosing the URL chooses where they go.
+        if !spec.remote_mcp_servers.is_empty() && !self.config.allow_client_commands {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "command_not_allowed",
+                "HTTP and SSE MCP servers receive this server's secrets as headers at a URL the \
+                 request chooses; its operator can accept them with allow_client_commands",
+            ));
+        }
         Ok(Some(spec))
     }
 

@@ -31,7 +31,8 @@ use serde_json::json;
 use crate::{
     frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, McpServer,
     NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
-    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Value, PREAMBLE_CLOSE, PREAMBLE_OPEN,
+    Rejected, RemoteMcpServer, RemoteTransport, SessionMode, Submitted, TurnOutcome, Turns, Value,
+    PREAMBLE_CLOSE, PREAMBLE_OPEN,
 };
 
 /// The ACP protocol version this client speaks.
@@ -45,18 +46,26 @@ enum Pending {
 }
 
 /// ACP stdio servers: `{name, command, args, env: [{name, value}]}` with no
-/// `type`, the untagged `McpServer::Stdio` variant every agent must accept.
-fn mcp_servers(servers: &[McpServer]) -> Value {
+/// `type`, the untagged `McpServer::Stdio` variant every agent must accept;
+/// then HTTP and SSE servers, `{type, name, url, headers: [{name, value}]}`,
+/// which an agent accepts only when it advertises `mcpCapabilities`.
+fn mcp_servers(servers: &[McpServer], remote: &[RemoteMcpServer]) -> Value {
+    let pairs = |pairs: &[(String, String)]| -> Vec<Value> {
+        pairs
+            .iter()
+            .map(|(name, value)| json!({"name": name, "value": value}))
+            .collect()
+    };
     servers
         .iter()
         .map(|server| {
-            let env: Vec<Value> = server
-                .env
-                .iter()
-                .map(|(name, value)| json!({"name": name, "value": value}))
-                .collect();
-            json!({"name": server.name, "command": server.command, "args": server.args, "env": env})
+            json!({"name": server.name, "command": server.command, "args": server.args,
+                   "env": pairs(&server.env)})
         })
+        .chain(remote.iter().map(|server| {
+            json!({"type": server.transport.as_str(), "name": server.name, "url": server.url,
+                   "headers": pairs(&server.headers)})
+        }))
         .collect()
 }
 
@@ -129,7 +138,24 @@ impl Acp {
         }
         let open = self.open.clone().expect("initialize follows open()");
         let capabilities = response.agent_capabilities;
-        let servers = mcp_servers(&open.mcp_servers);
+        let accepted = |transport: RemoteTransport| match transport {
+            RemoteTransport::Http => capabilities.mcp_capabilities.http,
+            RemoteTransport::Sse => capabilities.mcp_capabilities.sse,
+        };
+        if let Some(server) = open
+            .remote_mcp_servers
+            .iter()
+            .find(|s| !accepted(s.transport))
+        {
+            return Output::event(Event::OpenFailed {
+                reason: format!(
+                    "the agent does not accept {} MCP servers ({})",
+                    server.transport.as_str().to_uppercase(),
+                    server.name
+                ),
+            });
+        }
+        let servers = mcp_servers(&open.mcp_servers, &open.remote_mcp_servers);
         let (method, mut params) = match &open.mode {
             SessionMode::Fresh => (
                 "session/new",
@@ -364,7 +390,7 @@ impl Driver for Acp {
             // ACP v1 has no model parameter; selection belongs to the profile.
             return Err(Rejected::Unsupported("model selection over ACP".into()));
         }
-        crate::check_mcp_servers(&open.mcp_servers)?;
+        crate::check_all_mcp_servers(&open)?;
         self.preamble = open.instructions.as_ref().map(|i| i.text.clone());
         let launch = LaunchSpec {
             argv: self.command.clone(),

@@ -65,7 +65,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use branchyard_harness::profiles::Protocol;
-pub use branchyard_harness::{Instructions, McpServer};
+pub use branchyard_harness::{Instructions, McpServer, RemoteMcpServer, RemoteTransport};
 use serde::{Deserialize, Serialize};
 
 pub use edit::{Edit, JsonEdit, TomlEdit};
@@ -91,6 +91,9 @@ pub struct Provisioning {
     /// Stdio MCP servers the harness starts, besides Branchyard's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerSpec>,
+    /// HTTP and SSE MCP servers the harness connects to, where it can.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_mcp_servers: Vec<RemoteMcpSpec>,
     /// Standing instructions, besides Branchyard's delegation skill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -285,12 +288,106 @@ impl McpServerSpec {
             })?;
             server.env.push((var.clone(), secret.value.clone()));
             used.push(McpSecret {
-                server: self.name.clone(),
-                var: var.clone(),
                 secret: name.clone(),
+                via: Via::McpServer {
+                    server: self.name.clone(),
+                    var: var.clone(),
+                },
             });
         }
         Ok((server, used))
+    }
+}
+
+/// An HTTP or SSE MCP server, in a form that is stored and sent over the
+/// API. Every header's value is one of the task's secrets, named here and
+/// resolved each turn, so no header value is stored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteMcpSpec {
+    pub name: String,
+    /// `http` (streamable HTTP, the default) or `sse`.
+    #[serde(default, skip_serializing_if = "is_http")]
+    pub transport: RemoteMcpTransport,
+    pub url: String,
+    /// Header name to the name of the secret holding its value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// [`RemoteMcpSpec::transport`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteMcpTransport {
+    #[default]
+    Http,
+    Sse,
+}
+
+fn is_http(transport: &RemoteMcpTransport) -> bool {
+    *transport == RemoteMcpTransport::Http
+}
+
+impl RemoteMcpSpec {
+    /// The same checks the drivers make, so a bad server is refused before
+    /// a branch exists.
+    pub fn check(&self) -> Result<(), String> {
+        let probe = McpServerSpec {
+            name: self.name.clone(),
+            command: "/".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            secret_env: BTreeMap::new(),
+        };
+        probe.check()?;
+        branchyard_harness::check_remote_url(&self.url)
+            .map_err(|why| format!("MCP server {}: {why}", self.name))?;
+        for (header, secret) in &self.headers {
+            branchyard_harness::check_header(header, "")
+                .map_err(|why| format!("MCP server {}: {why}", self.name))?;
+            check_variable_name(secret)
+                .map_err(|why| format!("MCP server {} secret {secret:?} {why}", self.name))?;
+        }
+        Ok(())
+    }
+
+    /// The server with its headers from `secrets`, and which secret each
+    /// came from. Fails naming a secret that is not given.
+    pub fn resolve(&self, secrets: &[Secret]) -> Result<(RemoteMcpServer, Vec<McpSecret>), String> {
+        let mut headers = Vec::new();
+        let mut used = Vec::new();
+        for (header, name) in &self.headers {
+            let secret = secrets.iter().find(|s| &s.name == name).ok_or_else(|| {
+                format!(
+                    "MCP server {} needs the secret {name}, which the task does not give",
+                    self.name
+                )
+            })?;
+            branchyard_harness::check_header(header, &secret.value).map_err(|_| {
+                format!("the secret {name} spans lines and cannot be an HTTP header")
+            })?;
+            headers.push((header.clone(), secret.value.clone()));
+            used.push(McpSecret {
+                secret: name.clone(),
+                via: Via::McpHeader {
+                    server: self.name.clone(),
+                    header: header.clone(),
+                },
+            });
+        }
+        let transport = match self.transport {
+            RemoteMcpTransport::Http => RemoteTransport::Http,
+            RemoteMcpTransport::Sse => RemoteTransport::Sse,
+        };
+        Ok((
+            RemoteMcpServer {
+                name: self.name.clone(),
+                transport,
+                url: self.url.clone(),
+                headers,
+            },
+            used,
+        ))
     }
 }
 
@@ -392,12 +489,12 @@ impl Telemetry {
     }
 }
 
-/// An MCP server variable set from a secret, by name.
+/// An MCP server variable or header set from a secret, by name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpSecret {
-    pub server: String,
-    pub var: String,
     pub secret: String,
+    /// [`Via::McpServer`] or [`Via::McpHeader`].
+    pub via: Via,
 }
 
 /// A secret with its value. Never serialized; `Debug` shows only the name.
@@ -444,7 +541,9 @@ pub struct Context {
     /// Every MCP server for the turn: the task's and Branchyard's own,
     /// with their variables, secrets included.
     pub mcp_servers: Vec<McpServer>,
-    /// Which of those variables hold secrets.
+    /// HTTP and SSE MCP servers, with their headers.
+    pub remote_mcp_servers: Vec<RemoteMcpServer>,
+    /// Which of the servers' variables and headers hold secrets.
     pub mcp_secrets: Vec<McpSecret>,
     /// The task's instructions and Branchyard's delegation skill, joined.
     pub instructions: Option<Instructions>,
@@ -474,6 +573,7 @@ impl Context {
             secrets: Vec::new(),
             auth: None,
             mcp_servers: Vec::new(),
+            remote_mcp_servers: Vec::new(),
             mcp_secrets: Vec::new(),
             instructions: None,
             model: None,
@@ -673,6 +773,7 @@ impl fmt::Debug for EnvVar {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Session {
     pub mcp_servers: Vec<McpServer>,
+    pub remote_mcp_servers: Vec<RemoteMcpServer>,
     pub instructions: Option<Instructions>,
     pub model: Option<String>,
     /// For a driver that would otherwise put the MCP servers on its command
@@ -734,6 +835,9 @@ pub enum Via {
     /// server's configuration: over stdin, or in a 0600 file. Only that
     /// server's process has it, so `tool_env` is false.
     McpServer { server: String, var: String },
+    /// A header the harness sends to an HTTP or SSE MCP server, given in
+    /// the same way.
+    McpHeader { server: String, header: String },
 }
 
 /// A provisioning plan: data only, applied by [`apply::apply`].
@@ -886,18 +990,21 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
     if let Some(telemetry) = &context.telemetry {
         telemetry.check().map_err(Refused)?;
     }
+    if let Some(server) = context.remote_mcp_servers.first() {
+        if !matches!(context.protocol, Protocol::ClaudeStreamJson | Protocol::Acp) {
+            return Err(unsupported(
+                context,
+                &format!("the HTTP or SSE MCP server {}", server.name),
+                "only Claude Code's stream-json driver and ACP agents that advertise them \
+                 take one",
+            ));
+        }
+    }
     let mut plan = for_harness(&context.harness).plan(context)?;
     // Secrets given to MCP servers are used, and delivered with them.
     for used in &context.mcp_secrets {
         plan.unused_secrets.retain(|name| name != &used.secret);
-        plan.deliver(
-            &used.secret,
-            Via::McpServer {
-                server: used.server.clone(),
-                var: used.var.clone(),
-            },
-            false,
-        );
+        plan.deliver(&used.secret, used.via.clone(), false);
     }
     if context.private_home {
         record_installed(context, &mut plan);
@@ -976,6 +1083,7 @@ pub(crate) fn needs_private_home(context: &Context, what: &str) -> Result<(), Re
 /// the instructions, as they are.
 pub(crate) fn pass_session(context: &Context, plan: &mut Plan) {
     plan.session.mcp_servers = context.mcp_servers.clone();
+    plan.session.remote_mcp_servers = context.remote_mcp_servers.clone();
     plan.session.instructions = context.instructions.clone();
 }
 

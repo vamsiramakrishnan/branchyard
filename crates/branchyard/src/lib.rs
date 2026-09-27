@@ -127,7 +127,8 @@ pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
 };
 pub use branchyard_provision::{
-    Delivery, Effort, McpServerSpec, Provisioning, SecretFrom, SecretSource, Telemetry, Via,
+    Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport, SecretFrom,
+    SecretSource, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
 pub use delegation::{

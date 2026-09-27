@@ -364,6 +364,7 @@ fn run(
         instructions: provisioned.session.instructions,
         model: provisioned.session.model,
         mcp_config_file: provisioned.mcp_config_file,
+        remote_mcp_servers: provisioned.session.remote_mcp_servers,
         ..Open::new(turn.mode.clone(), placement.cwd())
     };
     let driver = turn.profile.driver_with(turn.command.clone());

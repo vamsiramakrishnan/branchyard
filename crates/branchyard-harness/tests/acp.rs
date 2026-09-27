@@ -12,7 +12,7 @@ use branchyard_harness::conformance::{
 };
 use branchyard_harness::{
     Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
-    Rejected, SessionMode, TurnOutcome,
+    Rejected, RemoteMcpServer, RemoteTransport, SessionMode, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -29,6 +29,7 @@ fn fresh() -> Open {
         mcp_servers: Vec::new(),
         instructions: None,
         mcp_config_file: None,
+        remote_mcp_servers: Vec::new(),
     }
 }
 
@@ -160,6 +161,7 @@ fn fork_and_model_selection_are_rejected_before_launch() {
         mcp_servers: Vec::new(),
         instructions: None,
         mcp_config_file: None,
+        remote_mcp_servers: Vec::new(),
     };
     assert!(matches!(
         driver.open(open(SessionMode::Fork(session("p")), None)),
@@ -359,6 +361,7 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
             mcp_servers: Vec::new(),
             instructions: None,
             mcp_config_file: None,
+            remote_mcp_servers: Vec::new(),
         })
         .unwrap();
     let initialize = decode(&opened.frames[0]);
@@ -381,6 +384,7 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
             mcp_servers: Vec::new(),
             instructions: None,
             mcp_config_file: None,
+            remote_mcp_servers: Vec::new(),
         })
         .unwrap();
     let initialize = decode(&opened.frames[0]);
@@ -512,4 +516,64 @@ fn instructions_precede_only_the_first_prompt_in_delimiters() {
     );
     let second = decode(&driver.submit("Again.").unwrap().frames[0]);
     assert_eq!(second["params"]["prompt"][0]["text"], "Again.");
+}
+
+#[test]
+fn remote_mcp_servers_go_to_agents_that_advertise_them() {
+    let server = RemoteMcpServer {
+        name: "search".into(),
+        transport: RemoteTransport::Http,
+        url: "https://mcp.example.com/mcp".into(),
+        headers: vec![("Authorization".into(), "Bearer h3ader".into())],
+    };
+    let sse = RemoteMcpServer {
+        name: "events".into(),
+        transport: RemoteTransport::Sse,
+        ..server.clone()
+    };
+    let session_new = |capabilities: Value| {
+        let mut driver = Acp::new(vec!["agent".into()]);
+        let opened = driver
+            .open(Open {
+                remote_mcp_servers: vec![server.clone(), sse.clone()],
+                ..fresh()
+            })
+            .unwrap();
+        let initialize = decode(&opened.frames[0]);
+        feed(
+            &mut driver,
+            &json!({"jsonrpc": "2.0", "id": initialize["id"],
+                    "result": {"protocolVersion": 1, "agentCapabilities": capabilities}}),
+        )
+    };
+    // claude-agent-acp 0.81.2 advertises both.
+    let (events, frames) = session_new(json!({"mcpCapabilities": {"http": true, "sse": true}}));
+    assert!(events.is_empty(), "{events:?}");
+    let request = &frames[0];
+    let _: NewSessionRequest = assert_conforms(request, "/params");
+    let servers = &request["params"]["mcpServers"];
+    assert_eq!(
+        servers,
+        &json!([
+            {"type": "http", "name": "search", "url": "https://mcp.example.com/mcp",
+             "headers": [{"name": "Authorization", "value": "Bearer h3ader"}]},
+            {"type": "sse", "name": "events", "url": "https://mcp.example.com/mcp",
+             "headers": [{"name": "Authorization", "value": "Bearer h3ader"}]},
+        ])
+    );
+    assert!(matches!(
+        serde_json::from_value::<AcpMcpServer>(servers[0].clone()).unwrap(),
+        AcpMcpServer::Http(_)
+    ));
+    assert!(matches!(
+        serde_json::from_value::<AcpMcpServer>(servers[1].clone()).unwrap(),
+        AcpMcpServer::Sse(_)
+    ));
+    // An agent without SSE fails the open, naming the server.
+    let (events, frames) = session_new(json!({"mcpCapabilities": {"http": true}}));
+    assert!(frames.is_empty());
+    assert!(
+        matches!(&events[..], [Event::OpenFailed { reason }] if reason.contains("SSE") && reason.contains("events")),
+        "{events:?}"
+    );
 }

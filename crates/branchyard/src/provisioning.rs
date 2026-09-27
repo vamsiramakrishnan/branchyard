@@ -143,6 +143,31 @@ pub(crate) fn check(spec: Option<&Provisioning>, private_home: bool) -> Result<(
             ));
         }
     }
+    for (index, server) in spec.remote_mcp_servers.iter().enumerate() {
+        server.check().or_else(refuse)?;
+        let repeated = server.name == SERVER_NAME
+            || spec.mcp_servers.iter().any(|s| s.name == server.name)
+            || spec.remote_mcp_servers[..index]
+                .iter()
+                .any(|s| s.name == server.name);
+        if repeated {
+            return refuse(format!(
+                "MCP server {} is listed twice or is Branchyard's own",
+                server.name
+            ));
+        }
+        if let Some(missing) = server
+            .headers
+            .values()
+            .find(|name| !spec.secrets.iter().any(|s| &s.name == *name))
+        {
+            return refuse(format!(
+                "MCP server {} takes the secret {missing}, which the task does not give \
+                 (--secret {missing})",
+                server.name
+            ));
+        }
+    }
     for (index, secret) in spec.secrets.iter().enumerate() {
         branchyard_provision::check_variable_name(&secret.name)
             .or_else(|why| refuse(format!("secret name {:?} {why}", secret.name)))?;
@@ -234,6 +259,12 @@ pub(crate) fn prepare(
         mcp_servers.push(server);
         mcp_secrets.extend(used);
     }
+    let mut remote_mcp_servers = Vec::new();
+    for spec in &spec.remote_mcp_servers {
+        let (server, used) = spec.resolve(&secrets)?;
+        remote_mcp_servers.push(server);
+        mcp_secrets.extend(used);
+    }
     let private = record.home.as_deref();
     let context = Context {
         harness: profile.harness.to_owned(),
@@ -245,6 +276,7 @@ pub(crate) fn prepare(
         secrets,
         auth: spec.auth.clone(),
         mcp_servers,
+        remote_mcp_servers,
         mcp_secrets,
         instructions: instructions(
             spec.instructions.as_deref(),

@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use branchyard_provision::apply::{apply, installed, remove_credentials};
 use branchyard_provision::{
-    for_harness, provisioners, Context, Effort, Instructions, McpServer, Plan, Protocol, Secret,
-    Telemetry, Via, NOT_PORTED,
+    for_harness, provisioners, Context, Effort, Instructions, McpServer, Plan, Protocol,
+    RemoteMcpServer, RemoteTransport, Secret, Telemetry, Via, NOT_PORTED,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -271,7 +271,7 @@ fn claude_stream_json_mcp_servers_go_in_a_private_file_not_the_command_line() {
     assert!(!format!("{file:?}").contains("mcp-env-secret"));
     assert_eq!(
         temp.read(".branchyard/claude-mcp.json"),
-        branchyard_harness::claude_code::mcp_config(&[docs])
+        branchyard_harness::claude_code::mcp_config(&[docs], &[])
     );
     assert_eq!(temp.mode(".branchyard/claude-mcp.json"), 0o600);
     // The driver still checks the servers.
@@ -356,7 +356,9 @@ fn every_secret_says_how_it_reaches_the_harness() {
                     plan.files.iter().any(|f| &f.path == path && f.secret),
                     "{case}: {path}"
                 ),
-                Via::McpServer { .. } => panic!("{case}: no MCP server was given"),
+                Via::McpServer { .. } | Via::McpHeader { .. } => {
+                    panic!("{case}: no MCP server was given")
+                }
             }
         }
         // Every secret variable is accounted for.
@@ -399,9 +401,11 @@ fn a_secret_given_to_an_mcp_server_is_used_and_delivered_with_it() {
     context.mcp_servers = vec![docs];
     context.secrets = secrets(&[("DOCS", "docs-secret")]);
     context.mcp_secrets = vec![branchyard_provision::McpSecret {
-        server: "docs".into(),
-        var: "DOCS_TOKEN".into(),
         secret: "DOCS".into(),
+        via: Via::McpServer {
+            server: "docs".into(),
+            var: "DOCS_TOKEN".into(),
+        },
     }];
     let plan = branchyard_provision::plan(&context).unwrap();
     assert!(plan.unused_secrets.is_empty());
@@ -417,6 +421,64 @@ fn a_secret_given_to_an_mcp_server_is_used_and_delivered_with_it() {
         }]
     );
     assert!(plan.env.is_empty() && plan.files.is_empty());
+}
+
+fn remote(name: &str) -> RemoteMcpServer {
+    RemoteMcpServer {
+        name: name.into(),
+        transport: RemoteTransport::Http,
+        url: "https://mcp.example.com/mcp".into(),
+        headers: vec![("Authorization".into(), "Bearer remote-header-secret".into())],
+    }
+}
+
+#[test]
+fn a_remote_mcp_server_goes_in_claude_codes_private_file_with_its_headers() {
+    let temp = Temp::new();
+    let mut context = context("claude-code", Protocol::ClaudeStreamJson);
+    context.remote_mcp_servers = vec![remote("search")];
+    context.secrets = secrets(&[("SEARCH_TOKEN", "Bearer remote-header-secret")]);
+    context.mcp_secrets = vec![branchyard_provision::McpSecret {
+        secret: "SEARCH_TOKEN".into(),
+        via: Via::McpHeader {
+            server: "search".into(),
+            header: "Authorization".into(),
+        },
+    }];
+    let plan = provision(&temp, &context);
+    let config: serde_json::Value =
+        serde_json::from_str(&temp.read(".branchyard/claude-mcp.json")).unwrap();
+    assert_eq!(
+        config,
+        serde_json::json!({"mcpServers": {"search": {
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+            "headers": {"Authorization": "Bearer remote-header-secret"},
+        }}})
+    );
+    assert_eq!(temp.mode(".branchyard/claude-mcp.json"), 0o600);
+    assert!(plan.unused_secrets.is_empty());
+    assert_eq!(plan.secrets[0].secret, "SEARCH_TOKEN");
+    assert!(!plan.secrets[0].tool_env);
+    assert!(!format!("{:?}", plan.session).contains("remote-header-secret"));
+
+    // Over ACP, the agent decides; elsewhere, refused before anything.
+    let mut acp = self::context("claude-code", Protocol::Acp);
+    acp.remote_mcp_servers = vec![remote("search")];
+    let plan = branchyard_provision::plan(&acp).unwrap();
+    assert_eq!(plan.session.remote_mcp_servers, acp.remote_mcp_servers);
+    for (harness, protocol) in [
+        ("codex", Protocol::CodexAppServer),
+        ("antigravity", Protocol::AntigravityStreamJson),
+    ] {
+        let mut context = self::context(harness, protocol);
+        context.remote_mcp_servers = vec![remote("search")];
+        let refused = branchyard_provision::plan(&context).unwrap_err().0;
+        assert!(
+            refused.contains("search") && !refused.contains("remote-header-secret"),
+            "{refused}"
+        );
+    }
 }
 
 #[test]

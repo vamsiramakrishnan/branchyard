@@ -22,6 +22,7 @@ fn fresh() -> Open {
         mcp_servers: Vec::new(),
         instructions: None,
         mcp_config_file: None,
+        remote_mcp_servers: Vec::new(),
     }
 }
 
@@ -422,4 +423,19 @@ fn instructions_are_developer_instructions_on_every_open_mode() {
     }
     let (_, _, request) = ready(SessionMode::Fresh, "t1");
     assert!(request["params"].get("developerInstructions").is_none());
+}
+
+#[test]
+fn remote_mcp_servers_are_refused_until_checked_against_codex() {
+    let mut driver = Codex::new(vec!["codex".into()]);
+    let refused = driver.open(Open {
+        remote_mcp_servers: vec![branchyard_harness::RemoteMcpServer {
+            name: "search".into(),
+            transport: branchyard_harness::RemoteTransport::Http,
+            url: "https://mcp.example.com/mcp".into(),
+            headers: Vec::new(),
+        }],
+        ..fresh()
+    });
+    assert!(matches!(refused, Err(Rejected::Unsupported(why)) if why.contains("search")));
 }

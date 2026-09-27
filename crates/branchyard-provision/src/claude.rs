@@ -287,13 +287,16 @@ fn mcp_config(context: &Context, plan: &mut Plan) {
         .credentials
         .iter()
         .any(|c| matches!(c, Credential::File { path } if path == MCP_CONFIG));
-    if context.mcp_servers.is_empty() {
+    if context.mcp_servers.is_empty() && context.remote_mcp_servers.is_empty() {
         if recorded {
             plan.edit(MCP_CONFIG, true, Edit::Remove);
         }
         return;
     }
-    let content = branchyard_harness::claude_code::mcp_config(&context.mcp_servers);
+    let content = branchyard_harness::claude_code::mcp_config(
+        &context.mcp_servers,
+        &context.remote_mcp_servers,
+    );
     let path = match context.private_home {
         true => {
             plan.edit(MCP_CONFIG, true, Edit::Put(content.clone()));

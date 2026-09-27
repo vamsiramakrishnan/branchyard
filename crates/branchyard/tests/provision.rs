@@ -11,8 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use branchyard::{
-    Activity, BranchStatus, Effort, McpServerSpec, Policy, Provisioning, RemoveOptions,
-    SecretSource, TaskOptions, Via,
+    Activity, BranchStatus, Effort, McpServerSpec, Policy, Provisioning, RemoteMcpSpec,
+    RemoteMcpTransport, RemoveOptions, SecretSource, TaskOptions, Via,
 };
 use common::{edit_record, stored_record, text, Fixture};
 
@@ -235,6 +235,7 @@ fn claude_code_acp_gets_its_key_model_and_mcp_server() {
 
 const MCP_SECRET: &str = "mcp-token-PROVISIONED-0123456789abcdefXYZ";
 const CLAUDE_SECRET: &str = "sk-ant-api03-LAUNCH-SECRET-0123456789abcdefghij";
+const HEADER_SECRET: &str = "Bearer remote-HEADER-SECRET-0123456789";
 
 /// Options that run the fake agent as Claude Code's stream-json harness,
 /// recording its launch in `record` and exiting, with an MCP server whose
@@ -246,12 +247,21 @@ fn claude_launch(f: &Fixture, record: &Path, isolated: bool) -> TaskOptions {
     // With a private home, the server's token is a secret; without one,
     // where secrets are refused, a plain variable that is still kept off
     // the command line.
+    std::env::set_var("BY_TEST_SEARCH_HEADER", HEADER_SECRET);
+    let mut remote_mcp_servers = Vec::new();
     let secrets = match isolated {
         true => {
             docs.secret_env.insert("DOCS_TOKEN".into(), "DOCS".into());
+            remote_mcp_servers.push(RemoteMcpSpec {
+                name: "search".into(),
+                transport: RemoteMcpTransport::Http,
+                url: "https://mcp.example.invalid/mcp".into(),
+                headers: [("Authorization".into(), "SEARCH".into())].into(),
+            });
             vec![
                 SecretSource::parse("ANTHROPIC_API_KEY=BY_TEST_CLAUDE_LAUNCH_KEY").unwrap(),
                 SecretSource::parse("DOCS=BY_TEST_DOCS_TOKEN").unwrap(),
+                SecretSource::parse("SEARCH=BY_TEST_SEARCH_HEADER").unwrap(),
             ]
         }
         false => {
@@ -270,6 +280,7 @@ fn claude_launch(f: &Fixture, record: &Path, isolated: bool) -> TaskOptions {
         provision: Some(Provisioning {
             secrets,
             mcp_servers: vec![docs],
+            remote_mcp_servers,
             ..Provisioning::default()
         }),
         ..f.options()
@@ -294,7 +305,7 @@ fn no_secret_is_on_claude_codes_command_line_with_a_private_home() {
     let launched = launch(&record);
     let cmdline = launched["cmdline"].to_string();
     assert!(cmdline.contains("--mcp-config"), "{cmdline}");
-    for secret in [MCP_SECRET, CLAUDE_SECRET] {
+    for secret in [MCP_SECRET, CLAUDE_SECRET, HEADER_SECRET] {
         assert!(!cmdline.contains(secret), "{cmdline}");
     }
     // The servers are in a 0600 file in the private home.
@@ -307,21 +318,23 @@ fn no_secret_is_on_claude_codes_command_line_with_a_private_home() {
             .to_string()
     );
     assert_eq!(config["mode"], "600");
-    assert_eq!(config["servers"], serde_json::json!(["docs"]));
+    assert_eq!(config["servers"], serde_json::json!(["docs", "search"]));
     // The API key is not in the harness's environment at all.
     let env = launched["env"].as_array().unwrap();
     assert!(
         !env.iter().any(|name| name == "ANTHROPIC_API_KEY"),
         "{env:?}"
     );
-    // Both secrets are in the private home and nowhere else.
-    for secret in [MCP_SECRET, CLAUDE_SECRET] {
+    // Every secret is in the private home and nowhere else: not the
+    // state database, which holds only their names.
+    for secret in [MCP_SECRET, CLAUDE_SECRET, HEADER_SECRET] {
         assert_eq!(containing(&f.dir, secret, &home), Vec::<PathBuf>::new());
         assert!(!containing(&home, secret, Path::new("/nonexistent")).is_empty());
     }
     let events = branch.events().unwrap();
     let log = serde_json::to_string(&events).unwrap();
     assert!(!log.contains(MCP_SECRET) && !log.contains(CLAUDE_SECRET));
+    assert!(!log.contains(HEADER_SECRET));
     let secrets = events
         .iter()
         .find_map(|e| match &e.activity {
@@ -339,6 +352,12 @@ fn no_secret_is_on_claude_codes_command_line_with_a_private_home() {
             == Via::McpServer {
                 server: "docs".into(),
                 var: "DOCS_TOKEN".into()
+            }));
+    assert!(secrets.0.iter().any(|d| d.secret == "SEARCH"
+        && d.via
+            == Via::McpHeader {
+                server: "search".into(),
+                header: "Authorization".into()
             }));
 }
 

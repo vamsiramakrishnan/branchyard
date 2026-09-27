@@ -16,6 +16,7 @@ fn fresh() -> Open {
         mcp_servers: Vec::new(),
         instructions: None,
         mcp_config_file: None,
+        remote_mcp_servers: Vec::new(),
     }
 }
 

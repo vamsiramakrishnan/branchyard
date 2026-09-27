@@ -16,8 +16,9 @@
 //! the caller gives [`Open::mcp_config_file`], a file already holding
 //! [`mcp_config`], the argument is its path; Claude Code 2.1.283 reads a
 //! path there as well as JSON. Without one, servers are passed inline only
-//! when none has variables, which may hold tokens; otherwise the open is
-//! refused.
+//! when none has variables or headers, which may hold tokens; otherwise the
+//! open is refused. HTTP and SSE servers are `{"type": "http" | "sse", url,
+//! headers}` entries, which 2.1.283 connects to with those headers.
 //!
 //! Instructions arrive as a plugin (`--plugin-dir`), whose skills Claude Code
 //! 2.1.283 lists in its `initialize` response as `<plugin>:<skill>`, or
@@ -35,7 +36,7 @@ use serde_json::json;
 use crate::{
     frame, parse, Capabilities, Driver, Event, Frame, Instructions, LaunchSpec, McpServer,
     NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
-    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Usage, Value,
+    Rejected, RemoteMcpServer, SessionMode, Submitted, TurnOutcome, Turns, Usage, Value,
 };
 
 #[derive(Debug)]
@@ -344,9 +345,23 @@ fn outcome(message: &Value, interrupted: bool) -> TurnOutcome {
 }
 
 /// `--mcp-config` JSON: `{"mcpServers": {<name>: <McpStdioServerConfig>}}`,
-/// the value the Agent SDK passes for its `mcpServers` option. This is
-/// also the content of [`Open::mcp_config_file`].
-pub fn mcp_config(servers: &[McpServer]) -> String {
+/// the value the Agent SDK passes for its `mcpServers` option, with HTTP and
+/// SSE servers as `{"type": "http" | "sse", url, headers}`. This is also
+/// the content of [`Open::mcp_config_file`].
+pub fn mcp_config(servers: &[McpServer], remote: &[RemoteMcpServer]) -> String {
+    let remote = remote.iter().map(|server| {
+        let headers: serde_json::Map<String, Value> = server
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), json!(value)))
+            .collect();
+        let config = json!({
+            "type": server.transport.as_str(),
+            "url": server.url,
+            "headers": headers,
+        });
+        (server.name.clone(), config)
+    });
     let servers: serde_json::Map<String, Value> = servers
         .iter()
         .map(|server| {
@@ -363,6 +378,7 @@ pub fn mcp_config(servers: &[McpServer]) -> String {
             });
             (server.name.clone(), config)
         })
+        .chain(remote)
         .collect();
     json!({ "mcpServers": servers }).to_string()
 }
@@ -432,7 +448,13 @@ impl Driver for ClaudeCode {
         if let Some(model) = &open.model {
             argv.extend(["--model".into(), model.clone()]);
         }
-        crate::check_mcp_servers(&open.mcp_servers)?;
+        crate::check_all_mcp_servers(&open)?;
+        let secret_bearing = open.mcp_servers.iter().any(|s| !s.env.is_empty())
+            || open
+                .remote_mcp_servers
+                .iter()
+                .any(|s| !s.headers.is_empty());
+        let any = !open.mcp_servers.is_empty() || !open.remote_mcp_servers.is_empty();
         match &open.mcp_config_file {
             Some(file) if !file.starts_with('/') => {
                 return Err(Rejected::InvalidOpen(format!(
@@ -440,16 +462,19 @@ impl Driver for ClaudeCode {
                 )));
             }
             Some(file) => argv.extend(["--mcp-config".into(), file.clone()]),
-            None if open.mcp_servers.iter().any(|s| !s.env.is_empty()) => {
+            None if secret_bearing => {
                 return Err(Rejected::InvalidOpen(
-                    "MCP server variables would be readable by every process on the host in \
-                     Claude Code's command line; give the servers in a file \
+                    "MCP server variables or headers would be readable by every process on the \
+                     host in Claude Code's command line; give the servers in a file \
                      (Open::mcp_config_file)"
                         .into(),
                 ));
             }
-            None if !open.mcp_servers.is_empty() => {
-                argv.extend(["--mcp-config".into(), mcp_config(&open.mcp_servers)]);
+            None if any => {
+                argv.extend([
+                    "--mcp-config".into(),
+                    mcp_config(&open.mcp_servers, &open.remote_mcp_servers),
+                ]);
             }
             None => {}
         }
