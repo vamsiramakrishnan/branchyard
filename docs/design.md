@@ -274,6 +274,8 @@ Do not add a second packet stack or custom TLS interceptor. If the existing ingr
 
 PGMQ supplies persistent queue operations, visibility windows and acknowledgments on PostgreSQL. Branchyard supplies command semantics. Use its SQL functions on the same SQLx transaction as domain updates; do not introduce a separate outbox database or custom queue tables.
 
+**As built.** The server's queue is a plain table in the store's own database (`operation_queue` on SQLite, `by_operation_queue` on PostgreSQL), written in the same transaction as the operation record, its idempotency binding and its branch locks, and claimed with `FOR UPDATE SKIP LOCKED` under a fenced lease ([durability](durability.md), [server](server.md)). PGMQ is not assumed to be installed, and SQLite needs the same guarantee, so no extension is required; the table keeps the property this section asks for, one transaction for the command and its domain effects. PGMQ can replace the table on PostgreSQL without changing that transaction.
+
 Conceptual transaction:
 
 ~~~sql
