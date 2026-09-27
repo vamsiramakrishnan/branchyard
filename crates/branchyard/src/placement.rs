@@ -11,9 +11,13 @@
 //! new repository at [`SubstrateOptions::workdir`] and the private home to
 //! [`SubstrateOptions::home`] before the harness starts; when the turn ends
 //! the actor's working files are applied to the worktree's files and its
-//! home replaces the private home, then the actor is deleted. The actor is
-//! journaled as the turn's `sandbox` step before it is created, so recovery
-//! can delete it if this engine stops. See [`branchyard_substrate::transfer`].
+//! home replaces the private home, then the actor is deleted. See
+//! [`branchyard_substrate::transfer`].
+//!
+//! Either sandbox is journaled as the turn's `sandbox` step before it is
+//! created. If this engine stops, recovery destroys a Microsandbox sandbox,
+//! and brings a Substrate actor's work back as the turn's end would have
+//! before deleting it.
 //!
 //! Either way the harness gets `HOME` and the variables named in the
 //! provider's `pass_env`, and nothing else from this process. Each turn gets
@@ -209,9 +213,24 @@ impl Placement {
             ],
         };
         let provider = microsandbox()?;
-        provider
-            .ensure(&spec)
-            .map_err(|e| format!("could not create sandbox {}: {e}", spec.name))?;
+        // Journaled before the sandbox exists, so recovery can destroy it.
+        let store = yard.store();
+        let intent = json!({ "provider": "microsandbox", "sandbox": spec.name });
+        store
+            .backend()
+            .begin_step(fence, fence.turn, STEP_SANDBOX, &intent)
+            .map_err(|e| format!("could not record sandbox {}: {e}", spec.name))?;
+        let created = provider.ensure(&spec);
+        let _ = store.backend().finish_step(
+            fence,
+            fence.turn,
+            STEP_SANDBOX,
+            &json!({ "created": created.is_ok() }),
+        );
+        if let Err(error) = created {
+            let _ = provider.destroy(&spec.name);
+            return Err(format!("could not create sandbox {}: {error}", spec.name));
+        }
         Ok(Placement {
             cwd: WORKSPACE.into(),
             kind: Kind::Sandbox {
@@ -462,28 +481,111 @@ fn staging(yard: &Yard, actor: &str) -> PathBuf {
     yard.store().dir().join("transfer").join(actor)
 }
 
-/// Delete the actor a stopped engine's turn journaled, if it still exists,
-/// and its transfer's staging directory. Returns what recovery should
-/// report, if anything.
+/// Clean up the sandbox a stopped engine's turn journaled in its
+/// `sandbox` step: a Substrate actor's work is brought back, then the actor
+/// and its transfer's staging directory are deleted; a Microsandbox sandbox
+/// is destroyed. Returns what recovery should report, if anything.
 pub(crate) fn recover(yard: &Yard, record: &Record, intent: &Value) -> Option<String> {
-    let Some(Provider::Substrate(options)) = &record.provider else {
-        return None;
-    };
-    let actor = intent.get("actor")?.as_str()?;
-    if !actor.is_empty() && !actor.contains(['/', '.']) {
-        let _ = std::fs::remove_dir_all(staging(yard, actor));
+    match &record.provider {
+        Some(Provider::Substrate(options)) => {
+            let actor = intent.get("actor")?.as_str()?;
+            Some(recover_actor(yard, record, options, actor))
+        }
+        Some(Provider::Microsandbox(_)) => {
+            let name = intent.get("sandbox")?.as_str()?;
+            Some(destroy_orphan(microsandbox(), name))
+        }
+        None | Some(Provider::Local) => None,
     }
-    // Deleting needs only the Control API, not the bridge key.
+}
+
+/// Destroy the Microsandbox sandbox `name` a stopped engine left, through
+/// `provider`, and say what happened.
+fn destroy_orphan(provider: Result<Box<dyn SandboxProvider>, String>, name: &str) -> String {
+    let destroyed = provider.and_then(|provider| {
+        let existed = provider.inspect(name).map_err(|e| e.to_string())?.is_some();
+        provider.destroy(name).map_err(|e| e.to_string())?;
+        Ok(existed)
+    });
+    match destroyed {
+        Ok(true) => format!("destroyed its Microsandbox sandbox {name}"),
+        Ok(false) => format!("its Microsandbox sandbox {name} was already gone"),
+        Err(error) => format!("could not destroy its Microsandbox sandbox {name}: {error}"),
+    }
+}
+
+/// Bring back what the harness left in the actor a stopped engine's turn
+/// journaled, if it still exists, as the turn's end would have: a fresh
+/// attempt credential from the host key, the actor's working files applied
+/// to the worktree only if the worktree still holds exactly what was sent,
+/// and the home. Then delete the actor and the transfer's staging
+/// directory. Returns what recovery should report.
+fn recover_actor(yard: &Yard, record: &Record, options: &SubstrateOptions, actor: &str) -> String {
+    let stage = (!actor.is_empty() && !actor.contains(['/', '.'])).then(|| staging(yard, actor));
+    let mut said = Vec::new();
+    // Deleting needs only the Control API; bringing work back needs the key.
     let deleted = substrate_provider(options, false).and_then(|provider| {
         let existed = provider.handle(actor).map_err(|e| e.to_string())?.is_some();
+        if existed {
+            said.push(bring_back(record, options, actor, stage.as_deref()));
+        }
         provider.destroy(actor).map_err(|e| e.to_string())?;
         Ok(existed)
     });
-    Some(match deleted {
+    if let Some(stage) = &stage {
+        let _ = std::fs::remove_dir_all(stage);
+    }
+    said.push(match deleted {
         Ok(true) => format!("deleted its Substrate actor {actor}"),
         Ok(false) => format!("its Substrate actor {actor} was already gone"),
         Err(error) => format!("could not delete its Substrate actor {actor}: {error}"),
-    })
+    });
+    said.join("; ")
+}
+
+/// Pull the worktree and home back from `actor`, and say what happened.
+fn bring_back(
+    record: &Record,
+    options: &SubstrateOptions,
+    actor: &str,
+    stage: Option<&Path>,
+) -> String {
+    let worktree = &record.info.worktree;
+    let pulled = (|| {
+        let stage = stage.ok_or("its actor's name cannot name a staging directory")?;
+        if !stage.is_dir() {
+            return Err(
+                "its transfer's staging directory is gone: the worktree was never sent to it, \
+                 or was already brought back"
+                    .to_owned(),
+            );
+        }
+        let provider = substrate(options)?;
+        provider
+            .begin_attempt(actor, "recovery")
+            .map_err(|e| e.to_string())?;
+        let endpoint = provider.endpoint(actor).map_err(|e| e.to_string())?;
+        let pushed = transfer::reopen_staged(worktree, Path::new(options.workdir()), stage)
+            .map_err(|e| e.to_string())?;
+        let pulled = transfer::pull(&endpoint, &pushed, worktree).map_err(|e| e.to_string())?;
+        let home = match &record.home {
+            Some(home) => transfer::pull_tree(&endpoint, Path::new(options.home()), home)
+                .err()
+                .map(|e| format!("; its home directory was not brought back: {e}")),
+            None => None,
+        };
+        let _ = provider.end_attempt(actor);
+        Ok((pulled.changed, home.unwrap_or_default()))
+    })();
+    match pulled {
+        Ok((true, home)) => {
+            format!("brought the harness's work in actor {actor} back to the worktree{home}")
+        }
+        Ok((false, home)) => format!(
+            "the harness had changed no files in actor {actor}; the worktree is as it was{home}"
+        ),
+        Err(why) => format!("did not bring the harness's work back from actor {actor}: {why}"),
+    }
 }
 
 /// The private home a new branch needs because it runs in a sandbox.
@@ -583,5 +685,92 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A stand-in for the Microsandbox provider, which this build may not
+    /// have: it knows some sandboxes, and records what it destroys. Clones
+    /// share their state.
+    #[derive(Clone)]
+    struct Standin {
+        known: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        destroyed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        fail: bool,
+    }
+
+    impl SandboxProvider for Standin {
+        fn capabilities(&self) -> branchyard_sandbox::Capabilities {
+            branchyard_sandbox::Capabilities::default()
+        }
+        fn ensure(
+            &self,
+            _: &SandboxSpec,
+        ) -> Result<branchyard_sandbox::SandboxInfo, branchyard_sandbox::ProviderError> {
+            unreachable!("recovery creates nothing")
+        }
+        fn inspect(
+            &self,
+            name: &str,
+        ) -> Result<Option<branchyard_sandbox::SandboxInfo>, branchyard_sandbox::ProviderError>
+        {
+            let known = self.known.lock().unwrap().iter().any(|n| n == name);
+            Ok(known.then(|| branchyard_sandbox::SandboxInfo {
+                name: name.into(),
+                state: branchyard_sandbox::SandboxState::Running,
+            }))
+        }
+        fn exec(
+            &self,
+            _: &str,
+            _: &branchyard_sandbox::ExecSpec,
+        ) -> Result<Box<dyn branchyard_sandbox::Process>, branchyard_sandbox::ProviderError>
+        {
+            unreachable!("recovery runs nothing")
+        }
+        fn stop(&self, _: &str) -> Result<(), branchyard_sandbox::ProviderError> {
+            unreachable!("recovery destroys")
+        }
+        fn destroy(&self, name: &str) -> Result<(), branchyard_sandbox::ProviderError> {
+            if self.fail {
+                return Err(branchyard_sandbox::ProviderError::Runtime(
+                    "the VM would not stop".into(),
+                ));
+            }
+            self.known.lock().unwrap().retain(|n| n != name);
+            self.destroyed.lock().unwrap().push(name.into());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_microsandbox_sandbox_left_by_a_stopped_engine_is_destroyed_through_its_provider() {
+        let standin = |fail| Standin {
+            known: std::sync::Arc::new(std::sync::Mutex::new(vec!["by-x-1".into()])),
+            destroyed: Default::default(),
+            fail,
+        };
+        let boxed =
+            |p: &Standin| -> Result<Box<dyn SandboxProvider>, String> { Ok(Box::new(p.clone())) };
+        let provider = standin(false);
+        assert_eq!(
+            destroy_orphan(boxed(&provider), "by-x-1"),
+            "destroyed its Microsandbox sandbox by-x-1"
+        );
+        assert_eq!(*provider.destroyed.lock().unwrap(), ["by-x-1"]);
+        assert_eq!(
+            destroy_orphan(boxed(&provider), "by-x-1"),
+            "its Microsandbox sandbox by-x-1 was already gone"
+        );
+        assert_eq!(
+            destroy_orphan(boxed(&standin(true)), "by-x-1"),
+            "could not destroy its Microsandbox sandbox by-x-1: sandbox runtime: the VM would \
+             not stop"
+        );
+        if !branchyard_microsandbox::ENABLED {
+            assert_eq!(
+                destroy_orphan(microsandbox(), "by-x-1"),
+                "could not destroy its Microsandbox sandbox by-x-1: this build has no \
+                 Microsandbox support"
+            );
+        }
     }
 }

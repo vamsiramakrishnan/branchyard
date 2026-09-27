@@ -1,8 +1,9 @@
 //! Turns in Agent Substrate actors, end to end against the fake cluster in
 //! `branchyard_substrate::fake`: the fake ACP agent runs behind a real
 //! bridge, the worktree and home go in and come back, the candidate merges,
-//! and recovery deletes the actor of an engine that died. Hermetic; not
-//! evidence about a Substrate cluster.
+//! and recovery brings back the work of an engine that died, unless the
+//! worktree changed since, and deletes its actor. Hermetic; not evidence
+//! about a Substrate cluster.
 
 mod common;
 
@@ -221,10 +222,15 @@ fn substrate_engine_child() {
         .run();
 }
 
-#[test]
-fn recovery_deletes_the_actor_of_an_engine_that_died() {
-    let f = Fixture::new();
-    let (fake, substrate) = cluster(&f);
+/// Start a turn in an actor in another process with the ORPHAN prompt,
+/// which writes `orphan.log` in the actor's worktree and hangs, kill that
+/// engine, and wait for the bridge to end the harness. Returns the actor's
+/// name and its bridge's pid.
+fn kill_engine_mid_turn(
+    f: &Fixture,
+    fake: &FakeCluster,
+    substrate: &SubstrateOptions,
+) -> (String, u32) {
     let provider = Provider::Substrate(substrate.clone());
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["substrate_engine_child", "--exact", "--ignored"])
@@ -269,11 +275,13 @@ fn recovery_deletes_the_actor_of_an_engine_that_died() {
         wait_gone(*pid);
     }
     assert_eq!(fake.actor_names(), vec![actor.clone()]);
+    (actor, bridge)
+}
 
-    let yard = Yard::open(&f.root).unwrap();
-    let branch = yard.branch("crashy").unwrap();
-    assert_eq!(branch.info().status, BranchStatus::Interrupted);
-    let reasons: Vec<String> = branch
+fn recovered_reason(yard: &Yard) -> String {
+    let reasons: Vec<String> = yard
+        .branch("crashy")
+        .unwrap()
         .events()
         .unwrap()
         .into_iter()
@@ -283,10 +291,45 @@ fn recovery_deletes_the_actor_of_an_engine_that_died() {
         })
         .collect();
     assert_eq!(reasons.len(), 1, "{reasons:?}");
+    reasons[0].clone()
+}
+
+#[test]
+fn recovery_brings_back_the_work_of_an_engine_that_died_and_deletes_its_actor() {
+    let f = Fixture::new();
+    let (fake, substrate) = cluster(&f);
+    let (actor, bridge) = kill_engine_mid_turn(&f, &fake, &substrate);
+    let worktree = f.root.join(".branchyard/worktrees/crashy");
     assert!(
-        reasons[0].contains(&format!("deleted its Substrate actor {actor}")),
-        "{}",
-        reasons[0]
+        !worktree.join("orphan.log").exists(),
+        "still only in the actor"
+    );
+
+    let yard = Yard::open(&f.root).unwrap();
+    let branch = yard.branch("crashy").unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Interrupted);
+    let reason = recovered_reason(&yard);
+    assert!(reason.contains("the prompt had been submitted"), "{reason}");
+    assert!(
+        reason.contains(&format!(
+            "brought the harness's work in actor {actor} back to the worktree; deleted its \
+             Substrate actor {actor}"
+        )),
+        "{reason}"
+    );
+    // What the harness wrote in the actor is in the worktree and in the
+    // candidate recovery snapshotted.
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("orphan.log")).unwrap(),
+        "prompt received\n"
+    );
+    let candidate = branch.info().candidate.clone().expect("a candidate");
+    assert_eq!(
+        git(
+            &f.root,
+            &["show", &format!("{}:orphan.log", candidate.commit)]
+        ),
+        "prompt received\n"
     );
     assert!(fake.actor_names().is_empty());
     wait_gone(bridge);
@@ -294,4 +337,40 @@ fn recovery_deletes_the_actor_of_an_engine_that_died() {
         !f.root.join(".branchyard/transfer").join(&actor).exists(),
         "the dead engine's transfer staging was left behind"
     );
+    assert!(yard.recover().unwrap().is_empty());
+}
+
+#[test]
+fn recovery_does_not_apply_an_actors_work_over_a_worktree_changed_since() {
+    let f = Fixture::new();
+    let (fake, substrate) = cluster(&f);
+    let (actor, bridge) = kill_engine_mid_turn(&f, &fake, &substrate);
+    let worktree = f.root.join(".branchyard/worktrees/crashy");
+    std::fs::write(worktree.join("a.txt"), "changed on the host\n").unwrap();
+
+    let yard = Yard::open(&f.root).unwrap();
+    assert_eq!(
+        yard.branch("crashy").unwrap().info().status,
+        BranchStatus::Interrupted
+    );
+    let reason = recovered_reason(&yard);
+    assert!(
+        reason.contains(&format!(
+            "did not bring the harness's work back from actor {actor}: the worktree changed on \
+             the host"
+        )),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(&format!("deleted its Substrate actor {actor}")),
+        "{reason}"
+    );
+    assert!(!worktree.join("orphan.log").exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("a.txt")).unwrap(),
+        "changed on the host\n"
+    );
+    assert!(fake.actor_names().is_empty());
+    wait_gone(bridge);
+    assert!(!f.root.join(".branchyard/transfer").join(&actor).exists());
 }

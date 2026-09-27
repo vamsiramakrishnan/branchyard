@@ -11,6 +11,11 @@
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
+/// The variable every local harness is started with, naming its turn's
+/// `start` step, so recovery can find the harness's processes even when
+/// the engine stopped before recording the harness's pid.
+pub(crate) const ENV_SPAWN: &str = "BRANCHYARD_SPAWN";
+
 /// This host and its current boot, as `hostname/boot`.
 pub(crate) fn host() -> &'static str {
     static HOST: OnceLock<String> = OnceLock::new();
@@ -109,6 +114,61 @@ pub(crate) fn kill_group(pgid: u32, start: &str) -> Vec<u32> {
     }
 }
 
+/// SIGKILL every process on this host whose environment has
+/// [`ENV_SPAWN`] set to `marker`, except this one, and return the pids
+/// signalled. Linux only: elsewhere nothing is found. A process sees only
+/// the environment it was started with, so this finds the harness and
+/// whatever it started without clearing that variable, in its process
+/// group or out of it.
+pub(crate) fn kill_marked(marker: &str) -> Vec<u32> {
+    if marker.is_empty() {
+        return Vec::new();
+    }
+    let mut killed = Vec::new();
+    // Again until none is left, for a process that forked meanwhile.
+    for _ in 0..5 {
+        let found = marked(marker);
+        if found.is_empty() {
+            break;
+        }
+        for pid in &found {
+            signal(&pid.to_string());
+        }
+        killed.extend(found);
+    }
+    killed.sort_unstable();
+    killed.dedup();
+    killed
+}
+
+#[cfg(target_os = "linux")]
+fn marked(marker: &str) -> Vec<u32> {
+    let wanted = format!("{ENV_SPAWN}={marker}");
+    let own = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids: Vec<u32> = entries
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| *pid != own)
+        .filter(|pid| {
+            stat(*pid).is_some_and(|fields| fields.first().map(String::as_str) != Some("Z"))
+                && std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
+                    environ
+                        .split(|byte| *byte == 0)
+                        .any(|entry| entry == wanted.as_bytes())
+                })
+        })
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+#[cfg(not(target_os = "linux"))]
+fn marked(_marker: &str) -> Vec<u32> {
+    Vec::new()
+}
+
 fn signal(target: &str) {
     let _ = Command::new("kill")
         .args(["-KILL", "--", target])
@@ -183,5 +243,34 @@ mod tests {
         let status = child.wait().unwrap();
         assert!(!status.success());
         assert!(!alive(pid, &start));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn processes_carrying_a_marker_are_killed_whatever_their_group() {
+        use std::os::unix::process::CommandExt;
+        let marker = format!("proc-test-{}", std::process::id());
+        let spawn = |marker: &str| {
+            Command::new("sleep")
+                .arg("30")
+                .env(ENV_SPAWN, marker)
+                .process_group(0)
+                .spawn()
+                .unwrap()
+        };
+        let (mut a, mut b) = (spawn(&marker), spawn(&marker));
+        let mut other = spawn(&format!("{marker}-other"));
+        let mut expected = vec![a.id(), b.id()];
+        expected.sort_unstable();
+        assert_eq!(kill_marked(&marker), expected);
+        assert!(!a.wait().unwrap().success());
+        assert!(!b.wait().unwrap().success());
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "another marker is kept"
+        );
+        assert!(kill_marked("").is_empty());
+        other.kill().unwrap();
+        other.wait().unwrap();
     }
 }

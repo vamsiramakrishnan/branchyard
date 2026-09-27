@@ -87,7 +87,8 @@
 //! in its shell, the Python module, or Branchyard's MCP tools; SDK code does
 //! the same through a [`Delegate`]. Children run on threads of the process
 //! that runs their parent; a process must call [`Branch::wait_subtree`]
-//! before it exits, or it abandons them. `docs/delegation.md` describes the
+//! before it exits, or it abandons them to recovery, which ends them
+//! `interrupted`. `docs/delegation.md` describes the
 //! surfaces, the envelope and the authority model, which in local mode
 //! stops honest mistakes, not a hostile harness.
 
@@ -96,6 +97,7 @@ mod delegation;
 mod engine;
 mod git;
 mod harness;
+mod lock;
 mod names;
 mod ops;
 mod placement;
@@ -113,6 +115,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
 pub use branchyard_harness::{
@@ -629,10 +632,11 @@ impl Branch {
         self.yard.cancel(&self.info.name)
     }
 
-    /// Wait until no descendant of this branch is running a turn on a
-    /// thread of this process, then return the descendants' records.
-    /// Descendants running in another process are not waited for; their
-    /// status says so.
+    /// Wait until no descendant of this branch is running a turn, then
+    /// return the descendants' records. Descendants on threads of this
+    /// process are joined; one another process drives is waited for through
+    /// its durable status, and one whose engine stopped is recovered first,
+    /// as [`Yard::recover`] would.
     pub fn wait_subtree(&self) -> Result<Vec<BranchInfo>, Error> {
         delegation::wait_subtree(&self.yard, &self.info.name)
     }

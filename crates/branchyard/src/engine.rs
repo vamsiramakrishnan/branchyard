@@ -57,6 +57,9 @@ pub(crate) struct Turn<'a> {
     pub options: &'a TaskOptions,
     /// For a forked session: the parent's worktree, where its session began.
     pub fork_source: Option<PathBuf>,
+    /// Recorded as a warning when the turn starts, such as why it starts a
+    /// fresh session.
+    pub note: Option<String>,
 }
 
 /// How a turn ended, before the snapshot. Journaled as the `turn_end`
@@ -137,6 +140,9 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     };
     let result = (|| {
         recorder.record(Activity::Status(record.info.status.clone()))?;
+        if let Some(note) = &turn.note {
+            recorder.record(Activity::Warning(note.clone()))?;
+        }
         if matches!(record.info.status, BranchStatus::Failed { .. }) {
             return Ok(());
         }
@@ -328,7 +334,26 @@ fn run(
         ..Open::new(turn.mode.clone(), placement.cwd())
     };
     let driver = turn.profile.driver_with(turn.command.clone());
-    let intent = json!({ "command": turn.command, "sandbox": placement.is_sandbox() });
+    // Journaled before the spawn: every process of a local harness carries
+    // this marker, so recovery finds them even if this engine stops before
+    // the harness's pid is recorded below.
+    let spawn = (!placement.is_sandbox()).then(|| {
+        format!(
+            "{}-{}-{}",
+            store.owner().id,
+            fence.incarnation,
+            fence.generation
+        )
+    });
+    if let Some(spawn) = &spawn {
+        placement.set_env(crate::proc::ENV_SPAWN, spawn);
+    }
+    let intent = json!({
+        "command": turn.command,
+        "sandbox": placement.is_sandbox(),
+        "spawn": spawn,
+        "host": crate::proc::host(),
+    });
     store
         .backend()
         .begin_step(fence, fence.turn, STEP_START, &intent)?;

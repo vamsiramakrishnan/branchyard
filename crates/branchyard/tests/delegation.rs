@@ -8,9 +8,9 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    Activity, BranchStatus, Budget, Delegate, Envelope, Error, Policy, Spawn, TaskOptions,
+    Activity, BranchStatus, Budget, Delegate, Envelope, Error, Policy, Spawn, TaskOptions, Yard,
 };
-use common::{fake_agent, Fixture};
+use common::{edit_record, fake_agent, Fixture};
 
 /// Root options that may delegate. The MCP server is never started here,
 /// since no prompt asks the agent to, so any executable stands in for it.
@@ -457,4 +457,102 @@ fn delegation_needs_a_server_before_anything_is_created() {
         "{result:?}"
     );
     assert!(f.yard.branches().unwrap().is_empty());
+}
+
+/// Leave `name` as an engine that died mid-turn would: its record says
+/// running, its lease is held by a process that has exited, and the turn's
+/// end was never recorded.
+fn die_mid_turn(f: &Fixture, name: &str) {
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let dead = gone.id();
+    gone.wait().unwrap();
+    edit_record(&f.root, name, |record| {
+        record["info"]["status"] = serde_json::json!({"state": "running"});
+    });
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    let held = db
+        .execute(
+            "UPDATE leases SET owner = 'gone', pid = ?2, expires_ms = 9999999999999 \
+             WHERE branch = ?1",
+            rusqlite::params![name, dead],
+        )
+        .unwrap();
+    assert_eq!(held, 1);
+    db.execute(
+        "DELETE FROM steps WHERE branch = ?1 AND step IN ('turn_end', 'snapshot')",
+        [name],
+    )
+    .unwrap();
+}
+
+fn recovered(f: &Fixture, name: &str) -> Vec<String> {
+    f.yard
+        .branch(name)
+        .unwrap()
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Recovered { reason, .. } => Some(reason),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_subtree_driven_by_another_engine_is_waited_for_and_a_stopped_ones_recovered() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::default());
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    // The child runs on a thread of the fixture's yard; another yard,
+    // standing in for another process, has no thread to join.
+    let delegate = root.delegate(options.clone()).unwrap();
+    delegate.spawn(spawn("SH sleep 1", "slow")).unwrap();
+    let other = Yard::open(&f.root).unwrap();
+    let started = Instant::now();
+    let waited = other.branch("root").unwrap().wait_subtree().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(500), "it waited");
+    assert_eq!(waited.len(), 1);
+    assert_eq!(waited[0].status, BranchStatus::NoChanges);
+    root.wait_subtree().unwrap();
+
+    // A child whose engine stopped is recovered by the wait, not waited
+    // for forever: through the subtree wait and through a delegate's.
+    die_mid_turn(&f, "slow");
+    let waited = root.wait_subtree().unwrap();
+    assert_eq!(waited[0].status, BranchStatus::Interrupted);
+    let reasons = recovered(&f, "slow");
+    assert_eq!(reasons.len(), 1);
+    assert!(
+        reasons[0].contains("is no longer running"),
+        "{}",
+        reasons[0]
+    );
+
+    die_mid_turn(&f, "slow");
+    let other_delegate = other.branch("root").unwrap().delegate(options).unwrap();
+    let inspection = other_delegate
+        .wait("slow", Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(inspection.status, BranchStatus::Interrupted);
+    assert_eq!(recovered(&f, "slow").len(), 2);
+
+    // A running record no engine holds a lease for is settled too.
+    edit_record(&f.root, "slow", |record| {
+        record["info"]["status"] = serde_json::json!({"state": "running"});
+    });
+    let waited = other.branch("root").unwrap().wait_subtree().unwrap();
+    assert_eq!(waited[0].status, BranchStatus::Interrupted);
+    let reasons = recovered(&f, "slow");
+    assert!(
+        reasons[2].contains("no engine holds its lease"),
+        "{}",
+        reasons[2]
+    );
 }

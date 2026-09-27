@@ -420,6 +420,38 @@ pub fn push_staged(
     })
 }
 
+/// The [`Pushed`] a stopped process's [`push_staged`] of `worktree` to
+/// `guest_dir` left in `stage`, so that another process can [`pull`] the
+/// result. Fails unless the staging repository holds both of the push's
+/// snapshot refs. The staging directory is deleted when the result is
+/// dropped, as for a push, or at once when it holds no push.
+pub fn reopen_staged(worktree: &Path, guest_dir: &Path, stage: &Path) -> Result<Pushed, Error> {
+    let common = host(
+        worktree,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        &[],
+    )?;
+    let stage = Stage {
+        dir: stage.to_path_buf(),
+        objects: PathBuf::from(common.trim()).join("objects"),
+    };
+    let read = |name: &str| -> Result<String, Error> {
+        let reference = format!("refs/branchyard/{name}^{{commit}}");
+        Ok(stage
+            .run(&["rev-parse", "--verify", "-q", &reference])
+            .map_err(|_| Error::Host(format!("{} holds no {name} of a push", stage.dir.display())))?
+            .trim()
+            .to_owned())
+    };
+    let (base, snapshot) = (read("base")?, read("snapshot")?);
+    Ok(Pushed {
+        base,
+        snapshot,
+        guest: guest_dir.to_path_buf(),
+        stage,
+    })
+}
+
 /// Bring the actor's worktree back and apply it to the host `worktree`,
 /// which must still hold exactly the files [`push`] sent.
 pub fn pull(endpoint: &Endpoint, pushed: &Pushed, worktree: &Path) -> Result<Pulled, Error> {

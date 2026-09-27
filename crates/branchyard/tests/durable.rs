@@ -537,3 +537,187 @@ fn an_event_of_a_turn_that_lost_its_lease_is_refused() {
         .iter()
         .any(|e| matches!(e.activity, Activity::Harness(Event::TurnEnded { .. }))));
 }
+
+/// A process that has exited: its pid and the start time it had.
+fn exited_process() -> (u32, String) {
+    let mut gone = Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    (pid, "1".into())
+}
+
+#[test]
+fn a_name_reserved_by_an_engine_that_stopped_is_reclaimed_by_recovery() {
+    let f = Fixture::new();
+    let (dead, start) = exited_process();
+    // This host's identity, as the engine records it.
+    f.task("WRITE r.txt=1").name("probe").run().unwrap();
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    let host: String = db
+        .query_row("SELECT host FROM leases WHERE branch = 'probe'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let reserve = |name: &str, host: &str, pid: u32, start: &str, at_ms: i64| {
+        db.execute(
+            "INSERT INTO branches (name, created_ms, record) VALUES (?1, ?2, NULL)",
+            rusqlite::params![name, at_ms],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO reservations (name, owner, host, pid, pid_start, reserved_ms) \
+             VALUES (?1, 'engine', ?2, ?3, ?4, ?5)",
+            rusqlite::params![name, host, pid, start, at_ms],
+        )
+        .unwrap();
+    };
+    // Its engine died on this host before creating the branch.
+    reserve("orphaned", &host, dead, &start, now);
+    // A live engine elsewhere, reserved just now: kept.
+    reserve("elsewhere", "another-host/boot", 1, "1", now);
+    // An engine elsewhere that reserved it an hour ago and never created
+    // it: expired.
+    reserve("stale", "another-host/boot", 1, "1", now - 3_600_000);
+    // An earlier version's reservation names no engine: kept.
+    db.execute(
+        "INSERT INTO branches (name, created_ms, record) VALUES ('legacy', 1, NULL)",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let planned = |yard: &Yard, name: &str| {
+        yard.task("x")
+            .name(name)
+            .planned_names(&[])
+            .is_ok_and(|names| names == [name])
+    };
+    for name in ["orphaned", "elsewhere", "stale", "legacy"] {
+        assert!(!planned(&f.yard, name), "{name} is taken before recovery");
+    }
+
+    let yard = Yard::open(&f.root).unwrap();
+    assert!(planned(&yard, "orphaned"));
+    assert!(planned(&yard, "stale"));
+    assert!(!planned(&yard, "elsewhere"));
+    assert!(!planned(&yard, "legacy"));
+    let branch = yard
+        .task("WRITE o.txt=1")
+        .options(f.options())
+        .name("orphaned")
+        .run();
+    assert_eq!(branch.unwrap().info().status, BranchStatus::Ready);
+    // A second recovery changes nothing.
+    assert!(yard.recover().unwrap().is_empty());
+    assert!(!planned(&yard, "elsewhere"));
+}
+
+#[test]
+fn a_microsandbox_sandbox_left_by_a_stopped_engine_is_reported_when_it_cannot_be_destroyed() {
+    let f = Fixture::new();
+    f.task("WRITE s.txt=1").name("boxed").run().unwrap();
+    // Stand in for an engine that journaled its Microsandbox sandbox and
+    // died mid-turn: the turn's end was never recorded.
+    let (dead, _) = exited_process();
+    edit_record(&f.root, "boxed", |record| {
+        record["info"]["status"] = serde_json::json!({"state": "running"});
+        record["provider"] = serde_json::json!({"kind": "microsandbox", "image": "alpine:3.20"});
+    });
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.execute(
+        "UPDATE leases SET owner = 'gone', pid = ?1, expires_ms = 9999999999999",
+        [dead],
+    )
+    .unwrap();
+    db.execute(
+        "DELETE FROM steps WHERE step IN ('turn_end', 'snapshot', 'submit')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO steps (incarnation, turn, step, branch, generation, intent, started_ms) \
+         SELECT incarnation, turn, 'sandbox', branch, generation, \
+         '{\"provider\":\"microsandbox\",\"sandbox\":\"by-boxed-1\"}', 0 \
+         FROM leases WHERE branch = 'boxed'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let yard = Yard::open(&f.root).unwrap();
+    let branch = yard.branch("boxed").unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Interrupted);
+    let found = recovered(&branch.events().unwrap());
+    assert_eq!(found.len(), 1);
+    let reason = &found[0].0;
+    // This build has no Microsandbox SDK; recovery says what it could not
+    // do rather than claiming the sandbox is gone. The destroy itself is
+    // tested against a stand-in provider in `placement`.
+    if !branchyard_microsandbox::ENABLED {
+        assert!(
+            reason.contains(
+                "could not destroy its Microsandbox sandbox by-boxed-1: this build has no \
+                 Microsandbox support"
+            ),
+            "{reason}"
+        );
+    }
+    assert!(yard.recover().unwrap().is_empty());
+}
+
+#[test]
+fn a_harness_started_just_before_its_engine_stopped_is_found_by_its_marker() {
+    let f = Fixture::new();
+    let mut child = start_child(&f, "ORPHAN", &[]);
+    let mut pids = Vec::new();
+    wait_until("the harness to report its processes", || {
+        let said = text(&events(&f.yard, "crashy"));
+        pids = said
+            .strip_prefix("orphan ")
+            .map(|rest| {
+                rest.split_whitespace()
+                    .filter_map(|p| p.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        pids.len() == 2
+    });
+    let (agent, sleeper) = (pids[0], pids[1]);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(running(agent) && running(sleeper));
+    // Leave the journal as an engine that stopped between spawning the
+    // harness and recording it would have: the start's intent and nothing
+    // after it.
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    assert_eq!(db.execute("DELETE FROM processes", []).unwrap(), 1);
+    db.execute("UPDATE steps SET outcome = NULL WHERE step = 'start'", [])
+        .unwrap();
+    db.execute(
+        "DELETE FROM steps WHERE step <> 'start' AND step <> 'create'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let yard = Yard::open(&f.root).unwrap();
+    let branch = yard.branch("crashy").unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Interrupted);
+    let found = recovered(&branch.events().unwrap());
+    assert_eq!(found.len(), 1);
+    let (reason, killed) = &found[0];
+    assert!(
+        reason.contains("before the prompt was submitted"),
+        "{reason}"
+    );
+    assert!(
+        killed.contains(&agent) && killed.contains(&sleeper),
+        "{killed:?}"
+    );
+    wait_until("the unrecorded harness to die", || {
+        !running(agent) && !running(sleeper)
+    });
+}

@@ -22,6 +22,7 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | Table | Key | Holds |
 |---|---|---|
 | `branches` | `incarnation` (autoincrement), `name` unique | The record as JSON; `NULL` is a reserved name. A removed and recreated branch is a new incarnation |
+| `reservations` | `name` | For a reserved name not yet created: the reserving engine's `owner`, `host`, `pid`, `pid_start`, and `reserved_ms` |
 | `leases` | `branch` | `generation`, the `turn` it was granted for, `owner` (`NULL` once released), owner `host`, `pid`, `pid_start`, `expires_ms`, and `deadline_ms` |
 | `steps` | `(incarnation, turn, step)` | `intent`, `outcome` (`NULL` until done), the generation that wrote it, times |
 | `processes` | `(incarnation, turn, pid)` | Process group, start time and host of each harness process a turn started |
@@ -36,8 +37,8 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | Step | Turn | Intent | Outcome | On recovery |
 |---|---|---|---|---|
 | `create` | the first turn | base, worktree path | worktree, or the error | Not repeated; a branch without a worktree ends `failed` at the snapshot |
-| `sandbox` | each, Substrate only | the actor's name and atespace, before it is created | its UID | The actor is deleted if it still exists |
-| `start` | each | command, sandboxed or not | pid, process group and start time, or the error | The recorded group is killed if it still matches |
+| `sandbox` | each, Substrate or Microsandbox | the actor's name and atespace, or the Microsandbox sandbox's name, before it is created | the actor's UID, or whether the sandbox was created | A live actor's work is brought back, then the actor is deleted; the sandbox is destroyed |
+| `start` | each | command, sandboxed or not, and for a local harness the host and the spawn marker it is started with | pid, process group and start time, or the error | The recorded group is killed if it still matches; on Linux, processes carrying the marker are killed |
 | `submit` | each | the prompt | the harness's turn number | Recorded intent means the prompt may have reached the harness: never submitted again |
 | `turn_end` | each | whether a prompt was submitted | how the turn ended | Finished as the engine would have |
 | `snapshot` | each | the commit message | the candidate, or the error | A recorded snapshot is used, not taken again |
@@ -68,7 +69,8 @@ A turn with `max_duration` stores its deadline with the lease. The engine that o
 
 `Yard::open` runs `Yard::recover`; the server runs it at start and every 30 seconds; `send`, `merge` and `remove` run it for their branch first. For each stale lease, recovery takes the lease over with a new generation (only one engine wins), then:
 
-1. **Processes.** A Substrate turn's actor, named by its `sandbox` step, is deleted through the `Control` API, and the `recovered` reason says so; its harness already ended when the dead engine's bridge connection closed. For each harness process the turn recorded on this host and boot: if a live process has the recorded pid and start time, its process group is killed; if the pid now has another start time, the pid was reused and nothing is signalled; if the leader is gone, on Linux the remaining members of its group that started no earlier than it are killed one by one. Start time is `/proc/<pid>/stat`'s `starttime` on Linux and `ps -o lstart=` elsewhere.
+1. **Processes.** For each harness process the turn recorded on this host and boot: if a live process has the recorded pid and start time, its process group is killed; if the pid now has another start time, the pid was reused and nothing is signalled; if the leader is gone, on Linux the remaining members of its group that started no earlier than it are killed one by one. Start time is `/proc/<pid>/stat`'s `starttime` on Linux and `ps -o lstart=` elsewhere. Then, on Linux, every process whose environment has `BRANCHYARD_SPAWN` set to the marker the `start` step journaled is killed: a local harness is started with it, and what it starts inherits it, so this finds a harness spawned in the instant before its engine stopped, whose pid was never recorded, and processes that left the harness's group. The marker names the engine instance, the branch's incarnation and the lease generation, so it matches no other turn.
+   - **Sandboxes.** A Microsandbox sandbox named by the turn's `sandbox` step is destroyed through the provider (a build without the `microsandbox` feature cannot, and the `recovered` reason says so). A Substrate actor that still exists has its work brought back as the turn's end would have: recovery mints a new attempt credential with the host's bridge key, which supersedes the dead engine's, fetches the actor's working files as a bundle into the turn's staging repository, and applies them to the worktree only if the worktree still holds exactly what was sent to the actor; it brings the home back too. Then it deletes the actor and the staging directory. The `recovered` reason says whether the work came back, and if not, why (the worktree changed since, the key could not be read, the actor did not answer). The harness itself already ended when the dead engine's bridge connection closed.
 2. **Status, from the journal.**
    - `turn_end` recorded: the turn is finished as the engine would have, with the recorded snapshot if there is one, else a new snapshot. The status is the turn's own.
    - `submit` recorded, no `turn_end`: the turn counts as run, the worktree is snapshotted, and the branch ends `interrupted`: *the prompt had been submitted and the turn's outcome is unknown. It was not submitted again.*
@@ -78,6 +80,18 @@ A turn with `max_duration` stores its deadline with the lease. The engine that o
 A branch whose record says `running` and whose lease is free, which only an earlier version or an engine that failed without settling leaves behind, ends `interrupted` with a `Recovered` event that says its last turn's outcome is unknown.
 
 Nothing is ever submitted again by recovery.
+
+### Reservations
+
+Reserving a name records the reserving engine as a lease does (owner, host and boot, pid and start time). Recovery frees a reserved name whose branch was never created when that engine is gone from this host, or when the reservation is older than 10 minutes, whichever host made it; reserving and creating happen in one call, well within that. Only the reserving engine can then create the branch: a slow engine whose reservation was freed and taken by another gets `Error::BranchExists`. A reservation from an earlier version names no engine and is never freed.
+
+## Waiting for turns in other processes
+
+`Branch::wait_subtree`, `Delegate::wait` (the `inspect`-until-done of `by spawn --wait` and `wait` in the SDK) and `by run`'s wait for delegated branches read each branch's status from the store, so they wait for a turn whichever process runs it. Children on the waiting process's threads are joined. A branch still `running` is checked once a second: if its engine stopped, the wait recovers it as `Yard::recover` would, so it ends `interrupted` instead of being waited for; a live engine in another process is waited for until its turn ends. An appended event in the same process wakes the wait at once, another process's within 100 ms.
+
+## One server per data directory
+
+The server takes an exclusive advisory lock (`flock`, through `std::fs::File::try_lock`) on `DATA-DIR/lock` before it opens anything and holds it until it has stopped. A second server on the same directory fails at start with an error naming the holder's pid. The operating system releases the lock when the process exits, however it exits. `DirLock` in the engine crate is the helper.
 
 ## Reading events from a cursor
 
@@ -106,13 +120,13 @@ The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-
 
 - **Continuing a turn.** A recovered turn is never resumed or resubmitted, and its partial work is only what the snapshot captured.
 - **Recovery across hosts.** An engine on another host is recovered only once its lease expires (30 seconds without a heartbeat), and its processes there are not killed.
-- **Processes that leave their group** (a daemon calling `setsid`), and a harness started in the instant between its spawn and the `start` step's outcome, which recovery does not know about.
-- **Sandboxed harnesses.** For a Microsandbox branch the provider's process ID is recorded but not reconciled; the sandbox is not destroyed by recovery. A Substrate turn's actor and its transfer staging directory are deleted, but what its harness changed there is not brought back.
+- **Processes that leave their group and clear `BRANCHYARD_SPAWN`** from their environment, such as a daemon started with a scrubbed environment. On macOS and other systems without `/proc`, the marker is not searched for, so a harness started in the instant between its spawn and the `start` step's outcome, and processes that left its group, are not found there either.
+- **Sandboxed harnesses.** Destroying an orphaned Microsandbox sandbox was tested only against a stand-in provider and, in a build without the feature, the report that it could not be destroyed; not against Microsandbox itself. Bringing a Substrate actor's work back was tested against the fake cluster only. What comes back is the files as they were when the bridge ended the harness; work the harness had not yet written is lost, and a result is not applied over a worktree that changed since the turn began.
 - **The last event appends before an operating-system crash** (see the store).
 - **A hung owner.** An engine that stops renewing for 30 seconds while still alive, such as a stopped process, is taken over; its later writes are fenced, but its harness may already have been killed by recovery.
-- **Stale reservations.** A name reserved by an engine that died before creating the branch stays taken.
+- **Reservations of earlier versions** stay taken; another host's reservation is freed only after 10 minutes.
 - **Old and new versions side by side** on one repository.
-- **One server per data directory** is still not enforced.
+- **The data directory lock on a network file system** is only as good as that file system's `flock`.
 
 ## PostgreSQL
 
@@ -140,7 +154,11 @@ Process identity then comes from the node that runs the harness, which reports i
 |---|---|
 | [`state.rs`](../crates/branchyard/src/state.rs), [`sqlite.rs`](../crates/branchyard/src/sqlite.rs) | The store, the `Backend` trait, leases and heartbeat, the SQLite backend and the import |
 | [`engine.rs`](../crates/branchyard/src/engine.rs), [`run.rs`](../crates/branchyard/src/run.rs), [`ops.rs`](../crates/branchyard/src/ops.rs) | Journaled steps of a turn, of branch creation, merge and removal |
-| [`recover.rs`](../crates/branchyard/src/recover.rs), [`proc.rs`](../crates/branchyard/src/proc.rs) | Recovery and process identity |
-| [`tests/durable.rs`](../crates/branchyard/tests/durable.rs) | A killed engine recovered (orphaned harness and its child killed, prompt received once, session continued), a crash before submit, two yards, a superseded lease, a replayed snapshot, a merge cut short, cursors and waits, the import |
-| `sqlite.rs` unit tests | Fencing after takeover, expiry, step replay, cancels bound to a turn |
+| [`recover.rs`](../crates/branchyard/src/recover.rs), [`proc.rs`](../crates/branchyard/src/proc.rs) | Recovery and process identity, the spawn marker |
+| [`lock.rs`](../crates/branchyard/src/lock.rs) | The data directory lock |
+| [`tests/durable.rs`](../crates/branchyard/tests/durable.rs) | A killed engine recovered (orphaned harness and its child killed, prompt received once, session continued), a crash before submit, a harness whose pid was never recorded found by its marker, stale reservations freed and live ones kept, a Microsandbox sandbox that this build cannot destroy reported, two yards, a superseded lease, a replayed snapshot, a merge cut short, cursors and waits, the import |
+| [`tests/substrate.rs`](../crates/branchyard/tests/substrate.rs) | A killed engine's work brought back from its actor and in the recovered candidate; not applied over a worktree changed since |
+| [`tests/delegation.rs`](../crates/branchyard/tests/delegation.rs) | A subtree another yard drives waited for; a child whose engine stopped, or with no lease holder, recovered by `wait_subtree` and `Delegate::wait` |
+| [`server tests/lock.rs`](../crates/branchyard-server/tests/lock.rs) | A second server on one data directory refused |
+| `sqlite.rs`, `proc.rs`, `placement.rs`, `lock.rs` unit tests | Fencing after takeover, expiry, step replay, cancels bound to a turn; reservations freed only from a gone engine or once expired; marked processes killed in any group; a sandbox destroyed through a stand-in provider; the lock refused to a second holder |
 | [`cli.rs`](../crates/branchyard-cli/tests/cli.rs), [`remote.rs`](../crates/branchyard-cli/tests/remote.rs), [`api.rs`](../crates/branchyard-server/tests/api.rs) | `by cancel` from another process, `by --remote cancel`, HTTP cancel, the SSE stream from the store across a restart |

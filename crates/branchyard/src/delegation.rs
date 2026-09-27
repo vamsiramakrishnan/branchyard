@@ -45,8 +45,9 @@ use crate::broker::Remote;
 use crate::engine::{self, Turn};
 use crate::projection::{lock, same_token, ENV_BRANCH, ENV_ROOT, ENV_TOKEN};
 use crate::record::{self, Recorder};
-use crate::run::{self, NewBranch};
-use crate::state::{Lease, Record, Store};
+use crate::recover;
+use crate::run::{self, NewBranch, Prepared};
+use crate::state::{Record, Store};
 use crate::{
     git, harness, names, ops, Activity, BranchInfo, BranchStatus, Budget, CandidateInfo, Error,
     Event, Merged, Policy, RecordedEvent, Rule, TaskOptions, Yard,
@@ -60,6 +61,9 @@ const LAST_MESSAGE_MAX: usize = 4000;
 const EPSILON_USD: f64 = 1e-9;
 /// How often [`Delegate::wait`] looks.
 const WAIT_POLL: Duration = Duration::from_millis(100);
+/// How often a wait for a turn in another process looks again for a
+/// stopped engine to recover, and for children on this process's threads.
+const SETTLE_EVERY: Duration = Duration::from_secs(1);
 
 /// What a branch may delegate. Children get an envelope at most as wide as
 /// their parent's, one level shallower.
@@ -511,6 +515,10 @@ impl Delegate {
 
     /// Inspect `branch` until it is not running a turn, for up to
     /// `timeout`. Fails with [`Error::Running`] if it still is.
+    ///
+    /// The branch's turn may run in any process using the repository: the
+    /// wait reads its durable status, and a turn whose engine stopped is
+    /// recovered, so it ends `interrupted` rather than being waited for.
     pub fn wait(&self, branch: &str, timeout: Duration) -> Result<Inspection, Error> {
         let deadline = Instant::now().checked_add(timeout);
         loop {
@@ -518,10 +526,24 @@ impl Delegate {
             if inspection.status != BranchStatus::Running {
                 return Ok(inspection);
             }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
+            let now = Instant::now();
+            if deadline.is_some_and(|d| now >= d) {
                 return Err(Error::Running(branch.to_owned()));
             }
-            std::thread::sleep(WAIT_POLL);
+            let left = deadline.map_or(SETTLE_EVERY, |d| (d - now).min(SETTLE_EVERY));
+            match &self.via {
+                Via::Local(local) => {
+                    recover::settle(&local.yard, branch)?;
+                    let store = local.store();
+                    store.wait(left, || {
+                        Ok(
+                            (store.read(branch)?.info.status != BranchStatus::Running)
+                                .then_some(()),
+                        )
+                    })?;
+                }
+                Via::Remote(_) => std::thread::sleep(WAIT_POLL.min(left)),
+            }
         }
     }
 }
@@ -687,13 +709,15 @@ pub(crate) fn cancel_tree(store: &Store, name: &str, by: &str) -> Result<Vec<Str
     Ok(cancelled)
 }
 
+/// Wait until no descendant of `name` is running a turn, wherever it runs.
+/// Children on this process's threads are joined; a child another process
+/// drives is waited for through its durable status, and one whose engine
+/// stopped is recovered.
 pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, Error> {
     let store = yard.store();
     loop {
-        let names: BTreeSet<String> = descendants(&store, name)?
-            .into_iter()
-            .map(|info| info.name)
-            .collect();
+        let all = descendants(&store, name)?;
+        let names: BTreeSet<String> = all.iter().map(|info| info.name.clone()).collect();
         let handles: Vec<JoinHandle<()>> = {
             let mut running = lock(&yard.hub.running);
             let waiting: Vec<String> = running
@@ -706,14 +730,31 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
                 .filter_map(|key| running.remove(key))
                 .collect()
         };
-        if handles.is_empty() {
-            return descendants(&store, name);
+        if !handles.is_empty() {
+            for handle in handles {
+                // A panic in a child's thread has already been reported by
+                // the runtime; its record says `running` until recovered,
+                // and the others go on.
+                let _ = handle.join();
+            }
+            continue;
         }
-        for handle in handles {
-            // A panic in a child's thread has already been reported by the
-            // runtime; its record says `running` and the others go on.
-            let _ = handle.join();
+        let running: Vec<&BranchInfo> = all
+            .iter()
+            .filter(|info| info.status == BranchStatus::Running)
+            .collect();
+        if running.is_empty() {
+            return Ok(all);
         }
+        for info in running {
+            recover::settle(yard, &info.name)?;
+        }
+        store.wait(SETTLE_EVERY, || {
+            let settled = descendants(&store, name)?
+                .iter()
+                .all(|info| info.status != BranchStatus::Running);
+            Ok(settled.then_some(()))
+        })?;
     }
 }
 
@@ -906,11 +947,14 @@ impl Local {
         store.add_child(&self.branch, &name)?;
         let info = record.info.clone();
         self.start(
-            record,
-            lease,
-            profile,
-            launch,
-            SessionMode::Fresh,
+            Prepared {
+                record,
+                lease,
+                profile,
+                command: launch,
+                mode: SessionMode::Fresh,
+                note: None,
+            },
             request.prompt.clone(),
         )?;
         Ok(Spawned {
@@ -1021,15 +1065,15 @@ impl Local {
     }
 
     /// Run a turn on a thread of this process.
-    fn start(
-        &self,
-        record: Record,
-        lease: Lease,
-        profile: &'static Profile,
-        command: Vec<String>,
-        mode: SessionMode,
-        prompt: String,
-    ) -> Result<(), Error> {
+    fn start(&self, prepared: Prepared, prompt: String) -> Result<(), Error> {
+        let Prepared {
+            record,
+            lease,
+            profile,
+            command,
+            mode,
+            note,
+        } = prepared;
         let name = record.info.name.clone();
         let yard = self.yard.clone();
         let options = self.child_options();
@@ -1047,6 +1091,7 @@ impl Local {
                         prompt: &prompt,
                         options: &options,
                         fork_source: None,
+                        note,
                     },
                     lease,
                 );
@@ -1143,14 +1188,7 @@ impl Local {
         let _spawning = lock(&self.yard.hub.spawning);
         let prepared = run::prepare_send(&self.yard, branch, &self.child_options(), true)?;
         let info = prepared.record.info.clone();
-        self.start(
-            prepared.record,
-            prepared.lease,
-            prepared.profile,
-            prepared.command,
-            prepared.mode,
-            prompt.to_owned(),
-        )?;
+        self.start(prepared, prompt.to_owned())?;
         Ok(Sent {
             name: info.name,
             status: info.status,

@@ -758,3 +758,66 @@ fn profiles_that_route_no_tool_approvals_need_an_explicit_opt_in() {
     assert!(matches!(fan, Err(Error::Unsupported(_))), "{fan:?}");
     assert!(f.yard.branches().unwrap().is_empty(), "nothing was created");
 }
+
+#[test]
+fn a_branch_cancelled_before_its_harness_opened_a_session_starts_a_fresh_one_on_send() {
+    let f = Fixture::new();
+    // A harness that never answers its handshake.
+    let silent = TaskOptions {
+        command: Some(vec!["sh".into(), "-c".into(), "exec sleep 60".into()]),
+        ..f.options()
+    };
+    let task = f
+        .yard
+        .task("WRITE never.txt=1")
+        .options(silent)
+        .name("unopened");
+    let turn = std::thread::spawn(move || task.run());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let db = f.root.join(".branchyard/state.db");
+    let started = || {
+        rusqlite::Connection::open(&db)
+            .and_then(|c| c.query_row("SELECT COUNT(*) FROM processes", [], |r| r.get(0)))
+            .is_ok_and(|n: i64| n == 1)
+    };
+    while !started() {
+        assert!(Instant::now() < deadline, "the harness never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while f.yard.cancel("unopened").map_or(true, |c| c.is_empty()) {
+        assert!(Instant::now() < deadline, "the turn never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let cancelled = turn.join().unwrap().unwrap();
+    assert_eq!(cancelled.info().status, BranchStatus::Interrupted);
+    assert_eq!(cancelled.info().session, None);
+    assert_eq!(cancelled.info().turns, 0);
+
+    // No conversation exists to continue, so a send starts one, and says
+    // so; the first prompt is not sent with it.
+    let sent = cancelled.send("WRITE fresh.txt=1", f.options()).unwrap();
+    assert_eq!(sent.info().status, BranchStatus::Ready);
+    assert_eq!(sent.info().turns, 1);
+    let log = sent.events().unwrap();
+    assert!(
+        log.iter()
+            .any(|e| matches!(&e.activity, Activity::Warning(w)
+            if w.contains("no earlier turn submitted a prompt; this turn starts a fresh session"))),
+        "{log:?}"
+    );
+    let worktree = &sent.info().worktree;
+    assert!(worktree.join("fresh.txt").is_file());
+    assert!(!worktree.join("never.txt").exists());
+    // From then on, sends resume that session.
+    let again = sent.send("WHOAMI", f.options()).unwrap();
+    assert!(text(&again.events().unwrap()).contains("resumed=true"));
+
+    // A branch that ran a prompt but has no session is still refused.
+    edit_record(&f.root, "unopened", |record| {
+        record["info"]["session"] = serde_json::Value::Null;
+    });
+    assert!(matches!(
+        again.send("WHOAMI", f.options()),
+        Err(Error::Unsupported(why)) if why.contains("no harness session to resume")
+    ));
+}

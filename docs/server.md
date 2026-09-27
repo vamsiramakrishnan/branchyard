@@ -180,7 +180,7 @@ Global options go before the command: `--remote URL`, `--token-file FILE`, `--re
 
 ## Deployment notes
 
-- **One server per data directory.** The registry is not locked against a second server process, which would record the first's running operations as interrupted.
+- **One server per data directory** is enforced with an advisory lock on `DATA-DIR/lock`; a second server on the directory fails at start. On a network file system it is only as good as that file system's `flock`.
 - **TLS.** Terminate TLS in the server (`--tls-cert`/`--tls-key`, rustls with the ring provider, HTTP/1.1) or in a reverse proxy in front of a loopback bind. A proxy must not buffer `text/event-stream` responses. Clients trust the Mozilla roots plus `--ca-file`.
 - **Harnesses** run as the server's user, with its `PATH`, `HOME` and harness logins. Install and log in the harnesses as that user, or set `harness_commands`.
 - **Limits.** Request bodies are bounded (`max_body_bytes`, default 1 MiB), request heads must arrive within 30 seconds, at most 256 requests are handled at once (more wait), and at most `max_running` operations run at once (more queue). There is no per-request deadline beyond those, and no rate limiting per token.
