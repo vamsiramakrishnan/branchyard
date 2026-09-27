@@ -19,8 +19,8 @@ use axum::{Extension, Json, Router};
 use branchyard::{BranchEvent, Observer, TaskOptions, Yard};
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, FeedEntry, ForkRequest,
-    HarnessEntry, HarnessList, MergeRequest, MergedInfo, Operation, OperationKind, OperationResult,
-    Removed, RepoEntry, RepoList, SendRequest, TaskRequest,
+    HarnessList, MergeRequest, Operation, OperationKind, OperationResult, Removed, RepoEntry,
+    RepoList, SendRequest, TaskRequest,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -393,9 +393,7 @@ async fn harnesses(State(app): State<Shared>) -> Result<Json<HarnessList>, ApiEr
         .map(|r| r.yard.clone())
         .ok_or_else(|| ApiError::internal("no repositories"))?;
     let list = blocking(move || yard.harnesses()).await?;
-    Ok(Json(HarnessList {
-        harnesses: list.iter().map(HarnessEntry::from).collect(),
-    }))
+    Ok(Json(HarnessList { harnesses: list }))
 }
 
 async fn operation(
@@ -697,7 +695,7 @@ async fn post_merge(
             .unwrap_or_default();
         Ok(OperationResult {
             branches,
-            merged: Some(MergedInfo::from(merged)),
+            merged: Some(merged),
         })
     });
     let new = NewOperation {

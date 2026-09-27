@@ -213,7 +213,7 @@ impl Client {
     /// Harness profiles, as found on the server.
     pub fn harnesses(&self) -> Result<Vec<HarnessInfo>, Error> {
         let list: HarnessList = self.get("/v1/harnesses")?;
-        Ok(list.harnesses.into_iter().map(Into::into).collect())
+        Ok(list.harnesses)
     }
 
     pub fn operation(&self, id: &str) -> Result<Operation, Error> {

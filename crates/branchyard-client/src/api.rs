@@ -233,7 +233,7 @@ pub struct OperationResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<BranchInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merged: Option<MergedInfo>,
+    pub merged: Option<Merged>,
 }
 
 /// A long operation, run in the background. Durable on the server from
@@ -324,65 +324,17 @@ pub struct RepoList {
     pub repos: Vec<RepoEntry>,
 }
 
-/// [`branchyard::HarnessInfo`] on the wire. `available` is about the
-/// server's `PATH`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HarnessEntry {
-    pub harness: String,
-    pub profile: String,
-    pub default: bool,
-    pub available: bool,
-    pub qualification: Option<String>,
-}
-
-impl From<&HarnessInfo> for HarnessEntry {
-    fn from(h: &HarnessInfo) -> Self {
-        HarnessEntry {
-            harness: h.harness.clone(),
-            profile: h.profile.clone(),
-            default: h.default,
-            available: h.available,
-            qualification: h.qualification.clone(),
-        }
-    }
-}
-
-impl From<HarnessEntry> for HarnessInfo {
-    fn from(h: HarnessEntry) -> Self {
-        HarnessInfo {
-            harness: h.harness,
-            profile: h.profile,
-            default: h.default,
-            available: h.available,
-            qualification: h.qualification,
-        }
-    }
-}
+/// A harness profile on the wire: [`branchyard::HarnessInfo`]'s own serde
+/// form. `available` is about the server's `PATH`.
+pub type HarnessEntry = HarnessInfo;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessList {
-    pub harnesses: Vec<HarnessEntry>,
+    pub harnesses: Vec<HarnessInfo>,
 }
 
-/// [`branchyard::Merged`] on the wire.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MergedInfo {
-    pub branch: String,
-    pub target: String,
-    pub previous: String,
-    pub commit: String,
-}
-
-impl From<Merged> for MergedInfo {
-    fn from(m: Merged) -> Self {
-        MergedInfo {
-            branch: m.branch,
-            target: m.target,
-            previous: m.previous,
-            commit: m.commit,
-        }
-    }
-}
+/// A merge on the wire: [`branchyard::Merged`]'s own serde form.
+pub type MergedInfo = Merged;
 
 #[cfg(test)]
 mod tests {

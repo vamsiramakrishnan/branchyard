@@ -978,7 +978,7 @@ pub struct Merged {
 }
 
 /// Known harness profile and local availability.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub harness: String,
     pub profile: String,
