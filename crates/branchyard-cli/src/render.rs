@@ -350,9 +350,11 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(", ");
             let via = match via {
-                branchyard::DeliveredVia::TurnStart => "at the turn's start".to_owned(),
-                branchyard::DeliveredVia::Steer { steer } => {
-                    format!("into the running turn (steered input {steer})")
+                branchyard::DeliveredVia::TurnStart { boundary } => {
+                    format!("at the turn's start ({boundary})")
+                }
+                branchyard::DeliveredVia::Steer { steer, boundary } => {
+                    format!("into the running turn (steered input {steer}, {boundary})")
                 }
             };
             style.paint(Tone::Cyan, &format!("delivered {ids} {via}"))

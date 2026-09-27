@@ -538,6 +538,12 @@ impl Driver for Acp {
         Ok(frames)
     }
 
+    fn steer_boundary(&self) -> &'static str {
+        // The `_session/steering` extension request, only when advertised
+        // (`docs/harness-integration.md` "Steering a running turn").
+        "acp_session_steering"
+    }
+
     fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
         let session = match (&self.session, self.ready) {
             (Some(session), true) => session.to_string(),

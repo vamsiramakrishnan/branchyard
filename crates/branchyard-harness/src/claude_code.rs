@@ -675,6 +675,13 @@ impl Driver for ClaudeCode {
         Ok(vec![self.control_request(Pending::Interrupt(turn), request)])
     }
 
+    fn steer_boundary(&self) -> &'static str {
+        // Queued as a stream-json `user` message, delivered before the next
+        // model call (`docs/harness-integration.md` "Steering a running
+        // turn").
+        "claude_next_model_call"
+    }
+
     fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
         if !self.ready {
             return Err(Rejected::NotReady);

@@ -182,7 +182,7 @@ fn a_child_reports_and_asks_its_parent_across_both_event_logs() {
     assert!(prompt.ends_with("WHOAMI"), "{prompt}");
     // root had no running turn when they were sent: delivered at the start.
     assert!(events.iter().any(|e| matches!(&e.activity,
-        Activity::MessagesDelivered { via: DeliveredVia::TurnStart, ids } if ids.len() == 3)));
+        Activity::MessagesDelivered { via: DeliveredVia::TurnStart { .. }, ids } if ids.len() == 3)));
 
     let now_delivered = root_delegate.inbox().unwrap();
     assert!(
@@ -413,7 +413,12 @@ fn a_message_waits_for_the_next_turn_when_the_parent_cannot_steer() {
     );
     assert_eq!(
         delivered(&log),
-        [(vec![question.id], DeliveredVia::TurnStart)]
+        [(
+            vec![question.id],
+            DeliveredVia::TurnStart {
+                boundary: "turn_start".to_owned()
+            }
+        )]
     );
     assert!(root_inbox().messages[0].delivered);
     let root = root.send("WHOAMI", options).unwrap();

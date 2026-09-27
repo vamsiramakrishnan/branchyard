@@ -132,12 +132,14 @@ pub struct RigArgs {
     pub json: bool,
 }
 
-/// `by artifact publish|list|get|share ...`; see `docs/storage.md`.
+/// `by artifact publish|list|get|share|export|import ...`; see `docs/storage.md`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArtifactArgs {
     pub action: String,
-    /// `publish`'s file, or `get`/`share`'s id.
+    /// `publish`'s file, `get`/`share`'s id, or `import`'s bundle file.
     pub arg: Option<String>,
+    /// `export`'s artifact ids, one or more.
+    pub ids: Vec<String>,
     pub name: Option<String>,
     pub media_type: Option<String>,
     pub labels: Vec<(String, String)>,
@@ -401,9 +403,14 @@ impl Spec {
     pub fn usage(&self) -> String {
         let mut usage = format!("by {}", self.name);
         for positional in self.positionals {
-            match positional.strip_suffix('?') {
-                Some(optional) => usage.push_str(&format!(" [<{optional}>]")),
-                None => usage.push_str(&format!(" <{positional}>")),
+            if let Some(variadic) = positional.strip_suffix("...") {
+                // Zero or more: bracketed like an optional positional.
+                usage.push_str(&format!(" [<{variadic}...>]"));
+            } else {
+                match positional.strip_suffix('?') {
+                    Some(optional) => usage.push_str(&format!(" [<{optional}>]")),
+                    None => usage.push_str(&format!(" <{positional}>")),
+                }
             }
         }
         if !self.flags.is_empty() {
@@ -692,7 +699,7 @@ const ARTIFACT_LABEL: Flag = Flag {
 const ARTIFACT_OUT: Flag = Flag {
     long: "out",
     value: Some("PATH"),
-    help: "Where to write the artifact's bytes",
+    help: "Where to write the artifact's bytes, or export's bundle tar",
 };
 const ARTIFACT_TO: Flag = Flag {
     long: "to",
@@ -1118,8 +1125,8 @@ pub static COMMANDS: &[Spec] = &[
     },
     Spec {
         name: "artifact",
-        positionals: &["publish|list|get|share", "arg?"],
-        summary: "Publish, list, read or share an immutable artifact (see docs/storage.md)",
+        positionals: &["publish|list|get|share|export|import", "arg?", "ids..."],
+        summary: "Publish, list, read, share, export or import an artifact (see docs/storage.md)",
         flags: &[
             NAME,
             MEDIA_TYPE,
@@ -1385,7 +1392,13 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         }
         "artifact" => {
             let action = next();
-            let arg = optional.next();
+            // `arg?` and the variadic `ids...` are both whatever
+            // positionals are left after the action; `optional`'s skip
+            // count does not fit this spec's variadic tail, so they are
+            // taken directly here instead.
+            let rest: Vec<String> = positionals.collect();
+            let arg = rest.first().cloned();
+            let ids = rest.clone();
             let labels = m
                 .values("label")
                 .iter()
@@ -1395,10 +1408,11 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             match action.as_str() {
-                "publish" | "list" | "get" | "share" => {}
+                "publish" | "list" | "get" | "share" | "export" | "import" => {}
                 other => {
                     return Err(m.error(format!(
-                        "unknown artifact action '{other}'; use publish, list, get or share"
+                        "unknown artifact action '{other}'; use publish, list, get, share, \
+                         export or import"
                     )))
                 }
             }
@@ -1414,9 +1428,19 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             if action == "share" && m.value("to").is_none() {
                 return Err(m.error("artifact share needs --to BRANCH"));
             }
+            if action == "export" && ids.is_empty() {
+                return Err(m.error("artifact export needs at least one id"));
+            }
+            if action == "export" && m.value("out").is_none() {
+                return Err(m.error("artifact export needs --out PATH"));
+            }
+            if action == "import" && arg.is_none() {
+                return Err(m.error("artifact import needs a bundle file"));
+            }
             Command::Artifact(ArtifactArgs {
                 action,
                 arg,
+                ids,
                 name: m.value("name").map(str::to_owned),
                 media_type: m.value("media-type").map(str::to_owned),
                 labels,
@@ -1546,19 +1570,25 @@ impl Matches {
             return Ok(m);
         }
         let expected = spec.positionals;
+        // A last positional ending `...` is variadic: zero or more, so it
+        // is never missing and never leaves an "extra" argument (e.g.
+        // `artifact export ID...`).
+        let variadic = expected.last().is_some_and(|p| p.ends_with("..."));
         if let Some(missing) = expected
             .get(m.positionals.len())
-            .filter(|p| !p.ends_with('?'))
+            .filter(|p| !p.ends_with('?') && !p.ends_with("..."))
         {
             return Err(m.error(format!("missing <{missing}>")));
         }
-        if let Some(extra) = m.positionals.get(expected.len()) {
-            let hint = if expected.contains(&"prompt") {
-                " (quote a prompt that contains spaces)"
-            } else {
-                ""
-            };
-            return Err(m.error(format!("unexpected argument '{extra}'{hint}")));
+        if !variadic {
+            if let Some(extra) = m.positionals.get(expected.len()) {
+                let hint = if expected.contains(&"prompt") {
+                    " (quote a prompt that contains spaces)"
+                } else {
+                    ""
+                };
+                return Err(m.error(format!("unexpected argument '{extra}'{hint}")));
+            }
         }
         Ok(m)
     }

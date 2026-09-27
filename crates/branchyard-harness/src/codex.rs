@@ -493,6 +493,13 @@ impl Driver for Codex {
         )])
     }
 
+    fn steer_boundary(&self) -> &'static str {
+        // `turn/steer`, recorded once the model response in progress
+        // finishes (`docs/harness-integration.md` "Steering a running
+        // turn").
+        "codex_turn_steer"
+    }
+
     fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
         let thread = match (&self.thread, self.ready) {
             (Some(thread), true) => thread.to_string(),

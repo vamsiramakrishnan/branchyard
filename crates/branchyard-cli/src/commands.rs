@@ -1204,6 +1204,34 @@ pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
             let result = act.share_artifact(&id, &to).map(|()| Ack { ok: true });
             emit(json, result, |_| format!("shared {id} with {to}\n"))
         }
+        "export" => {
+            let out = absolute(args.out.as_deref().expect("checked in args"));
+            let result = act.export_artifacts(&args.ids, &out);
+            emit(json, result, |entries: &Vec<branchyard::BundleEntry>| {
+                format!(
+                    "exported {} artifact{} to {}\n",
+                    entries.len(),
+                    if entries.len() == 1 { "" } else { "s" },
+                    out.display()
+                )
+            })
+        }
+        "import" => {
+            let path = absolute(args.arg.as_deref().expect("checked in args"));
+            let result = act.import_artifacts(&path);
+            emit(json, result, |imported: &Vec<branchyard::ArtifactRef>| {
+                let mut out = format!(
+                    "imported {} artifact{} from {}\n",
+                    imported.len(),
+                    if imported.len() == 1 { "" } else { "s" },
+                    path.display()
+                );
+                for a in imported {
+                    out.push_str(&format!("  {} {} ({} bytes)\n", a.id, a.name, a.size));
+                }
+                out
+            })
+        }
         other => unreachable!("artifact action {other} was validated in args"),
     }
 }
@@ -1326,6 +1354,15 @@ fn remote_artifact(server: &remote::Remote, args: &ArtifactArgs) -> Outcome {
                 .map(|()| Ack { ok: true });
             emit(json, result, |_| format!("shared {id} with {to}\n"))
         }
+        "export" | "import" => fail(
+            json,
+            &branchyard::Error::Unsupported(format!(
+                "`by --remote artifact {action}` is not supported: the server has no bundle \
+                 endpoint. Run `by artifact {action}` locally instead (see docs/storage.md \
+                 \"Portable bundles\")",
+                action = args.action
+            )),
+        ),
         other => unreachable!("artifact action {other} was validated in args"),
     }
 }
