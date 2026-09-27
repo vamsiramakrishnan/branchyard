@@ -13,6 +13,8 @@
 | [Durable execution](durability.md) | What survives a crash, how leases, journaled steps, cancellation and recovery work, what is never replayed, and how the store maps onto PostgreSQL? |
 | [Surfaces](surfaces.md) | Which operations and options work in the SDK, `by`, `by --remote`, the HTTP API, the Rust client and delegation, and which are refused where? |
 | [Server and remote mode](server.md) | How do I run `by serve`, call its HTTP API, and drive it with `by --remote`? What is durable, and what is not isolated? |
+| [Distribution](distribution.md) | How do I install the Branchyard skill for Claude Code or Codex, or build reproducible plugin, skill and SDK archives? |
+| [Deploying `by serve`](deploy.md) | How do I run the server in a container or behind PostgreSQL with compose, and check a host is ready to? |
 | [Driver qualification](qualification/README.md) | Which driver profiles passed live protocol qualification, and what did it find? |
 | [Compatibility](compatibility.md) | Which profile drives each harness, with which capabilities, and has it passed live qualification? |
 | [Writing a driver](writing-a-driver.md) | How do I add a harness profile or driver, test it against a recorded transcript, and qualify it? |
