@@ -235,7 +235,7 @@ impl Placement {
             .ok_or("a sandboxed branch has no private home")?;
         let env = sandbox_env(options.home(), &options.pass_env)?;
         let provider = substrate(options)?;
-        let name = sandbox_name(&record.info.name, now_ms());
+        let name = actor_name(&record.info.name, now_ms());
         // Journaled before the actor exists, so recovery can delete it.
         let store = yard.store();
         let intent = json!({
@@ -405,6 +405,22 @@ fn sandbox_name(branch: &str, ms: u64) -> String {
     format!("by-{branch}{suffix}")
 }
 
+/// `by-<branch>-<ms>` as a Substrate resource name: a DNS label of at most
+/// 63 characters, so `.` and `_` become `-` and the branch is shortened.
+fn actor_name(branch: &str, ms: u64) -> String {
+    let suffix = format!("-{ms}");
+    let room = 63 - "by-".len() - suffix.len();
+    let branch: String = branch
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' => c,
+            _ => '-',
+        })
+        .take(room)
+        .collect();
+    format!("by-{}{suffix}", branch.trim_end_matches('-'))
+}
+
 #[cfg(feature = "microsandbox")]
 fn microsandbox() -> Result<Box<dyn SandboxProvider>, String> {
     branchyard_microsandbox::MicrosandboxProvider::new()
@@ -479,6 +495,16 @@ mod tests {
         let long = sandbox_name(&"a".repeat(200), u64::MAX);
         assert_eq!(long.len(), 128);
         assert!(branchyard_microsandbox::plan::name(&long).is_ok());
+    }
+
+    #[test]
+    fn actor_names_are_dns_labels() {
+        assert_eq!(actor_name("fix.parser_2", 17), "by-fix-parser-2-17");
+        let long = actor_name(&"a".repeat(200), 1_790_000_000_000);
+        assert_eq!(long.len(), 63);
+        assert!(long.ends_with("-1790000000000"));
+        let dashed = actor_name(&format!("{}.x", "a".repeat(45)), 1_790_000_000_000);
+        assert!(!dashed.contains("--"), "{dashed}");
     }
 
     #[test]

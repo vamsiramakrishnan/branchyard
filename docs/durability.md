@@ -36,6 +36,7 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | Step | Turn | Intent | Outcome | On recovery |
 |---|---|---|---|---|
 | `create` | the first turn | base, worktree path | worktree, or the error | Not repeated; a branch without a worktree ends `failed` at the snapshot |
+| `sandbox` | each, Substrate only | the actor's name and atespace, before it is created | its UID | The actor is deleted if it still exists |
 | `start` | each | command, sandboxed or not | pid, process group and start time, or the error | The recorded group is killed if it still matches |
 | `submit` | each | the prompt | the harness's turn number | Recorded intent means the prompt may have reached the harness: never submitted again |
 | `turn_end` | each | whether a prompt was submitted | how the turn ended | Finished as the engine would have |
@@ -67,7 +68,7 @@ A turn with `max_duration` stores its deadline with the lease. The engine that o
 
 `Yard::open` runs `Yard::recover`; the server runs it at start and every 30 seconds; `send`, `merge` and `remove` run it for their branch first. For each stale lease, recovery takes the lease over with a new generation (only one engine wins), then:
 
-1. **Processes.** For each harness process the turn recorded on this host and boot: if a live process has the recorded pid and start time, its process group is killed; if the pid now has another start time, the pid was reused and nothing is signalled; if the leader is gone, on Linux the remaining members of its group that started no earlier than it are killed one by one. Start time is `/proc/<pid>/stat`'s `starttime` on Linux and `ps -o lstart=` elsewhere.
+1. **Processes.** A Substrate turn's actor, named by its `sandbox` step, is deleted through the `Control` API, and the `recovered` reason says so; its harness already ended when the dead engine's bridge connection closed. For each harness process the turn recorded on this host and boot: if a live process has the recorded pid and start time, its process group is killed; if the pid now has another start time, the pid was reused and nothing is signalled; if the leader is gone, on Linux the remaining members of its group that started no earlier than it are killed one by one. Start time is `/proc/<pid>/stat`'s `starttime` on Linux and `ps -o lstart=` elsewhere.
 2. **Status, from the journal.**
    - `turn_end` recorded: the turn is finished as the engine would have, with the recorded snapshot if there is one, else a new snapshot. The status is the turn's own.
    - `submit` recorded, no `turn_end`: the turn counts as run, the worktree is snapshotted, and the branch ends `interrupted`: *the prompt had been submitted and the turn's outcome is unknown. It was not submitted again.*
@@ -106,7 +107,7 @@ The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-
 - **Continuing a turn.** A recovered turn is never resumed or resubmitted, and its partial work is only what the snapshot captured.
 - **Recovery across hosts.** An engine on another host is recovered only once its lease expires (30 seconds without a heartbeat), and its processes there are not killed.
 - **Processes that leave their group** (a daemon calling `setsid`), and a harness started in the instant between its spawn and the `start` step's outcome, which recovery does not know about.
-- **Sandboxed harnesses.** For a Microsandbox branch the provider's process ID is recorded but not reconciled; the sandbox is not destroyed by recovery.
+- **Sandboxed harnesses.** For a Microsandbox branch the provider's process ID is recorded but not reconciled; the sandbox is not destroyed by recovery. A Substrate turn's actor is deleted, but what its harness changed there is not brought back, and the host's transfer staging directory is left in the temp directory.
 - **The last event appends before an operating-system crash** (see the store).
 - **A hung owner.** An engine that stops renewing for 30 seconds while still alive, such as a stopped process, is taken over; its later writes are fenced, but its harness may already have been killed by recovery.
 - **Stale reservations.** A name reserved by an engine that died before creating the branch stays taken.

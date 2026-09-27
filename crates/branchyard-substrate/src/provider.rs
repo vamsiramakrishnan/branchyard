@@ -475,7 +475,10 @@ impl SandboxProvider for SubstrateProvider {
         let handle = self
             .handle(name)?
             .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;
-        let tag = format!("{name}-{}", unix_now().as_millis());
+        // Tag names are DNS labels of at most 63 characters.
+        let suffix = format!("-{}", unix_now().as_millis());
+        let stem: String = name.chars().take(63 - suffix.len()).collect();
+        let tag = format!("{}{suffix}", stem.trim_end_matches('-'));
         let tag = self.block(async move |actors| actors.checkpoint(&handle, &tag).await)?;
         Ok(Checkpoint {
             sandbox: name.to_owned(),
