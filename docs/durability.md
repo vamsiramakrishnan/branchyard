@@ -101,9 +101,15 @@ Reserving a name records the reserving engine as a lease does (owner, host and b
 
 `Branch::wait_subtree`, `Delegate::wait` (the `inspect`-until-done of `by spawn --wait` and `wait` in the SDK) and `by run`'s wait for delegated branches read each branch's status from the store, so they wait for a turn whichever process runs it. Children on the waiting process's threads are joined. A branch still `running` is checked once a second: if its engine stopped, the wait recovers it as `Yard::recover` would, so it ends `interrupted` instead of being waited for; a live engine in another process is waited for until its turn ends. An appended event in the same process wakes the wait at once, another process's within 100 ms.
 
+## Operation dispatch
+
+The server's operations follow the same model one level up. Accepting an operation is a durable enqueue: its record, its idempotency binding, its branch locks and a queue row describing its work (a serializable description, not a closure) commit in one transaction before the `202`, and a failure of any of those writes, the queue's included, rolls all of them back. A worker claims a queue row under a lease it renews and a fence (the claim's attempt number) that its `running` record and its outcome both name; the outcome, the queue row's deletion and the branch locks' release commit together, and a worker that lost its claim is refused them. A claim whose lease expired, or whose process is gone from this host, is claimed again: an operation still `queued` runs, and one recorded `running` is recorded `interrupted` and never run again, since only the engine knows whether its prompt was submitted, and the engine's own recovery settles its branch. So an operation admitted by a server that crashed before running it runs exactly once, on a server that restarts or on another sharing the database; and one whose server crashed mid-turn is interrupted, as a turn whose engine died is.
+
+On SQLite the data directory lock makes the server the store's only user, so at start it releases every claim its predecessor held. On PostgreSQL several servers and `by worker` processes share the queue: claims use `FOR UPDATE SKIP LOCKED`, leases are measured by the database's clock, and a claim is taken over when its lease expires, or at once when its process is gone from the claiming worker's host ([server](server.md#dispatch)).
+
 ## One server per data directory
 
-The server takes an exclusive advisory lock (`flock`, through `std::fs::File::try_lock`) on `DATA-DIR/lock` before it opens anything and holds it until it has stopped. A second server on the same directory fails at start, after retrying for up to 2 seconds, with an error naming the holder's pid. The retry covers a lock released an instant earlier but still held by a copy of the file that a child starting on another thread took with it, which a server restarted in the same process could otherwise hit. The operating system releases the lock when the process exits, however it exits. `DirLock` in the engine crate is the helper.
+With `--database`, the server takes no lock: the database holds its operations, and several servers may share it. Otherwise it takes an exclusive advisory lock (`flock`, through `std::fs::File::try_lock`) on `DATA-DIR/lock` before it opens anything and holds it until it has stopped. A second server on the same directory fails at start, after retrying for up to 2 seconds, with an error naming the holder's pid. The retry covers a lock released an instant earlier but still held by a copy of the file that a child starting on another thread took with it, which a server restarted in the same process could otherwise hit. The operating system releases the lock when the process exits, however it exits. `DirLock` in the engine crate is the helper.
 
 ## Reading events from a cursor
 
@@ -130,7 +136,7 @@ The server's webhook deliveries (`docs/server.md#webhooks`) read the same feed f
 
 On first open, `.branchyard/branches/*.json` (an empty file was a reservation) and `.branchyard/events/*.jsonl` are imported in one transaction: records as they were, events in line order per branch (a torn final line is dropped) and in time order across branches in the feed. The directories then move to `.branchyard/legacy/`, and the import is recorded so it never runs again. A record that says `running` is then recovered as described above. The delegation cancel marker files are no longer read. Running an earlier `by` on a repository after the import is not supported: it would write files nothing reads.
 
-The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-DIR/state.db` (SQLite, the same settings, `synchronous=FULL` on every save): the file is imported on first start and renamed `operations.jsonl.imported`. `DATA-DIR/feeds/` is no longer used and can be deleted. The registry is a separate database from the repositories' because it spans every served repository and lives in the server's data directory. Its restart behavior is unchanged: operations and idempotency keys survive, and unfinished operations become `interrupted`.
+The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-DIR/state.db` (SQLite, the same settings, `synchronous=FULL` on every save): the file is imported on first start and renamed `operations.jsonl.imported`. `DATA-DIR/feeds/` is no longer used and can be deleted. The registry is a separate database from the repositories' because it spans every served repository and lives in the server's data directory. Operations and idempotency keys survive a restart. An unfinished operation recorded by a version without the dispatch queue has no queue row; it becomes `interrupted` at the next start, as it did then.
 
 ## Not guaranteed
 
@@ -143,10 +149,12 @@ The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-
 - **Reservations of earlier versions** stay taken; another host's reservation is freed only after 10 minutes.
 - **Old and new versions side by side** on one repository.
 - **The data directory lock on a network file system** is only as good as that file system's `flock`.
+- **A hung worker.** A server that stops renewing its operation claims for the lease (30 seconds) while still alive has its running operations recorded `interrupted` by another worker; its own later outcome is refused, and the branch is what the engine says. Operation leases are on the database's clock; the engine's turn leases are on the engines'.
+- **Delivery to a server that serves other repositories.** A worker claims only the repositories it serves; an operation for a repository no running worker serves waits in the queue.
 
 ## PostgreSQL
 
-[`pg.rs`](../crates/branchyard/src/pg.rs) implements the same `Backend` on PostgreSQL, behind the cargo feature `postgres` (the `postgres` 0.19 crate, the synchronous client over `tokio-postgres`). `Yard::open_postgres(path, url, scope)` opens a repository with it, and `by serve --database URL` opens every served repository that way, with its served name as the scope; the server's `OperationStore` is the `by_operations` table in the same database ([`store.rs`](../crates/branchyard-server/src/store.rs)). Nothing above the two traits changed.
+[`pg.rs`](../crates/branchyard/src/pg.rs) implements the same `Backend` on PostgreSQL, behind the cargo feature `postgres` (the `postgres` 0.19 crate, the synchronous client over `tokio-postgres`). `Yard::open_postgres(path, url, scope)` opens a repository with it, and `by serve --database URL` opens every served repository that way, with its served name as the scope; the server's `OperationStore` is the `by_operations`, `by_operation_queue` and `by_branch_locks` tables in the same database ([`store.rs`](../crates/branchyard-server/src/store.rs)), which several servers may share. Nothing above the two traits changed.
 
 | SQLite | PostgreSQL |
 |---|---|
@@ -163,7 +171,9 @@ The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-
 
 The client blocks; a call made on a Tokio runtime's thread, such as the server's, runs on a thread of its own. The connection is reopened when it closes. Connections have no TLS.
 
-Not built: delivering accepted operations through PGMQ in the same transaction (design §8), branch locks in the database, several servers on one schema, a reconciler that claims stale leases with `FOR UPDATE SKIP LOCKED`, and importing an existing `state.db`.
+The dispatch queue is plain tables, not PGMQ: `by_operation_queue` has the operation's ID, its repository, its work description, and the claim (attempt, worker, host, pid, start time, `lease_until`). PGMQ could replace it; the admission transaction would send the message where it now inserts the row, and a worker would read with a visibility timeout where it now sets `lease_until`.
+
+Not built: importing an existing `state.db`, and waking idle workers with `NOTIFY` rather than polling.
 
 ### Running its tests
 
@@ -196,5 +206,6 @@ As any other user, drop `runuser -u nobody --`. The CI job `postgres` in [`check
 | [`tests/substrate.rs`](../crates/branchyard/tests/substrate.rs) | A killed engine's work brought back from its actor and in the recovered candidate; not applied over a worktree changed since |
 | [`tests/delegation.rs`](../crates/branchyard/tests/delegation.rs) | A subtree another yard drives waited for; a child whose engine stopped, or with no lease holder, recovered by `wait_subtree` and `Delegate::wait` |
 | [`server tests/lock.rs`](../crates/branchyard-server/tests/lock.rs) | A second server on one data directory refused |
+| The server's [`store.rs`](../crates/branchyard-server/src/store.rs) and [`ops.rs`](../crates/branchyard-server/src/ops.rs) unit tests, [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs) | Admission binds the key, takes the locks and enqueues together; a trigger-injected queue failure rolls it back (SQLite and PostgreSQL); claims fenced after expiry; a crash between admission and execution run once by another registry and by a `--worker` process; an expired claim taken over, running a queued operation and interrupting a started one without running it again; two servers on one database running each operation once, replaying one key and holding branch locks across servers |
 | `sqlite.rs`, `proc.rs`, `placement.rs`, `lock.rs` unit tests | Fencing after takeover, expiry, step replay, cancels bound to a turn; reservations freed only from a gone engine or once expired; marked processes killed in any group; a sandbox destroyed through a stand-in provider; the lock refused to a second holder |
 | [`cli.rs`](../crates/branchyard-cli/tests/cli.rs), [`remote.rs`](../crates/branchyard-cli/tests/remote.rs), [`api.rs`](../crates/branchyard-server/tests/api.rs) | `by cancel` from another process, `by --remote cancel`, HTTP cancel, `by send --steer` into a turn another process runs, locally and remotely, HTTP steer, the SSE stream from the store across a restart |

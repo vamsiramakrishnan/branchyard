@@ -153,5 +153,6 @@ Every result a surface returns is the SDK's serde form: `BranchInfo`, `RecordedE
 | Delegation for the server's harnesses | none | `--allow-delegation`, `--by-path` |
 | Unapproved tools on the server | refused | `--allow-unapproved-tools` |
 | PostgreSQL | design only | `Yard::open_postgres`, `by serve --database` |
+| Several servers, and execute-only workers, on one database | one server per data directory | `by serve --database` on each, `by worker --database`; operations looked up by key with `GET /v1/operations?idempotency_key=` (`Client::operation_by_key`) ([server](server.md#several-servers-on-one-database)) |
 | `HarnessInfo` | not `Serialize`; copied field by field | serde |
 | `by --remote artifact`/`scratch`, the server's HTTP API, `branchyard-client` for storage | refused: "does not yet reach a server over --remote" | server endpoints, the same JSON as local; `--max-artifact-bytes` |
