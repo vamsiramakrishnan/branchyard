@@ -53,10 +53,13 @@ In the throwaway repository:
 | Merge | `by merge <b>` | The check runs in a temporary worktree; the target moves only if it passes |
 | Budget | `by run "…" --max-turns 1` then `by send`; and `--max-minutes 1` on a long task | `budget_exceeded` with the limit named |
 | Interrupt | Ctrl-C during a long turn | The harness and its process group are gone (`ps -eo pgid,comm`) |
+| Cancel | `by cancel <b>` from a second terminal during a long turn | The turn stops; `by log <b>` names who cancelled |
+| Crash recovery | `kill -9` the `by` process mid-turn (after the prompt is submitted), then `by ls` | The harness's process group is gone; the branch is `interrupted` with a `recovered` event saying the outcome is unknown; the prompt was not sent again; `by send <b> …` resumes the session |
+| Two terminals | `by send <b> …` while another `by` runs a turn on `<b>` | Refused as running; no race |
 | Unapproved tools | `by run "…" --harness pi` | Refused; with `--allow-unapproved-tools` it runs |
 | Watch | `by watch` in a second terminal during the above | The tree updates live; `q` exits cleanly |
 
-**Record:** anything that differs from the expectation, in an issue or in [validation](validation.md).
+**Record:** anything that differs from the expectation, in an issue or in [validation](validation.md). Recovery is described in [durability](durability.md); on macOS it relies on `ps -o lstart=` for process start times, which is untested.
 
 ## 3. Delegation (model calls)
 
