@@ -1,0 +1,26 @@
+{
+  "general": {
+    "disableAutoUpdate": true
+  },
+  "model": {
+    "name": "gemini-3.6-flash",
+    "skipNextSpeakerCheck": true
+  },
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    },
+    "folderTrust": {
+      "enabled": false
+    }
+  },
+  "telemetry": {
+    "enabled": true,
+    "logPrompts": false,
+    "otlpEndpoint": "http://127.0.0.1:14317",
+    "otlpProtocol": "grpc",
+    "target": "local",
+    "traces": false,
+    "useCollector": false
+  }
+}

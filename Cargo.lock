@@ -653,6 +653,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-provision"
+version = "0.0.1"
+dependencies = [
+ "branchyard-controls",
+ "branchyard-harness",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "branchyard-qualify"
 version = "0.0.1"
 dependencies = [

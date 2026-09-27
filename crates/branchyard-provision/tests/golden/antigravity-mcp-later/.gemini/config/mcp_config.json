@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "docs": {
+      "args": [
+        "--stdio"
+      ],
+      "command": "/usr/bin/docs-mcp",
+      "env": {
+        "LEVEL": "1"
+      },
+      "type": "stdio"
+    },
+    "users-own": {
+      "command": "/opt/mine"
+    }
+  }
+}
