@@ -428,3 +428,58 @@ fn idempotency_keys_are_scoped_per_tenant() {
     assert_eq!(wait(&acme, &a.id).state, OperationState::Succeeded);
     assert_eq!(wait(&globex, &b.id).state, OperationState::Succeeded);
 }
+
+/// A graph proposal is not an operation, but its spawns are branches:
+/// `max_branches` refuses a proposal that would take the tenant past it,
+/// with nothing applied, and admits one that fits.
+#[test]
+fn max_branches_quota_covers_graph_proposals() {
+    use branchyard::{Envelope, GraphEdit, SpawnSpec};
+    use branchyard_client::api::{GraphRequest, PolicySpec, TaskRequest};
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.by_path = Some("/bin/true".into());
+    config.allow_delegation = true;
+    config.tenants.insert(
+        "default".into(),
+        TenantPolicy {
+            max_branches: Some(2),
+            ..TenantPolicy::default()
+        },
+    );
+    let server = Server::start(config);
+    let client = server.client();
+    let repo = client.repo("app");
+    let root = run(
+        &client,
+        &TaskRequest {
+            delegation: Some(Envelope::default()),
+            ..task("say hi", "root")
+        },
+    );
+    assert_eq!(root.state, OperationState::Succeeded, "{root:?}");
+    let spawn = |name: &str| {
+        GraphEdit::Spawn(SpawnSpec {
+            prompt: "WRITE f.txt=1".into(),
+            name: Some(name.into()),
+            ..SpawnSpec::default()
+        })
+    };
+    let request = |edits| GraphRequest {
+        expected_revision: 0,
+        edits,
+        policy: PolicySpec::allow_all(),
+        unapproved_tools: false,
+    };
+    let denied = repo
+        .apply_graph("root", &request(vec![spawn("one"), spawn("two")]))
+        .unwrap_err();
+    assert_eq!(denied.code(), Some("quota_exceeded"), "{denied:?}");
+    assert!(denied.to_string().contains("max_branches"), "{denied}");
+    assert_eq!(repo.graph("root").unwrap().revision, 0);
+    assert_eq!(repo.branches().unwrap().len(), 1);
+    let applied = repo
+        .apply_graph("root", &request(vec![spawn("one")]))
+        .unwrap();
+    assert_eq!(applied.revision, 1);
+}

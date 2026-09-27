@@ -233,6 +233,13 @@ impl Registry {
             .map(|stored| stored.operation))
     }
 
+    /// `tenant`'s queued and running operations, as the store holds them.
+    pub fn unfinished(&self, tenant: &str) -> Result<Vec<StoredOperation>, ApiError> {
+        self.store
+            .unfinished(tenant)
+            .map_err(|e| ApiError::internal(format!("could not read the operations: {e}")))
+    }
+
     /// The operation an earlier request of `tenant` with this key created,
     /// if any.
     pub fn replay(&self, idem: &Idempotency, tenant: &str) -> Result<Option<Operation>, ApiError> {

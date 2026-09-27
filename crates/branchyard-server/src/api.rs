@@ -218,6 +218,52 @@ impl App {
         }
     }
 
+    /// `max_branches` for a graph proposal's spawns. A proposal is not an
+    /// operation, so this is not taken in an admission's transaction: it
+    /// counts the tenant's branches and those its unfinished operations
+    /// will create, as admission does, but two proposals racing past the
+    /// same near-limit tenant can both be applied. See
+    /// `docs/server.md#quotas`.
+    async fn check_graph_branches(
+        self: &Arc<Self>,
+        caller: &Caller,
+        policy: &TenantPolicy,
+        new_children: usize,
+    ) -> Result<(), ApiError> {
+        let Some(max) = policy.max_branches else {
+            return Ok(());
+        };
+        let quota = self.admission_quota(caller, policy);
+        let registry = self.registry.clone();
+        let tenant = caller.tenant().to_owned();
+        let reserved = blocking(move || {
+            let mut branches: BTreeSet<(String, String)> = registry
+                .unfinished(&tenant)?
+                .into_iter()
+                .flat_map(|o| {
+                    let repo = o.operation.repo.clone();
+                    o.creates.into_iter().map(move |b| (repo.clone(), b))
+                })
+                .collect();
+            if let Some(existing) = &quota.existing_branches {
+                branches.extend(existing().map_err(|e| {
+                    ApiError::internal(format!("could not read the branches: {e}"))
+                })?);
+            }
+            Ok::<_, ApiError>(branches.len())
+        })
+        .await??;
+        if reserved + new_children > max {
+            return Err(crate::ops::quota_exceeded(
+                "max_branches",
+                caller.tenant(),
+                max,
+                reserved,
+            ));
+        }
+        Ok(())
+    }
+
     /// `max_cost_usd` and `max_artifact_bytes`, checked live against
     /// durable state before a branch-creating operation (task, fork,
     /// reincarnate, spawn) is admitted. Best-effort, unlike `max_running`
@@ -1440,6 +1486,17 @@ async fn post_graph(
     }
     app.opt_ins(false, false, request.unapproved_tools)?;
     let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let new_children = request
+        .edits
+        .iter()
+        .filter(|edit| matches!(edit, branchyard::GraphEdit::Spawn(_)))
+        .count();
+    if new_children > 0 {
+        let policy = app.tenant_policy(&caller);
+        app.check_admission_quotas(&caller, &policy).await?;
+        app.check_graph_branches(&caller, &policy, new_children)
+            .await?;
+    }
     let options = app.options(
         &repo,
         Budget::default(),
