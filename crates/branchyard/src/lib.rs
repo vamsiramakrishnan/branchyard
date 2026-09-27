@@ -50,7 +50,9 @@
 //!
 //! - Isolation. By default a harness runs with your environment and your
 //!   `HOME`, so it uses your own harness login and can read what you can;
-//!   only nested-session markers are removed. [`TaskOptions::isolated`]
+//!   every `CLAUDE*` variable except Claude Code configuration (provider,
+//!   credentials, TLS identity, limits) is removed, so a child never runs
+//!   under its parent session's identity. [`TaskOptions::isolated`]
 //!   gives it a scrubbed environment and a private home instead, which
 //!   usually means it is not logged in.
 //! - Coordination between processes beyond name reservation: two processes

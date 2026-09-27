@@ -24,7 +24,7 @@ A task, a conversation, a sandbox, and a code branch have separate identities. F
 
 ## Quick start (local mode)
 
-Local mode runs the engine in-process and each harness as a local process in its own git worktree under `.branchyard/`. It needs no server, but it provides **no isolation beyond your operating-system user**: by default a harness runs with your environment, your `HOME` and your own harness login, and can read and write whatever you can. Only nested-session markers such as `CLAUDECODE` are removed. `--isolated` scrubs credentials and uses a private `HOME`, so the harness is then usually not logged in.
+Local mode runs the engine in-process and each harness as a local process in its own git worktree under `.branchyard/`. It needs no server, but it provides **no isolation beyond your operating-system user**: by default a harness runs with your environment, your `HOME` and your own harness login, and can read and write whatever you can. Every `CLAUDE*` variable except Claude Code configuration (provider selection, credentials, TLS client identity, limits) is removed, so a harness never runs under the identity of a Claude Code session that launched `by`. `--isolated` scrubs credentials and uses a private `HOME`, so the harness is then usually not logged in.
 
 ```sh
 cargo install --locked --path crates/branchyard-cli   # installs `by`

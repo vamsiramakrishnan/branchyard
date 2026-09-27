@@ -264,8 +264,11 @@ impl Renderer {
     }
 
     pub fn event(&mut self, branch: &str, event: &Event) -> String {
-        if let Event::MessageDelta { text, .. } = event {
-            return self.text(branch, text);
+        match event {
+            Event::MessageDelta { text, .. } => return self.text(branch, text),
+            // Kept in the record for `by log`; noise in live output.
+            Event::Unrecognized { .. } => return String::new(),
+            _ => {}
         }
         match event_line(event, self.style) {
             Some(line) => self.line(branch, &line),

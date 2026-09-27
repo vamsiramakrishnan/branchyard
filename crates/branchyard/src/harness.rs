@@ -11,23 +11,33 @@ use crate::{Error, HarnessInfo};
 
 pub(crate) const DEFAULT_HARNESS: &str = "claude-code";
 
-/// Variables a harness sets for the processes it runs, which would make a
-/// harness started from inside one believe it is a nested session. The
-/// first seven are the ones Claude Code 2.1 itself removes before starting
-/// a child Claude Code; `CLAUDE_CODE_ENTRYPOINT` would misreport how the
-/// child was launched, and `CLAUDE_CODE_SSE_PORT` would attach it to the
-/// parent's IDE connection. Credentials are not markers and are kept.
-pub(crate) const NESTED_SESSION_MARKERS: &[&str] = &[
-    "CLAUDECODE",
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_CHILD_SESSION",
-    "CLAUDE_CODE_SESSION_ATTENDED",
-    "CLAUDE_CODE_CHROME_MCP_ORG_DENIED",
-    "CLAUDE_CODE_EVAL_INTERVIEW_SESSION",
-    "CLAUDE_CODE_BRIDGE_SESSION_ID",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_SSE_PORT",
+/// Claude Code configuration a developer may set that a child harness should
+/// keep: provider selection, credentials, TLS client identity and limits.
+/// Every other `CLAUDE*` variable describes the *current* Claude Code
+/// process or host (its session, remote ingress, messaging socket) and is
+/// removed, so a child never runs under its parent's identity.
+pub(crate) const CLAUDE_CONFIGURATION: &[&str] = &[
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_API_KEY_HELPER_TTL_MS",
+    "CLAUDE_CODE_CLIENT_CERT",
+    "CLAUDE_CODE_CLIENT_KEY",
+    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
 ];
+
+/// Whether an inherited variable belongs to the running Claude Code process
+/// or its host rather than to the developer's configuration.
+pub(crate) fn is_parent_session_variable(name: &str) -> bool {
+    name.to_ascii_uppercase().starts_with("CLAUDE") && !CLAUDE_CONFIGURATION.contains(&name)
+}
 
 /// Published qualification reports, embedded at build time. A test checks
 /// this list against `docs/qualification/`.
@@ -92,14 +102,15 @@ fn executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-/// The harness's environment: this process's, minus nested-session
-/// markers; or, isolated, the runtime's scrubbed environment with `home`.
+/// The harness's environment: this process's, minus the parent Claude Code
+/// session's variables; or, isolated, the runtime's scrubbed environment with `home`.
 pub(crate) fn environment(isolated_home: Option<&Path>) -> Environment {
     match isolated_home {
         Some(home) => Environment::new(home),
-        None => NESTED_SESSION_MARKERS
-            .iter()
-            .fold(Environment::inherit(), |env, name| env.remove(*name)),
+        None => std::env::vars_os()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .filter(|name| is_parent_session_variable(name))
+            .fold(Environment::inherit(), |env, name| env.remove(name)),
     }
 }
 
@@ -188,7 +199,26 @@ mod tests {
     }
 
     #[test]
-    fn inherited_environments_drop_only_nested_session_markers() {
+    fn inherited_environments_drop_the_parent_session_but_keep_configuration() {
+        for name in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_REMOTE_SESSION_ID",
+            "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "claude_code_anything_new",
+        ] {
+            assert!(is_parent_session_variable(name), "{name} must be removed");
+        }
+        for name in [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CONFIG_DIR",
+            "ANTHROPIC_API_KEY",
+            "PATH",
+        ] {
+            assert!(!is_parent_session_variable(name), "{name} must be kept");
+        }
         let env = environment(None);
         assert_eq!(
             env.home(),
