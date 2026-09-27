@@ -593,15 +593,31 @@ pub fn serve_stdio(root: PathBuf, branch: &str, token: &str) -> std::io::Result<
     })
 }
 
-/// Usage for the command line.
-pub const USAGE: &str = "Usage: branchyard-mcp --root <repository> --branch <name>\n\
-The delegation token is read from BRANCHYARD_DELEGATION. The engine starts this server \
-for a harness; it works only while that branch's turn runs.\n";
+/// The command line: `--root <repository> --branch <name>`.
+#[derive(clap::Parser, Debug)]
+#[command(
+    name = "branchyard-mcp",
+    version,
+    about = "Branchyard's delegation tools for one branch, over MCP on stdio.",
+    after_help = "The delegation token is read from BRANCHYARD_DELEGATION. The engine starts \
+                  this server for a harness; it works only while that branch's turn runs."
+)]
+struct Cli {
+    /// The repository root
+    #[arg(long, value_name = "DIR")]
+    root: PathBuf,
+    /// The branch whose turn this server serves
+    #[arg(long, value_name = "NAME")]
+    branch: String,
+}
 
 /// Why the command line failed.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Failure {
-    /// Bad arguments or a missing token: exit 2.
+    /// Bad arguments: clap's error, printed as clap formats it, exit 2
+    /// (or 0 for `--help` and `--version`).
+    Clap(clap::Error),
+    /// A missing token: exit 2.
     Usage(String),
     /// Serving failed.
     Serve(String),
@@ -610,44 +626,27 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Failure::Clap(error) => write!(f, "{}", error.to_string().trim_end()),
             Failure::Usage(message) | Failure::Serve(message) => f.write_str(message),
         }
     }
 }
 
-/// Run the command line: `--root <repository> --branch <name>`, token in
-/// [`ENV_TOKEN`].
+/// Run the command line (after the program name): `--root <repository>
+/// --branch <name>`, token in [`ENV_TOKEN`].
 pub fn main_with_args(args: &[String]) -> Result<(), Failure> {
-    let usage = Failure::Usage;
-    let mut root = None;
-    let mut branch = None;
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        let (flag, inline) = match arg.split_once('=') {
-            Some((flag, value)) => (flag, Some(value.to_owned())),
-            None => (arg.as_str(), None),
-        };
-        let mut value = || {
-            inline
-                .clone()
-                .or_else(|| args.next().cloned())
-                .ok_or_else(|| usage(format!("{flag} needs a value")))
-        };
-        match flag {
-            "--root" => root = Some(PathBuf::from(value()?)),
-            "--branch" => branch = Some(value()?),
-            "-h" | "--help" => {
-                print!("{USAGE}");
-                return Ok(());
-            }
-            other => return Err(usage(format!("unexpected argument '{other}'"))),
-        }
-    }
-    let root = root.ok_or_else(|| usage("--root is required".into()))?;
-    let branch = branch.ok_or_else(|| usage("--branch is required".into()))?;
+    use clap::Parser;
+    let program = std::iter::once("branchyard-mcp".to_owned());
+    let cli = Cli::try_parse_from(program.chain(args.iter().cloned())).map_err(Failure::Clap)?;
+    serve_branch(cli.root, &cli.branch)
+}
+
+/// Serve `branch`'s delegation tools on stdio, with the token in
+/// [`ENV_TOKEN`]; `by mcp --root --branch` calls this directly.
+pub fn serve_branch(root: PathBuf, branch: &str) -> Result<(), Failure> {
     let token = std::env::var(ENV_TOKEN)
         .ok()
         .filter(|t| !t.is_empty())
-        .ok_or_else(|| usage(format!("{ENV_TOKEN} is not set")))?;
-    serve_stdio(root, &branch, &token).map_err(|e| Failure::Serve(format!("serving MCP: {e}")))
+        .ok_or_else(|| Failure::Usage(format!("{ENV_TOKEN} is not set")))?;
+    serve_stdio(root, branch, &token).map_err(|e| Failure::Serve(format!("serving MCP: {e}")))
 }

@@ -8,87 +8,100 @@ use std::time::Duration;
 
 use branchyard::Yard;
 
+use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+
 use crate::config::{self, sha256_hex, Config, TlsFiles, Token, DEFAULT_TENANT, SCOPES};
 use crate::serve;
 
-pub const TOKEN_USAGE: &str = "\
+const TOKEN_NEW_ABOUT: &str = "\
 Generate a bearer token and the hashed credential to configure for it.
-
-Usage: branchyard-server token new [options]
 
 The token is printed once, in cleartext: give it to the client and discard
 it; only its hash goes in the server's configuration; branchyard-server
 never stores or logs the plaintext. Paste the printed `credentials` entry
-into your configuration's `credentials` array (see `docs/server.md`).
+into your configuration's `credentials` array (see docs/server.md).";
 
-Options:
-  --name NAME       This credential's subject name (default: a random one)
-  --tenant TENANT   Its tenant (default: 'default')
-  --scopes S,...    Its scopes: read, run, merge, admin (default: all four)
-  --repo R,...      Its own repository allowlist, narrower than its
-                     tenant's (default: none, meaning whatever its tenant
-                     allows)
-  -h, --help        Show this help
-";
+const AFTER_HELP: &str = "\
+On start it prints 'listening on URL' to stdout. SIGINT or SIGTERM begins a
+graceful shutdown; a second one stops waiting for running operations.
+Harnesses run as the server's operating-system user, with no isolation
+beyond it.";
 
-fn token_new(args: &[String], program: &str) -> ExitCode {
-    let mut name = None;
-    let mut tenant = DEFAULT_TENANT.to_owned();
-    let mut scopes: Vec<String> = SCOPES.iter().map(|s| s.to_string()).collect();
-    let mut repos: Option<Vec<String>> = None;
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        let (flag, inline) = match arg.split_once('=') {
-            Some((n, v)) if n.starts_with("--") => (n, Some(v.to_owned())),
-            _ => (arg.as_str(), None),
-        };
-        let mut value = |what: &str| -> Result<String, String> {
-            match &inline {
-                Some(v) => Ok(v.clone()),
-                None => args
-                    .next()
-                    .cloned()
-                    .ok_or_else(|| format!("{flag} needs a value {what}")),
-            }
-        };
-        let result = match flag {
-            "-h" | "--help" => {
-                print!("{TOKEN_USAGE}");
-                return ExitCode::SUCCESS;
-            }
-            "--name" => value("NAME").map(|v| name = Some(v)),
-            "--tenant" => value("TENANT").map(|v| tenant = v),
-            "--scopes" => value("S,...").map(|v| {
-                scopes = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-            }),
-            "--repo" => value("R,...").map(|v| {
-                repos = Some(
-                    v.split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .collect(),
-                );
-            }),
-            other => Err(format!("unknown option {other}")),
-        };
-        if let Err(error) = result {
-            eprintln!("{program}: {error}\nTry '{program} token new --help'.");
-            return ExitCode::from(2);
-        }
-    }
+/// `branchyard-server`'s command line, also `by serve` and `by worker`.
+#[derive(Parser, Debug)]
+#[command(
+    name = "branchyard-server",
+    version,
+    about = "Serve Branchyard repositories over an authenticated HTTP API.",
+    after_help = AFTER_HELP,
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<ServerCommand>,
+    #[command(flatten)]
+    flags: Flags,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServerCommand {
+    /// Bearer tokens for the configuration's credentials
+    #[command(subcommand)]
+    Token(TokenCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenCommand {
+    /// Generate a bearer token and the hashed credential to configure for it
+    #[command(long_about = TOKEN_NEW_ABOUT)]
+    New(TokenNew),
+}
+
+#[derive(Args, Debug)]
+struct TokenNew {
+    /// This credential's subject name (default: a random one)
+    #[arg(long)]
+    name: Option<String>,
+    /// Its tenant
+    #[arg(long, default_value = DEFAULT_TENANT)]
+    tenant: String,
+    /// Its scopes: read, run, merge, admin (default: all four)
+    #[arg(long, value_name = "S,...", value_parser = names)]
+    scopes: Option<Names>,
+    /// Its own repository allowlist, narrower than its tenant's (default: none, meaning
+    /// whatever its tenant allows)
+    #[arg(long = "repo", value_name = "R,...", value_parser = names)]
+    repos: Option<Names>,
+}
+
+/// A comma-separated list, trimmed, without empty entries.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Names(Vec<String>);
+
+fn names(text: &str) -> Result<Names, String> {
+    Ok(Names(
+        text.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    ))
+}
+
+fn token_new(args: TokenNew, program: &str) -> ExitCode {
+    let scopes = match args.scopes {
+        Some(Names(scopes)) => scopes,
+        None => SCOPES.iter().map(|s| s.to_string()).collect(),
+    };
     for scope in &scopes {
         if let Err(error) = config::check_scope_name(scope) {
             eprintln!("{program}: --scopes: {error}");
             return ExitCode::FAILURE;
         }
     }
-    let name = name.unwrap_or_else(|| format!("token-{}", &branchyard_client::new_key()[..8]));
+    let name = args
+        .name
+        .unwrap_or_else(|| format!("token-{}", &branchyard_client::new_key()[..8]));
     let secret = format!(
         "{}{}",
         branchyard_client::new_key(),
@@ -98,10 +111,10 @@ fn token_new(args: &[String], program: &str) -> ExitCode {
     eprintln!("{program}: token (printed once; give it to the client, never store it): {secret}");
     let credential = serde_json::json!({
         "token_sha256": hash,
-        "tenant": tenant,
+        "tenant": args.tenant,
         "name": name,
         "scopes": scopes,
-        "repos": repos,
+        "repos": args.repos.map(|Names(repos)| repos),
     });
     println!(
         "{}",
@@ -113,94 +126,123 @@ fn token_new(args: &[String], program: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-pub const USAGE: &str = "\
-Serve Branchyard repositories over an authenticated HTTP API.
-
-Usage: branchyard-server [options]
-       by serve [options]
-       by worker --database URL [options]
-       branchyard-server token new [options]   (see 'branchyard-server token new --help')
-
-Options:
-  --config FILE             JSON configuration; see docs/server.md
-  --listen ADDR             Address to listen on (default: 127.0.0.1:8421)
-  --repo NAME=PATH          Serve the repository at PATH as NAME; repeatable
-                            (default: the repository containing the current directory)
-  --data-dir DIR            Operation registry and activity feeds
-                            (default: .branchyard/server in the first repository)
-  --token-file FILE         Accept the token on the first line of FILE; repeatable
-                            (default: DATA-DIR/token, created if missing)
-  --tls-cert FILE           PEM certificate chain; serve HTTPS
-  --tls-key FILE            PEM private key for --tls-cert
-  --insecure-bind           Allow plain HTTP on an address other than loopback
-  --harness-command H=CMD   Run harness H as CMD, split on spaces; repeatable
-  --allow-client-commands   Accept a request's own command: any token holder can then
-                            choose what the server executes
-  --allow-provider P,...    Accept requests that name these providers besides local:
-                            microsandbox, substrate; repeatable
-  --allow-delegation        Accept delegation envelopes and spawns: harnesses get the
-                            delegation tools, with this server's by
-  --by-path PATH            The by a delegating harness gets (default: this by, or by
-                            beside this executable, or on PATH)
-  --allow-unapproved-tools  Accept requests to run profiles whose tools bypass the policy
-  --secret NAME[=VAR|=@FILE]
-                            A secret requests may name, read from this server's
-                            variable NAME or VAR, or from FILE; repeatable
-  --database URL            Keep branch state, operations and their queue in
-                            PostgreSQL (postgres://...), which several servers and
-                            workers may share; needs a build with the postgres feature
-  --worker                  Only run operations queued in --database, by any server
-                            on it: no listener, no webhooks (what by worker does)
-  --max-artifact-bytes N    Largest artifact a publish may upload (default: 268435456)
-  --webhook URL             Notify URL of every served repository's activity
-                            (branch status changes, stalls, permission requests);
-                            https:// only unless loopback or --webhook-insecure
-  --webhook-secret FILE     HMAC-SHA256 key for the most recent --webhook, signing
-                            each delivery's body (X-Branchyard-Signature)
-  --webhook-events KINDS    Only these comma-separated kinds for the most recent
-                            --webhook: status, stall, permission_wait, merge,
-                            failure (default: every kind)
-  --webhook-insecure        Allow a --webhook URL that is plain http:// off loopback
-  --max-running N           Operations running at once (default: 8)
-  --operation-lease SECS    How long a claim on a queued operation lasts without
-                            renewal before another worker takes it over (default: 30)
-  --shutdown-grace SECS     At shutdown, wait this long for running operations (default: 60)
-  --quiet                   Do not log requests
-  -h, --help                Show this help
-
-On start it prints 'listening on URL' to stdout. SIGINT or SIGTERM begins a
-graceful shutdown; a second one stops waiting for running operations.
-Harnesses run as the server's operating-system user, with no isolation
-beyond it.
-";
-
-#[derive(Default, Debug, PartialEq)]
+/// The server's options. The `webhook*` and `secret` fields are as given;
+/// [`parse`] turns them into `webhooks` and `secrets`.
+#[derive(Args, Default, Debug, PartialEq)]
 struct Flags {
+    /// JSON configuration; see docs/server.md
+    #[arg(short, long, value_name = "FILE")]
     config: Option<PathBuf>,
+    /// Address to listen on (default: 127.0.0.1:8421)
+    #[arg(long, value_name = "ADDR")]
     listen: Option<String>,
+    /// Serve the repository at PATH as NAME; repeatable (default: the repository containing
+    /// the current directory)
+    #[arg(long = "repo", value_name = "NAME=PATH", value_parser = repo)]
     repos: Vec<(String, PathBuf)>,
+    /// Operation registry and activity feeds (default: .branchyard/server in the first
+    /// repository)
+    #[arg(long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
+    /// Accept the token on the first line of FILE; repeatable (default: DATA-DIR/token,
+    /// created if missing)
+    #[arg(long = "token-file", value_name = "FILE")]
     token_files: Vec<PathBuf>,
+    /// PEM certificate chain; serve HTTPS
+    #[arg(long, value_name = "FILE", help_heading = "TLS")]
     tls_cert: Option<PathBuf>,
+    /// PEM private key for --tls-cert
+    #[arg(long, value_name = "FILE", help_heading = "TLS")]
     tls_key: Option<PathBuf>,
+    /// Allow plain HTTP on an address other than loopback
+    #[arg(long, help_heading = "TLS")]
     insecure_bind: bool,
+    /// Run harness H as CMD, split on spaces; repeatable
+    #[arg(
+        long = "harness-command",
+        value_name = "H=CMD",
+        value_parser = harness_command,
+        help_heading = "What requests may do"
+    )]
     harness_commands: Vec<(String, Vec<String>)>,
+    /// Accept a request's own command: any token holder can then choose what the server
+    /// executes
+    #[arg(long, help_heading = "What requests may do")]
     allow_client_commands: bool,
+    /// Accept requests that name these providers besides local: microsandbox, substrate;
+    /// repeatable
+    #[arg(
+        long = "allow-provider",
+        value_name = "P,...",
+        value_parser = providers,
+        help_heading = "What requests may do"
+    )]
+    allow_provider: Vec<Names>,
+    #[arg(skip)]
     allow_providers: Vec<String>,
+    /// Accept delegation envelopes and spawns: harnesses get the delegation tools, with this
+    /// server's by
+    #[arg(long, help_heading = "What requests may do")]
     allow_delegation: bool,
+    /// The by a delegating harness gets (default: this by, or by beside this executable, or
+    /// on PATH)
+    #[arg(long, value_name = "PATH", help_heading = "What requests may do")]
     by_path: Option<PathBuf>,
+    /// Accept requests to run profiles whose tools bypass the policy
+    #[arg(long, help_heading = "What requests may do")]
     allow_unapproved_tools: bool,
+    /// A secret requests may name, read from this server's variable NAME or VAR, or from
+    /// FILE; repeatable
+    #[arg(
+        long = "secret",
+        value_name = "NAME[=VAR|=@FILE]",
+        value_parser = secret,
+        help_heading = "What requests may do"
+    )]
+    secret: Vec<branchyard::SecretSource>,
+    #[arg(skip)]
     secrets: Vec<branchyard::SecretSource>,
+    /// Keep branch state, operations and their queue in PostgreSQL (postgres://...), which
+    /// several servers and workers may share; needs a build with the postgres feature
+    #[arg(long, value_name = "URL", help_heading = "Operations")]
     database: Option<String>,
-    max_artifact_bytes: Option<u64>,
-    max_running: Option<usize>,
-    operation_lease: Option<Duration>,
+    /// Only run operations queued in --database, by any server on it: no listener, no
+    /// webhooks (what by worker does)
+    #[arg(long, help_heading = "Operations")]
     worker: bool,
+    /// Largest artifact a publish may upload (default: 268435456)
+    #[arg(long, value_name = "N", value_parser = artifact_bytes, help_heading = "Operations")]
+    max_artifact_bytes: Option<u64>,
+    /// Operations running at once (default: 8)
+    #[arg(long, value_name = "N", value_parser = max_running, help_heading = "Operations")]
+    max_running: Option<usize>,
+    /// How long a claim on a queued operation lasts without renewal before another worker
+    /// takes it over (default: 30)
+    #[arg(long, value_name = "SECS", value_parser = lease, help_heading = "Operations")]
+    operation_lease: Option<Duration>,
+    /// At shutdown, wait this long for running operations (default: 60)
+    #[arg(long, value_name = "SECS", value_parser = grace, help_heading = "Operations")]
     shutdown_grace: Option<Duration>,
+    /// Notify URL of every served repository's activity (branch status changes, stalls,
+    /// permission requests); https:// only unless loopback or --webhook-insecure
+    #[arg(long, value_name = "URL", help_heading = "Webhooks")]
+    webhook: Vec<String>,
+    /// HMAC-SHA256 key for the most recent --webhook, signing each delivery's body
+    /// (X-Branchyard-Signature)
+    #[arg(long, value_name = "FILE", help_heading = "Webhooks")]
+    webhook_secret: Vec<PathBuf>,
+    /// Only these comma-separated kinds for the most recent --webhook: status, stall,
+    /// permission_wait, merge, failure (default: every kind)
+    #[arg(long, value_name = "KINDS", value_parser = webhook_events, help_heading = "Webhooks")]
+    webhook_events: Vec<Names>,
+    #[arg(skip)]
     webhooks: Vec<FlagWebhook>,
+    /// Allow a --webhook URL that is plain http:// off loopback
+    #[arg(long, help_heading = "Webhooks")]
     webhook_insecure: bool,
+    /// Do not log requests
+    #[arg(short, long)]
     quiet: bool,
-    help: bool,
 }
 
 /// One `--webhook`, with the `--webhook-secret` and `--webhook-events` that
@@ -212,174 +254,163 @@ struct FlagWebhook {
     events: Vec<String>,
 }
 
-fn parse(args: &[String]) -> Result<Flags, String> {
-    let mut flags = Flags::default();
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        let (name, inline) = match arg.split_once('=') {
-            Some((name, value)) if name.starts_with("--") => (name, Some(value.to_owned())),
-            _ => (arg.as_str(), None),
-        };
-        let mut value = |what: &str| -> Result<String, String> {
-            match &inline {
-                Some(value) => Ok(value.clone()),
-                None => args
-                    .next()
-                    .cloned()
-                    .ok_or_else(|| format!("{name} needs a value {what}")),
-            }
-        };
-        let once = |seen: bool| match seen {
-            true => Err(format!("{name} given twice")),
-            false => Ok(()),
-        };
-        match name {
-            "-h" | "--help" => flags.help = true,
-            "--config" => {
-                once(flags.config.is_some())?;
-                flags.config = Some(value("FILE")?.into());
-            }
-            "--listen" => {
-                once(flags.listen.is_some())?;
-                flags.listen = Some(value("ADDR")?);
-            }
-            "--repo" => {
-                let text = value("NAME=PATH")?;
-                let (name, path) = text
-                    .split_once('=')
-                    .filter(|(n, p)| !n.is_empty() && !p.is_empty())
-                    .ok_or_else(|| format!("--repo needs NAME=PATH, not {text:?}"))?;
-                flags.repos.push((name.to_owned(), path.into()));
-            }
-            "--data-dir" => {
-                once(flags.data_dir.is_some())?;
-                flags.data_dir = Some(value("DIR")?.into());
-            }
-            "--token-file" => flags.token_files.push(value("FILE")?.into()),
-            "--tls-cert" => {
-                once(flags.tls_cert.is_some())?;
-                flags.tls_cert = Some(value("FILE")?.into());
-            }
-            "--tls-key" => {
-                once(flags.tls_key.is_some())?;
-                flags.tls_key = Some(value("FILE")?.into());
-            }
-            "--insecure-bind" if inline.is_none() => flags.insecure_bind = true,
-            "--allow-client-commands" if inline.is_none() => flags.allow_client_commands = true,
-            "--quiet" if inline.is_none() => flags.quiet = true,
-            "--allow-delegation" if inline.is_none() => flags.allow_delegation = true,
-            "--allow-unapproved-tools" if inline.is_none() => flags.allow_unapproved_tools = true,
-            "--allow-provider" => {
-                let text = value("PROVIDER,...")?;
-                for name in text.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-                    config::check_provider_name(name)?;
-                    flags.allow_providers.push(name.to_owned());
-                }
-            }
-            "--secret" => {
-                let secret = config::parse_secret(&value("NAME[=VAR|=@FILE]")?)
-                    .map_err(|e| format!("--secret: {e}"))?;
-                let dir = std::env::current_dir().map_err(|e| e.to_string())?;
-                flags.secrets.push(config::resolve_secret(secret, &dir));
-            }
-            "--by-path" => {
-                once(flags.by_path.is_some())?;
-                flags.by_path = Some(value("PATH")?.into());
-            }
-            "--database" => {
-                once(flags.database.is_some())?;
-                flags.database = Some(value("URL")?);
-            }
-            "--harness-command" => {
-                let text = value("HARNESS=CMD")?;
-                let (harness, command) = text
-                    .split_once('=')
-                    .ok_or_else(|| format!("--harness-command needs HARNESS=CMD, not {text:?}"))?;
-                let argv: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
-                if harness.is_empty() || argv.is_empty() {
-                    return Err(format!("--harness-command needs HARNESS=CMD, not {text:?}"));
-                }
-                flags.harness_commands.push((harness.to_owned(), argv));
-            }
-            "--max-artifact-bytes" => {
-                once(flags.max_artifact_bytes.is_some())?;
-                let text = value("N")?;
-                let n = text.parse::<u64>().ok().filter(|n| *n >= 1024).ok_or_else(|| {
-                    format!("--max-artifact-bytes needs a number of bytes, at least 1024, not {text:?}")
-                })?;
-                flags.max_artifact_bytes = Some(n);
-            }
-            "--max-running" => {
-                once(flags.max_running.is_some())?;
-                let text = value("N")?;
-                let n = text
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|n| *n > 0)
-                    .ok_or_else(|| {
-                        format!("--max-running needs a positive number, not {text:?}")
-                    })?;
-                flags.max_running = Some(n);
-            }
-            "--webhook" => {
-                flags.webhooks.push(FlagWebhook {
-                    url: value("URL")?,
-                    secret_file: None,
-                    events: Vec::new(),
-                });
-            }
-            "--webhook-secret" => {
-                let path: PathBuf = value("FILE")?.into();
-                let webhook = flags
-                    .webhooks
-                    .last_mut()
-                    .ok_or("--webhook-secret needs a --webhook before it")?;
-                once(webhook.secret_file.is_some())?;
-                webhook.secret_file = Some(path);
-            }
-            "--webhook-events" => {
-                let text = value("KINDS")?;
-                let webhook = flags
-                    .webhooks
-                    .last_mut()
-                    .ok_or("--webhook-events needs a --webhook before it")?;
-                once(!webhook.events.is_empty())?;
-                for kind in text.split(',').map(str::trim).filter(|k| !k.is_empty()) {
-                    config::check_webhook_event_kind(kind)?;
-                    webhook.events.push(kind.to_owned());
-                }
-            }
-            "--webhook-insecure" if inline.is_none() => flags.webhook_insecure = true,
-            "--worker" if inline.is_none() => flags.worker = true,
-            "--operation-lease" => {
-                once(flags.operation_lease.is_some())?;
-                let text = value("SECS")?;
-                let secs = text
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|s| s.is_finite() && *s >= 0.1 && *s < 1e6)
-                    .ok_or_else(|| {
-                        format!("--operation-lease needs a number of seconds, at least 0.1, not {text:?}")
-                    })?;
-                flags.operation_lease = Some(Duration::from_secs_f64(secs));
-            }
-            "--shutdown-grace" => {
-                once(flags.shutdown_grace.is_some())?;
-                let text = value("SECS")?;
-                let secs = text
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|s| s.is_finite() && *s >= 0.0 && *s < 1e9)
-                    .ok_or_else(|| {
-                        format!("--shutdown-grace needs a number of seconds, not {text:?}")
-                    })?;
-                flags.shutdown_grace = Some(Duration::from_secs_f64(secs));
-            }
-            other if other.starts_with('-') => return Err(format!("unknown option {other}")),
-            other => return Err(format!("unexpected argument {other:?}")),
-        }
+fn repo(text: &str) -> Result<(String, PathBuf), String> {
+    text.split_once('=')
+        .filter(|(n, p)| !n.is_empty() && !p.is_empty())
+        .map(|(name, path)| (name.to_owned(), path.into()))
+        .ok_or_else(|| "needs NAME=PATH".into())
+}
+
+fn harness_command(text: &str) -> Result<(String, Vec<String>), String> {
+    let (harness, command) = text.split_once('=').ok_or("needs HARNESS=CMD")?;
+    let argv: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+    if harness.is_empty() || argv.is_empty() {
+        return Err("needs HARNESS=CMD".into());
     }
-    Ok(flags)
+    Ok((harness.to_owned(), argv))
+}
+
+fn providers(text: &str) -> Result<Names, String> {
+    let names = names(text)?;
+    for name in &names.0 {
+        config::check_provider_name(name)?;
+    }
+    Ok(names)
+}
+
+fn webhook_events(text: &str) -> Result<Names, String> {
+    let kinds = names(text)?;
+    for kind in &kinds.0 {
+        config::check_webhook_event_kind(kind)?;
+    }
+    Ok(kinds)
+}
+
+fn secret(text: &str) -> Result<branchyard::SecretSource, String> {
+    config::parse_secret(text)
+}
+
+fn artifact_bytes(text: &str) -> Result<u64, String> {
+    text.parse::<u64>()
+        .ok()
+        .filter(|n| *n >= 1024)
+        .ok_or_else(|| "needs a number of bytes, at least 1024".into())
+}
+
+fn max_running(text: &str) -> Result<usize, String> {
+    text.parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| "needs a positive number".into())
+}
+
+fn lease(text: &str) -> Result<Duration, String> {
+    text.parse::<f64>()
+        .ok()
+        .filter(|s| s.is_finite() && *s >= 0.1 && *s < 1e6)
+        .map(Duration::from_secs_f64)
+        .ok_or_else(|| "needs a number of seconds, at least 0.1".into())
+}
+
+fn grace(text: &str) -> Result<Duration, String> {
+    text.parse::<f64>()
+        .ok()
+        .filter(|s| s.is_finite() && *s >= 0.0 && *s < 1e9)
+        .map(Duration::from_secs_f64)
+        .ok_or_else(|| "needs a number of seconds".into())
+}
+
+/// The command, named `program` in its usage and messages.
+fn command(program: &str) -> clap::Command {
+    Cli::command().bin_name(program.to_owned())
+}
+
+/// Help for `program` (`branchyard-server`, `by serve` or `by worker`).
+pub fn help(program: &str) -> String {
+    command(program).render_help().to_string()
+}
+
+/// Parse `args` (after the program name) as `program`'s: the server's
+/// flags, or `token new`.
+fn parse_cli(args: &[String], program: &str) -> Result<Cli, clap::Error> {
+    let mut cmd = command(program);
+    let argv = std::iter::once(program.to_owned()).chain(args.iter().cloned());
+    let matches = cmd.try_get_matches_from_mut(argv)?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if cli.command.is_none() {
+        let flags = &mut cli.flags;
+        let fail = |message: String| {
+            clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message).format(&mut cmd)
+        };
+        flags.webhooks = webhooks(&matches, flags).map_err(fail)?;
+        flags.allow_providers = std::mem::take(&mut flags.allow_provider)
+            .into_iter()
+            .flat_map(|Names(names)| names)
+            .collect();
+        let dir = std::env::current_dir().map_err(|e| {
+            clap::Error::raw(clap::error::ErrorKind::Io, e.to_string())
+                .format(&mut command(program))
+        })?;
+        flags.secrets = std::mem::take(&mut flags.secret)
+            .into_iter()
+            .map(|secret| config::resolve_secret(secret, &dir))
+            .collect();
+    }
+    Ok(cli)
+}
+
+/// `--webhook-secret` and `--webhook-events` belong to the `--webhook`
+/// before them on the command line.
+fn webhooks(matches: &ArgMatches, flags: &Flags) -> Result<Vec<FlagWebhook>, String> {
+    let indices = |id: &str| -> Vec<usize> {
+        matches
+            .indices_of(id)
+            .map(|i| i.collect())
+            .unwrap_or_default()
+    };
+    let urls = indices("webhook");
+    let mut webhooks: Vec<FlagWebhook> = flags
+        .webhook
+        .iter()
+        .map(|url| FlagWebhook {
+            url: url.clone(),
+            ..FlagWebhook::default()
+        })
+        .collect();
+    let owner = |at: usize, flag: &str| -> Result<usize, String> {
+        urls.iter()
+            .rposition(|url| *url < at)
+            .ok_or_else(|| format!("{flag} needs a --webhook before it"))
+    };
+    for (at, file) in indices("webhook_secret")
+        .into_iter()
+        .zip(&flags.webhook_secret)
+    {
+        let webhook = &mut webhooks[owner(at, "--webhook-secret")?];
+        if webhook.secret_file.is_some() {
+            return Err("--webhook-secret given twice for one --webhook".into());
+        }
+        webhook.secret_file = Some(file.clone());
+    }
+    for (at, kinds) in indices("webhook_events")
+        .into_iter()
+        .zip(&flags.webhook_events)
+    {
+        let webhook = &mut webhooks[owner(at, "--webhook-events")?];
+        if !webhook.events.is_empty() {
+            return Err("--webhook-events given twice for one --webhook".into());
+        }
+        webhook.events = kinds.0.clone();
+    }
+    Ok(webhooks)
+}
+
+/// The server's flags from `args`, as `branchyard-server` would parse them.
+#[cfg(test)]
+fn parse(args: &[String]) -> Result<Flags, String> {
+    parse_cli(args, "branchyard-server")
+        .map(|cli| cli.flags)
+        .map_err(|e| e.to_string())
 }
 
 /// A token file's contents, created with a fresh random token and mode 600
@@ -575,26 +606,19 @@ async fn signal() {
 /// Run the server with `args` (after the program name); `program` names it
 /// in messages.
 pub fn main(args: &[String], program: &str) -> ExitCode {
-    if args.first().map(String::as_str) == Some("token") {
-        return match args.get(1).map(String::as_str) {
-            Some("new") => token_new(&args[2..], program),
-            _ => {
-                eprintln!("{program}: usage: {program} token new [options]");
-                ExitCode::from(2)
-            }
-        };
-    }
-    let flags = match parse(args) {
-        Ok(flags) => flags,
+    let flags = match parse_cli(args, program) {
+        Ok(Cli {
+            command: Some(ServerCommand::Token(TokenCommand::New(args))),
+            ..
+        }) => return token_new(args, program),
+        Ok(cli) => cli.flags,
+        // Help and --version come this way too, to stdout with exit 0;
+        // usage errors go to stderr with exit 2.
         Err(error) => {
-            eprintln!("{program}: {error}\nTry '{program} --help'.");
-            return ExitCode::from(2);
+            let _ = error.print();
+            return ExitCode::from(error.exit_code() as u8);
         }
     };
-    if flags.help {
-        print!("{USAGE}");
-        return ExitCode::SUCCESS;
-    }
     let (config, warnings) = match build(flags) {
         Ok(built) => built,
         Err(error) => {
@@ -716,24 +740,65 @@ mod tests {
         );
         assert_eq!(flags.shutdown_grace, Some(Duration::from_millis(1500)));
         for (line, error) in [
-            ("--bogus", "unknown option --bogus"),
-            ("--listen", "--listen needs a value ADDR"),
-            ("--repo x", "--repo needs NAME=PATH"),
-            ("--config a --config b", "--config given twice"),
+            ("--bogus", "unexpected argument '--bogus'"),
+            ("--listen", "a value is required for '--listen <ADDR>'"),
+            ("--repo x", "needs NAME=PATH"),
+            ("--config a --config b", "cannot be used multiple times"),
             ("--max-running 0", "positive number"),
-            ("--insecure-bind=1", "unknown option --insecure-bind"),
+            (
+                "--insecure-bind=1",
+                "unexpected value '1' for '--insecure-bind'",
+            ),
             ("--allow-provider docker", "\"docker\" is not a provider"),
             (
                 "--allow-delegation=yes",
-                "unknown option --allow-delegation",
+                "unexpected value 'yes' for '--allow-delegation'",
             ),
-            ("extra", "unexpected argument"),
+            ("extra", "unrecognized subcommand 'extra'"),
             ("--operation-lease 0", "at least 0.1"),
-            ("--worker=1", "unknown option --worker"),
+            ("--worker=1", "unexpected value '1' for '--worker'"),
+            ("token new --listen x", "unexpected argument '--listen'"),
+            ("--listen x token new", "cannot be used with"),
         ] {
             let got = parse(&args(line)).unwrap_err();
             assert!(got.contains(error), "{line}: {got}");
         }
+        // Short forms, and the server's help under each of its names.
+        let flags = parse(&args("-c conf.json -q")).unwrap();
+        assert_eq!(flags.config, Some(PathBuf::from("conf.json")));
+        assert!(flags.quiet);
+        assert!(help("by worker").contains("Usage: by worker [OPTIONS]"));
+        assert!(help("branchyard-server").contains("--webhook-events <KINDS>"));
+        command("branchyard-server").debug_assert();
+    }
+
+    #[test]
+    fn token_new_takes_its_own_flags() {
+        let cli = parse_cli(
+            &args("token new --name ci --tenant acme --scopes read,run --repo app,docs"),
+            "branchyard-server",
+        )
+        .unwrap();
+        let Some(ServerCommand::Token(TokenCommand::New(new))) = cli.command else {
+            panic!("not token new")
+        };
+        assert_eq!(new.name.as_deref(), Some("ci"));
+        assert_eq!(new.tenant, "acme");
+        assert_eq!(new.scopes, Some(Names(vec!["read".into(), "run".into()])));
+        assert_eq!(new.repos, Some(Names(vec!["app".into(), "docs".into()])));
+        let cli = parse_cli(&args("token new"), "by serve").unwrap();
+        let Some(ServerCommand::Token(TokenCommand::New(new))) = cli.command else {
+            panic!("not token new")
+        };
+        assert_eq!((new.tenant.as_str(), new.scopes), (DEFAULT_TENANT, None));
+        let help = parse_cli(&args("token new --help"), "by serve")
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("printed once"), "{help}");
+        assert!(
+            help.contains("Usage: by serve token new [OPTIONS]"),
+            "{help}"
+        );
     }
 
     #[test]
@@ -763,6 +828,14 @@ mod tests {
         for (line, error) in [
             ("--webhook-secret f", "needs a --webhook before it"),
             ("--webhook-events stall", "needs a --webhook before it"),
+            (
+                "--webhook https://a.example --webhook-events stall --webhook-events merge",
+                "given twice",
+            ),
+            (
+                "--webhook-secret f --webhook https://a.example",
+                "needs a --webhook before it",
+            ),
             (
                 "--webhook https://a.example --webhook-events bogus",
                 "not a webhook event kind",

@@ -106,7 +106,7 @@ fn usage_errors_exit_2_before_speaking_mcp() {
     assert!(String::from_utf8_lossy(&no_token.stderr).contains("BRANCHYARD_DELEGATION is not set"));
     let no_branch = run(&["--root", "/tmp"], Some("t"));
     assert_eq!(no_branch.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&no_branch.stderr).contains("--branch is required"));
+    assert!(String::from_utf8_lossy(&no_branch.stderr).contains("--branch <NAME>"));
     let extra = run(&["--root=/tmp", "--branch=b", "--bogus"], Some("t"));
     assert_eq!(extra.status.code(), Some(2));
     let help = run(&["--help"], None);

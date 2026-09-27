@@ -41,43 +41,52 @@ struct Config {
     report: Option<PathBuf>,
 }
 
+/// The command line, before the profile and work directory are checked.
+#[derive(clap::Parser, Debug)]
+#[command(
+    name = "branchyard-qualify",
+    about = "Run driver qualification scenarios against a real harness binary.",
+    long_about = "Run driver qualification scenarios against a real harness binary.\n\n\
+                  Scenarios make real model calls and spend the credentials the harness finds. \
+                  --max-cost-usd stops the run once the harness's own cost estimates exceed \
+                  the cap; a profile that reports no cost is not capped."
+)]
+struct Args {
+    /// The harness profile to qualify, such as claude-code-stream-json
+    #[arg(long)]
+    profile: String,
+    /// The harness executable, instead of the profile's
+    #[arg(long, value_name = "PATH")]
+    command: Option<String>,
+    /// A scratch directory for the harness's home and workspace
+    #[arg(long, value_name = "DIR")]
+    workdir: PathBuf,
+    /// Stop once the harness's own cost estimates exceed this many dollars
+    #[arg(long, value_name = "USD", default_value_t = 3.0)]
+    max_cost_usd: f64,
+    /// Pass this variable through to the harness; repeatable
+    #[arg(long, value_name = "NAME")]
+    keep_env: Vec<String>,
+    /// Write the JSON report to FILE
+    #[arg(long, value_name = "FILE")]
+    report: Option<PathBuf>,
+}
+
 fn parse_args() -> Result<Config, String> {
-    let mut args = std::env::args().skip(1);
-    let (mut profile, mut command, mut workdir, mut report) = (None, None, None, None);
-    let mut max_cost_usd = 3.0;
-    let mut keep_env = BTreeSet::new();
-    while let Some(flag) = args.next() {
-        let mut value = || args.next().ok_or(format!("{flag} needs a value"));
-        match flag.as_str() {
-            "--profile" => profile = Some(value()?),
-            "--command" => command = Some(value()?),
-            "--workdir" => workdir = Some(PathBuf::from(value()?)),
-            "--report" => report = Some(PathBuf::from(value()?)),
-            "--max-cost-usd" => {
-                max_cost_usd = value()?
-                    .parse()
-                    .map_err(|e| format!("--max-cost-usd: {e}"))?
-            }
-            "--keep-env" => {
-                keep_env.insert(value()?);
-            }
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-    let id = profile.ok_or("--profile is required")?;
-    let profile = profiles::by_id(&id).ok_or(format!("unknown profile {id}"))?;
+    let args = <Args as clap::Parser>::parse();
+    let profile =
+        profiles::by_id(&args.profile).ok_or(format!("unknown profile {}", args.profile))?;
     let mut argv: Vec<String> = profile.command.iter().map(|s| (*s).to_owned()).collect();
-    if let Some(command) = command {
+    if let Some(command) = args.command {
         argv[0] = command;
     }
     Ok(Config {
         profile,
         command: argv,
-        workdir: fs::canonicalize(workdir.ok_or("--workdir is required")?)
-            .map_err(|e| format!("--workdir: {e}"))?,
-        max_cost_usd,
-        keep_env,
-        report,
+        workdir: fs::canonicalize(&args.workdir).map_err(|e| format!("--workdir: {e}"))?,
+        max_cost_usd: args.max_cost_usd,
+        keep_env: args.keep_env.into_iter().collect(),
+        report: args.report,
     })
 }
 

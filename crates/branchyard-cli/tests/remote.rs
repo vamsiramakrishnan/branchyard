@@ -1450,3 +1450,44 @@ fn graph_commands_print_what_local_ones_do() {
         1
     );
 }
+
+#[test]
+fn the_server_comes_from_flags_after_the_command_or_the_environment() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &[]);
+    let expected = text(&server.by(&dir.0, &["ls", "--json"]).stdout);
+    assert_eq!(expected.trim(), "[]");
+    // Global options after the command, and after its own flags.
+    let after = command(BY, &dir.0)
+        .args(["ls", "--json", "--remote", &server.url, "--token-file"])
+        .arg(&server.token_file)
+        .output()
+        .unwrap();
+    assert!(after.status.success(), "{}", text(&after.stderr));
+    assert_eq!(text(&after.stdout), expected);
+    // Only the environment, as clap's `env` reads it.
+    let env = command(BY, &dir.0)
+        .args(["ls", "--json"])
+        .env("BRANCHYARD_REMOTE", &server.url)
+        .env("BRANCHYARD_TOKEN_FILE", &server.token_file)
+        .env("BRANCHYARD_REPO", "app")
+        .output()
+        .unwrap();
+    assert!(env.status.success(), "{}", text(&env.stderr));
+    assert_eq!(text(&env.stdout), expected);
+    // A flag wins over its variable.
+    let flag_wins = command(BY, &dir.0)
+        .args(["ls", "--json", "--repo", "nope"])
+        .env("BRANCHYARD_REMOTE", &server.url)
+        .env("BRANCHYARD_TOKEN_FILE", &server.token_file)
+        .env("BRANCHYARD_REPO", "app")
+        .output()
+        .unwrap();
+    assert_eq!(flag_wins.status.code(), Some(1));
+    assert!(
+        text(&flag_wins.stderr).contains("nope"),
+        "{}",
+        text(&flag_wins.stderr)
+    );
+}

@@ -27,6 +27,13 @@ serde_json = "1"
 # `by rig` spec files. Already in Cargo.lock (through proc-macro-crate);
 # only its parser is used.
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+# The command line; `env` reads BRANCHYARD_REMOTE and the other globals.
+clap = { version = "4.6", features = ["derive", "env"] }
+# `by completions` and `by man`.
+clap_complete = "4.6"
+clap_mangen = "0.3.3"
+# `--check` and `--command` splitting. Already in Cargo.lock.
+shlex = "2"
 
 [dev-dependencies]
 branchyard-bridge = { path = "../branchyard-bridge" }

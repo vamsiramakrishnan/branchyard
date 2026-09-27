@@ -748,8 +748,8 @@ pub fn rm(target: &Target, branch: &str, keep_credentials: bool) -> Outcome {
 }
 
 /// Serve a branch's delegation tools on stdio; see `branchyard-mcp`.
-pub fn mcp(args: &[String]) -> Outcome {
-    branchyard_mcp::main_with_args(args).map_err(|e| Failure::Message(e.to_string()))
+pub fn mcp(root: &str, branch: &str) -> Outcome {
+    branchyard_mcp::serve_branch(root.into(), branch).map_err(|e| Failure::Message(e.to_string()))
 }
 
 /// The delegate for this harness's branch when `by` runs inside a

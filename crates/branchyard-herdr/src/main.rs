@@ -21,55 +21,68 @@ use std::process::ExitCode;
 
 use config::Config;
 
-const USAGE: &str = "\
-usage: branchyard-herdr [--remote URL] [--token-file FILE] [--repo NAME] [--ca-file FILE] COMMAND
+/// The plugin's command line; Herdr runs it from `herdr-plugin.toml`.
+#[derive(clap::Parser, Debug)]
+#[command(
+    name = "branchyard-herdr",
+    version,
+    about = "A Herdr plugin that shows a Branchyard server's branches as Herdr panes.",
+    after_help = "Settings not given as flags come from BRANCHYARD_REMOTE, BRANCHYARD_TOKEN_FILE,\n\
+                  BRANCHYARD_REPO and BRANCHYARD_CA_FILE, then from config.env in the plugin's\n\
+                  Herdr config directory."
+)]
+struct Cli {
+    /// The Branchyard server
+    #[arg(long, global = true, value_name = "URL")]
+    remote: Option<String>,
+    /// The server's bearer token, on the first line of FILE
+    #[arg(long, global = true, value_name = "FILE")]
+    token_file: Option<String>,
+    /// Repository on the server, when it serves several
+    #[arg(long, global = true, value_name = "NAME")]
+    repo: Option<String>,
+    /// Also trust this CA certificate for https
+    #[arg(long, global = true, value_name = "FILE")]
+    ca_file: Option<String>,
+    #[command(subcommand)]
+    command: Plugin,
+}
 
-commands:
-  bridge                 follow the server and keep one Herdr pane per branch
-  start                  open the bridge in a new Herdr tab
-  log                    run `by log --follow $BRANCHYARD_HERDR_BRANCH` (a branch pane)
-  action merge|cancel|send
-                         act on the branch shown in the focused pane
-  send                   read a prompt and run `by send $BRANCHYARD_HERDR_BRANCH` (a popup)
-
-Settings not given as flags come from BRANCHYARD_REMOTE, BRANCHYARD_TOKEN_FILE,
-BRANCHYARD_REPO and BRANCHYARD_CA_FILE, then from config.env in the plugin's
-Herdr config directory.
-";
+#[derive(clap::Subcommand, Debug, PartialEq, Eq)]
+enum Plugin {
+    /// Follow the server and keep one Herdr pane per branch
+    Bridge,
+    /// Open the bridge in a new Herdr tab
+    Start,
+    /// Run `by log --follow $BRANCHYARD_HERDR_BRANCH` (a branch pane)
+    Log,
+    /// Act on the branch shown in the focused pane
+    Action {
+        #[arg(value_parser = ["merge", "cancel", "send"])]
+        name: String,
+    },
+    /// Read a prompt and run `by send $BRANCHYARD_HERDR_BRANCH` (a popup)
+    Send,
+}
 
 fn main() -> ExitCode {
-    let mut flags = Vec::new();
-    let mut rest = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        let name = match arg.as_str() {
-            "--remote" => "BRANCHYARD_REMOTE",
-            "--token-file" => "BRANCHYARD_TOKEN_FILE",
-            "--repo" => "BRANCHYARD_REPO",
-            "--ca-file" => "BRANCHYARD_CA_FILE",
-            "-h" | "--help" | "help" => {
-                print!("{USAGE}");
-                return ExitCode::SUCCESS;
-            }
-            _ => {
-                rest.push(arg);
-                continue;
-            }
-        };
-        match args.next() {
-            Some(value) => flags.push((name.to_owned(), value)),
-            None => return usage(&format!("{arg} needs a value")),
-        }
-    }
+    let cli = <Cli as clap::Parser>::parse();
+    let flags: Vec<(String, String)> = [
+        ("BRANCHYARD_REMOTE", cli.remote),
+        ("BRANCHYARD_TOKEN_FILE", cli.token_file),
+        ("BRANCHYARD_REPO", cli.repo),
+        ("BRANCHYARD_CA_FILE", cli.ca_file),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| Some((name.to_owned(), value?)))
+    .collect();
     let config = Config::load(&flags);
-    let result = match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["bridge"] => bridge::run(&config),
-        ["start"] => actions::start(&config),
-        ["log"] => actions::log(&config),
-        ["send"] => actions::send_popup(&config),
-        ["action", name] => actions::action(&config, name),
-        [] => return usage("a command is required"),
-        _ => return usage(&format!("unknown command: {}", rest.join(" "))),
+    let result = match &cli.command {
+        Plugin::Bridge => bridge::run(&config),
+        Plugin::Start => actions::start(&config),
+        Plugin::Log => actions::log(&config),
+        Plugin::Send => actions::send_popup(&config),
+        Plugin::Action { name } => actions::action(&config, name),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -77,16 +90,11 @@ fn main() -> ExitCode {
             eprintln!("branchyard-herdr: {message}");
             // In a Herdr pane, which closes when this exits: keep the
             // reason on screen.
-            if rest == ["bridge"] && std::io::stdin().is_terminal() {
+            if cli.command == Plugin::Bridge && std::io::stdin().is_terminal() {
                 eprint!("press Enter to close ");
                 let _ = std::io::stdin().read_line(&mut String::new());
             }
             ExitCode::FAILURE
         }
     }
-}
-
-fn usage(message: &str) -> ExitCode {
-    eprintln!("branchyard-herdr: {message}\n\n{USAGE}");
-    ExitCode::from(2)
 }
