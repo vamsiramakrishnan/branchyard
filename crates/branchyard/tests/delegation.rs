@@ -567,6 +567,7 @@ fn seat(below: &[&str]) -> Seat {
         isolated: false,
         provision: None,
         delegates_to: below.iter().map(|s| (*s).to_owned()).collect(),
+        escalates_to: Vec::new(),
         instances: 1,
     }
 }
@@ -590,6 +591,7 @@ fn team() -> Seats {
         rig: "team".into(),
         seat: "lead".into(),
         delegates_to: vec!["worker".into(), "planner".into()],
+        escalates_to: Vec::new(),
         table: [
             ("worker".to_owned(), worker),
             ("planner".to_owned(), seat(&["helper"])),

@@ -29,6 +29,7 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | `cancels` | `(incarnation, turn)` | Who asked, when, and whether for a subtree; the first request for a turn is kept |
 | `events` | `id` (autoincrement), unique `(incarnation, seq)` | Branch name, `seq` from 1 per incarnation, `at_ms`, the activity as JSON |
 | `meta` | `key` | Schema version (1) and when earlier state was imported |
+| `messages` | `id` (autoincrement) | Harness-to-harness messages: `from`, `to`, `kind`, `text`, `in_reply_to`, `at_ms`, `delivered_ms` (`NULL` until acknowledged); see [delegation](delegation.md#inbox) |
 
 `id` is the feed position. SQLite serializes writers, so positions are assigned in commit order: a reader that sees position *N* already sees every position before it.
 
@@ -171,7 +172,7 @@ As any other user, drop `runuser -u nobody --`. The CI job `postgres` in [`check
 | Where | What |
 |---|---|
 | [`state.rs`](../crates/branchyard/src/state.rs), [`sqlite.rs`](../crates/branchyard/src/sqlite.rs), [`pg.rs`](../crates/branchyard/src/pg.rs) | The store, the `Backend` trait, leases and heartbeat, the SQLite backend and the import, the PostgreSQL backend |
-| [`conformance.rs`](../crates/branchyard/src/conformance.rs) | One suite, run against both backends: fencing, expiry, steps and processes, cancels, records and children, events and the feed, concurrent appends, and races for a name, a lease and a takeover |
+| [`conformance.rs`](../crates/branchyard/src/conformance.rs) | One suite, run against both backends: fencing, expiry, steps and processes, cancels, records and children, events and the feed, concurrent appends, races for a name, a lease and a takeover, and messages (send, inbox, mark delivered, the answer to a question) |
 | [`tests/postgres.rs`](../crates/branchyard/tests/postgres.rs), the server's [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs) | A task through merge, waits across yards, two yards and a cancel, a killed engine recovered, and a server's branches and operations across a restart, all on PostgreSQL |
 | [`engine.rs`](../crates/branchyard/src/engine.rs), [`run.rs`](../crates/branchyard/src/run.rs), [`ops.rs`](../crates/branchyard/src/ops.rs) | Journaled steps of a turn, of branch creation, merge and removal |
 | [`recover.rs`](../crates/branchyard/src/recover.rs), [`proc.rs`](../crates/branchyard/src/proc.rs) | Recovery and process identity, the spawn marker |

@@ -125,7 +125,41 @@ me.integrate(&done.name)?;
 
 ## MCP tools
 
-`spawn`, `inspect`, `events`, `send`, `propose_integration`, `cancel` and `children`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays; `seat` names a rig seat). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
+`spawn`, `inspect`, `events`, `send`, `propose_integration`, `cancel`, `children`, `ask`, `report`, `escalate`, `answer` and `inbox`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays; `seat` names a rig seat; `ask`'s `wait_seconds` blocks for an answer). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
+
+## Inbox
+
+A branch can message another branch it has authority over, not only inspect it: a running turn can ask its parent a question, report progress, escalate a problem, and a parent can answer. Every message is durable in the store (both SQLite and PostgreSQL), typed `{id, from, to, kind, text, in_reply_to, at}` where `kind` is `question`, `report`, `escalation` or `answer`, and is also an event (`Activity::Message`) on both the sending and the receiving branch's log, so `by events`/`log` show it.
+
+Authority follows the delegation tree, checked the same way spawning is:
+
+| `kind` | May go to |
+|---|---|
+| `question`, `report` | Only the sender's own parent |
+| `escalation` | The sender's parent, always; further up an ancestor only if the sender is in a [rig](rigs.md) and its seat's `escalates_to` names that ancestor's seat |
+| `answer` | From a branch to any of its own descendants, not only a direct child |
+
+A leaf branch (`max_depth` 0, such as a leaf rig seat) gets no delegation tools at all, spawning or messaging, the same as today; give it depth 1 (it need not use it to spawn) if it should be able to message its parent.
+
+Every surface reaches the same five operations, with the same authority and the same JSON:
+
+| Command | Tool / Python / Rust | What |
+|---|---|---|
+| `by ask "<text>" [--wait SECS]` | `ask` / `branchyard.ask(text, wait=None)` / `Delegate::ask` | Ask your parent a question. Without a wait, returns once it is sent (`Asked{message, answer: None}`). With one, blocks — in the process running your turn, so across processes when reached through the broker — for up to that long for an answer; a wait that passes with no answer yet is not an error, `answer` is `None`. |
+| `by report "<text>"` | `report` / `branchyard.report` / `Delegate::report` | Report to your parent; no answer is expected. |
+| `by escalate "<text>"` | `escalate` / `branchyard.escalate` / `Delegate::escalate` | Escalate to your parent, or, in a rig, further up if your seat's `escalates_to` allows it. |
+| `by answer <message-id> "<text>"` | `answer` / `branchyard.answer` / `Delegate::answer` | Answer one of your own descendants' messages (usually a question), addressed back to whoever sent it. |
+| `by inbox [--unread]` | `inbox` / `branchyard.inbox(unread=False)` / `Delegate::inbox` | Every message addressed to you, oldest first; `--unread` for only what has not yet been delivered to a turn. |
+
+Outside a harness, each of these needs `--as <branch>` (there is no other way to say who is asking); a person then acts with their own authority, bounded the same way. `by --remote` reaches the same operations over HTTP (`GET …/inbox`, `POST …/ask|report|escalate|answer`), with the same JSON and the same refusals; `by ask --remote --wait` blocks on the server, capped at 120 seconds so one request cannot tie up a worker indefinitely — poll `inbox` for a longer wait.
+
+### Delivery
+
+A message sits *pending* until it is acknowledged. Acknowledging it (marking it delivered) is the same store write as handing it to a turn, so a crash never delivers a message twice and never silently drops one — the same intent-before-effect discipline as [durable turns](durability.md).
+
+Without a running turn to reach, a branch's pending messages are given to it at the start of its next turn: prepended to the prompt it actually submits, as one `<branchyard-inbox>...</branchyard-inbox>` block, oldest first, each line `[#id] kind from sender: text`. The block is bounded (at most 20 messages or about 8,000 characters at once); whatever does not fit stays pending, noted as `...and N more messages queued for a later turn`. Only the messages actually included are acknowledged, so a large backlog drains gradually across turns rather than in one giant prompt. The recorded `Activity::Prompt` and the journaled `submit` step hold the combined text, so recovery's replay guarantee ([durability](durability.md)) covers it too: a crash before the prompt reaches the harness leaves those messages pending, and one after never gives them again.
+
+A `DeliveryHook` (`Yard::set_delivery_hook`) lets a caller that keeps a branch's turn open outside this engine — such as a steer channel — try to deliver a message into that running turn right away; whatever it does not accept stays pending for the turn-boundary delivery above. No hook is wired in today, so every message waits for the recipient's next turn; steering support fills this in without changing the inbox model.
 
 ## The envelope
 
@@ -186,3 +220,6 @@ A child's own spend counts against every ancestor through the reservations. `ins
 - Delegation from a sandboxed harness. The tools reach the engine over a host socket with the host's `by`, so a turn with `--provider microsandbox` and `--delegate` fails, and a sandboxed branch runs without the tools.
 - A boundary through a server. Harnesses on the server still run as the server's user unless a sandbox provider is used, and a sandboxed turn gets no tools; the envelope stops honest mistakes there too.
 - Any real harness delegating end to end. The projections were checked against Claude Code 2.1.283 and codex-cli 0.157.1 without model calls; the full loop was tested against the fake ACP agent only.
+- Messaging from a leaf branch (`max_depth` 0). It has no delegation tools at all, so it cannot `ask`, `report` or `escalate` either.
+- Delivering a message into a running turn. Without a `DeliveryHook` wired in (none is today), every message waits for the recipient's next turn to start; steering will fill this in.
+- `ask --wait` on a server past 120 seconds; it is capped, not refused, so poll `inbox` instead for a longer wait.

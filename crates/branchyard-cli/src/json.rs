@@ -167,6 +167,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "reason": reason,
             "killed": killed,
         }),
+        Activity::Message(m) => json!({ "activity": "message", "message": m }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value

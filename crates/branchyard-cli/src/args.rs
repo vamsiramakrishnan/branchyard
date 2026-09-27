@@ -143,6 +143,7 @@ pub enum Command {
         branch: String,
         prompt: String,
         task: TaskArgs,
+        wait: bool,
         json: bool,
     },
     Fork {
@@ -215,6 +216,33 @@ pub enum Command {
     },
     Children {
         branch: Option<String>,
+        json: bool,
+    },
+    Ask {
+        as_branch: Option<String>,
+        text: String,
+        wait_seconds: Option<f64>,
+        json: bool,
+    },
+    Report {
+        as_branch: Option<String>,
+        text: String,
+        json: bool,
+    },
+    Escalate {
+        as_branch: Option<String>,
+        text: String,
+        json: bool,
+    },
+    Answer {
+        as_branch: Option<String>,
+        message_id: u64,
+        text: String,
+        json: bool,
+    },
+    Inbox {
+        as_branch: Option<String>,
+        unread: bool,
         json: bool,
     },
     Rig(RigArgs),
@@ -551,7 +579,7 @@ const PARENT: Flag = Flag {
 const WAIT: Flag = Flag {
     long: "wait",
     value: None,
-    help: "Wait for the child's turn to end and show it (outside a harness, spawn always waits)",
+    help: "Wait for the turn to end and show it (outside a harness, spawn and send always wait)",
 };
 const MAX_DEPTH: Flag = Flag {
     long: "max-depth",
@@ -567,6 +595,21 @@ const SEAT: Flag = Flag {
     long: "seat",
     value: Some("NAME"),
     help: "In a rig, the seat the child fills; it sets the child's harness, limits, check and instructions",
+};
+const AS_BRANCH: Flag = Flag {
+    long: "as",
+    value: Some("BRANCH"),
+    help: "Act as this branch (outside a harness; inside one, it is the harness's own)",
+};
+const WAIT_SECONDS: Flag = Flag {
+    long: "wait",
+    value: Some("SECS"),
+    help: "Block up to SECS seconds for an answer (default: return once the question is sent)",
+};
+const UNREAD: Flag = Flag {
+    long: "unread",
+    value: None,
+    help: "Only messages not yet delivered to a turn",
 };
 const CURSOR: Flag = Flag {
     long: "cursor",
@@ -741,6 +784,7 @@ pub static COMMANDS: &[Spec] = &[
             MODEL,
             EFFORT,
             TELEMETRY,
+            WAIT,
             JSON,
         ],
     },
@@ -896,6 +940,36 @@ pub static COMMANDS: &[Spec] = &[
         flags: &[JSON],
     },
     Spec {
+        name: "ask",
+        positionals: &["text"],
+        summary: "Ask this branch's parent a question",
+        flags: &[AS_BRANCH, WAIT_SECONDS, JSON],
+    },
+    Spec {
+        name: "report",
+        positionals: &["text"],
+        summary: "Report to this branch's parent",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "escalate",
+        positionals: &["text"],
+        summary: "Escalate to this branch's parent, or further up if its rig seat allows",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "answer",
+        positionals: &["message-id", "text"],
+        summary: "Answer a message (usually a question) from a descendant",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "inbox",
+        positionals: &[],
+        summary: "List messages addressed to this branch",
+        flags: &[AS_BRANCH, UNREAD, JSON],
+    },
+    Spec {
         name: "rig",
         positionals: &["check|run", "file", "prompt?"],
         summary: "Check a rig spec and print its plan, or run its root seat with a prompt",
@@ -970,6 +1044,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             branch: next(),
             prompt: next(),
             task: m.task()?,
+            wait: m.switch("wait"),
             json: m.switch("json"),
         },
         "fork" => Command::Fork {
@@ -1055,6 +1130,41 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         },
         "children" => Command::Children {
             branch: optional.next(),
+            json: m.switch("json"),
+        },
+        "ask" => Command::Ask {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            wait_seconds: m.number("wait")?,
+            json: m.switch("json"),
+        },
+        "report" => Command::Report {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            json: m.switch("json"),
+        },
+        "escalate" => Command::Escalate {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            json: m.switch("json"),
+        },
+        "answer" => {
+            let message_id_text = next();
+            let message_id = message_id_text.parse::<u64>().map_err(|_| {
+                m.error(format!(
+                    "message-id must be a whole number, not '{message_id_text}'"
+                ))
+            })?;
+            Command::Answer {
+                as_branch: m.value("as").map(str::to_owned),
+                message_id,
+                text: next(),
+                json: m.switch("json"),
+            }
+        }
+        "inbox" => Command::Inbox {
+            as_branch: m.value("as").map(str::to_owned),
+            unread: m.switch("unread"),
             json: m.switch("json"),
         },
         "rig" => {
@@ -1973,6 +2083,7 @@ mod tests {
                     permissions: Permissions::Yes,
                     ..TaskArgs::default()
                 },
+                wait: false,
                 json: false,
             }
         );

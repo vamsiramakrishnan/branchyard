@@ -91,6 +91,9 @@ pub(crate) struct Hub {
     broker: Mutex<Option<Broker>>,
     /// Checks and reservations for one spawn or send happen together.
     pub spawning: Mutex<()>,
+    /// Set with [`crate::Yard::set_delivery_hook`]; tried before a message
+    /// waits for its recipient's next turn.
+    pub delivery_hook: Mutex<Option<Arc<dyn crate::inbox::DeliveryHook>>>,
 }
 
 impl fmt::Debug for Hub {

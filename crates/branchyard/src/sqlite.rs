@@ -25,7 +25,7 @@ use crate::state::{
     now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
     ReservationRow, StepRow,
 };
-use crate::{Error, RecordedEvent};
+use crate::{Error, Message, RecordedEvent};
 
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
@@ -105,6 +105,18 @@ CREATE TABLE IF NOT EXISTS events (
     activity TEXT NOT NULL,
     UNIQUE (incarnation, seq)
 );
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_branch TEXT NOT NULL,
+    to_branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    in_reply_to INTEGER,
+    at_ms INTEGER NOT NULL,
+    delivered_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS messages_to ON messages (to_branch, id);
+CREATE INDEX IF NOT EXISTS messages_reply ON messages (in_reply_to);
 ";
 
 #[derive(Debug)]
@@ -1130,6 +1142,109 @@ impl Backend for Sqlite {
             .map_err(|e| db("feed", e))
         })
     }
+
+    fn send_message(&self, message: &Message) -> Result<Message, Error> {
+        self.tx(true, |tx| {
+            let at_ms = now_ms();
+            tx.execute(
+                "INSERT INTO messages \
+                 (from_branch, to_branch, kind, text, in_reply_to, at_ms, delivered_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                params![
+                    message.from,
+                    message.to,
+                    message.kind.as_str(),
+                    message.text,
+                    message.in_reply_to.map(int),
+                    int(at_ms),
+                ],
+            )
+            .map_err(|e| db("message", e))?;
+            Ok(Message {
+                id: uint(tx.last_insert_rowid()),
+                at_ms,
+                delivered: false,
+                ..message.clone()
+            })
+        })
+    }
+
+    fn message(&self, id: u64) -> Result<Option<Message>, Error> {
+        self.query(|conn| {
+            conn.query_row(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM messages WHERE id = ?1",
+                params![int(id)],
+                message_from,
+            )
+            .optional()
+            .map_err(|e| db("message", e))
+        })
+    }
+
+    fn inbox(&self, to: &str) -> Result<Vec<Message>, Error> {
+        self.query(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                     delivered_ms FROM messages WHERE to_branch = ?1 ORDER BY id",
+                )
+                .map_err(|e| db("inbox", e))?;
+            let rows = statement
+                .query_map(params![to], message_from)
+                .map_err(|e| db("inbox", e))?;
+            rows.collect::<Result<_, _>>().map_err(|e| db("inbox", e))
+        })
+    }
+
+    fn mark_delivered(&self, ids: &[u64]) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.tx(true, |tx| {
+            let now = int(now_ms());
+            for id in ids {
+                tx.execute(
+                    "UPDATE messages SET delivered_ms = ?2 \
+                     WHERE id = ?1 AND delivered_ms IS NULL",
+                    params![int(*id), now],
+                )
+                .map_err(|e| db("message", e))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn answer_to(&self, question_id: u64) -> Result<Option<Message>, Error> {
+        self.query(|conn| {
+            conn.query_row(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM messages WHERE in_reply_to = ?1 ORDER BY id LIMIT 1",
+                params![int(question_id)],
+                message_from,
+            )
+            .optional()
+            .map_err(|e| db("message", e))
+        })
+    }
+}
+
+/// Reads one `messages` row.
+fn message_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+    let kind: String = r.get(3)?;
+    let kind = kind.parse::<crate::MessageKind>().map_err(|_| {
+        rusqlite::Error::InvalidColumnType(3, "kind".into(), rusqlite::types::Type::Text)
+    })?;
+    Ok(Message {
+        id: uint(r.get::<_, i64>(0)?),
+        from: r.get(1)?,
+        to: r.get(2)?,
+        kind,
+        text: r.get(4)?,
+        in_reply_to: r.get::<_, Option<i64>>(5)?.map(uint),
+        at_ms: uint(r.get(6)?),
+        delivered: r.get::<_, Option<i64>>(7)?.is_some(),
+    })
 }
 
 #[cfg(test)]

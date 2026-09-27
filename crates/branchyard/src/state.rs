@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::delegation::Grant;
-use crate::{proc, BranchInfo, Error, Provider, RecordedEvent};
+use crate::{proc, BranchInfo, Error, Message, Provider, RecordedEvent};
 
 pub(crate) const DIR: &str = ".branchyard";
 
@@ -350,6 +350,20 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn feed_since(&self, after: u64, limit: usize) -> Result<Vec<FeedRow>, Error>;
     /// The last feed position; 0 when empty.
     fn head(&self) -> Result<u64, Error>;
+
+    /// Store a harness-to-harness message: assigns its id (counting from 1
+    /// across the repository) and `at_ms`, and returns the stored copy.
+    fn send_message(&self, message: &Message) -> Result<Message, Error>;
+    /// One message by id, if it exists.
+    fn message(&self, id: u64) -> Result<Option<Message>, Error>;
+    /// Every message addressed to `to`, oldest first.
+    fn inbox(&self, to: &str) -> Result<Vec<Message>, Error>;
+    /// Mark these messages delivered; already-delivered and unknown ids are
+    /// ignored.
+    fn mark_delivered(&self, ids: &[u64]) -> Result<(), Error>;
+    /// The first message that answers the question `question_id`, if one
+    /// has arrived.
+    fn answer_to(&self, question_id: u64) -> Result<Option<Message>, Error>;
 }
 
 /// Wakes readers in this process when events are appended to a store.

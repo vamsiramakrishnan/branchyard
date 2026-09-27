@@ -336,6 +336,23 @@ pub fn router(app: Shared) -> Router {
             get(event_page),
         )
         .route("/v1/repos/{repo}/branches/{branch}/children", get(children))
+        .route("/v1/repos/{repo}/branches/{branch}/inbox", get(inbox))
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/ask",
+            axum::routing::post(post_ask),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/report",
+            axum::routing::post(post_report),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/escalate",
+            axum::routing::post(post_escalate),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/answer",
+            axum::routing::post(post_answer),
+        )
         .route("/v1/repos/{repo}/branches/{branch}/diff", get(diff))
         .route("/v1/repos/{repo}/branches/{branch}/events", get(events))
         .route("/v1/repos/{repo}/events/stream", get(stream_events));
@@ -1231,6 +1248,77 @@ async fn children(
     as_person(&app, &repo, branch, |d, _| d.children())
         .await
         .map(Json)
+}
+
+async fn inbox(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+) -> Result<Json<branchyard::Inbox>, ApiError> {
+    as_person(&app, &repo, branch, |d, _| d.inbox())
+        .await
+        .map(Json)
+}
+
+/// Blocking a server worker for a long wait is bounded: a caller that wants
+/// longer polls `inbox` instead.
+const MAX_ASK_WAIT: Duration = Duration::from_secs(120);
+
+async fn post_ask(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::AskRequest>,
+) -> Result<Json<branchyard::Asked>, ApiError> {
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("text is empty"));
+    }
+    let wait = request
+        .wait_seconds
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| Duration::from_secs_f64(s).min(MAX_ASK_WAIT));
+    as_person(&app, &repo, branch, move |d, _| d.ask(&request.text, wait))
+        .await
+        .map(Json)
+}
+
+async fn post_report(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::TextRequest>,
+) -> Result<Json<branchyard::Message>, ApiError> {
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("text is empty"));
+    }
+    as_person(&app, &repo, branch, move |d, _| d.report(&request.text))
+        .await
+        .map(Json)
+}
+
+async fn post_escalate(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::TextRequest>,
+) -> Result<Json<branchyard::Message>, ApiError> {
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("text is empty"));
+    }
+    as_person(&app, &repo, branch, move |d, _| d.escalate(&request.text))
+        .await
+        .map(Json)
+}
+
+async fn post_answer(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::AnswerRequest>,
+) -> Result<Json<branchyard::Message>, ApiError> {
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("text is empty"));
+    }
+    as_person(&app, &repo, branch, move |d, _| {
+        d.answer(request.message_id, &request.text)
+    })
+    .await
+    .map(Json)
 }
 
 async fn branches(

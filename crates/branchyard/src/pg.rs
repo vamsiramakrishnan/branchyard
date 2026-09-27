@@ -37,7 +37,7 @@ use crate::state::{
     now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
     ReservationRow, StepRow,
 };
-use crate::{Error, RecordedEvent};
+use crate::{Error, Message, RecordedEvent};
 
 const SCHEMA: i64 = 1;
 /// How long a write keeps retrying serialization failures.
@@ -129,6 +129,19 @@ CREATE TABLE IF NOT EXISTS by_events (
     PRIMARY KEY (repo, id),
     UNIQUE (incarnation, seq)
 );
+CREATE TABLE IF NOT EXISTS by_messages (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    repo TEXT NOT NULL,
+    from_branch TEXT NOT NULL,
+    to_branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    in_reply_to BIGINT,
+    at_ms BIGINT NOT NULL,
+    delivered_ms BIGINT
+);
+CREATE INDEX IF NOT EXISTS by_messages_to ON by_messages (repo, to_branch, id);
+CREATE INDEX IF NOT EXISTS by_messages_reply ON by_messages (repo, in_reply_to);
 ";
 
 /// Branch state for one repository scope in a PostgreSQL database.
@@ -1151,4 +1164,99 @@ impl Backend for Postgres {
         })
         .map(|r| uint(r.get(0)))
     }
+
+    fn send_message(&self, message: &Message) -> Result<Message, Error> {
+        self.tx(true, |tx| {
+            let at_ms = now_ms();
+            let row = tx
+                .query_one(
+                    "INSERT INTO by_messages \
+                     (repo, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                      delivered_ms) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL) RETURNING id",
+                    &[
+                        &self.repo,
+                        &message.from,
+                        &message.to,
+                        &message.kind.as_str(),
+                        &message.text,
+                        &message.in_reply_to.map(int),
+                        &int(at_ms),
+                    ],
+                )
+                .map_err(db("message"))?;
+            Ok(Message {
+                id: uint(row.get(0)),
+                at_ms,
+                delivered: false,
+                ..message.clone()
+            })
+        })
+    }
+
+    fn message(&self, id: u64) -> Result<Option<Message>, Error> {
+        let row = self.query(|c| {
+            c.query_opt(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM by_messages WHERE repo = $1 AND id = $2",
+                &[&self.repo, &int(id)],
+            )
+        })?;
+        row.map(|r| message_row(&r)).transpose()
+    }
+
+    fn inbox(&self, to: &str) -> Result<Vec<Message>, Error> {
+        let rows = self.query(|c| {
+            c.query(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM by_messages WHERE repo = $1 AND to_branch = $2 ORDER BY id",
+                &[&self.repo, &to],
+            )
+        })?;
+        rows.iter().map(message_row).collect()
+    }
+
+    fn mark_delivered(&self, ids: &[u64]) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.tx(true, |tx| {
+            let now = int(now_ms());
+            for id in ids {
+                tx.execute(
+                    "UPDATE by_messages SET delivered_ms = $3 \
+                     WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
+                    &[&self.repo, &int(*id), &now],
+                )
+                .map_err(db("message"))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn answer_to(&self, question_id: u64) -> Result<Option<Message>, Error> {
+        let row = self.query(|c| {
+            c.query_opt(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM by_messages WHERE repo = $1 AND in_reply_to = $2 \
+                 ORDER BY id LIMIT 1",
+                &[&self.repo, &int(question_id)],
+            )
+        })?;
+        row.map(|r| message_row(&r)).transpose()
+    }
+}
+
+/// Reads one `by_messages` row.
+fn message_row(r: &Row) -> Result<Message, Error> {
+    let kind: String = r.get(3);
+    Ok(Message {
+        id: uint(r.get(0)),
+        from: r.get(1),
+        to: r.get(2),
+        kind: kind.parse()?,
+        text: r.get(4),
+        in_reply_to: r.get::<_, Option<i64>>(5).map(uint),
+        at_ms: uint(r.get(6)),
+        delivered: r.get::<_, Option<i64>>(7).is_some(),
+    })
 }

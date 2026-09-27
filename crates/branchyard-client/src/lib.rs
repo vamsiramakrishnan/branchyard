@@ -54,15 +54,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use branchyard::{BranchInfo, Children, EventPage, HarnessInfo, Inspection};
+use branchyard::{Asked, BranchInfo, Children, EventPage, HarnessInfo, Inbox, Inspection, Message};
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use api::{
-    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, ErrorResponse,
-    FeedEntry, ForkRequest, HarnessList, IntegrateRequest, MergeRequest, Operation, Removed,
-    RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
+    AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, Diff,
+    ErrorBody, ErrorResponse, FeedEntry, ForkRequest, HarnessList, IntegrateRequest, MergeRequest,
+    Operation, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest, TextRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -443,6 +443,61 @@ impl Repo {
     /// `by children`.
     pub fn children(&self, branch: &str) -> Result<Children, Error> {
         self.client.get(&self.branch_path(branch, "/children"))
+    }
+
+    /// Every message addressed to `branch`, oldest first; like `by inbox`.
+    pub fn inbox(&self, branch: &str) -> Result<Inbox, Error> {
+        self.client.get(&self.branch_path(branch, "/inbox"))
+    }
+
+    /// Ask `branch`'s parent a question; like `by ask`. Without
+    /// `wait_seconds`, returns once the question is sent; with it, blocks
+    /// on the server for up to that long for an answer.
+    pub fn ask(&self, branch: &str, text: &str, wait_seconds: Option<f64>) -> Result<Asked, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/ask"),
+            &AskRequest {
+                text: text.to_owned(),
+                wait_seconds,
+            },
+            &new_key(),
+        )
+    }
+
+    /// Report to `branch`'s parent; like `by report`.
+    pub fn report(&self, branch: &str, text: &str) -> Result<Message, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/report"),
+            &TextRequest {
+                text: text.to_owned(),
+            },
+            &new_key(),
+        )
+    }
+
+    /// Escalate to `branch`'s parent, or further up if its rig seat allows;
+    /// like `by escalate`.
+    pub fn escalate(&self, branch: &str, text: &str) -> Result<Message, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/escalate"),
+            &TextRequest {
+                text: text.to_owned(),
+            },
+            &new_key(),
+        )
+    }
+
+    /// Answer one of `branch`'s own descendants' messages; like `by
+    /// answer`.
+    pub fn answer(&self, branch: &str, message_id: u64, text: &str) -> Result<Message, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/answer"),
+            &AnswerRequest {
+                message_id,
+                text: text.to_owned(),
+            },
+            &new_key(),
+        )
     }
 
     /// Ask the branch's running turn, and every running turn delegated

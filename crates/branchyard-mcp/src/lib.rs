@@ -44,7 +44,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
 /// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 7] = [
+pub const TOOLS: [&str; 12] = [
     "spawn",
     "inspect",
     "events",
@@ -52,6 +52,11 @@ pub const TOOLS: [&str; 7] = [
     "propose_integration",
     "cancel",
     "children",
+    "ask",
+    "report",
+    "escalate",
+    "answer",
+    "inbox",
 ];
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
@@ -60,7 +65,9 @@ and events, continue them with send, merge a finished child into your own branch
 propose_integration (its check must pass), stop them with cancel, and list them with \
 children. Children run in parallel; spawn returns once a child has started. You act only as your own branch and only \
 on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
-may spawn.";
+may spawn. You can also message: ask your parent a question (optionally waiting for its \
+answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
+descendant's message; and read your own inbox.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {
@@ -189,6 +196,65 @@ pub fn tools() -> Vec<Tool> {
             })),
         ),
         children,
+        Tool::new(
+            "ask",
+            "Ask your parent a question. Without wait_seconds, returns once it is sent. With \
+             it, blocks for up to that long for an answer (in_reply_to your question); a wait \
+             that passes with no answer yet is not an error, answer is just absent, ask inbox \
+             or ask again.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "wait_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Block up to this long for an answer"},
+                },
+                "required": ["text"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "report",
+            "Report to your parent; no answer is expected.",
+            schema(json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "escalate",
+            "Escalate to your parent, or, if your rig seat's escalates_to allows it, an \
+             ancestor further up.",
+            schema(json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "answer",
+            "Answer a message (usually a question) from one of your own descendants.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "integer", "description": "The message's id, from inbox or the message you received"},
+                    "text": {"type": "string"},
+                },
+                "required": ["message_id", "text"],
+                "additionalProperties": false,
+            })),
+        ),
+        {
+            let mut inbox = Tool::new(
+                "inbox",
+                "Every message addressed to you, oldest first.",
+                schema(json!({"type": "object", "properties": {}, "additionalProperties": false})),
+            );
+            inbox.annotations = Some(read_only("Read your inbox"));
+            inbox
+        },
     ]
 }
 

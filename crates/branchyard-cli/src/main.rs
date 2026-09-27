@@ -103,8 +103,9 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             branch,
             prompt,
             task,
+            wait,
             json,
-        } => commands::send(env, target, &branch, &prompt, &task, json),
+        } => commands::send(env, target, &branch, &prompt, &task, wait, json),
         Command::Fork {
             branch,
             prompt,
@@ -137,6 +138,33 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::events(env, target, branch, cursor, limit, json),
         Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
         Command::Children { branch, json } => commands::children(env, target, branch, json),
+        Command::Ask {
+            as_branch,
+            text,
+            wait_seconds,
+            json,
+        } => commands::ask(target, as_branch, &text, wait_seconds, json),
+        Command::Report {
+            as_branch,
+            text,
+            json,
+        } => commands::report(target, as_branch, &text, json),
+        Command::Escalate {
+            as_branch,
+            text,
+            json,
+        } => commands::escalate(target, as_branch, &text, json),
+        Command::Answer {
+            as_branch,
+            message_id,
+            text,
+            json,
+        } => commands::answer(target, as_branch, message_id, &text, json),
+        Command::Inbox {
+            as_branch,
+            unread,
+            json,
+        } => commands::inbox(target, as_branch, unread, json),
         Command::Rig(args) => commands::rig(env, target, &args),
         Command::Help { .. } | Command::Version | Command::Serve { .. } | Command::Mcp { .. } => {
             unreachable!("handled before choosing a target")

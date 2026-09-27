@@ -296,6 +296,30 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             };
             style.paint(Tone::Yellow, &format!("recovered: {reason}{killed}"))
         }
+        Activity::Message(message) => {
+            let reply = match message.in_reply_to {
+                Some(id) => format!(" (re #{id})"),
+                None => String::new(),
+            };
+            style.paint(
+                Tone::Cyan,
+                &format!(
+                    "message #{} {} {} -> {}{reply}: {}",
+                    message.id,
+                    message.kind,
+                    message.from,
+                    message.to,
+                    truncate(
+                        &message
+                            .text
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        100
+                    )
+                ),
+            )
+        }
     })
 }
 

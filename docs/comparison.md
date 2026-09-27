@@ -176,7 +176,7 @@ Types: **port** copies or translates code, keeping attribution under Apache-2.0 
 | Capability reasons in the compatibility matrix | idea | 0.5 day | None | Scion states why a capability is missing (`max_model_calls: { support: "no", reason: … }`). Add a reason column to the generated matrix |
 | Stall detection and self-declared `blocked` | idea | 3–5 days | Server mode; Substrate suspend for the resource win | A branch waiting on children or on a permission is not stalled. Branchyard already knows both from structured state, so it needs no self-report |
 | Reincarnation as a fork with a fresh session and handoff brief | idea | 1–2 days | None | Useful when a harness version or profile changes under a long-lived branch |
-| Roles capped by the parent; message modes | idea | Later | Branch-to-branch messaging, which Branchyard does not have | The envelope already attenuates. Revisit if messaging is added |
+| Roles capped by the parent; message modes | done | — | — | The envelope already attenuates roles. Parent/descendant messaging (ask, report, escalate, answer, an inbox) is built, authority following the delegation tree; sibling-to-sibling messaging is not, so `collaborates_with` is still refused |
 | Egress allowlist | idea | With provider qualification | Microsandbox or Substrate network policy | Use the runtime's network controls; do not ship an iptables script |
 | Hub, brokers, chat bridges, Skill Bank, A2A bridge | don't | — | — | Product surface beyond Branchyard's contract |
 | Tmux keystroke control and hook-inferred state | don't | — | — | Branchyard drives protocols |
@@ -209,7 +209,8 @@ Built as designed in outline, with the deviations listed below; [rigs](rigs.md) 
 | `delegates_to` from A to B | `seats.A.delegates_to = ["B"]`. A's envelope allows B's harness, B's `instances` more children and B's budget |
 | `spawned_by` | Refused: declare the edge on the parent |
 | `can_observe` | Refused: authority is still descendants only |
-| `collaborates_with`, `escalates_to` | Refused: no branch-to-branch messaging |
+| `escalates_to` from A to an ancestor C | `seats.A.escalates_to = ["C"]`, `C` a seat above A's beyond its own parent (always allowed); `by escalate` reaches it, authority checked against the tree |
+| `collaborates_with` | Refused: messaging is parent/descendant only, no sibling-to-sibling |
 | `permission_policy` | Refused: presets are not implemented. The root seat has explicit `policy` rules (`default` allow, deny or ask; `deny`; `allow`; `delegation_commands`); a child seat may only add `deny` |
 | `startup.files` | Standing instructions through provisioning, after a generated section naming the seat and the seats it may spawn; never written to a worktree. Paths are relative, without `..`; `required = false` skips a missing file |
 | `startup.actions`, `delivery_hint` | Refused: the prompt is the first message, and drivers refuse slash commands |

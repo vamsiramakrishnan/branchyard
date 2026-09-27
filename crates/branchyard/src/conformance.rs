@@ -252,6 +252,68 @@ pub(crate) fn cancels(s: Opened) {
     assert_eq!(store.cancel_requested(&next).unwrap(), None);
 }
 
+pub(crate) fn messages(s: Opened) {
+    let store = &s.backend;
+    let sent = store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "kid".into(),
+            to: "parent".into(),
+            kind: crate::MessageKind::Question,
+            text: "should I rename the module?".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+    assert!(sent.id > 0);
+    assert!(sent.at_ms > 0);
+    assert!(!sent.delivered);
+    assert_eq!(store.message(sent.id).unwrap().as_ref(), Some(&sent));
+    assert_eq!(store.message(sent.id + 999).unwrap(), None);
+
+    // A second, unrelated message to someone else does not show up in
+    // parent's inbox or as an answer to the first.
+    store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "other".into(),
+            to: "elsewhere".into(),
+            kind: crate::MessageKind::Report,
+            text: "tests pass".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+
+    let inbox = store.inbox("parent").unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].id, sent.id);
+    assert!(!inbox[0].delivered);
+    assert!(store.answer_to(sent.id).unwrap().is_none());
+
+    store.mark_delivered(&[sent.id]).unwrap();
+    assert!(store.inbox("parent").unwrap()[0].delivered);
+    // Delivering twice, or an id nobody sent, is not an error.
+    store.mark_delivered(&[sent.id, sent.id + 999]).unwrap();
+
+    let answer = store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "parent".into(),
+            to: "kid".into(),
+            kind: crate::MessageKind::Answer,
+            text: "yes, rename it".into(),
+            in_reply_to: Some(sent.id),
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+    assert_eq!(store.answer_to(sent.id).unwrap().as_ref(), Some(&answer));
+    assert_eq!(store.inbox("kid").unwrap(), [answer]);
+}
+
 pub(crate) fn records(s: Opened) {
     let store = &s.backend;
     assert!(!store.taken("a").unwrap());
@@ -503,7 +565,7 @@ pub(crate) fn races(s: Opened) {
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, records, reservations, events,
-            concurrent_appends, races);
+            concurrent_appends, races, messages);
     };
     ($open:expr; $($check:ident),*) => {
         $(

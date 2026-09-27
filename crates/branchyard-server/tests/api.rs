@@ -731,12 +731,14 @@ fn a_rigs_seats_are_checked_when_its_task_is_submitted() {
             ..branchyard::Provisioning::default()
         }),
         delegates_to: Vec::new(),
+        escalates_to: Vec::new(),
         instances: 1,
     };
     let seats = branchyard::Seats {
         rig: "team".into(),
         seat: "lead".into(),
         delegates_to: vec!["worker".into()],
+        escalates_to: Vec::new(),
         table: [("worker".to_owned(), seat)].into_iter().collect(),
     };
     let submit = |client: &Client, seats: branchyard::Seats, delegation: bool| {

@@ -50,8 +50,8 @@ use crate::run::{self, NewBranch, Prepared};
 use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
 use crate::{
-    git, harness, names, ops, Activity, BranchInfo, BranchStatus, Budget, CandidateInfo, Error,
-    Event, Merged, Policy, RecordedEvent, Rule, TaskOptions, Yard,
+    git, harness, inbox, names, ops, Activity, BranchInfo, BranchStatus, Budget, CandidateInfo,
+    Error, Event, Merged, Message, MessageKind, Policy, RecordedEvent, Rule, TaskOptions, Yard,
 };
 
 /// Most events one `events` call returns.
@@ -340,6 +340,22 @@ pub struct Children {
     pub descendants: Vec<BranchInfo>,
 }
 
+/// A branch's own inbox: every message addressed to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Inbox {
+    pub branch: String,
+    pub messages: Vec<Message>,
+}
+
+/// A question sent, and its answer if one arrived within the wait.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Asked {
+    pub message: Message,
+    /// `None` when asked without `--wait`, or the wait passed with no
+    /// answer yet; ask again, or `inbox` to check later.
+    pub answer: Option<Message>,
+}
+
 /// A branch as a delegating parent sees it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Inspection {
@@ -509,6 +525,23 @@ impl Delegate {
         }
     }
 
+    /// [`Delegate::send`], then wait for the turn it started to settle, for
+    /// up to `timeout`. Race-free: a branch's lease admits one turn at a
+    /// time, so once this send's turn is running, nothing but its own end
+    /// (or recovery, for a stopped engine) makes the branch stop running;
+    /// there is no later turn to be confused with. Refused with
+    /// [`Error::Running`] if `branch` is already running when asked (no
+    /// steer channel to reach it yet).
+    pub fn send_and_wait(
+        &self,
+        branch: &str,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Result<Inspection, Error> {
+        self.send(branch, prompt)?;
+        self.wait(branch, timeout)
+    }
+
     /// Merge a descendant's candidate into this branch's own git branch
     /// (`by/<name>`, never the user's branches), after the descendant's
     /// check passes on the exact merge. This branch's uncommitted work is
@@ -534,6 +567,41 @@ impl Delegate {
             Via::Local(local) => local.children(),
             Via::Remote(_) => self.typed("children", json!({})),
         }
+    }
+
+    /// Ask this branch's parent a question. Without `wait`, returns once
+    /// the message is sent; with it, blocks (in the process that runs this
+    /// branch's turn, so across processes when reached through the
+    /// broker) for up to that long for an answer (`in_reply_to` the
+    /// question). A wait that passes with no answer yet is not an error:
+    /// `answer` is `None`; ask `inbox` or wait again.
+    pub fn ask(&self, text: &str, wait: Option<Duration>) -> Result<Asked, Error> {
+        self.typed(
+            "ask",
+            json!({"text": text, "wait_seconds": wait.map(|d| d.as_secs_f64())}),
+        )
+    }
+
+    /// Report to this branch's parent; no answer is expected.
+    pub fn report(&self, text: &str) -> Result<Message, Error> {
+        self.typed("report", json!({"text": text}))
+    }
+
+    /// Escalate to this branch's parent, or, when its rig seat's
+    /// `escalates_to` names one, an ancestor further up.
+    pub fn escalate(&self, text: &str) -> Result<Message, Error> {
+        self.typed("escalate", json!({"text": text}))
+    }
+
+    /// Answer a descendant's message (usually a question) with `text`.
+    pub fn answer(&self, message_id: u64, text: &str) -> Result<Message, Error> {
+        self.typed("answer", json!({"message_id": message_id, "text": text}))
+    }
+
+    /// This branch's own inbox: every message addressed to it, oldest
+    /// first.
+    pub fn inbox(&self) -> Result<Inbox, Error> {
+        self.typed("inbox", json!({}))
     }
 
     /// Inspect `branch` until it is not running a turn, for up to
@@ -715,6 +783,16 @@ pub(crate) fn descendants(store: &Store, name: &str) -> Result<Vec<BranchInfo>, 
     }
     found.sort_by(|a, b| (a.created_ms, &a.info.name).cmp(&(b.created_ms, &b.info.name)));
     Ok(found.into_iter().map(|record| record.info).collect())
+}
+
+/// Whether `descendant` is `ancestor` or below it in the delegation tree.
+pub(crate) fn is_ancestor(store: &Store, ancestor: &str, descendant: &str) -> Result<bool, Error> {
+    if ancestor == descendant {
+        return Ok(true);
+    }
+    Ok(descendants(store, ancestor)?
+        .iter()
+        .any(|info| info.name == descendant))
 }
 
 /// Ask `name`'s running turn and every running turn below it to stop, on
@@ -1352,6 +1430,97 @@ impl Local {
             descendants: descendants(&self.store(), &self.branch)?,
         })
     }
+
+    /// Send `kind` from this branch to its parent (`question`, `report` or
+    /// `escalation`).
+    fn send_to_parent(&self, kind: MessageKind, text: &str) -> Result<Message, Error> {
+        let parent = self
+            .store()
+            .read(&self.branch)?
+            .info
+            .parent
+            .ok_or_else(|| Error::Denied(format!("{} has no parent to {kind}", self.branch)))?;
+        self.send_message(kind, &parent, text, None)
+    }
+
+    fn answer(&self, message_id: u64, text: &str) -> Result<Message, Error> {
+        let question = self
+            .store()
+            .backend()
+            .message(message_id)?
+            .ok_or(Error::UnknownMessage(message_id))?;
+        self.send_message(MessageKind::Answer, &question.from, text, Some(message_id))
+    }
+
+    fn send_message(
+        &self,
+        kind: MessageKind,
+        to: &str,
+        text: &str,
+        in_reply_to: Option<u64>,
+    ) -> Result<Message, Error> {
+        let result = self.try_send_message(kind, to, text, in_reply_to);
+        self.note("message", to, &result, |m| {
+            format!("sent {} #{}", m.kind, m.id)
+        });
+        result
+    }
+
+    fn try_send_message(
+        &self,
+        kind: MessageKind,
+        to: &str,
+        text: &str,
+        in_reply_to: Option<u64>,
+    ) -> Result<Message, Error> {
+        if text.trim().is_empty() {
+            return Err(Error::Denied(format!("a {kind} needs text")));
+        }
+        let store = self.store();
+        inbox::authorize(&store, &self.branch, kind, to)?;
+        if let Some(question_id) = in_reply_to {
+            let question = store
+                .backend()
+                .message(question_id)?
+                .ok_or(Error::UnknownMessage(question_id))?;
+            if question.to != self.branch {
+                return Err(Error::Denied(format!(
+                    "message #{question_id} was not sent to {}",
+                    self.branch
+                )));
+            }
+        }
+        let message = store.backend().send_message(&Message {
+            id: 0,
+            from: self.branch.clone(),
+            to: to.to_owned(),
+            kind,
+            text: text.to_owned(),
+            in_reply_to,
+            at_ms: 0,
+            delivered: false,
+        })?;
+        // `authorize` above refused `to == self.branch`, so these are two
+        // distinct logs.
+        for branch in [self.branch.as_str(), to] {
+            if let Ok(mut recorder) = Recorder::open(&store, branch, self.options.observer.clone())
+            {
+                let _ = recorder.record(Activity::Message(message.clone()));
+            }
+        }
+        // The one call site a delivery hook (a steer channel, once wired
+        // in) can reach for a message just sent, before it falls back to
+        // waiting for `to`'s next turn to start.
+        inbox::try_deliver_now(&self.yard, &store, to, &message);
+        Ok(message)
+    }
+
+    fn inbox(&self) -> Result<Inbox, Error> {
+        Ok(Inbox {
+            branch: self.branch.clone(),
+            messages: self.store().backend().inbox(&self.branch)?,
+        })
+    }
 }
 
 /// Names for messages: `a, b` or `none`.
@@ -1499,6 +1668,29 @@ struct SendArgs {
 #[serde(deny_unknown_fields)]
 struct NoArgs {}
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextArgs {
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskArgs {
+    text: String,
+    /// Block for up to this many seconds for an answer; `None` or `0`
+    /// returns as soon as the question is sent.
+    #[serde(default)]
+    wait_seconds: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerArgs {
+    message_id: u64,
+    text: String,
+}
+
 fn parse<T: DeserializeOwned>(tool: &str, arguments: Value) -> Result<T, Error> {
     let arguments = match arguments {
         Value::Null => json!({}),
@@ -1562,6 +1754,36 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "children" => {
             let _: NoArgs = parse(tool, arguments)?;
             to_json(&local.children()?)
+        }
+        "ask" => {
+            let args: AskArgs = parse(tool, arguments)?;
+            let message = local.send_to_parent(MessageKind::Question, &args.text)?;
+            let answer = match args.wait_seconds.filter(|s| *s > 0.0) {
+                Some(secs) => {
+                    let store = local.store();
+                    store.wait(Duration::from_secs_f64(secs), || {
+                        store.backend().answer_to(message.id)
+                    })?
+                }
+                None => None,
+            };
+            to_json(&Asked { message, answer })
+        }
+        "report" => {
+            let args: TextArgs = parse(tool, arguments)?;
+            to_json(&local.send_to_parent(MessageKind::Report, &args.text)?)
+        }
+        "escalate" => {
+            let args: TextArgs = parse(tool, arguments)?;
+            to_json(&local.send_to_parent(MessageKind::Escalation, &args.text)?)
+        }
+        "answer" => {
+            let args: AnswerArgs = parse(tool, arguments)?;
+            to_json(&local.answer(args.message_id, &args.text)?)
+        }
+        "inbox" => {
+            let _: NoArgs = parse(tool, arguments)?;
+            to_json(&local.inbox()?)
         }
         other => Err(Error::Denied(format!("no delegation tool named {other}"))),
     }
@@ -1630,6 +1852,61 @@ mod tests {
                 seats: None,
             }),
         }
+    }
+
+    /// A record in a rig, with its own seat and its seat's `escalates_to`.
+    fn seated(name: &str, parent: Option<&str>, seat: &str, escalates_to: &[&str]) -> Record {
+        let mut r = record(name, &[], None, None);
+        r.info.parent = parent.map(str::to_owned);
+        r.grant.as_mut().unwrap().seats = Some(Seats {
+            rig: "r".into(),
+            seat: seat.into(),
+            delegates_to: Vec::new(),
+            escalates_to: escalates_to.iter().map(|s| (*s).to_owned()).collect(),
+            table: std::collections::BTreeMap::new(),
+        });
+        r
+    }
+
+    #[test]
+    fn escalation_reaches_the_parent_always_and_further_up_only_when_the_seat_allows() {
+        let (_temp, store) = temp_store();
+        let root = seated("root", None, "root", &[]);
+        store.write(&root).unwrap();
+        let mid = seated("mid", Some("root"), "mid", &[]);
+        store.write(&mid).unwrap();
+        let mut leaf = seated("leaf", Some("mid"), "leaf", &[]);
+        store.write(&leaf).unwrap();
+        store.add_child("root", "mid").unwrap();
+        store.add_child("mid", "leaf").unwrap();
+
+        // Always allowed: escalate to the direct parent.
+        crate::inbox::authorize(&store, "leaf", MessageKind::Escalation, "mid").unwrap();
+        // Not yet allowed: nothing names root in leaf's escalates_to.
+        assert!(matches!(
+            crate::inbox::authorize(&store, "leaf", MessageKind::Escalation, "root"),
+            Err(Error::Denied(_))
+        ));
+
+        leaf.grant
+            .as_mut()
+            .unwrap()
+            .seats
+            .as_mut()
+            .unwrap()
+            .escalates_to = vec!["root".into()];
+        store.write(&leaf).unwrap();
+        crate::inbox::authorize(&store, "leaf", MessageKind::Escalation, "root").unwrap();
+
+        // A question or report never reaches beyond the parent, whatever
+        // escalates_to says.
+        assert!(matches!(
+            crate::inbox::authorize(&store, "leaf", MessageKind::Question, "root"),
+            Err(Error::Denied(_))
+        ));
+        // A parent may always answer a further descendant, not only its
+        // direct child.
+        crate::inbox::authorize(&store, "root", MessageKind::Answer, "leaf").unwrap();
     }
 
     #[test]

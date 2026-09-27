@@ -547,14 +547,21 @@ fn run(
         recorder.record(Activity::Harness(event.clone()))?;
         match event {
             Event::Ready if matches!(phase, Phase::Opening) => {
-                recorder.record(Activity::Prompt(turn.prompt.to_owned()))?;
+                // Pending inbox messages are prepended here, at the last
+                // point before the prompt may reach the harness, and
+                // acknowledged (marked delivered) in the same call: a crash
+                // before this point leaves them pending, and one after
+                // never delivers them again (see `crate::inbox`).
+                let submitted =
+                    crate::inbox::deliver_at_turn_start(&store, &record.info.name, turn.prompt)?;
+                recorder.record(Activity::Prompt(submitted.clone()))?;
                 // Journaled first: from here the prompt may have reached the
                 // harness, and recovery must never submit it again.
-                let intent = json!({ "prompt": turn.prompt });
+                let intent = json!({ "prompt": submitted });
                 store
                     .backend()
                     .begin_step(fence, fence.turn, STEP_SUBMIT, &intent)?;
-                match session.submit(turn.prompt) {
+                match session.submit(&submitted) {
                     Ok(n) => {
                         driven.submitted = true;
                         store.backend().finish_step(
