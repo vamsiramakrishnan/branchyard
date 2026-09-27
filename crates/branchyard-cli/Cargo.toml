@@ -12,4 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 branchyard = { path = "../branchyard" }
+branchyard-client = { path = "../branchyard-client" }
+branchyard-server = { path = "../branchyard-server" }
 serde_json = "1"

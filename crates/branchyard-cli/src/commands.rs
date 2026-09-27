@@ -1,4 +1,5 @@
-//! One function per command, each a thin call into the SDK.
+//! One function per command, each a thin call into the SDK locally or into
+//! `branchyard-client` remotely ([`crate::remote`]).
 
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
@@ -12,7 +13,15 @@ use branchyard::{Branch, BranchInfo, BranchStatus, Budget, Policy, TaskOptions, 
 use crate::args::{self, shell_quote, TaskArgs};
 use crate::console::{self, Choice, Console};
 use crate::json;
+use crate::remote::{self, Remote};
 use crate::render::{self, Renderer, Style, Tone};
+
+/// Where commands run.
+pub enum Target {
+    /// In-process, on the repository containing the current directory.
+    Local,
+    Remote(Box<Remote>),
+}
 
 /// What the process can see of its terminal.
 pub struct Env {
@@ -43,6 +52,7 @@ impl Env {
 #[derive(Debug)]
 pub enum Failure {
     Sdk(branchyard::Error),
+    Remote(branchyard_client::Error),
     Io(io::Error),
     Message(String),
     /// Already explained on stdout, such as a branch that failed; exit 1.
@@ -53,6 +63,7 @@ impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Failure::Sdk(error) => write!(f, "{error}"),
+            Failure::Remote(error) => write!(f, "{error}"),
             Failure::Io(error) => write!(f, "{error}"),
             Failure::Message(message) => f.write_str(message),
             Failure::Reported => Ok(()),
@@ -63,6 +74,12 @@ impl fmt::Display for Failure {
 impl From<branchyard::Error> for Failure {
     fn from(error: branchyard::Error) -> Self {
         Failure::Sdk(error)
+    }
+}
+
+impl From<branchyard_client::Error> for Failure {
+    fn from(error: branchyard_client::Error) -> Self {
+        Failure::Remote(error)
     }
 }
 
@@ -81,7 +98,7 @@ pub fn print(text: &str) -> Outcome {
     Ok(())
 }
 
-fn open() -> Result<Yard, Failure> {
+pub fn open() -> Result<Yard, Failure> {
     Ok(Yard::open(".")?)
 }
 
@@ -147,21 +164,33 @@ impl Live {
 
 /// A branch that failed is an error for scripts; one that stopped at a
 /// limit or produced nothing is not.
-fn branch_outcome(info: &BranchInfo) -> Outcome {
+pub fn branch_outcome(info: &BranchInfo) -> Outcome {
     match info.status {
         BranchStatus::Failed { .. } => Err(Failure::Reported),
         _ => Ok(()),
     }
 }
 
-pub fn run(env: &Env, prompt: &str, task: &TaskArgs) -> Outcome {
+pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::run(env, remote, prompt, task);
+    }
     let yard = open()?;
     let live = Live::start(env, task, false);
     let result = yard.task(prompt).options(live.options(task)).run();
     live.finish(env, result)
 }
 
-pub fn fan(env: &Env, prompt: &str, harnesses: &[String], task: &TaskArgs) -> Outcome {
+pub fn fan(
+    env: &Env,
+    target: &Target,
+    prompt: &str,
+    harnesses: &[String],
+    task: &TaskArgs,
+) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::fan(env, remote, prompt, harnesses, task);
+    }
     let yard = open()?;
     let live = Live::start(env, task, true);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
@@ -174,8 +203,14 @@ pub fn fan(env: &Env, prompt: &str, harnesses: &[String], task: &TaskArgs) -> Ou
     live.console.finish();
     let branches = result?;
     let infos: Vec<&BranchInfo> = branches.iter().map(Branch::info).collect();
+    fan_summary(env, &infos)
+}
+
+/// The comparison closing `by fan`, and its exit status: failure only when
+/// every branch failed.
+pub fn fan_summary(env: &Env, infos: &[&BranchInfo]) -> Outcome {
     let style = env.style();
-    let mut text = format!("\n{}", render::comparison_table(&infos, style));
+    let mut text = format!("\n{}", render::comparison_table(infos, style));
     let ready: Vec<&str> = infos
         .iter()
         .filter(|info| info.status == BranchStatus::Ready)
@@ -198,7 +233,10 @@ pub fn fan(env: &Env, prompt: &str, harnesses: &[String], task: &TaskArgs) -> Ou
     Ok(())
 }
 
-pub fn send(env: &Env, branch: &str, prompt: &str, task: &TaskArgs) -> Outcome {
+pub fn send(env: &Env, target: &Target, branch: &str, prompt: &str, task: &TaskArgs) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::send(env, remote, branch, prompt, task);
+    }
     let branch = open()?.branch(branch)?;
     let live = Live::start(env, task, false);
     let result = branch.send(prompt, live.options(task));
@@ -207,19 +245,26 @@ pub fn send(env: &Env, branch: &str, prompt: &str, task: &TaskArgs) -> Outcome {
 
 pub fn fork(
     env: &Env,
+    target: &Target,
     branch: &str,
     prompt: &str,
     fresh_session: bool,
     task: &TaskArgs,
 ) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::fork(env, remote, branch, prompt, fresh_session, task);
+    }
     let branch = open()?.branch(branch)?;
     let live = Live::start(env, task, false);
     let result = branch.fork(prompt, fresh_session, live.options(task));
     live.finish(env, result)
 }
 
-pub fn ls(env: &Env, as_json: bool) -> Outcome {
-    let infos = open()?.branches()?;
+pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
+    let infos = match target {
+        Target::Local => open()?.branches()?,
+        Target::Remote(remote) => remote.repo.branches()?,
+    };
     if as_json {
         let list = infos.iter().map(json::branch).collect();
         return print(&json::text(&serde_json::Value::Array(list)));
@@ -230,16 +275,22 @@ pub fn ls(env: &Env, as_json: bool) -> Outcome {
     print(&render::branch_table(&infos, now(), env.style()))
 }
 
-pub fn show(env: &Env, branch: &str, as_json: bool) -> Outcome {
-    let branch = open()?.branch(branch)?;
+pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
+    let info = match target {
+        Target::Local => open()?.branch(branch)?.info().clone(),
+        Target::Remote(remote) => remote.repo.branch(branch)?,
+    };
     if as_json {
-        return print(&json::text(&json::branch(branch.info())));
+        return print(&json::text(&json::branch(&info)));
     }
-    print(&render::details(branch.info(), now(), env.style()))
+    print(&render::details(&info, now(), env.style()))
 }
 
-pub fn diff(env: &Env, branch: &str) -> Outcome {
-    let diff = open()?.branch(branch)?.diff()?;
+pub fn diff(env: &Env, target: &Target, branch: &str) -> Outcome {
+    let diff = match target {
+        Target::Local => open()?.branch(branch)?.diff()?,
+        Target::Remote(remote) => remote.repo.diff(branch)?,
+    };
     if !env.stdout_tty || diff.is_empty() {
         return print(&diff);
     }
@@ -304,8 +355,11 @@ fn page(text: &str) -> Outcome {
     Ok(())
 }
 
-pub fn log(env: &Env, branch: &str, as_json: bool) -> Outcome {
-    let events = open()?.branch(branch)?.events()?;
+pub fn log(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
+    let events = match target {
+        Target::Local => open()?.branch(branch)?.events()?,
+        Target::Remote(remote) => remote.repo.events(branch, 0)?.events,
+    };
     if as_json {
         let list = events.iter().map(json::recorded).collect();
         return print(&json::text(&serde_json::Value::Array(list)));
@@ -313,20 +367,30 @@ pub fn log(env: &Env, branch: &str, as_json: bool) -> Outcome {
     print(&render::log_text(&events, env.style()))
 }
 
-pub fn merge(branch: &str, into: Option<&str>) -> Outcome {
+pub fn merge(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::merge(remote, branch, into);
+    }
     let yard = open()?;
     let target = match into {
         Some(target) => target.to_owned(),
         None => current_branch(yard.root())?,
     };
     let merged = yard.merge(branch, &target)?;
+    print_merged(
+        &merged.branch,
+        &merged.target,
+        &merged.previous,
+        &merged.commit,
+    )
+}
+
+pub fn print_merged(branch: &str, target: &str, previous: &str, commit: &str) -> Outcome {
     let short = |commit: &str| commit.get(..10).unwrap_or(commit).to_owned();
     print(&format!(
-        "merged {} into {} ({}..{})\n",
-        merged.branch,
-        merged.target,
-        short(&merged.previous),
-        short(&merged.commit)
+        "merged {branch} into {target} ({}..{})\n",
+        short(previous),
+        short(commit)
     ))
 }
 
@@ -353,13 +417,19 @@ fn current_branch(root: &Path) -> Result<String, Failure> {
     Ok(name)
 }
 
-pub fn rm(branch: &str) -> Outcome {
-    open()?.remove(branch)?;
+pub fn rm(target: &Target, branch: &str) -> Outcome {
+    match target {
+        Target::Local => open()?.remove(branch)?,
+        Target::Remote(remote) => remote.repo.remove(branch)?,
+    }
     print(&format!("removed {branch}\n"))
 }
 
-pub fn harnesses(env: &Env, as_json: bool) -> Outcome {
-    let harnesses = open()?.harnesses();
+pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
+    let harnesses = match target {
+        Target::Local => open()?.harnesses(),
+        Target::Remote(remote) => remote.client.harnesses()?,
+    };
     if as_json {
         let list = harnesses.iter().map(json::harness).collect();
         return print(&json::text(&serde_json::Value::Array(list)));

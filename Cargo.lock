@@ -151,6 +151,8 @@ name = "branchyard-cli"
 version = "0.0.1"
 dependencies = [
  "branchyard",
+ "branchyard-client",
+ "branchyard-server",
  "serde_json",
 ]
 

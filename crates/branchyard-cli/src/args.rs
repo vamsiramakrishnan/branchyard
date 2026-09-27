@@ -82,6 +82,16 @@ pub enum Command {
     Harnesses {
         json: bool,
     },
+    Watch {
+        /// Seconds between refreshes.
+        interval: Duration,
+        /// Print one frame and exit.
+        once: bool,
+    },
+    /// `by serve`: arguments for the server's own parser.
+    Serve {
+        args: Vec<String>,
+    },
     /// General help, or one command's.
     Help {
         topic: Option<&'static Spec>,
@@ -101,6 +111,82 @@ impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
     }
+}
+
+/// Options before the command, choosing where commands run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Globals {
+    /// Server URL: run against a Branchyard server instead of locally.
+    pub remote: Option<String>,
+    pub token_file: Option<String>,
+    /// Repository name on the server.
+    pub repo: Option<String>,
+    /// Extra CA certificates for `https`.
+    pub ca_file: Option<String>,
+}
+
+impl Globals {
+    /// Fill what the command line left unset from `BRANCHYARD_REMOTE`,
+    /// `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO` and `BRANCHYARD_CA_FILE`.
+    pub fn with_env(mut self, get: impl Fn(&str) -> Option<String>) -> Globals {
+        let get = |name: &str| get(name).filter(|v| !v.trim().is_empty());
+        self.remote = self.remote.or_else(|| get("BRANCHYARD_REMOTE"));
+        self.token_file = self.token_file.or_else(|| get("BRANCHYARD_TOKEN_FILE"));
+        self.repo = self.repo.or_else(|| get("BRANCHYARD_REPO"));
+        self.ca_file = self.ca_file.or_else(|| get("BRANCHYARD_CA_FILE"));
+        self
+    }
+}
+
+const GLOBALS: [(&str, &str); 4] = [
+    ("remote", "URL"),
+    ("token-file", "FILE"),
+    ("repo", "NAME"),
+    ("ca-file", "FILE"),
+];
+
+/// Split leading global options from the command's arguments.
+pub fn parse_globals(args: &[String]) -> Result<(Globals, &[String]), UsageError> {
+    let mut globals = Globals::default();
+    let mut rest = args;
+    while let Some(arg) = rest.first() {
+        let Some(long) = arg.strip_prefix("--") else {
+            break;
+        };
+        let (name, inline) = match long.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_owned())),
+            None => (long, None),
+        };
+        let Some((name, placeholder)) = GLOBALS.iter().find(|(n, _)| *n == name) else {
+            break;
+        };
+        let error = |message: String| UsageError {
+            message,
+            command: None,
+        };
+        let (value, used) = match inline {
+            Some(value) => (value, 1),
+            None => match rest.get(1) {
+                Some(value) => (value.clone(), 2),
+                None => return Err(error(format!("--{name} needs a value {placeholder}"))),
+            },
+        };
+        if value.is_empty() {
+            return Err(error(format!("--{name} needs a value {placeholder}")));
+        }
+        let slot = match *name {
+            "remote" => &mut globals.remote,
+            "token-file" => &mut globals.token_file,
+            "repo" => &mut globals.repo,
+            _ => &mut globals.ca_file,
+        };
+        if slot.is_some() {
+            return Err(error(format!("--{name} given twice")));
+        }
+        *slot = Some(value);
+        rest = &rest[used..];
+    }
+    Ok((globals, rest))
 }
 
 #[derive(Debug, PartialEq)]
@@ -201,6 +287,16 @@ const JSON: Flag = Flag {
     long: "json",
     value: None,
     help: "Print JSON",
+};
+const INTERVAL: Flag = Flag {
+    long: "interval",
+    value: Some("SECS"),
+    help: "Seconds between refreshes (default: 1)",
+};
+const ONCE: Flag = Flag {
+    long: "once",
+    value: None,
+    help: "Print the tree once and exit",
 };
 const INTO: Flag = Flag {
     long: "into",
@@ -311,6 +407,18 @@ pub static COMMANDS: &[Spec] = &[
         flags: &[JSON],
     },
     Spec {
+        name: "watch",
+        positionals: &[],
+        summary: "Watch every branch live: status, activity, cost",
+        flags: &[INTERVAL, ONCE],
+    },
+    Spec {
+        name: "serve",
+        positionals: &[],
+        summary: "Serve repositories over an authenticated HTTP API",
+        flags: &[],
+    },
+    Spec {
         name: "help",
         positionals: &[],
         summary: "Show help for by or one command",
@@ -331,6 +439,12 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "help" | "-h" | "--help" => return help(args.get(1..).unwrap_or_default()),
         "-V" | "--version" => return Ok(Command::Version),
         _ => {}
+    }
+    if first == "serve" {
+        // The server parses its own options, and prints its own help.
+        return Ok(Command::Serve {
+            args: args[1..].to_vec(),
+        });
     }
     let spec = spec(first).ok_or_else(|| UsageError {
         message: format!("unknown command '{first}'"),
@@ -387,6 +501,22 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "rm" => Command::Rm { branch: next() },
         "harnesses" => Command::Harnesses {
             json: m.switch("json"),
+        },
+        "watch" => Command::Watch {
+            interval: match m.value("interval") {
+                None => Duration::from_secs(1),
+                Some(text) => text
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| s.is_finite() && *s >= 0.05 && *s <= 3600.0)
+                    .map(Duration::from_secs_f64)
+                    .ok_or_else(|| {
+                        m.error(format!(
+                            "--interval needs a number of seconds from 0.05 to 3600, not '{text}'"
+                        ))
+                    })?,
+            },
+            once: m.switch("once"),
         },
         other => unreachable!("command {other} has a spec but no parser"),
     })
@@ -688,9 +818,16 @@ pub fn general_help() -> String {
         text.push_str(&format!("  {:<10} {}\n", spec.name, spec.summary));
     }
     text.push_str(
-        "\nRun 'by help <command>' or 'by <command> --help' for its options.\n\
+        "\nGlobal options, before the command:\n\
+         \x20 --remote URL       Run commands on a Branchyard server (or BRANCHYARD_REMOTE)\n\
+         \x20 --token-file FILE  The server's bearer token (or BRANCHYARD_TOKEN_FILE)\n\
+         \x20 --repo NAME        Repository on the server, when it serves several\n\
+         \x20                    (or BRANCHYARD_REPO)\n\
+         \x20 --ca-file FILE     Also trust this CA for https (or BRANCHYARD_CA_FILE)\n\
+         \nRun 'by help <command>' or 'by <command> --help' for its options.\n\
          Local mode: harnesses run as your operating-system user, with no other\n\
-         isolation. State lives in .branchyard/ at the repository root.\n",
+         isolation. State lives in .branchyard/ at the repository root. Remote mode:\n\
+         harnesses run as the server's user, with no other isolation.\n",
     );
     text
 }
@@ -933,6 +1070,84 @@ mod tests {
             "unexpected argument 'the' (quote a prompt that contains spaces)"
         );
         assert_eq!(err("ls extra"), "unexpected argument 'extra'");
+    }
+
+    #[test]
+    fn globals_come_before_the_command_and_fall_back_to_the_environment() {
+        let argv = split_words("--remote http://h:1 --token-file=t --repo app ls --json").unwrap();
+        let (globals, rest) = parse_globals(&argv).unwrap();
+        assert_eq!(
+            globals,
+            Globals {
+                remote: Some("http://h:1".into()),
+                token_file: Some("t".into()),
+                repo: Some("app".into()),
+                ca_file: None,
+            }
+        );
+        assert_eq!(parse(rest).unwrap(), Command::Ls { json: true });
+        // After the command they are the command's options.
+        let argv = split_words("ls --remote x").unwrap();
+        let (globals, rest) = parse_globals(&argv).unwrap();
+        assert_eq!(globals, Globals::default());
+        assert_eq!(parse(rest).unwrap_err().message, "unknown option --remote");
+        let env = |name: &str| match name {
+            "BRANCHYARD_REMOTE" => Some("http://env:2".to_owned()),
+            "BRANCHYARD_REPO" => Some(" ".to_owned()),
+            _ => None,
+        };
+        let merged = Globals {
+            token_file: Some("f".into()),
+            ..Globals::default()
+        }
+        .with_env(env);
+        assert_eq!(merged.remote.as_deref(), Some("http://env:2"));
+        assert_eq!(merged.repo, None, "blank variables are unset");
+        let flag_wins = Globals {
+            remote: Some("http://flag:3".into()),
+            ..Globals::default()
+        }
+        .with_env(env);
+        assert_eq!(flag_wins.remote.as_deref(), Some("http://flag:3"));
+        for (line, error) in [
+            ("--remote", "--remote needs a value URL"),
+            ("--remote= ls", "--remote needs a value URL"),
+            ("--repo a --repo b ls", "--repo given twice"),
+        ] {
+            let argv = split_words(line).unwrap();
+            assert_eq!(parse_globals(&argv).unwrap_err().message, error, "{line}");
+        }
+    }
+
+    #[test]
+    fn watch_and_serve() {
+        assert_eq!(
+            parse_str("watch").unwrap(),
+            Command::Watch {
+                interval: Duration::from_secs(1),
+                once: false
+            }
+        );
+        assert_eq!(
+            parse_str("watch --interval 0.5 --once").unwrap(),
+            Command::Watch {
+                interval: Duration::from_millis(500),
+                once: true
+            }
+        );
+        assert!(err("watch --interval 0").contains("--interval needs"));
+        assert_eq!(
+            parse_str("serve --listen 127.0.0.1:0 --help").unwrap(),
+            Command::Serve {
+                args: vec!["--listen".into(), "127.0.0.1:0".into(), "--help".into()]
+            }
+        );
+        assert_eq!(
+            parse_str("help serve").unwrap(),
+            Command::Help {
+                topic: spec("serve")
+            }
+        );
     }
 
     #[test]
