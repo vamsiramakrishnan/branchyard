@@ -21,7 +21,8 @@ use crate::auth::Tokens;
 use crate::config::{Config, TlsFiles};
 use crate::feed::Feed;
 use crate::ops::Registry;
-use crate::store::SqliteStore;
+use crate::store::{OperationStore, SqliteStore};
+use crate::webhook;
 
 /// How long open connections get to finish after shutdown begins.
 const DRAIN: Duration = Duration::from_secs(10);
@@ -37,6 +38,7 @@ pub struct Running {
     grace: Duration,
     accept: tokio::task::JoinHandle<()>,
     pollers: Vec<tokio::task::JoinHandle<()>>,
+    webhooks: Vec<tokio::task::JoinHandle<()>>,
     /// Held until the server has stopped: one server per data directory.
     _lock: branchyard::DirLock,
 }
@@ -84,6 +86,9 @@ impl Running {
         let _ = self.accept.await;
         for poller in self.pollers {
             poller.abort();
+        }
+        for webhook in self.webhooks {
+            webhook.abort();
         }
         let registry = self.registry.clone();
         let grace = self.grace;
@@ -178,6 +183,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
             ))
         })
         .collect();
+    let webhooks = start_webhooks(&config, &repos, shutdown_rx.clone())?;
     let grace = config.shutdown_grace;
     let app = Arc::new(App {
         repos,
@@ -197,8 +203,43 @@ pub async fn start(config: Config) -> Result<Running, String> {
         grace,
         accept,
         pollers,
+        webhooks,
         _lock: lock,
     })
+}
+
+/// One delivery task per (repository, configured webhook), sharing a store
+/// for their durable cursors and an HTTP client.
+fn start_webhooks(
+    config: &Config,
+    repos: &BTreeMap<String, RepoState>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<Vec<tokio::task::JoinHandle<()>>, String> {
+    if config.webhooks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (store, place) = operation_store(config)?;
+    let store: Arc<dyn OperationStore> = Arc::from(store);
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("webhook client: {e}"))?;
+    let mut tasks = Vec::new();
+    for repo in repos.values() {
+        for webhook in &config.webhooks {
+            eprintln!(
+                "branchyard-server: notifying {} of {}'s activity, cursor in {place}",
+                webhook.url, repo.name
+            );
+            tasks.push(webhook::spawn(
+                repo.clone(),
+                webhook.clone(),
+                store.clone(),
+                client.clone(),
+                shutdown.clone(),
+            ));
+        }
+    }
+    Ok(tasks)
 }
 
 type Opened = (BTreeMap<String, RepoState>, Arc<Registry>);

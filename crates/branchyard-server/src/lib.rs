@@ -36,6 +36,9 @@
 //!   resumed from a cursor continues with the next entry, across restarts.
 //! - Plain HTTP binds only to loopback unless TLS is configured or
 //!   `--insecure-bind` is given.
+//! - Configured webhooks ([`webhook`]) are delivered from the same durable
+//!   feed by their own cursor, so a restart resumes rather than replaying
+//!   or skipping; at-least-once, signed, with retry and a dead-letter note.
 //!
 //! What it does not guarantee:
 //!
@@ -58,6 +61,7 @@ pub mod feed;
 pub mod ops;
 pub mod serve;
 pub mod store;
+pub mod webhook;
 
 pub use config::Config;
 pub use serve::{start, Handle, Running, Stopped};
