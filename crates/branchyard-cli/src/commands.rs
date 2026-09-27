@@ -8,7 +8,9 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use branchyard::{Branch, BranchInfo, BranchStatus, Budget, Policy, TaskOptions, Yard};
+use branchyard::{
+    Branch, BranchInfo, BranchStatus, Budget, Policy, Provider, SandboxOptions, TaskOptions, Yard,
+};
 
 use crate::args::{self, shell_quote, TaskArgs};
 use crate::console::{self, Choice, Console};
@@ -116,14 +118,25 @@ struct Live {
 }
 
 impl Live {
-    fn start(env: &Env, task: &TaskArgs, prefixed: bool) -> Live {
+    /// `branch` is the provider a send or fork inherits when the flags name
+    /// none.
+    fn start(env: &Env, task: &TaskArgs, prefixed: bool, branch: Option<Provider>) -> Live {
         let console = Arc::new(Console::new(
             Renderer::new(env.style(), prefixed),
             Box::new(io::stdout()),
             Box::new(console::terminal_prompt),
         ));
         let choice = console::choose(task.permissions, env.stdin_tty, env.stderr_tty);
-        eprintln!("by: local mode: harnesses run as your user, with no isolation beyond it");
+        match provider(task).or(branch) {
+            None | Some(Provider::Local) => {
+                eprintln!("by: local mode: harnesses run as your user, with no isolation beyond it")
+            }
+            Some(Provider::Microsandbox(sandbox)) => eprintln!(
+                "by: harnesses run in Microsandbox microVMs from {}; the worktree is mounted at {}",
+                sandbox.image,
+                branchyard::SANDBOX_WORKSPACE
+            ),
+        }
         if choice == (Choice::DenyAll { notice: true }) {
             eprintln!("by: {}", console::DENY_NOTICE);
         }
@@ -147,6 +160,7 @@ impl Live {
             observer: Some(Arc::new(move |event| console.event(event))),
             isolated: task.isolated,
             command: task.command.clone(),
+            provider: provider(task),
         }
     }
 
@@ -176,7 +190,7 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome
         return remote::run(env, remote, prompt, task);
     }
     let yard = open()?;
-    let live = Live::start(env, task, false);
+    let live = Live::start(env, task, false, None);
     let result = yard.task(prompt).options(live.options(task)).run();
     live.finish(env, result)
 }
@@ -192,7 +206,7 @@ pub fn fan(
         return remote::fan(env, remote, prompt, harnesses, task);
     }
     let yard = open()?;
-    let live = Live::start(env, task, true);
+    let live = Live::start(env, task, true, None);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
     let builder = yard.task(prompt).options(live.options(task));
     // Knowing the names up front lines the prefixes up from the first line.
@@ -238,7 +252,7 @@ pub fn send(env: &Env, target: &Target, branch: &str, prompt: &str, task: &TaskA
         return remote::send(env, remote, branch, prompt, task);
     }
     let branch = open()?.branch(branch)?;
-    let live = Live::start(env, task, false);
+    let live = Live::start(env, task, false, branch.provider()?);
     let result = branch.send(prompt, live.options(task));
     live.finish(env, result)
 }
@@ -255,7 +269,7 @@ pub fn fork(
         return remote::fork(env, remote, branch, prompt, fresh_session, task);
     }
     let branch = open()?.branch(branch)?;
-    let live = Live::start(env, task, false);
+    let live = Live::start(env, task, false, branch.provider()?);
     let result = branch.fork(prompt, fresh_session, live.options(task));
     live.finish(env, result)
 }
@@ -435,4 +449,18 @@ pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
         return print(&json::text(&serde_json::Value::Array(list)));
     }
     print(&render::harness_table(&harnesses, env.style()))
+}
+
+/// The SDK provider for `--provider`, if given.
+fn provider(task: &TaskArgs) -> Option<Provider> {
+    match (&task.sandbox, task.local) {
+        (Some(sandbox), _) => Some(Provider::Microsandbox(SandboxOptions {
+            image: sandbox.image.clone(),
+            cpus: sandbox.cpus,
+            memory_mib: sandbox.memory_mib,
+            pass_env: sandbox.pass_env.clone(),
+        })),
+        (None, true) => Some(Provider::Local),
+        (None, false) => None,
+    }
 }

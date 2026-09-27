@@ -5,7 +5,9 @@
 //! in-process, harnesses run as local processes, and every branch is a git
 //! worktree of your repository. State lives in `.branchyard/` at the
 //! repository root. Local mode provides no isolation beyond your operating
-//! system user; see `docs/design.md` §4.
+//! system user; see `docs/design.md` §4. [`TaskOptions::provider`] runs a
+//! branch's harness in a Microsandbox microVM instead, with the worktree
+//! mounted into it; see `docs/providers.md`.
 //!
 //! ```no_run
 //! use branchyard::{Budget, Policy, Yard};
@@ -69,6 +71,7 @@ mod git;
 mod harness;
 mod names;
 mod ops;
+mod placement;
 mod policy;
 mod record;
 mod run;
@@ -78,6 +81,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
 pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
@@ -188,6 +193,41 @@ pub struct TaskOptions {
     /// driver still appends its protocol arguments. Stored with the branch
     /// for later sends and forks.
     pub command: Option<Vec<String>>,
+    /// Where the harness runs. `None` runs a new branch as a local process
+    /// and keeps a branch's own provider for its sends and forks. Stored
+    /// with the branch.
+    pub provider: Option<Provider>,
+}
+
+/// Where a branch's harness runs.
+///
+/// Serialized as an object tagged by `kind`, such as `{"kind": "local"}` or
+/// `{"kind": "microsandbox", "image": "...", ...}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Provider {
+    /// A local process as your user; no isolation. The default.
+    Local,
+    /// A Microsandbox microVM per turn, booted from an image that has the
+    /// harness installed. Needs a build with the `microsandbox` feature and
+    /// a Linux host with KVM.
+    Microsandbox(SandboxOptions),
+}
+
+/// A sandboxed harness's image, limits and credentials.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SandboxOptions {
+    /// OCI image reference. The harness executable must be installed in it
+    /// and on its `PATH`, or named by an absolute guest path in
+    /// [`TaskOptions::command`].
+    pub image: String,
+    pub cpus: Option<u8>,
+    pub memory_mib: Option<u32>,
+    /// Variables copied by name from this process into the sandbox, such as
+    /// `ANTHROPIC_API_KEY`. Nothing else is: not your login, not your
+    /// `HOME`. Names are stored with the branch; values are not.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
 }
 
 /// Receives every activity as it is recorded, from any branch's thread.
@@ -243,6 +283,12 @@ impl TaskBuilder {
     /// See [`TaskOptions::isolated`].
     pub fn isolated(mut self, isolated: bool) -> Self {
         self.options.isolated = isolated;
+        self
+    }
+
+    /// See [`TaskOptions::provider`].
+    pub fn provider(mut self, provider: Provider) -> Self {
+        self.options.provider = Some(provider);
         self
     }
 
@@ -329,6 +375,11 @@ impl Branch {
             None => Ok(String::new()),
             Some(candidate) => git::diff(&self.yard.root, &info.base, &candidate.commit),
         }
+    }
+
+    /// Where this branch's harness runs; `None` is a local process.
+    pub fn provider(&self) -> Result<Option<Provider>, Error> {
+        Ok(self.yard.store().read(&self.info.name)?.provider)
     }
 
     /// Recorded activity, oldest first.

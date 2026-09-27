@@ -6,9 +6,16 @@ license.workspace = true
 publish.workspace = true
 description = "Delegate coding work to agent harnesses on git branches, and merge only validated results"
 
+[features]
+# Run harnesses in Microsandbox microVMs. Needs Rust 1.94 or newer; see
+# docs/providers.md.
+microsandbox = ["branchyard-microsandbox/microsandbox"]
+
 [dependencies]
 branchyard-harness = { path = "../branchyard-harness" }
+branchyard-microsandbox = { path = "../branchyard-microsandbox" }
 branchyard-runtime = { path = "../branchyard-runtime" }
+branchyard-sandbox = { path = "../branchyard-sandbox" }
 branchyard-workspace = { path = "../branchyard-workspace" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -10,6 +10,11 @@ description = "The by command: delegate coding work to agent harnesses on git br
 name = "by"
 path = "src/main.rs"
 
+[features]
+# Accept --provider microsandbox. Needs Rust 1.94 or newer; see
+# docs/providers.md.
+microsandbox = ["branchyard/microsandbox"]
+
 [dependencies]
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }

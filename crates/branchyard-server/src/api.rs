@@ -449,6 +449,7 @@ async fn post_task(
         observer: Some(observer(&repo.wake)),
         isolated: request.isolated,
         command,
+        provider: None,
     };
     let harnesses = request.harnesses.clone();
     let prompt = request.prompt.clone();

@@ -10,9 +10,11 @@ use branchyard_harness::SessionMode;
 use branchyard_workspace::Commit;
 
 use crate::engine::{self, Turn};
+use crate::placement;
 use crate::state::{now_ms, Record};
 use crate::{
-    git, harness, names, Branch, BranchInfo, BranchStatus, Error, NativeSession, TaskOptions, Yard,
+    git, harness, names, Branch, BranchInfo, BranchStatus, Error, NativeSession, Provider,
+    TaskOptions, Yard,
 };
 
 pub(crate) fn planned_names(
@@ -36,10 +38,19 @@ struct Launch {
     command: Vec<String>,
 }
 
-fn launch(id: Option<&str>, command: Option<&[String]>) -> Result<Launch, Error> {
+/// The executable is looked for on this host only when the harness runs
+/// here; a sandbox's image must provide it.
+fn launch(
+    id: Option<&str>,
+    command: Option<&[String]>,
+    provider: Option<&Provider>,
+) -> Result<Launch, Error> {
     let profile = harness::select(id)?;
     let command = harness::command(profile, command);
-    harness::check_available(id.unwrap_or(profile.harness), &command)?;
+    placement::check(provider)?;
+    if !placement::sandboxed(provider) {
+        harness::check_available(id.unwrap_or(profile.harness), &command)?;
+    }
     Ok(Launch { profile, command })
 }
 
@@ -62,6 +73,7 @@ struct NewBranch<'a> {
     command: Option<Vec<String>>,
     home: Option<PathBuf>,
     cost_baseline: Option<f64>,
+    provider: Option<Provider>,
 }
 
 /// Write the record for a reserved name and create its worktree. A
@@ -90,8 +102,11 @@ fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
         created_ms,
         check: new.check,
         command: new.command,
-        home: new.home,
+        home: new
+            .home
+            .or_else(|| placement::private_home(new.provider.as_ref(), &store, new.name)),
         cost_baseline: new.cost_baseline,
+        provider: new.provider,
     };
     let created = {
         let _lock = git::lock();
@@ -118,7 +133,11 @@ fn isolated_home(yard: &Yard, options: &TaskOptions, name: &str) -> Option<PathB
 }
 
 pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Branch, Error> {
-    let launch = launch(options.harness.as_deref(), options.command.as_deref())?;
+    let launch = launch(
+        options.harness.as_deref(),
+        options.command.as_deref(),
+        options.provider.as_ref(),
+    )?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let name = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
@@ -134,6 +153,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             command: options.command.clone(),
             home: isolated_home(yard, options, &name),
             cost_baseline: None,
+            provider: options.provider.clone(),
         },
     );
     let record = record.inspect_err(|_| store.release(&name))?;
@@ -160,7 +180,13 @@ pub(crate) fn run_on(
     }
     let launches = harnesses
         .iter()
-        .map(|id| launch(Some(id), options.command.as_deref()))
+        .map(|id| {
+            launch(
+                Some(id),
+                options.command.as_deref(),
+                options.provider.as_ref(),
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
@@ -185,6 +211,7 @@ pub(crate) fn run_on(
                 command: options.command.clone(),
                 home: isolated_home(yard, options, name),
                 cost_baseline: None,
+                provider: options.provider.clone(),
             },
         );
         match record {
@@ -255,8 +282,18 @@ pub(crate) fn send(
     if options.command.is_some() {
         record.command = options.command.clone();
     }
+    if options.provider.is_some() {
+        record.provider = options.provider.clone();
+    }
     let command = harness::command(profile, record.command.as_deref());
-    harness::check_available(profile.harness, &command)?;
+    placement::check(record.provider.as_ref())?;
+    if !placement::sandboxed(record.provider.as_ref()) {
+        harness::check_available(profile.harness, &command)?;
+    } else if record.home.is_none() {
+        let home = store.home(name);
+        std::fs::create_dir_all(&home)?;
+        record.home = Some(home);
+    }
     if !record.info.worktree.is_dir() {
         return Err(Error::State(format!(
             "{name}'s worktree {} is missing",
@@ -331,10 +368,14 @@ pub(crate) fn fork(
         (None, false) => None,
     };
     let launch_command = harness::command(profile, command.as_deref());
-    harness::check_available(
-        options.harness.as_deref().unwrap_or(profile.harness),
-        &launch_command,
-    )?;
+    let provider = options.provider.clone().or(parent.provider.clone());
+    placement::check(provider.as_ref())?;
+    if !placement::sandboxed(provider.as_ref()) {
+        harness::check_available(
+            options.harness.as_deref().unwrap_or(profile.harness),
+            &launch_command,
+        )?;
+    }
     let reserved =
         names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
     // A forked session lives in the parent's home when it ran isolated.
@@ -359,6 +400,7 @@ pub(crate) fn fork(
             command,
             home,
             cost_baseline,
+            provider,
         },
     )
     .inspect_err(|_| store.release(&reserved))?;

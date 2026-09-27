@@ -9,11 +9,12 @@ use branchyard_harness::profiles::Profile;
 use branchyard_harness::{Open, SessionMode};
 use branchyard_runtime::{RuntimeError, Session};
 
+use crate::placement::Placement;
 use crate::record::Recorder;
 use crate::state::Record;
 use crate::{
-    git, harness, names, Activity, Branch, BranchStatus, CandidateInfo, DecisionSource, Error,
-    Event, NativeSession, PermissionDecision, PermissionRequest, TaskOptions, TurnOutcome, Yard,
+    git, names, Activity, Branch, BranchStatus, CandidateInfo, DecisionSource, Error, Event,
+    NativeSession, PermissionDecision, PermissionRequest, TaskOptions, TurnOutcome, Yard,
 };
 
 /// How long a harness may take to complete its handshake.
@@ -132,20 +133,27 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
         .budget
         .max_duration
         .and_then(|limit| started.checked_add(limit));
-    let env = harness::environment(record.home.as_deref());
-    let open = Open {
-        mode: turn.mode.clone(),
-        cwd: record.info.worktree.display().to_string(),
-        model: None,
-    };
     let mut driven = Driven {
         end: End::Failed(String::new()),
         submitted: false,
         session: None,
         cost: None,
     };
+    // Declared before the session so a sandbox outlives it.
+    let mut placement = match Placement::prepare(turn.yard, record) {
+        Ok(placement) => placement,
+        Err(reason) => {
+            driven.end = End::Failed(reason);
+            return Ok(driven);
+        }
+    };
+    let open = Open {
+        mode: turn.mode.clone(),
+        cwd: placement.cwd(),
+        model: None,
+    };
     let driver = turn.profile.driver_with(turn.command.clone());
-    let mut session = match Session::start(driver, open, &env, None) {
+    let mut session = match placement.start(driver, open) {
         Ok(session) => session,
         Err(error) => {
             driven.end = End::Failed(match error {
@@ -348,6 +356,9 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
             }
             Err(error) => recorder.record(Activity::Warning(format!("kill failed: {error}")))?,
         }
+        if let Some(warning) = placement.release() {
+            recorder.record(Activity::Warning(warning))?;
+        }
         return Ok(driven);
     }
     match session.close(CLOSE_GRACE) {
@@ -372,6 +383,9 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
             }
         }
         Err(error) => recorder.record(Activity::Warning(format!("close failed: {error}")))?,
+    }
+    if let Some(warning) = placement.release() {
+        recorder.record(Activity::Warning(warning))?;
     }
     Ok(driven)
 }

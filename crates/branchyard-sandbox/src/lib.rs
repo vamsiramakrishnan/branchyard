@@ -1,16 +1,26 @@
-//! Sandbox provider capabilities, independent of any runtime SDK.
+//! Sandbox providers, independent of any runtime SDK.
 //!
 //! A provider declares the guarantees it can keep; a task declares the ones
 //! it requires. [`admit`] rejects a request the provider cannot meet instead of
-//! substituting a weaker operation. This is the capability half of the
-//! `SandboxProvider` contract in `docs/design.md` §10; lifecycle operations are
-//! implemented by each provider adapter against these types.
+//! substituting a weaker operation. That is the capability half of the
+//! `SandboxProvider` contract in `docs/design.md` §10. The lifecycle half is
+//! the [`SandboxProvider`] trait: create, exec, stop and destroy, with
+//! optional checkpoint, restore, branch and share. [`conformance`] holds the
+//! checks every provider must pass. See `docs/providers.md`.
 //!
 //! Declarations describe what an adapter claims. They are not qualification
 //! evidence: a provider profile ships only after it passes the runtime gates in
 //! `docs/implementation-plan.md`.
 
 use std::fmt;
+
+pub mod conformance;
+mod provider;
+
+pub use provider::{
+    Checkpoint, ExecSpec, ExitStatus, Mount, Process, ProviderError, Resources, SandboxInfo,
+    SandboxProvider, SandboxSpec,
+};
 
 /// What a snapshot captures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
