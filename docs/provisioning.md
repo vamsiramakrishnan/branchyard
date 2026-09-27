@@ -31,7 +31,7 @@ In [`engine::run`](../crates/branchyard/src/engine.rs) and [`provisioning`](../c
 2. The branch's `Provisioning` and the projection become a `Context`. Secrets are resolved now; a missing or empty one fails the turn by name.
 3. The profile's harness plans it. A refusal fails the turn, with the reason.
 4. The plan's files are applied to the branch's private home on this host, **before** the sandbox exists, and a `provisioned` event records the method, the files written or removed, the variable names and unused secrets.
-5. The placement is prepared. A Microsandbox sandbox mounts the home at `/branchyard/home`; a Substrate actor receives it with the existing home transfer (file modes are carried) and returns it at the turn's end.
+5. The placement is prepared. A Microsandbox sandbox mounts the home at `/branchyard/home`; a Substrate actor receives it with the existing home transfer (each file is owner-only while it arrives, then gets its own mode) and returns it at the turn's end.
 6. The plan's variables are set on the harness process, after Branchyard's own; its session items go into the driver's `Open`.
 
 A send provisions again with the branch's stored request unless it gives a new one; a fork inherits its parent's unless it gives one; a delegated child inherits its parent's.
@@ -118,7 +118,6 @@ by run "Same, in a microVM" --provider microsandbox --image ghcr.io/you/codex:0.
 - Variables reach everything the harness starts, including its tool commands. Codex filters variables named with `KEY`, `SECRET` or `TOKEN` from its shell by default; Claude Code does not. Prefer file-based credentials (`CODEX_AUTH`, `CLAUDE_AUTH`) where a harness has them.
 - Claude Code's stream-json driver passes MCP servers as a `--mcp-config` argument, so a server's variables are visible in the process list on the host that runs it. Do not put secrets in `--mcp` variables.
 - Credential files stay in the branch's private home after the turn, 0600, like Scion's; the private home is under `.branchyard/homes/`. Removing the branch removes them.
-- The Substrate home transfer creates files and then sets their modes, so a secret file is briefly created with the bridge's default mode inside the actor.
 - Telemetry is sent where the task says: Scion routes only to its local receiver, Branchyard to the caller's endpoint. Prompt content is not exported: Codex gets `log_user_prompt = false`, Gemini CLI `logPrompts: false`, and Claude Code's `OTEL_LOG_USER_PROMPTS` is left unset.
 
 ## Tests

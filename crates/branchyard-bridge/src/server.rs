@@ -767,7 +767,14 @@ fn put_file(path: &[u8], mode: u32, reader: &mut WsReader) -> io::Result<()> {
     let mut partial = path.clone().into_os_string();
     partial.push(".branchyard-partial");
     let partial = PathBuf::from(partial);
-    let mut file = fs::File::create(&partial)?;
+    // Owner-only until the content is in; its mode comes after.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&partial)?;
+    fs::set_permissions(&partial, fs::Permissions::from_mode(0o600))?;
     tree::receive_content(&mut file, &mut || next_frame(reader))?;
     file.set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
     file.sync_all()?;
