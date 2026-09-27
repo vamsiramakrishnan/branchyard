@@ -591,7 +591,14 @@ pub fn repo_name_for(path: &Path) -> String {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileConfig {
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileConfig {
+    /// Ignored: a `"$schema": "https://.../server.config.json"` key so
+    /// editors with JSON Schema support (e.g. VS Code) offer completion
+    /// and inline docs while editing this file. See
+    /// `schema/server.config.json` and `docs/server.md#published-schema`.
+    #[serde(rename = "$schema", default)]
+    _schema: Option<String>,
     listen: Option<String>,
     data_dir: Option<PathBuf>,
     #[serde(default)]
@@ -629,7 +636,8 @@ struct FileConfig {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileWebhook {
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileWebhook {
     /// Defaults to the URL when omitted.
     id: Option<String>,
     url: String,
@@ -641,7 +649,8 @@ struct FileWebhook {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileToken {
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileToken {
     name: String,
     token: Option<String>,
     token_file: Option<PathBuf>,
@@ -656,7 +665,8 @@ struct FileToken {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileCredential {
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileCredential {
     token_sha256: String,
     tenant: String,
     /// Defaults to `token_sha256`'s first 12 characters when omitted.
@@ -669,7 +679,8 @@ struct FileCredential {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct FileTenantPolicy {
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileTenantPolicy {
     #[serde(default)]
     repos: Option<Vec<String>>,
     max_running: Option<usize>,
@@ -680,9 +691,29 @@ struct FileTenantPolicy {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileTls {
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileTls {
     cert: PathBuf,
     key: PathBuf,
+}
+
+/// The configuration file's JSON Schema, built from [`FileConfig`] with
+/// `schemars` rather than hand-maintained; see `schema/server.config.json`
+/// (freshness checked by `tests/server_config_schema.rs`) and
+/// `tools/schema-gen`.
+#[cfg(feature = "schema")]
+pub mod schema {
+    use schemars::schema_for;
+
+    /// The full JSON Schema document, pretty-printed with a trailing
+    /// newline, matching `schema/server.config.json` byte for byte.
+    pub fn server_config_json() -> String {
+        let schema = schema_for!(super::FileConfig);
+        let mut text =
+            serde_json::to_string_pretty(&schema).expect("a JSON Schema document serializes");
+        text.push('\n');
+        text
+    }
 }
 
 /// Settings from a file, before flags and defaults.

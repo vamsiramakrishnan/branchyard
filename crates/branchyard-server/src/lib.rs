@@ -77,5 +77,7 @@ pub mod store;
 pub mod webhook;
 pub mod work;
 
+#[cfg(feature = "schema")]
+pub use config::schema;
 pub use config::Config;
 pub use serve::{start, Handle, Running, Stopped};

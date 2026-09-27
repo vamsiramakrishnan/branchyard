@@ -17,6 +17,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = json.loads((ROOT / "schema/contract.json").read_text())
 TYPES = CONTRACT["types"]
+SERVER_CONFIG_SCHEMA = json.loads((ROOT / "schema/server.config.json").read_text())
 
 
 class ValidationError(Exception):
@@ -226,6 +227,52 @@ class GraphTypesValidate(unittest.TestCase):
                     {"dependent": "a", "prerequisite": "b", "after": "later"}]},
                 "Graph",
             )
+
+
+class ServerConfigExampleValidatesAgainstItsSchema(unittest.TestCase):
+    """`deploy/config.example.json` against `schema/server.config.json`
+    (generated from `crates/branchyard-server/src/config.rs`'s
+    `FileConfig`; freshness is `crates/branchyard-server/tests/
+    server_config_schema.rs`). This is the deploy recipe's own sanity
+    check, besides `crates/branchyard-server/tests/deploy_config.rs`'s
+    parse-with-the-real-loader check."""
+
+    def _example(self):
+        return json.loads((ROOT / "deploy/config.example.json").read_text())
+
+    def test_the_example_validates(self):
+        validate(
+            self._example(),
+            SERVER_CONFIG_SCHEMA,
+            _defs(SERVER_CONFIG_SCHEMA),
+        )
+
+    def test_an_unknown_top_level_key_is_refused(self):
+        example = self._example()
+        example["not_a_real_field"] = True
+        with self.assertRaises(ValidationError):
+            validate(example, SERVER_CONFIG_SCHEMA, _defs(SERVER_CONFIG_SCHEMA))
+
+    def test_the_dollar_schema_key_is_accepted(self):
+        example = self._example()
+        example["$schema"] = "https://example.invalid/server.config.json"
+        validate(example, SERVER_CONFIG_SCHEMA, _defs(SERVER_CONFIG_SCHEMA))
+
+    def test_a_wrongly_typed_field_is_refused(self):
+        # A required, non-nullable field (unlike most of `FileConfig`'s
+        # `Option<T>` fields, whose `["T", "null"]` schema type this
+        # minimal validator does not itself enforce; see `validate`'s
+        # docstring).
+        example = self._example()
+        example["repos"] = "not an object"
+        with self.assertRaises(ValidationError):
+            validate(example, SERVER_CONFIG_SCHEMA, _defs(SERVER_CONFIG_SCHEMA))
+
+    def test_an_unknown_token_field_is_refused(self):
+        example = self._example()
+        example["tokens"][0]["colour"] = "blue"
+        with self.assertRaises(ValidationError):
+            validate(example, SERVER_CONFIG_SCHEMA, _defs(SERVER_CONFIG_SCHEMA))
 
 
 if __name__ == "__main__":
