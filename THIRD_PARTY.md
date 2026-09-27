@@ -14,7 +14,7 @@ Retrieved 2026-09-16; Agent Substrate retrieved 2026-09-26. Files under `vendor/
 
 `crates/branchyard-substrate` generates Rust types and a gRPC client from the unmodified `vendor/substrate/pkg/proto/ateapipb/ateapi.proto` at build time. No Substrate Go source is copied or translated. The proto's copyright header is preserved in the vendored file and in the generated output.
 
-The Substrate adapter's Cargo dependencies (Tonic, Prost and their transitive crates) are resolved from `Cargo.lock` and are not vendored. `protoc-bin-vendored` supplies a prebuilt `protoc` used only at build time. Review their licenses when producing a distributable image.
+The Substrate adapter's and the bridge's Cargo dependencies (Tonic, Prost, rustls with `ring`, `webpki-roots`, which bundles Mozilla's root certificates, and their transitive crates; `rcgen` for tests only) are resolved from `Cargo.lock` and are not vendored. `protoc-bin-vendored` supplies a prebuilt `protoc` used only at build time. Review their licenses when producing a distributable image.
 
 The optional `postgres` feature of `branchyard`, `branchyard-server` and `branchyard-cli` depends on `postgres` and `tokio-postgres` (MIT OR Apache-2.0) and their transitive crates from crates.io, resolved from `Cargo.lock` and not vendored.
 

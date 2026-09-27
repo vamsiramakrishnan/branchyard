@@ -59,6 +59,7 @@ fn cluster(f: &Fixture) -> (FakeCluster, SubstrateOptions) {
         workdir: workdir.display().to_string(),
         home: home.display().to_string(),
         pass_env: vec!["BY_TEST_VISIBLE".into()],
+        ..SubstrateOptions::default()
     };
     (fake, options)
 }
@@ -106,6 +107,51 @@ fn a_turn_in_an_actor_produces_a_candidate_that_merges() {
         "from-the-actor\n"
     );
     assert_eq!(git(&f.root, &["show", "main:a.txt"]), "rewritten\n");
+}
+
+#[test]
+fn commits_made_in_an_actor_reach_the_branch_as_commits() {
+    let f = Fixture::new();
+    let (fake, substrate) = cluster(&f);
+    let base = git(&f.root, &["rev-parse", "HEAD"]).trim().to_owned();
+    let branch = f
+        .task(
+            "SH printf one > one.txt && git add one.txt && git commit -q -m 'First in the actor'\n\
+             SH printf two > two.txt && git add two.txt && git commit -q -m 'Second in the actor'\n\
+             SH printf dirty > dirty-in-actor.txt",
+        )
+        .options(options(&f, &substrate))
+        .name("committer")
+        .policy(Policy::allow_all())
+        .run()
+        .unwrap();
+    let info = branch.info();
+    assert_eq!(info.status, BranchStatus::Ready, "{:?}", branch.events());
+    let candidate = info.candidate.as_ref().unwrap();
+    // The harness's commits, in order, then the engine's snapshot of what
+    // it left uncommitted.
+    let log = git(
+        &f.root,
+        &[
+            "log",
+            "--format=%s",
+            &format!("{base}..{}", candidate.commit),
+        ],
+    );
+    let subjects: Vec<&str> = log.lines().collect();
+    assert_eq!(subjects.len(), 3, "{log}");
+    assert_eq!(subjects[1..], ["Second in the actor", "First in the actor"]);
+    assert_eq!(
+        git(
+            &f.root,
+            &["show", &format!("{}:dirty-in-actor.txt", candidate.commit)]
+        ),
+        "dirty"
+    );
+    assert!(fake.actor_names().is_empty());
+    let merged = f.yard.merge("committer", "main").unwrap();
+    let log = git(&f.root, &["log", "--format=%s", &merged.commit]);
+    assert!(log.contains("First in the actor"), "{log}");
 }
 
 #[test]

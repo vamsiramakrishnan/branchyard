@@ -81,17 +81,9 @@ pub(crate) fn check(provider: Option<&Provider>) -> Result<(), Error> {
 
 fn check_substrate(options: &SubstrateOptions) -> Result<(), Error> {
     let refuse = |why: String| Err(Error::Unsupported(format!("the substrate provider {why}")));
-    if !options.endpoint.starts_with("http://") {
-        return refuse(format!(
-            "needs an http:// Control API endpoint, not {:?}",
-            options.endpoint
-        ));
-    }
-    if !options.router.starts_with("http://") || !options.router.contains("{actor}") {
-        return refuse(format!(
-            "needs an http:// router URL naming {{actor}}, not {:?}",
-            options.router
-        ));
+    // Schemes, loopback-only plain HTTP, and the TLS files.
+    if let Err(error) = substrate_config(options).check() {
+        return refuse(format!("cannot use its options: {error}"));
     }
     if options.template.trim().is_empty() {
         return refuse("needs an actor template".into());
@@ -453,17 +445,28 @@ fn microsandbox() -> Result<Box<dyn SandboxProvider>, String> {
     Err("this build has no Microsandbox support".into())
 }
 
-/// A provider for `options`; `signed` includes the bridge key.
-fn substrate_provider(
-    options: &SubstrateOptions,
-    signed: bool,
-) -> Result<SubstrateProvider, String> {
+/// The provider configuration `options` describe, without the key.
+fn substrate_config(options: &SubstrateOptions) -> branchyard_substrate::Config {
     let mut config = branchyard_substrate::Config::new(
         &options.endpoint,
         options.atespace(),
         &options.template,
         &options.router,
     );
+    config.ca = options.ca.clone();
+    config.client_cert = options.client_cert.clone();
+    config.client_key = options.client_key.clone();
+    config.router_ca = options.router_ca.clone();
+    config.insecure = options.insecure;
+    config
+}
+
+/// A provider for `options`; `signed` includes the bridge key.
+fn substrate_provider(
+    options: &SubstrateOptions,
+    signed: bool,
+) -> Result<SubstrateProvider, String> {
+    let mut config = substrate_config(options);
     if signed {
         let signer = branchyard_bridge::Signer::read(&options.key).map_err(|e| e.to_string())?;
         config = config.signer(signer);
@@ -653,9 +656,45 @@ mod tests {
         };
         assert!(check(Some(&Provider::Substrate(good.clone()))).is_ok());
         assert!(sandboxed(Some(&Provider::Substrate(good.clone()))));
+        // TLS anywhere, or plain HTTP to another host when asked for.
+        for fine in [
+            SubstrateOptions {
+                endpoint: "https://control.example".into(),
+                router: "wss://router.example/{atespace}/{actor}/".into(),
+                ..good.clone()
+            },
+            SubstrateOptions {
+                endpoint: "http://control.example:8080".into(),
+                insecure: true,
+                ..good.clone()
+            },
+        ] {
+            assert!(
+                check(Some(&Provider::Substrate(fine.clone()))).is_ok(),
+                "{fine:?}"
+            );
+        }
         let bad = [
             SubstrateOptions {
-                endpoint: "https://secure".into(),
+                endpoint: "ftp://control".into(),
+                ..good.clone()
+            },
+            SubstrateOptions {
+                endpoint: "http://control.example:8080".into(),
+                ..good.clone()
+            },
+            SubstrateOptions {
+                router: "ws://router.example/{actor}/".into(),
+                ..good.clone()
+            },
+            SubstrateOptions {
+                endpoint: "https://control.example".into(),
+                ca: Some(dir.join("missing-ca.pem")),
+                ..good.clone()
+            },
+            SubstrateOptions {
+                endpoint: "https://control.example".into(),
+                client_cert: Some(key.clone()),
                 ..good.clone()
             },
             SubstrateOptions {

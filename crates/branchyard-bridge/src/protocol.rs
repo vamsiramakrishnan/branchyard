@@ -1,4 +1,4 @@
-//! The bridge wire protocol, version 1.
+//! The bridge wire protocol, version 2.
 //!
 //! A connection is an HTTP/1.1 upgrade to WebSocket ([`crate::ws`]) that
 //! names [`SUBPROTOCOL`] and carries a per-attempt credential
@@ -7,8 +7,11 @@
 //!
 //! The client's first frame is the connection's one request: [`Frame::Exec`],
 //! [`Frame::PutFile`], [`Frame::GetFile`], [`Frame::PutTree`],
-//! [`Frame::GetTree`], [`Frame::EndAttempt`] or [`Frame::Shutdown`]. See
-//! `docs/substrate.md` for each exchange.
+//! [`Frame::GetTree`], [`Frame::EndAttempt`], [`Frame::Shutdown`] or
+//! [`Frame::Status`]. See `docs/substrate.md` for each exchange.
+//!
+//! Version 2 added [`Frame::Status`] and [`Frame::Report`]; version 1 had
+//! neither. A bridge speaks exactly one version.
 //!
 //! Encoding: a one-byte tag, then the frame's fields in order. Integers are
 //! big-endian; `bytes` is a `u32` length and that many bytes; a list is a
@@ -21,9 +24,9 @@
 use std::io;
 
 /// The protocol version this crate speaks.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// The WebSocket subprotocol naming [`VERSION`].
-pub const SUBPROTOCOL: &str = "branchyard-bridge.v1";
+pub const SUBPROTOCOL: &str = "branchyard-bridge.v2";
 /// The largest WebSocket message either side accepts.
 pub const MAX_MESSAGE: usize = 1 << 20;
 /// How much stream or file data one [`Frame::Data`], [`Frame::Stdin`],
@@ -143,6 +146,10 @@ pub enum Frame {
     /// Tear down every process the bridge started, of any attempt.
     /// Answered by [`Frame::Survivors`].
     Shutdown,
+    /// Report the execs that are running and whether the attempt state
+    /// file was changed behind the bridge's back. Answered by
+    /// [`Frame::Report`].
+    Status,
 
     /// Bytes for the exec's stdin.
     Stdin(Vec<u8>),
@@ -175,6 +182,13 @@ pub enum Frame {
         message: String,
     },
     Done,
+    /// The answer to [`Frame::Status`].
+    Report {
+        execs: Vec<ExecReport>,
+        /// The state file did not hold what the bridge last wrote at some
+        /// point in this bridge's life; it was rewritten from memory.
+        tampered: bool,
+    },
 
     /// One entry of a tree, its path relative to the tree's root.
     Entry {
@@ -185,6 +199,23 @@ pub enum Frame {
     },
     Data(Vec<u8>),
     End,
+}
+
+/// One running exec, in a [`Frame::Report`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecReport {
+    /// The launched process, which leads its process group.
+    pub pid: u32,
+    /// The sequence number of the attempt that started it.
+    pub attempt: u64,
+    /// The program it was started as.
+    pub program: Vec<u8>,
+    /// Seconds since it started.
+    pub seconds: u32,
+    /// Command names of the group's live members, the leader first if it is
+    /// still running. More than the leader means the exec has children at
+    /// work, such as a harness's tool call.
+    pub members: Vec<String>,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -203,6 +234,10 @@ impl Encoder {
     }
 
     fn i32(&mut self, value: i32) {
+        self.0.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
         self.0.extend_from_slice(&value.to_be_bytes());
     }
 
@@ -244,6 +279,10 @@ impl Decoder<'_> {
 
     fn i32(&mut self) -> io::Result<i32> {
         Ok(i32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
     }
 
     fn bytes(&mut self) -> io::Result<Vec<u8>> {
@@ -311,6 +350,7 @@ impl Frame {
             }
             Frame::EndAttempt => e.u8(0x06),
             Frame::Shutdown => e.u8(0x07),
+            Frame::Status => e.u8(0x08),
             Frame::Stdin(data) => {
                 e.u8(0x10);
                 e.bytes(data);
@@ -350,6 +390,21 @@ impl Frame {
                 e.bytes(message.as_bytes());
             }
             Frame::Done => e.u8(0x28),
+            Frame::Report { execs, tampered } => {
+                e.u8(0x29);
+                e.u32(execs.len() as u32);
+                for exec in execs {
+                    e.u32(exec.pid);
+                    e.u64(exec.attempt);
+                    e.bytes(&exec.program);
+                    e.u32(exec.seconds);
+                    e.u32(exec.members.len() as u32);
+                    for name in &exec.members {
+                        e.bytes(name.as_bytes());
+                    }
+                }
+                e.u8(u8::from(*tampered));
+            }
             Frame::Entry {
                 kind,
                 path,
@@ -399,6 +454,7 @@ impl Frame {
             0x05 => Frame::GetTree { path: d.bytes()? },
             0x06 => Frame::EndAttempt,
             0x07 => Frame::Shutdown,
+            0x08 => Frame::Status,
             0x10 => Frame::Stdin(d.bytes()?),
             0x11 => Frame::CloseStdin,
             0x12 => Frame::Kill,
@@ -422,6 +478,26 @@ impl Frame {
                 message: d.string()?,
             },
             0x28 => Frame::Done,
+            0x29 => Frame::Report {
+                execs: (0..d.count()?)
+                    .map(|_| {
+                        Ok(ExecReport {
+                            pid: d.u32()?,
+                            attempt: d.u64()?,
+                            program: d.bytes()?,
+                            seconds: d.u32()?,
+                            members: (0..d.count()?)
+                                .map(|_| d.string())
+                                .collect::<io::Result<_>>()?,
+                        })
+                    })
+                    .collect::<io::Result<_>>()?,
+                tampered: match d.u8()? {
+                    0 => false,
+                    1 => true,
+                    other => return Err(invalid(format!("bad flag {other}"))),
+                },
+            },
             0x30 => Frame::Entry {
                 kind: match d.u8()? {
                     0 => EntryKind::Dir,
@@ -478,6 +554,7 @@ mod tests {
             },
             Frame::EndAttempt,
             Frame::Shutdown,
+            Frame::Status,
             Frame::Stdin(b"line\n".to_vec()),
             Frame::CloseStdin,
             Frame::Kill,
@@ -501,6 +578,20 @@ mod tests {
                 message: "no such file".into(),
             },
             Frame::Done,
+            Frame::Report {
+                execs: Vec::new(),
+                tampered: true,
+            },
+            Frame::Report {
+                execs: vec![ExecReport {
+                    pid: 7,
+                    attempt: u64::MAX,
+                    program: b"claude".to_vec(),
+                    seconds: 12,
+                    members: vec!["claude".into(), "bash".into()],
+                }],
+                tampered: false,
+            },
             Frame::Entry {
                 kind: EntryKind::Symlink,
                 path: b"a/b".to_vec(),

@@ -70,6 +70,19 @@ pub struct SubstrateArgs {
     pub workdir: Option<String>,
     pub home: Option<String>,
     pub pass_env: Vec<String>,
+    /// `--substrate-ca`: authorities for an `https://` Control API, and for
+    /// the router unless `router_ca` is given.
+    pub ca: Option<String>,
+    /// `--substrate-client-cert` and `--substrate-client-key`: a client
+    /// certificate for the Control API (mutual TLS).
+    pub client_cert: Option<String>,
+    pub client_key: Option<String>,
+    /// `--substrate-router-ca`: authorities for an `https://` or `wss://`
+    /// router.
+    pub router_ca: Option<String>,
+    /// `--substrate-insecure`: allow `http://` or `ws://` to hosts other
+    /// than loopback.
+    pub insecure: bool,
 }
 
 /// Which `--provider` was chosen, with its options.
@@ -77,7 +90,7 @@ pub struct SubstrateArgs {
 enum Chosen {
     Local,
     Microsandbox(SandboxArgs),
-    Substrate(SubstrateArgs),
+    Substrate(Box<SubstrateArgs>),
 }
 
 /// Options of `by spawn`.
@@ -388,7 +401,7 @@ const PASS_ENV: Flag = Flag {
 const SUBSTRATE_ENDPOINT: Flag = Flag {
     long: "substrate-endpoint",
     value: Some("URL"),
-    help: "Agent Substrate Control API, http://HOST:PORT (substrate)",
+    help: "Agent Substrate Control API, https://HOST:PORT (substrate)",
 };
 const SUBSTRATE_ROUTER: Flag = Flag {
     long: "substrate-router",
@@ -419,6 +432,31 @@ const SUBSTRATE_HOME: Flag = Flag {
     long: "substrate-home",
     value: Some("PATH"),
     help: "The harness's HOME in the actor (substrate; default: /branchyard/home)",
+};
+const SUBSTRATE_CA: Flag = Flag {
+    long: "substrate-ca",
+    value: Some("FILE"),
+    help: "PEM authorities for the TLS Control API, and the router (substrate)",
+};
+const SUBSTRATE_CLIENT_CERT: Flag = Flag {
+    long: "substrate-client-cert",
+    value: Some("FILE"),
+    help: "PEM client certificate for the Control API, mutual TLS (substrate)",
+};
+const SUBSTRATE_CLIENT_KEY: Flag = Flag {
+    long: "substrate-client-key",
+    value: Some("FILE"),
+    help: "PEM key of --substrate-client-cert (substrate)",
+};
+const SUBSTRATE_ROUTER_CA: Flag = Flag {
+    long: "substrate-router-ca",
+    value: Some("FILE"),
+    help: "PEM authorities for the TLS router, if not --substrate-ca (substrate)",
+};
+const SUBSTRATE_INSECURE: Flag = Flag {
+    long: "substrate-insecure",
+    value: None,
+    help: "Allow http:// or ws:// to hosts other than loopback (substrate)",
 };
 const YES: Flag = Flag {
     long: "yes",
@@ -540,6 +578,11 @@ pub static COMMANDS: &[Spec] = &[
             SUBSTRATE_ATESPACE,
             SUBSTRATE_WORKDIR,
             SUBSTRATE_HOME,
+            SUBSTRATE_CA,
+            SUBSTRATE_CLIENT_CERT,
+            SUBSTRATE_CLIENT_KEY,
+            SUBSTRATE_ROUTER_CA,
+            SUBSTRATE_INSECURE,
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
@@ -573,6 +616,11 @@ pub static COMMANDS: &[Spec] = &[
             SUBSTRATE_ATESPACE,
             SUBSTRATE_WORKDIR,
             SUBSTRATE_HOME,
+            SUBSTRATE_CA,
+            SUBSTRATE_CLIENT_CERT,
+            SUBSTRATE_CLIENT_KEY,
+            SUBSTRATE_ROUTER_CA,
+            SUBSTRATE_INSECURE,
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
@@ -623,6 +671,11 @@ pub static COMMANDS: &[Spec] = &[
             SUBSTRATE_ATESPACE,
             SUBSTRATE_WORKDIR,
             SUBSTRATE_HOME,
+            SUBSTRATE_CA,
+            SUBSTRATE_CLIENT_CERT,
+            SUBSTRATE_CLIENT_KEY,
+            SUBSTRATE_ROUTER_CA,
+            SUBSTRATE_INSECURE,
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
@@ -1125,7 +1178,7 @@ impl Matches {
                 _ => None,
             },
             substrate: match &provider {
-                Some(Chosen::Substrate(args)) => Some(args.clone()),
+                Some(Chosen::Substrate(args)) => Some(SubstrateArgs::clone(args)),
                 _ => None,
             },
             local: provider == Some(Chosen::Local),
@@ -1147,6 +1200,11 @@ impl Matches {
             "substrate-atespace",
             "substrate-workdir",
             "substrate-home",
+            "substrate-ca",
+            "substrate-client-cert",
+            "substrate-client-key",
+            "substrate-router-ca",
+            "substrate-insecure",
         ];
         let given = |flags: &[&'static str]| -> Option<&'static str> {
             flags.iter().copied().find(|flag| self.switch(flag))
@@ -1221,7 +1279,7 @@ impl Matches {
                         .ok_or_else(|| self.error(format!("--provider substrate needs --{flag}")))
                 };
                 let optional = |flag: &str| self.value(flag).map(str::to_owned);
-                Ok(Some(Chosen::Substrate(SubstrateArgs {
+                Ok(Some(Chosen::Substrate(Box::new(SubstrateArgs {
                     endpoint: required("substrate-endpoint")?,
                     router: required("substrate-router")?,
                     template: required("substrate-template")?,
@@ -1230,7 +1288,12 @@ impl Matches {
                     workdir: optional("substrate-workdir"),
                     home: optional("substrate-home"),
                     pass_env,
-                })))
+                    ca: optional("substrate-ca"),
+                    client_cert: optional("substrate-client-cert"),
+                    client_key: optional("substrate-client-key"),
+                    router_ca: optional("substrate-router-ca"),
+                    insecure: self.switch("substrate-insecure"),
+                }))))
             }
             Some(other) => Err(self.error(format!(
                 "--provider is local, microsandbox or substrate, not '{other}'"
@@ -1418,6 +1481,44 @@ mod tests {
                     unapproved_tools: false,
                 },
             }
+        );
+    }
+
+    #[test]
+    fn substrate_flags_configure_tls_and_the_insecure_escape() {
+        let Command::Run { task, .. } = parse_str(
+            "run go --provider substrate --substrate-endpoint https://control:443 \
+             --substrate-router 'wss://router/{atespace}/{actor}/' --substrate-template t \
+             --substrate-key k --substrate-ca ca.pem --substrate-client-cert c.pem \
+             --substrate-client-key c.key --substrate-router-ca router-ca.pem",
+        )
+        .unwrap() else {
+            panic!("not run")
+        };
+        let substrate = task.substrate.unwrap();
+        assert_eq!(substrate.endpoint, "https://control:443");
+        assert_eq!(substrate.ca.as_deref(), Some("ca.pem"));
+        assert_eq!(substrate.client_cert.as_deref(), Some("c.pem"));
+        assert_eq!(substrate.client_key.as_deref(), Some("c.key"));
+        assert_eq!(substrate.router_ca.as_deref(), Some("router-ca.pem"));
+        assert!(!substrate.insecure);
+        let Command::Fork { task, .. } = parse_str(
+            "fork b go --provider substrate --substrate-endpoint http://10.0.0.1:8080 \
+             --substrate-router 'http://10.0.0.2/{actor}/' --substrate-template t \
+             --substrate-key k --substrate-insecure",
+        )
+        .unwrap() else {
+            panic!("not fork")
+        };
+        let substrate = task.substrate.unwrap();
+        assert!(substrate.insecure && substrate.ca.is_none());
+        assert_eq!(
+            err("run go --substrate-insecure"),
+            "--substrate-insecure needs --provider substrate"
+        );
+        assert_eq!(
+            err("run go --provider local --substrate-ca ca.pem"),
+            "--substrate-ca needs --provider substrate"
         );
     }
 

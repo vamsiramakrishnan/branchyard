@@ -126,9 +126,18 @@ Record the results with the [runtime qualification record](implementation-plan.m
 
 `SubstrateProvider` in [`branchyard-substrate`](../crates/branchyard-substrate/src/lib.rs), in the default build. [Agent Substrate](substrate.md)'s API has no exec: an actor runs its template's entry point and is reached through routed network ingress. The template's entry point is therefore the Branchyard bridge ([`branchyard-bridge`](../crates/branchyard-bridge/src/lib.rs)), which accepts WebSocket connections through the router, each carrying a per-attempt credential the host signs, and starts the harness with piped stdio in its own process group. `exec` returns a `Process` whose pipes are backed by that connection; `kill`, `teardown` (naming survivors), `wait` and drop behave as the contract says.
 
-It guarantees, beyond the contract: every attempt's credential is refused once the attempt ends or a newer one starts, even across a bridge restart; operations on a known actor are bound to its UID. It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree. It is not isolated from the router's network path (plain HTTP) and it is tested only against an in-process fake cluster. It declares `exec` for a template that runs the bridge, `ingress`, and checkpoint and branch with the template's commit scope, crash consistency and portability.
+It guarantees, beyond the contract:
 
-`TaskOptions::provider` selects it with `Provider::Substrate(SubstrateOptions)`; the CLI flags are `--provider substrate --substrate-endpoint URL --substrate-router URL --substrate-template NAME --substrate-key FILE [--substrate-atespace NAME] [--substrate-workdir PATH] [--substrate-home PATH] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. [Agent Substrate](substrate.md) documents the bridge protocol, the credentials, the transfer, the template and what remains unqualified; [live testing](testing-live.md#6-agent-substrate-cluster) says how to run it on a kind cluster.
+- Every attempt's credential is refused once the attempt ends or a newer one starts, even across a bridge restart; the bridge's memory is the authority while it runs, and a state file changed behind it is detected and restored. With `--run-as` in the template, the harness runs as another user and cannot touch the state, signal the bridge or read its memory.
+- Operations on a known actor are bound to its UID: checked before and after each resume, suspend, revert and tag, and in the request itself for delete. A replacement during a call is reported, not prevented.
+- TLS on both hops (`https://` to `Control`, with an optional client certificate; `https://` or `wss://` to the router, or to a bridge that serves TLS itself), verified against a given authority or the bundled public roots. Plain HTTP is refused off loopback unless explicitly allowed.
+- `stop_with` and `checkpoint_with` refuse, or wait, while the bridge reports a running exec, unless forced.
+- The bridge reaps every orphan and stops cleanly on the runtime's `SIGTERM`, so it can be the container's process 1.
+- Commits the harness makes in the actor come back as commits on the branch (a history rewritten below the commit sent is refused), with its uncommitted changes as working-tree changes on top.
+
+It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree. It cannot tell a harness's tool call from an idle harness, and it is tested only against an in-process fake cluster. It declares `exec` for a template that runs the bridge, `ingress`, and checkpoint and branch with the template's commit scope, crash consistency and portability.
+
+`TaskOptions::provider` selects it with `Provider::Substrate(SubstrateOptions)`; the CLI flags are `--provider substrate --substrate-endpoint URL --substrate-router URL --substrate-template NAME --substrate-key FILE [--substrate-atespace NAME] [--substrate-workdir PATH] [--substrate-home PATH] [--substrate-ca FILE] [--substrate-client-cert FILE --substrate-client-key FILE] [--substrate-router-ca FILE] [--substrate-insecure] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. [Agent Substrate](substrate.md) documents the bridge protocol, the credentials, the transfer, the template and what remains unqualified; [live testing](testing-live.md#6-agent-substrate-cluster) says how to run it on a kind cluster.
 
 ## Through a server
 
@@ -137,7 +146,7 @@ A server runs a request's provider only when its operator allowed it: `by serve 
 Everything a provider names is the server's:
 
 - `--pass-env` names are read from **the server's environment** at each turn, not the caller's. Set the credentials in the server's environment (its service unit, for example) and let callers name them.
-- `--substrate-key` is a path on the server and must be absolute; `by --remote` refuses a relative one rather than resolve it against the caller's directory.
+- `--substrate-key`, and the TLS files `--substrate-ca`, `--substrate-client-cert`, `--substrate-client-key` and `--substrate-router-ca`, are paths on the server and must be absolute; `by --remote` refuses a relative key rather than resolve it against the caller's directory.
 - The Microsandbox provider needs a server built with the `microsandbox` feature, on a host with KVM.
 - The Substrate endpoint and router must be reachable from the server.
 

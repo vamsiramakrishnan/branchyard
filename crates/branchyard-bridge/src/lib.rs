@@ -7,6 +7,7 @@
 //! [`protocol`]: start a process with piped stdio, move a file or a
 //! directory tree in or out, end an attempt, or tear everything down. The
 //! host side ([`client`]) turns an exec into a [`branchyard_sandbox::Process`].
+//! Either hop may use TLS ([`tls`]).
 //!
 //! Unix only.
 
@@ -16,8 +17,12 @@ pub mod client;
 pub mod credential;
 pub mod protocol;
 pub mod server;
+pub mod stream;
+pub mod tls;
 pub mod tree;
 pub mod ws;
 
-pub use client::{BridgeProcess, Endpoint};
+pub use client::{BridgeProcess, BridgeStatus, Endpoint};
 pub use credential::{Claims, Identity, Refusal, Signer, Verifier, KEY_ENV};
+pub use protocol::ExecReport;
+pub use tls::{ClientTls, ServerTls};

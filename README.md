@@ -92,12 +92,13 @@ The **Agent Substrate** provider, in the default build, runs each turn's harness
 
 ```sh
 branchyard-bridge keygen --out bridge.key       # its public key goes in the actor template
-by run "Fix the flaky parser test" --provider substrate --substrate-endpoint http://127.0.0.1:8080 \
-  --substrate-router 'http://127.0.0.1:8081/{atespace}/{actor}/' --substrate-template by-claude \
+by run "Fix the flaky parser test" --provider substrate \
+  --substrate-endpoint https://substrate.example --substrate-ca ca.pem \
+  --substrate-router 'wss://router.example/{atespace}/{actor}/' --substrate-template by-claude \
   --substrate-key bridge.key --pass-env ANTHROPIC_API_KEY --check "cargo test" --yes
 ```
 
-It is **unqualified**: it has run only against an in-process fake cluster, the router's addressing is an assumption, and its connections are plain HTTP. See [Agent Substrate](docs/substrate.md) and [live testing](docs/testing-live.md#6-agent-substrate-cluster).
+Both connections use TLS (plain HTTP only to loopback unless `--substrate-insecure`), commits the harness makes come back as commits, and the bridge can be the container's process 1 and run the harness as another user. It is **unqualified**: it has run only against an in-process fake cluster, and the router's addressing and TLS handling are assumptions. See [Agent Substrate](docs/substrate.md) and [live testing](docs/testing-live.md#6-agent-substrate-cluster).
 
 ## Delegation
 
@@ -166,8 +167,8 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | `branchyard-mcp` | Branchyard's delegation tools over MCP on stdio (`by mcp`), for harnesses whose shell is restricted; the same operations and token as `by spawn` and the SDKs |
 | `branchyard-sandbox` | The vendor-independent `SandboxProvider` contract, provider conformance checks, and capability admission; unsupported requirements are rejected, never weakened |
 | `branchyard-microsandbox` | A [Microsandbox](https://github.com/superradcompany/microsandbox) provider over its public SDK 0.7.3, behind the off-by-default `microsandbox` feature (the SDK needs Rust 1.94); 11 mapping tests, 4 more with the SDK, and 14 ignored tests for a KVM host; **unqualified** |
-| `branchyard-substrate` | An [Agent Substrate](https://github.com/agent-substrate/substrate) `SandboxProvider` over a client generated from its unmodified proto, exec through the bridge, git transfer, the bridge's actor template, and a fake cluster for tests; 32 tests, including the conformance checks, against the fake, and 4 ignored tests for a cluster; **unqualified** |
-| `branchyard-bridge` | The in-sandbox exec bridge for runtimes without an exec API: a versioned frame protocol over WebSocket, Ed25519-signed per-attempt credentials, process groups with teardown, file and tree transfer, and its host-side client; 17 tests |
+| `branchyard-substrate` | An [Agent Substrate](https://github.com/agent-substrate/substrate) `SandboxProvider` over a client generated from its unmodified proto, exec through the bridge, TLS on both hops, UID fencing before and after each call, quiescence checks, git transfer that keeps the harness's commits, the bridge's actor template, and a fake cluster (optionally over TLS) for tests; 41 tests, including the conformance checks, against the fake, and 4 ignored tests for a cluster; **unqualified** |
+| `branchyard-bridge` | The in-sandbox exec bridge for runtimes without an exec API: a versioned frame protocol over WebSocket, optionally over TLS, Ed25519-signed per-attempt credentials with tamper-evident state, process groups with teardown, reaping and signal handling as process 1, execs as another user, file and tree transfer, and its host-side client; 26 tests, 2 of them only as root |
 | Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |
 | Herdr controls | Original resume source and 22 terminal-observation manifests |
 | OpenRig controls | Launch/readiness contract and configuration fragments; not a standalone adapter |

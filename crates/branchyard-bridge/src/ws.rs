@@ -1,5 +1,6 @@
 //! Just enough WebSocket (RFC 6455) for the bridge: the HTTP/1.1 upgrade
-//! handshake and binary messages over a blocking TCP stream.
+//! handshake and binary messages over a blocking stream, TCP or TLS
+//! ([`Stream`]).
 //!
 //! WebSocket is used because routers that forward actor ingress forward
 //! WebSocket upgrades; the bridge's own framing ([`crate::protocol`]) rides
@@ -10,12 +11,13 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::Shutdown;
 use std::sync::{Arc, Mutex};
 
 use ring::rand::{SecureRandom, SystemRandom};
 
 use crate::protocol::MAX_MESSAGE;
+use crate::stream::Stream;
 
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /// The largest HTTP request or response head either side reads.
@@ -114,7 +116,7 @@ pub fn read_head(stream: &mut impl Read) -> io::Result<Head> {
 }
 
 /// Write a complete, non-upgrade HTTP response and close the connection.
-pub fn respond(stream: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
+pub fn respond(stream: &mut Stream, status: &str, body: &str) -> io::Result<()> {
     write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\n\
@@ -134,7 +136,7 @@ enum Role {
 
 /// The sending half of a WebSocket.
 pub struct WsWriter {
-    stream: TcpStream,
+    stream: Stream,
     role: Role,
     random: SystemRandom,
 }
@@ -199,7 +201,7 @@ impl WsWriter {
 /// The receiving half of a WebSocket. Pings are answered through the
 /// shared writer.
 pub struct WsReader {
-    stream: TcpStream,
+    stream: Stream,
     writer: Arc<Mutex<WsWriter>>,
     closed: bool,
 }
@@ -314,7 +316,7 @@ fn read_exact_or_eof(stream: &mut impl Read, buf: &mut [u8]) -> io::Result<bool>
     Ok(true)
 }
 
-fn split(stream: TcpStream, role: Role) -> io::Result<(WsReader, Arc<Mutex<WsWriter>>)> {
+fn split(stream: Stream, role: Role) -> io::Result<(WsReader, Arc<Mutex<WsWriter>>)> {
     let writer = Arc::new(Mutex::new(WsWriter {
         stream: stream.try_clone()?,
         role,
@@ -340,7 +342,7 @@ pub struct Refused {
 /// [`Refused`] inside the error, with kind `PermissionDenied` for 401 and
 /// 403, `NotFound` for 404 and `Other` otherwise.
 pub fn client(
-    mut stream: TcpStream,
+    mut stream: Stream,
     host: &str,
     path: &str,
     protocol: &str,
@@ -409,7 +411,7 @@ pub fn client(
 /// Complete a server-side upgrade whose request head was already read and
 /// accepted.
 pub fn server_accept(
-    mut stream: TcpStream,
+    mut stream: Stream,
     request: &Head,
     protocol: &str,
 ) -> io::Result<(WsReader, Arc<Mutex<WsWriter>>)> {
@@ -428,7 +430,7 @@ pub fn server_accept(
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
 
     use super::*;
@@ -452,7 +454,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut stream = Stream::from(stream);
             let head = read_head(&mut stream).unwrap();
             assert!(head.lists("connection", "upgrade"));
             assert_eq!(head.header("x-extra"), Some("yes"));
@@ -461,7 +464,7 @@ mod tests {
                 writer.lock().unwrap().send(&message).unwrap();
             }
         });
-        let stream = TcpStream::connect(address).unwrap();
+        let stream = TcpStream::connect(address).unwrap().into();
         let (mut reader, writer) =
             client(stream, "localhost", "/x", "p.v1", &[("X-Extra", "yes")]).unwrap();
         for size in [0, 1, 125, 126, 65535, 65536, 300_000] {
@@ -479,11 +482,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut stream = Stream::from(stream);
             read_head(&mut stream).unwrap();
             respond(&mut stream, "401 Unauthorized", "expired credential").unwrap();
         });
-        let stream = TcpStream::connect(address).unwrap();
+        let stream = TcpStream::connect(address).unwrap().into();
         let error = client(stream, "localhost", "/", "p.v1", &[])
             .err()
             .expect("refused");

@@ -16,6 +16,13 @@
 //! - The router forwards `/actors/<atespace>/<actor>/<rest>` to the running
 //!   actor's bridge as `/<rest>`, WebSocket upgrades included, and answers
 //!   503 for an actor that is not running.
+//! - With [`FakeTls`] ([`FakeCluster::start_tls`]), the `Control` API, the
+//!   router and every bridge serve TLS with one certificate, the `Control`
+//!   API optionally requires a client certificate, and the router verifies
+//!   the bridge's certificate when it connects to it.
+//! - A test can have an actor replaced under its name, with a new UID, just
+//!   before the next call of a given RPC acts on it
+//!   ([`FakeCluster::replace_before`]), to exercise UID fencing.
 //!
 //! Nothing here is evidence about a real cluster: the real router's
 //! addressing, activation and authentication are not modelled.
@@ -24,6 +31,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+
+use branchyard_bridge::stream::Stream;
+use branchyard_bridge::{tls, ClientTls, ServerTls};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -32,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use tokio::runtime::Runtime;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::Server;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 
 use crate::pb;
@@ -74,11 +84,36 @@ struct State {
     next_uid: u32,
 }
 
+/// Certificates for a fake cluster that serves TLS.
+#[derive(Clone, Debug)]
+pub struct FakeTls {
+    /// The authority that signed `cert`, in PEM.
+    pub ca: PathBuf,
+    /// The certificate chain every endpoint serves, valid for `127.0.0.1`,
+    /// and its key, in PEM.
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    /// When set, the `Control` API requires a client certificate signed by
+    /// this authority.
+    pub client_ca: Option<PathBuf>,
+}
+
+/// The router's TLS: what it serves, and whom it trusts upstream.
+struct RouterTls {
+    serve: ServerTls,
+    upstream: ClientTls,
+    files: FakeTls,
+}
+
 struct Inner {
     atespace: String,
     state: Mutex<State>,
     bridge: Option<PathBuf>,
     scratch: PathBuf,
+    tls: Option<RouterTls>,
+    /// `(rpc, actor)` pairs: replace the actor just before that RPC next
+    /// acts on it.
+    replace: Mutex<Vec<(String, String)>>,
     /// Paths removed whenever an actor is created, standing in for a fresh
     /// root filesystem.
     fresh: Mutex<Vec<PathBuf>>,
@@ -113,8 +148,19 @@ impl Inner {
             fs::write(identity.join(file), format!("{value}\n"))
                 .map_err(|e| Status::internal(e.to_string()))?;
         }
-        let mut child = Command::new(program)
-            .args(["serve", "--listen", "127.0.0.1:0", "--lifeline-stdin"])
+        let mut command = Command::new(program);
+        if let Some(tls) = &self.tls {
+            command
+                .arg("serve")
+                .arg("--tls-cert")
+                .arg(&tls.files.cert)
+                .arg("--tls-key")
+                .arg(&tls.files.key)
+                .args(["--listen", "127.0.0.1:0", "--lifeline-stdin"]);
+        } else {
+            command.args(["serve", "--listen", "127.0.0.1:0", "--lifeline-stdin"]);
+        }
+        let mut child = command
             .arg("--identity")
             .arg(&identity)
             .arg("--state")
@@ -143,12 +189,61 @@ impl Inner {
         }
     }
 
+    /// If a test asked for it, replace `name` by a new actor with the same
+    /// name and template before `rpc` acts on it.
+    fn maybe_replace(&self, rpc: &str, name: &str) {
+        let wanted = {
+            let mut replace = self.replace.lock().unwrap_or_else(|e| e.into_inner());
+            match replace.iter().position(|(r, n)| r == rpc && n == name) {
+                Some(at) => {
+                    replace.remove(at);
+                    true
+                }
+                None => false,
+            }
+        };
+        if !wanted {
+            return;
+        }
+        let old = {
+            let mut state = self.lock();
+            let Some(old) = state.actors.remove(name) else {
+                return;
+            };
+            state.next_uid += 1;
+            let mut proto = old.proto.clone();
+            let metadata = proto.metadata.get_or_insert_with(Default::default);
+            metadata.uid = format!("00000000-0000-4000-8000-{:012}", state.next_uid);
+            let root = self
+                .scratch
+                .join("actors")
+                .join(format!("{name}-{}", metadata.uid));
+            let _ = fs::create_dir_all(&root);
+            set_state(&mut proto, pb::ActorState::Suspended);
+            state.actors.insert(
+                name.to_owned(),
+                Actor {
+                    proto,
+                    root,
+                    bridge: None,
+                },
+            );
+            old
+        };
+        if let Some(bridge) = old.bridge {
+            bridge.stop();
+        }
+        let _ = fs::remove_dir_all(old.root);
+    }
+
     fn transition(
         &self,
+        rpc: &str,
         reference: Option<pb::ObjectRef>,
         to: pb::ActorState,
     ) -> Result<pb::Actor, Status> {
         let name = self.name_of(reference)?;
+        self.maybe_replace(rpc, &name);
         let stopped = {
             let mut state = self.lock();
             let template_key = {
@@ -328,7 +423,7 @@ impl Control for Service {
         let inner = self.0.clone();
         let reference = request.into_inner().actor;
         let actor = tokio::task::spawn_blocking(move || {
-            inner.transition(reference, pb::ActorState::Running)
+            inner.transition("ResumeActor", reference, pb::ActorState::Running)
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))??;
@@ -345,7 +440,7 @@ impl Control for Service {
         let inner = self.0.clone();
         let reference = request.into_inner().actor;
         let actor = tokio::task::spawn_blocking(move || {
-            inner.transition(reference, pb::ActorState::Suspended)
+            inner.transition("SuspendActor", reference, pb::ActorState::Suspended)
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))??;
@@ -361,7 +456,7 @@ impl Control for Service {
         let inner = self.0.clone();
         let reference = request.into_inner().actor;
         let actor = tokio::task::spawn_blocking(move || {
-            inner.transition(reference, pb::ActorState::Suspended)
+            inner.transition("RevertActor", reference, pb::ActorState::Suspended)
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))??;
@@ -384,6 +479,13 @@ impl Control for Service {
             ));
         }
         let source = self.0.name_of(tag.source_actor.clone())?;
+        {
+            let inner = self.0.clone();
+            let source = source.clone();
+            tokio::task::spawn_blocking(move || inner.maybe_replace("CreateTag", &source))
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
         let mut state = self.0.lock();
         let actor = state
             .actors
@@ -416,6 +518,28 @@ impl Control for Service {
         state
             .tags
             .insert(metadata.name.clone(), (tag.clone(), copy));
+        Ok(Response::new(tag))
+    }
+
+    async fn delete_tag(
+        &self,
+        request: Request<pb::DeleteTagRequest>,
+    ) -> Result<Response<pb::Tag>, Status> {
+        let request = request.into_inner();
+        let name = self.0.name_of(request.tag)?;
+        let mut state = self.0.lock();
+        let (tag, _) = state
+            .tags
+            .get(&name)
+            .ok_or_else(|| Status::not_found(name.clone()))?;
+        let uid = request.options.map(|o| o.uid).unwrap_or_default();
+        let actual = tag.metadata.as_ref().map(|m| m.uid.as_str());
+        if !uid.is_empty() && actual != Some(uid.as_str()) {
+            return Err(Status::failed_precondition("uid precondition failed"));
+        }
+        let (tag, copy) = state.tags.remove(&name).expect("checked above");
+        drop(state);
+        let _ = fs::remove_dir_all(copy);
         Ok(Response::new(tag))
     }
 
@@ -472,8 +596,13 @@ impl Control for Service {
     }
 }
 
-/// Forward one router connection to the actor's bridge.
-fn route(inner: &Inner, mut client: TcpStream) -> io::Result<()> {
+/// Forward one router connection to the actor's bridge, terminating TLS on
+/// both hops when the fake serves it.
+fn route(inner: &Inner, client: TcpStream) -> io::Result<()> {
+    let mut client = match &inner.tls {
+        None => Stream::Tcp(client),
+        Some(tls) => tls::accept(client, &tls.serve, Duration::from_secs(10))?,
+    };
     let head = branchyard_bridge::ws::read_head(&mut client)?;
     let mut start = head.start.split_whitespace();
     let (method, path) = (start.next().unwrap_or(""), start.next().unwrap_or(""));
@@ -504,7 +633,16 @@ fn route(inner: &Inner, mut client: TcpStream) -> io::Result<()> {
             "the actor is not running\n",
         );
     };
-    let mut upstream = TcpStream::connect(address)?;
+    let upstream = TcpStream::connect(address)?;
+    let mut upstream = match &inner.tls {
+        None => Stream::Tcp(upstream),
+        Some(tls) => tls::connect(
+            upstream,
+            &address.ip().to_string(),
+            &tls.upstream,
+            Duration::from_secs(10),
+        )?,
+    };
     let mut forwarded = format!("{method} /{rest} HTTP/1.1\r\n");
     for (name, value) in &head.headers {
         forwarded.push_str(&format!("{name}: {value}\r\n"));
@@ -533,13 +671,41 @@ pub struct FakeCluster {
 impl FakeCluster {
     /// Serve the fake for `atespace`, with actors that run `bridge` (the
     /// `branchyard-bridge` binary), keeping per-actor state under `scratch`.
+    /// Everything is plain HTTP on loopback.
     pub fn start(atespace: &str, bridge: Option<PathBuf>, scratch: &Path) -> FakeCluster {
+        FakeCluster::serve(atespace, bridge, scratch, None)
+    }
+
+    /// [`FakeCluster::start`], with every endpoint serving TLS.
+    pub fn start_tls(
+        atespace: &str,
+        bridge: Option<PathBuf>,
+        scratch: &Path,
+        tls: FakeTls,
+    ) -> FakeCluster {
+        FakeCluster::serve(atespace, bridge, scratch, Some(tls))
+    }
+
+    fn serve(
+        atespace: &str,
+        bridge: Option<PathBuf>,
+        scratch: &Path,
+        tls: Option<FakeTls>,
+    ) -> FakeCluster {
         fs::create_dir_all(scratch).expect("create the fake's scratch directory");
+        let read = |path: &Path| fs::read(path).expect("read the fake's TLS files");
+        let router_tls = tls.as_ref().map(|files| RouterTls {
+            serve: ServerTls::from_pem_files(&files.cert, &files.key).expect("the fake's identity"),
+            upstream: ClientTls::from_ca_file(&files.ca).expect("the fake's CA"),
+            files: files.clone(),
+        });
         let inner = Arc::new(Inner {
             atespace: atespace.to_owned(),
             state: Mutex::new(State::default()),
             bridge,
             scratch: scratch.to_path_buf(),
+            tls: router_tls,
+            replace: Mutex::new(Vec::new()),
             fresh: Mutex::new(Vec::new()),
         });
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -551,17 +717,27 @@ impl FakeCluster {
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .expect("bind the fake control API");
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let scheme = if tls.is_some() { "https" } else { "http" };
+        let endpoint = format!("{scheme}://{}", listener.local_addr().unwrap());
         let service = ControlServer::new(Service(inner.clone()));
+        let mut server = Server::builder();
+        if let Some(files) = &tls {
+            let mut config = ServerTlsConfig::new()
+                .identity(Identity::from_pem(read(&files.cert), read(&files.key)));
+            if let Some(client_ca) = &files.client_ca {
+                config = config.client_ca_root(Certificate::from_pem(read(client_ca)));
+            }
+            server = server.tls_config(config).expect("the fake's TLS");
+        }
         runtime.spawn(async move {
-            let _ = Server::builder()
+            let _ = server
                 .add_service(service)
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await;
         });
         let router = TcpListener::bind("127.0.0.1:0").expect("bind the fake router");
         let router_url = format!(
-            "http://{}/actors/{{atespace}}/{{actor}}/",
+            "{scheme}://{}/actors/{{atespace}}/{{actor}}/",
             router.local_addr().unwrap()
         );
         {
@@ -612,8 +788,26 @@ impl FakeCluster {
             .push(path.into());
     }
 
+    /// Just before the next `rpc` (`ResumeActor`, `SuspendActor`,
+    /// `RevertActor` or `CreateTag`) acts on `actor`, delete it and create
+    /// another actor with the same name and template and a new UID, as a
+    /// concurrent client could between a check and the call.
+    pub fn replace_before(&self, rpc: &str, actor: &str) {
+        self.inner
+            .replace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((rpc.to_owned(), actor.to_owned()));
+    }
+
     pub fn actor(&self, name: &str) -> Option<pb::Actor> {
         self.inner.lock().actors.get(name).map(|a| a.proto.clone())
+    }
+
+    pub fn tag_names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.inner.lock().tags.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     pub fn actor_names(&self) -> Vec<String> {

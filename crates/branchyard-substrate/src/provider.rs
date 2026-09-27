@@ -13,8 +13,15 @@
 //!   bridge; [`SubstrateProvider::end_attempt`], `stop` and `destroy` end it,
 //!   so it is refused from then on.
 //! - Operations on a known actor are bound to its UID: a newer actor that
-//!   reused the name is reported, never acted on, and `destroy` cannot delete
-//!   it.
+//!   reused the name before a call is reported, never acted on, and
+//!   `destroy` cannot delete it; one that replaced it during a call is
+//!   reported as such ([`crate::Error::ReplacedDuring`]).
+//! - [`SubstrateProvider::stop_with`] and
+//!   [`SubstrateProvider::checkpoint_with`] ask the bridge which execs are
+//!   running first and refuse, or wait, while any is ([`Quiesce`]), so a
+//!   checkpoint is not taken in the middle of a harness's work unless the
+//!   caller forces it. [`SandboxProvider::stop`] is `stop_with` forced, as
+//!   the contract requires `stop` to end processes.
 //!
 //! What it does not guarantee:
 //!
@@ -22,24 +29,29 @@
 //!   mount is refused; code crosses by explicit transfer ([`crate::transfer`]).
 //! - Images and limits per sandbox. Both are fixed by the actor template, so
 //!   a spec that sets either is refused rather than ignored.
-//! - Confidentiality between host and bridge: the router URL is plain HTTP.
+//! - Confidentiality on a hop that is not TLS. `https://` (and `wss://` for
+//!   the router) verify the server against [`Config::ca`] or
+//!   [`Config::router_ca`], or the bundled public roots; plain `http://` or
+//!   `ws://` is refused to anything but loopback unless [`Config::insecure`]
+//!   is set.
 //! - Anything about a real cluster. It is exercised only against the fake in
 //!   [`crate::fake`].
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use branchyard_bridge::{Claims, Endpoint, Signer};
+use branchyard_bridge::{BridgeStatus, Claims, ClientTls, Endpoint, Signer};
 use branchyard_sandbox::{
     Capabilities, Checkpoint, ExecSpec, Operation, Process, ProviderError, SandboxInfo,
     SandboxProvider, SandboxSpec, SandboxState, SnapshotGuarantee, Unsupported,
 };
 use tokio::runtime::Runtime;
-use tonic::transport::Channel;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tonic::Code;
 
 use crate::actors::{ActorHandle, Actors, CheckpointRef, Error};
@@ -47,14 +59,16 @@ use crate::actors::{ActorHandle, Actors, CheckpointRef, Error};
 /// How a [`SubstrateProvider`] reaches Substrate and the bridges.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The `Control` API, as `http://host:port`. TLS is not supported yet.
+    /// The `Control` API, as `https://host:port`, or `http://host:port`
+    /// on loopback or with [`Config::insecure`].
     pub endpoint: String,
     pub atespace: String,
     /// The actor template every sandbox is created from.
     pub template: String,
     /// The router URL of an actor's bridge, with `{atespace}` and `{actor}`
     /// in place of the names, such as
-    /// `http://router.example/{atespace}/{actor}/`.
+    /// `https://router.example/{atespace}/{actor}/`. `https` and `wss` use
+    /// TLS; `http` and `ws` are in the clear.
     pub router: String,
     /// Signs attempt credentials. Without one, lifecycle calls work and
     /// anything that reaches a bridge fails.
@@ -64,6 +78,20 @@ pub struct Config {
     /// How long a started actor's bridge may take to answer its health
     /// check through the router.
     pub ready_timeout: Duration,
+    /// PEM certificate authorities that sign the `Control` endpoint's
+    /// certificate, and the router's unless [`Config::router_ca`] is set.
+    /// Unset trusts the public roots bundled at build time.
+    pub ca: Option<PathBuf>,
+    /// A PEM client certificate and its key, presented to the `Control`
+    /// endpoint (mutual TLS). Both or neither.
+    pub client_cert: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
+    /// PEM certificate authorities that sign the router's certificate (or
+    /// the bridge's, where the router passes TLS through).
+    pub router_ca: Option<PathBuf>,
+    /// Allow `http://` or `ws://` to a host other than loopback. Credentials
+    /// and code then cross the network in the clear.
+    pub insecure: bool,
 }
 
 impl Config {
@@ -81,6 +109,11 @@ impl Config {
             signer: None,
             attempt_ttl: Duration::from_secs(6 * 3600),
             ready_timeout: Duration::from_secs(120),
+            ca: None,
+            client_cert: None,
+            client_key: None,
+            router_ca: None,
+            insecure: false,
         }
     }
 
@@ -95,6 +128,172 @@ impl Config {
             .replace("{atespace}", &self.atespace)
             .replace("{actor}", actor)
     }
+
+    /// Check the URLs and the TLS files without contacting anything: the
+    /// schemes, plain HTTP only to loopback unless [`Config::insecure`],
+    /// TLS files only for TLS URLs, and every file readable and valid PEM.
+    pub fn check(&self) -> Result<(), ProviderError> {
+        self.control_tls()?;
+        self.router_tls()?;
+        Ok(())
+    }
+
+    /// A lazily connecting channel to the `Control` API, with TLS as
+    /// configured. Must be called inside a Tokio runtime.
+    pub fn channel(&self) -> Result<Channel, ProviderError> {
+        let invalid = |e: String| {
+            ProviderError::Invalid(format!("Substrate endpoint {:?}: {e}", self.endpoint))
+        };
+        let mut endpoint = Channel::from_shared(self.endpoint.clone())
+            .map_err(|e| invalid(e.to_string()))?
+            .connect_timeout(Duration::from_secs(30));
+        if let Some(tls) = self.control_tls()? {
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|e| invalid(e.to_string()))?;
+        }
+        Ok(endpoint.connect_lazy())
+    }
+
+    /// The TLS settings for the `Control` channel, or `None` in the clear.
+    fn control_tls(&self) -> Result<Option<ClientTlsConfig>, ProviderError> {
+        let invalid = |why: String| ProviderError::Invalid(format!("Substrate endpoint: {why}"));
+        let (scheme, rest) = self
+            .endpoint
+            .split_once("://")
+            .ok_or_else(|| invalid(format!("{:?} is not a URL", self.endpoint)))?;
+        let host = url_host(rest);
+        let tls_files =
+            self.ca.is_some() || self.client_cert.is_some() || self.client_key.is_some();
+        match scheme {
+            "http" => {
+                if tls_files {
+                    return Err(invalid(format!(
+                        "{} is not https://, so a CA or client certificate cannot apply",
+                        self.endpoint
+                    )));
+                }
+                self.clear_allowed(&self.endpoint, host)?;
+                Ok(None)
+            }
+            "https" => {
+                let read = |path: &PathBuf, what: &str| {
+                    std::fs::read(path).map_err(|e| {
+                        invalid(format!("could not read the {what} {}: {e}", path.display()))
+                    })
+                };
+                let mut tls = ClientTlsConfig::new();
+                tls = match &self.ca {
+                    Some(ca) => {
+                        let pem = read(ca, "CA file")?;
+                        // Parsed here so a bad file is reported now, not on
+                        // the first call.
+                        ClientTls::from_ca_pem(&pem)
+                            .map_err(|e| invalid(format!("CA file {}: {e}", ca.display())))?;
+                        tls.ca_certificate(Certificate::from_pem(pem))
+                    }
+                    None => tls.with_webpki_roots(),
+                };
+                match (&self.client_cert, &self.client_key) {
+                    (None, None) => {}
+                    (Some(cert), Some(key)) => {
+                        let (cert_pem, key_pem) =
+                            (read(cert, "client certificate")?, read(key, "client key")?);
+                        branchyard_bridge::ServerTls::from_pem(&cert_pem, &key_pem).map_err(
+                            |e| {
+                                invalid(format!(
+                                    "client certificate {} and key {}: {e}",
+                                    cert.display(),
+                                    key.display()
+                                ))
+                            },
+                        )?;
+                        tls = tls.identity(Identity::from_pem(cert_pem, key_pem));
+                    }
+                    _ => {
+                        return Err(invalid(
+                            "a client certificate and its key go together".into(),
+                        ))
+                    }
+                }
+                Ok(Some(tls))
+            }
+            other => Err(invalid(format!(
+                "the {other} scheme is not supported; use https (or http on loopback)"
+            ))),
+        }
+    }
+
+    /// Who the router must prove itself to, or `None` in the clear.
+    fn router_tls(&self) -> Result<Option<ClientTls>, ProviderError> {
+        if !self.router.contains("{actor}") {
+            return Err(ProviderError::Invalid(format!(
+                "the router URL {} does not name the actor with {{actor}}",
+                self.router
+            )));
+        }
+        let probe = Endpoint::new(&self.router_url("probe"), "")?;
+        if !probe.is_secure() {
+            if self.router_ca.is_some() {
+                return Err(ProviderError::Invalid(format!(
+                    "the router URL {} is not https:// or wss://, so a router CA cannot apply",
+                    self.router
+                )));
+            }
+            self.clear_allowed(&self.router, probe.host())?;
+            return Ok(None);
+        }
+        match self.router_ca.as_ref().or(self.ca.as_ref()) {
+            None => Ok(None),
+            Some(ca) => ClientTls::from_ca_file(ca)
+                .map(Some)
+                .map_err(|e| ProviderError::Invalid(format!("router: {e}"))),
+        }
+    }
+
+    fn clear_allowed(&self, url: &str, host: &str) -> Result<(), ProviderError> {
+        if self.insecure || loopback(host) {
+            return Ok(());
+        }
+        Err(ProviderError::Invalid(format!(
+            "{url} would send credentials and code to {host} unencrypted; use https:// (or \
+             wss:// for the router) with a CA, or allow it explicitly with \
+             --substrate-insecure"
+        )))
+    }
+}
+
+/// The host of `rest`, a URL after its `scheme://`: no path, port,
+/// credentials or IPv6 brackets.
+fn url_host(rest: &str) -> &str {
+    let authority = rest.split('/').next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    if let Some(v6) = authority.strip_prefix('[') {
+        return v6.split(']').next().unwrap_or(v6);
+    }
+    authority.split(':').next().unwrap_or(authority)
+}
+
+/// Whether `host` names this machine without leaving it: `localhost`, or a
+/// loopback address.
+fn loopback(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// What [`SubstrateProvider::stop_with`] and
+/// [`SubstrateProvider::checkpoint_with`] do about execs still running in
+/// the sandbox, as its bridge reports them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quiesce {
+    /// Refuse, with an [`std::io::ErrorKind::ResourceBusy`] error naming
+    /// them, while any exec runs.
+    Refuse,
+    /// Wait up to this long for every exec to end, then refuse.
+    Wait(Duration),
+    /// Proceed, killing whatever runs: the result is only crash-consistent.
+    Force,
 }
 
 /// An actor this provider knows, and its current attempt, if any.
@@ -116,6 +315,9 @@ pub struct SubstrateProvider {
     runtime: Runtime,
     actors: Actors,
     config: Config,
+    /// Who the router must prove itself to; `None` in the clear or for the
+    /// public roots.
+    router_tls: Option<ClientTls>,
     live: Mutex<HashMap<String, Live>>,
     last_seq: AtomicU64,
 }
@@ -141,13 +343,7 @@ fn unix_now() -> Duration {
 impl SubstrateProvider {
     /// Prepare a provider. Nothing is contacted until the first call.
     pub fn connect(config: Config) -> Result<SubstrateProvider, ProviderError> {
-        if !config.router.contains("{actor}") {
-            return Err(ProviderError::Invalid(format!(
-                "the router URL {} does not name the actor with {{actor}}",
-                config.router
-            )));
-        }
-        Endpoint::new(&config.router_url("probe"), "")?;
+        let router_tls = config.router_tls()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("substrate-provider")
@@ -155,17 +351,13 @@ impl SubstrateProvider {
             .build()?;
         let channel = {
             let _entered = runtime.enter();
-            Channel::from_shared(config.endpoint.clone())
-                .map_err(|e| {
-                    ProviderError::Invalid(format!("Substrate endpoint {:?}: {e}", config.endpoint))
-                })?
-                .connect_timeout(Duration::from_secs(30))
-                .connect_lazy()
+            config.channel()?
         };
         Ok(SubstrateProvider {
             runtime,
             actors: Actors::new(channel, config.atespace.clone()),
             config,
+            router_tls,
             live: Mutex::new(HashMap::new()),
             last_seq: AtomicU64::new(0),
         })
@@ -245,7 +437,10 @@ impl SubstrateProvider {
         let credential = signer
             .sign(&claims)
             .map_err(|e| ProviderError::Invalid(e.to_string()))?;
-        let endpoint = Endpoint::new(&self.config.router_url(&handle.name), credential)?;
+        let mut endpoint = Endpoint::new(&self.config.router_url(&handle.name), credential)?;
+        if let Some(tls) = &self.router_tls {
+            endpoint = endpoint.with_tls(tls.clone());
+        }
         self.lock().insert(
             name.to_owned(),
             Live {
@@ -300,18 +495,113 @@ impl SubstrateProvider {
         let endpoint = self.endpoint(name)?;
         let deadline = Instant::now() + self.config.ready_timeout;
         loop {
-            if endpoint.healthy() {
-                return Ok(());
-            }
+            let error = match endpoint.health() {
+                Ok(()) => return Ok(()),
+                // A certificate that does not verify will not start to.
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    return Err(ProviderError::Runtime(format!(
+                        "the router of {name} at {} failed TLS: {error}",
+                        endpoint.url()
+                    )))
+                }
+                Err(error) => error,
+            };
             if Instant::now() >= deadline {
                 return Err(ProviderError::Runtime(format!(
-                    "the bridge of {name} did not answer at {} within {}s",
+                    "the bridge of {name} did not answer at {} within {}s: {error}",
                     endpoint.url(),
                     self.config.ready_timeout.as_secs()
                 )));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// The execs running in the sandbox, as its bridge reports them, and
+    /// whether the bridge found its attempt state tampered with.
+    pub fn status(&self, name: &str) -> Result<BridgeStatus, ProviderError> {
+        Ok(self.endpoint(name)?.status()?)
+    }
+
+    /// Return once no exec runs in the sandbox, as `quiesce` allows. A
+    /// sandbox with no current attempt, whose bridge this provider cannot
+    /// reach, is not running anything it started.
+    pub fn quiesce(&self, name: &str, quiesce: Quiesce) -> Result<(), ProviderError> {
+        let deadline = match quiesce {
+            Quiesce::Force => return Ok(()),
+            Quiesce::Refuse => Instant::now(),
+            Quiesce::Wait(timeout) => Instant::now() + timeout,
+        };
+        let Ok(endpoint) = self.endpoint(name) else {
+            return Ok(());
+        };
+        loop {
+            let status = endpoint.status()?;
+            if status.execs.is_empty() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                let busy: Vec<String> = status
+                    .execs
+                    .iter()
+                    .map(|exec| {
+                        let program = String::from_utf8_lossy(&exec.program);
+                        match exec.members.len() {
+                            0 | 1 => format!("{program} (pid {})", exec.pid),
+                            _ => format!(
+                                "{program} (pid {}, at work: {})",
+                                exec.pid,
+                                exec.members.join(", ")
+                            ),
+                        }
+                    })
+                    .collect();
+                return Err(ProviderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ResourceBusy,
+                    format!(
+                        "sandbox {name} is not quiescent; still running: {}",
+                        busy.join("; ")
+                    ),
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// [`SandboxProvider::stop`], but first wait for the running execs to
+    /// end, or refuse, as `quiesce` says.
+    pub fn stop_with(&self, name: &str, quiesce: Quiesce) -> Result<(), ProviderError> {
+        let handle = self
+            .handle(name)?
+            .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;
+        self.quiesce(name, quiesce)?;
+        if let Ok(endpoint) = self.endpoint(name) {
+            endpoint.shutdown().map_err(|e| {
+                ProviderError::Runtime(format!("could not stop the processes in {name}: {e}"))
+            })?;
+        }
+        let _ = self.end_attempt(name);
+        self.block(async move |actors| actors.stop(&handle).await)
+    }
+
+    /// Checkpoint the sandbox whether it is running or stopped: a running
+    /// one is stopped first with [`SubstrateProvider::stop_with`], so the
+    /// checkpoint is refused while an exec runs unless `quiesce` forces it.
+    pub fn checkpoint_with(
+        &self,
+        name: &str,
+        required: &SnapshotGuarantee,
+        quiesce: Quiesce,
+    ) -> Result<Checkpoint, ProviderError> {
+        let running = self
+            .inspect(name)?
+            .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?
+            .state
+            != SandboxState::Stopped;
+        if running {
+            self.stop_with(name, quiesce)?;
+        }
+        self.checkpoint(name, required)
     }
 
     /// Write `content` to `path` in the sandbox.
@@ -440,16 +730,7 @@ impl SandboxProvider for SubstrateProvider {
     /// suspend the actor. A full-scope suspend would otherwise keep the
     /// processes, frozen, to resume later.
     fn stop(&self, name: &str) -> Result<(), ProviderError> {
-        let handle = self
-            .handle(name)?
-            .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;
-        if let Ok(endpoint) = self.endpoint(name) {
-            endpoint.shutdown().map_err(|e| {
-                ProviderError::Runtime(format!("could not stop the processes in {name}: {e}"))
-            })?;
-        }
-        let _ = self.end_attempt(name);
-        self.block(async move |actors| actors.stop(&handle).await)
+        self.stop_with(name, Quiesce::Force)
     }
 
     fn destroy(&self, name: &str) -> Result<(), ProviderError> {
@@ -458,7 +739,8 @@ impl SandboxProvider for SubstrateProvider {
     }
 
     /// Tag the stopped actor's latest suspend. The actor must already be
-    /// stopped: a checkpoint never suspends implicitly.
+    /// stopped: a checkpoint never suspends implicitly (see
+    /// [`SubstrateProvider::checkpoint_with`] for one that does).
     fn checkpoint(
         &self,
         name: &str,

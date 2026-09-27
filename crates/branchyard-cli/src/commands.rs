@@ -863,6 +863,11 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
             workdir: substrate.workdir.clone().unwrap_or_default(),
             home: substrate.home.clone().unwrap_or_default(),
             pass_env: substrate.pass_env.clone(),
+            ca: substrate.ca.as_deref().map(absolute),
+            client_cert: substrate.client_cert.as_deref().map(absolute),
+            client_key: substrate.client_key.as_deref().map(absolute),
+            router_ca: substrate.router_ca.as_deref().map(absolute),
+            insecure: substrate.insecure,
         }));
     }
     match (&task.sandbox, task.local) {
