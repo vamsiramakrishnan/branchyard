@@ -67,6 +67,11 @@ impl Fixture {
             std::env::set_var("CLAUDECODE", "1");
             std::env::set_var("BRANCHYARD_TEST_VISIBLE", "yes");
         });
+        // Build the agent before any test body runs. The first build can
+        // recompile dependencies (a single-package build unifies features
+        // differently from `cargo test --workspace`), which must not count
+        // against a test's own timing.
+        fake_agent();
         let dir = std::env::temp_dir().join(format!(
             "branchyard-sdk-test-{}-{}",
             std::process::id(),
