@@ -25,3 +25,4 @@ rusqlite = { version = "0.39", default-features = false, features = ["bundled"] 
 
 [dev-dependencies]
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }

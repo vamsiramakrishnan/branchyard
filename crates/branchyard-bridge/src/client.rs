@@ -11,17 +11,35 @@ use std::time::{Duration, Instant};
 
 use branchyard_sandbox::{ExecSpec, ExitStatus, Process, ProviderError};
 
-use crate::protocol::{Frame, CHUNK, SUBPROTOCOL};
+use crate::protocol::{ExecReport, Frame, CHUNK, SUBPROTOCOL};
+use crate::stream::Stream;
+use crate::tls::{self, ClientTls};
 use crate::tree;
 use crate::ws::{self, WsReader, WsWriter};
 
 /// How long a teardown waits for the bridge to name the survivors.
 const TEARDOWN_WAIT: Duration = Duration::from_secs(30);
 
-/// Where a bridge is reached: an `http://host[:port][/path]` URL, and the
-/// credential to present.
+/// What a bridge reported for [`Endpoint::status`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BridgeStatus {
+    /// The execs still running, of any attempt.
+    pub execs: Vec<ExecReport>,
+    /// The bridge found its attempt state file changed behind its back at
+    /// least once, and rewrote it from memory.
+    pub tampered: bool,
+}
+
+/// Where a bridge is reached: an `http://` or `ws://` URL in the clear, or
+/// an `https://` or `wss://` URL over TLS, as `scheme://host[:port][/path]`;
+/// and the credential to present.
 #[derive(Clone)]
 pub struct Endpoint {
+    /// `https` or `wss` when `secure`, else `http` or `ws`.
+    scheme: String,
+    secure: bool,
+    /// Who to trust over TLS; the bundled public roots when unset.
+    tls: Option<ClientTls>,
     host: String,
     port: u16,
     path: String,
@@ -39,8 +57,10 @@ impl std::fmt::Debug for Endpoint {
 }
 
 impl Endpoint {
-    /// Parse `url`. Only plain `http` is supported; see the server's
-    /// documentation for what that means for confidentiality.
+    /// Parse `url`. `https` and `wss` connect over TLS, trusting the
+    /// bundled public roots unless [`Endpoint::with_tls`] says otherwise;
+    /// `http` and `ws` connect in the clear, and whether that is acceptable
+    /// is the caller's decision.
     pub fn new(url: &str, credential: impl Into<String>) -> io::Result<Endpoint> {
         let bad = |why: &str| {
             io::Error::new(
@@ -48,15 +68,19 @@ impl Endpoint {
                 format!("bridge URL {url:?}: {why}"),
             )
         };
-        let rest = match url.split_once("://") {
-            Some(("http", rest)) => rest,
+        let (scheme, secure, rest) = match url.split_once("://") {
+            Some((scheme @ ("http" | "ws"), rest)) => (scheme, false, rest),
+            Some((scheme @ ("https" | "wss"), rest)) => (scheme, true, rest),
             Some((scheme, _)) => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    format!("bridge URL {url:?}: the {scheme} scheme is not supported; use http"),
+                    format!(
+                        "bridge URL {url:?}: the {scheme} scheme is not supported; use https, \
+                         wss, http or ws"
+                    ),
                 ))
             }
-            None => return Err(bad("expected http://host[:port][/path]")),
+            None => return Err(bad("expected https://host[:port][/path]")),
         };
         let (authority, path) = match rest.find('/') {
             Some(at) => (&rest[..at], &rest[at..]),
@@ -70,9 +94,15 @@ impl Endpoint {
                 let port = port.parse().map_err(|_| bad("bad port"))?;
                 (host.to_owned(), port)
             }
-            _ => (authority.to_owned(), 80),
+            _ => (authority.to_owned(), if secure { 443 } else { 80 }),
         };
+        if host.is_empty() {
+            return Err(bad("expected a host"));
+        }
         Ok(Endpoint {
+            scheme: scheme.to_owned(),
+            secure,
+            tls: None,
             host,
             port,
             path: path.to_owned(),
@@ -82,13 +112,33 @@ impl Endpoint {
     }
 
     pub fn url(&self) -> String {
-        format!("http://{}:{}{}", self.host, self.port, self.path)
+        format!("{}://{}:{}{}", self.scheme, self.host, self.port, self.path)
     }
 
-    /// The same credential presented at another URL.
+    /// The host part of the URL: a name, an IPv4 address or a bracketed
+    /// IPv6 address.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Whether connections use TLS.
+    pub fn is_secure(&self) -> bool {
+        self.secure
+    }
+
+    /// Verify the server with `tls` rather than the bundled public roots.
+    /// Ignored for a URL in the clear.
+    pub fn with_tls(mut self, tls: ClientTls) -> Endpoint {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// The same credential presented at another URL, trusting the same
+    /// authorities.
     pub fn with_url(&self, url: &str) -> io::Result<Endpoint> {
         Ok(Endpoint {
             connect_timeout: self.connect_timeout,
+            tls: self.tls.clone(),
             ..Endpoint::new(url, self.credential.clone())?
         })
     }
@@ -99,6 +149,23 @@ impl Endpoint {
             credential: credential.into(),
             ..self.clone()
         }
+    }
+
+    /// A connection to the bridge or router, over TLS for a secure URL.
+    fn stream(&self) -> io::Result<Stream> {
+        let tcp = self.tcp()?;
+        if !self.secure {
+            return Ok(Stream::Tcp(tcp));
+        }
+        let fallback;
+        let tls = match &self.tls {
+            Some(tls) => tls,
+            None => {
+                fallback = ClientTls::public_roots();
+                &fallback
+            }
+        };
+        tls::connect(tcp, &self.host, tls, self.connect_timeout)
     }
 
     fn tcp(&self) -> io::Result<TcpStream> {
@@ -120,10 +187,10 @@ impl Endpoint {
     }
 
     fn connect(&self) -> io::Result<Connection> {
-        let stream = self.tcp()?;
-        let authority = match self.port {
-            80 => self.host.clone(),
-            port => format!("{}:{port}", self.host),
+        let stream = self.stream()?;
+        let authority = match (self.port, self.secure) {
+            (80, false) | (443, true) => self.host.clone(),
+            (port, _) => format!("{}:{port}", self.host),
         };
         let bearer = format!("Bearer {}", self.credential);
         let (reader, writer) = ws::client(
@@ -138,20 +205,44 @@ impl Endpoint {
 
     /// Whether the bridge answers its health check, `GET <path>healthz`.
     pub fn healthy(&self) -> bool {
-        let Ok(mut stream) = self.tcp() else {
-            return false;
-        };
-        let _ = stream.set_read_timeout(Some(self.connect_timeout));
+        self.health().is_ok()
+    }
+
+    /// The bridge's health check, `GET <path>healthz`: `Ok` for a 200. A
+    /// TLS failure, such as a certificate from an authority not trusted,
+    /// is an [`io::ErrorKind::InvalidData`] error, which retrying does not
+    /// fix.
+    pub fn health(&self) -> io::Result<()> {
+        let mut stream = self.stream()?;
+        stream.set_read_timeout(Some(self.connect_timeout))?;
         let path = format!("{}/healthz", self.path.trim_end_matches('/'));
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.host
         );
-        if stream.write_all(request.as_bytes()).is_err() {
-            return false;
+        stream.write_all(request.as_bytes())?;
+        let head = ws::read_head(&mut stream)?;
+        match head.start.split_whitespace().nth(1) {
+            Some("200") => Ok(()),
+            _ => Err(io::Error::other(format!(
+                "the health check at {} answered {:?}",
+                self.url(),
+                head.start
+            ))),
         }
-        ws::read_head(&mut stream)
-            .is_ok_and(|head| head.start.split_whitespace().nth(1) == Some("200"))
+    }
+
+    /// The execs running in the sandbox and whether the bridge saw its
+    /// attempt state tampered with.
+    pub fn status(&self) -> io::Result<BridgeStatus> {
+        let mut connection = self.connect()?;
+        connection.send(&Frame::Status)?;
+        let status = match connection.recv_ok()? {
+            Frame::Report { execs, tampered } => BridgeStatus { execs, tampered },
+            other => return Err(unexpected(&other)),
+        };
+        connection.close();
+        Ok(status)
     }
 
     /// Start `spec` in the sandbox.
