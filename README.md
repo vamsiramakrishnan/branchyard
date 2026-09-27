@@ -61,10 +61,10 @@ Work runs on the server: interrupting `by` stops watching, not the turn, `by can
 
 ## Watching branches
 
-`by watch` shows every branch as a tree, forks under their parents, with status, harness, current activity (the tool running, a pending permission request, the last line of the message), turns, cost and age:
+`by watch` shows every branch as a tree, forks under their parents, with status, harness, current activity (the tool running, a pending permission request, the last line of the message), turns, cost and age. `by watch --once` prints it once:
 
 ```text
-by watch · /src/app · q to quit
+by watch · /src/app
 
 BRANCH        HARNESS      STATUS      TURNS   COST  AGE  ACTIVITY
 parser        claude-code  running         2  $0.41   3m  ▸ Bash · Running the parser tests
@@ -74,7 +74,7 @@ docs          gemini-cli   no changes      1      -   9m  The docs already cover
 3 branches, 1 running, $0.53 reported
 ```
 
-On a terminal it redraws in place; `q` or Ctrl-C exits and restores the terminal. Piped, it prints one line per change instead, and `--once` prints the tree once. It reads event logs incrementally, and works the same with `--remote`, where it follows the server's event stream.
+On a terminal it is a live dashboard (ratatui): the tree with each status in its own color (an interrupted branch in black on yellow, since its work is stopped mid-turn), and beside or below it the selected branch's detail: its latest events, cost and tokens, unread inbox messages, children, prompt and the commands to run next. `j`/`k` or the arrows move, Enter focuses the selected branch's subtree, `/` filters by name, harness, status or prompt, `?` lists every key, and `q`, Esc or Ctrl-C exits and restores the terminal (as does a panic). Piped, it prints one line per change instead. It reads event logs incrementally, and works the same with `--remote`, where it follows the server's event stream.
 
 `by log --follow <branch>` prints a branch's events as they are recorded. In [Herdr](https://github.com/herdrdev/herdr), the [Branchyard plugin](plugins/herdr/README.md) follows a server's event stream and gives each branch a tab running `by log --follow`, with the branch's state in Herdr's agent sidebar (`working`, `blocked` on a waiting permission request, `idle` with what happened) and actions to merge, cancel or send to the focused branch. It is tested against a fake `herdr`, not yet against Herdr itself.
 

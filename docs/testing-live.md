@@ -58,7 +58,7 @@ In the throwaway repository:
 | One server | `by serve --data-dir D` in two terminals | The second fails within 2 seconds, naming the first's pid |
 | Two terminals | `by send <b> …` while another `by` runs a turn on `<b>` | Refused as running; no race |
 | Unapproved tools | `by run "…" --harness pi` | Refused; with `--allow-unapproved-tools` it runs |
-| Watch | `by watch` in a second terminal during the above | The tree updates live; `q` exits cleanly |
+| Watch | `by watch` in a second terminal during the above | The tree updates live; the detail pane follows the selection; resizing redraws; `q` exits and restores the terminal |
 
 **Record:** anything that differs from the expectation, in an issue or in [validation](validation.md). Recovery is described in [durability](durability.md); on macOS it relies on `ps -o lstart=` for process start times, which is untested.
 

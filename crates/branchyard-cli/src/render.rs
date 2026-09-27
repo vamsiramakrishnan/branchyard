@@ -110,7 +110,7 @@ pub fn usd(value: f64) -> String {
     }
 }
 
-fn tokens(count: u64) -> String {
+pub fn tokens(count: u64) -> String {
     match count {
         0..=999 => count.to_string(),
         1_000..=999_999 => format!("{:.1}k", count as f64 / 1e3),
