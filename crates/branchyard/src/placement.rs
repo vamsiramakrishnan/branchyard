@@ -44,6 +44,9 @@ use crate::{git, harness, Error, Provider, SubstrateOptions, Yard};
 pub const WORKSPACE: &str = "/workspace";
 /// Where the branch's private home appears in a sandbox.
 pub const HOME: &str = "/branchyard/home";
+/// Where a Microsandbox turn's authorized scratch areas are mounted, one
+/// subdirectory per area named for it.
+const SCRATCH_MOUNT_BASE: &str = "/branchyard/scratch";
 /// The journaled step naming a turn's sandbox, before it is created.
 pub(crate) const STEP_SANDBOX: &str = "sandbox";
 
@@ -208,8 +211,30 @@ impl Placement {
             .home
             .clone()
             .ok_or("a sandboxed branch has no private home")?;
-        let env = sandbox_env(HOME, &options.pass_env)?;
+        let mut env = sandbox_env(HOME, &options.pass_env)?;
         let git_dir = git::common_dir(&yard.root).map_err(|e| e.to_string())?;
+        let mut mounts = vec![
+            Mount::writable(&record.info.worktree, WORKSPACE),
+            Mount::writable(home, HOME),
+            Mount::read_only(&git_dir, &git_dir),
+        ];
+        // Every scratch area this branch may reach is mounted read-write
+        // at a fixed guest path, named for the harness the same way the
+        // local provider's environment variable does; see
+        // `docs/storage.md`. One writer at a time is still enforced by
+        // `by scratch lock`, not by this mount.
+        if let Ok(areas) = crate::storage::authorized_scratch(yard, &record.info.name) {
+            for area in &areas {
+                let host = crate::storage::scratch_dir(&yard.store(), &area.name);
+                let _ = std::fs::create_dir_all(&host);
+                let guest = format!("{SCRATCH_MOUNT_BASE}/{}", area.name);
+                mounts.push(Mount::writable(&host, &guest));
+                env.insert(
+                    crate::storage::scratch_env_var(&area.name).into(),
+                    guest.into(),
+                );
+            }
+        }
         let spec = SandboxSpec {
             name: sandbox_name(&record.info.name, now_ms()),
             image: Some(options.image.clone()),
@@ -217,11 +242,7 @@ impl Placement {
                 cpus: options.cpus,
                 memory_mib: options.memory_mib,
             },
-            mounts: vec![
-                Mount::writable(&record.info.worktree, WORKSPACE),
-                Mount::writable(home, HOME),
-                Mount::read_only(&git_dir, &git_dir),
-            ],
+            mounts,
         };
         let provider = microsandbox()?;
         // Journaled before the sandbox exists, so recovery can destroy it.
@@ -354,6 +375,20 @@ impl Placement {
             }
             Kind::Substrate(actor) => {
                 actor.env.insert(name.into(), value.into());
+            }
+        }
+    }
+
+    /// Take a variable out of the harness's environment; a later
+    /// [`Placement::set_env`] of it still applies.
+    pub fn remove_env(&mut self, name: &str) {
+        match &mut self.kind {
+            Kind::Local(env) => *env = env.clone().remove(name),
+            Kind::Sandbox { env, .. } => {
+                env.remove(std::ffi::OsStr::new(name));
+            }
+            Kind::Substrate(actor) => {
+                actor.env.remove(std::ffi::OsStr::new(name));
             }
         }
     }

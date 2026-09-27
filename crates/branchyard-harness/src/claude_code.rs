@@ -11,8 +11,14 @@
 //! MCP servers go in one `--mcp-config` argument as the JSON the Agent SDK
 //! builds from its `mcpServers` option (`{"mcpServers": {name: {"type":
 //! "stdio", command, args, env}}}`). Claude Code adds them to the servers it
-//! already loads; it is not given `--strict-mcp-config`. The argument is
-//! visible to other processes of the same user, environment included.
+//! already loads; it is not given `--strict-mcp-config`. A command line is
+//! readable by every process on the host (`/proc/<pid>/cmdline`), so when
+//! the caller gives [`Open::mcp_config_file`], a file already holding
+//! [`mcp_config`], the argument is its path; Claude Code 2.1.283 reads a
+//! path there as well as JSON. Without one, servers are passed inline only
+//! when none has variables or headers, which may hold tokens; otherwise the
+//! open is refused. HTTP and SSE servers are `{"type": "http" | "sse", url,
+//! headers}` entries, which 2.1.283 connects to with those headers.
 //!
 //! Instructions arrive as a plugin (`--plugin-dir`), whose skills Claude Code
 //! 2.1.283 lists in its `initialize` response as `<plugin>:<skill>`, or
@@ -22,6 +28,22 @@
 //! arrives on `system/init` and is checked: a resume that comes back under a
 //! different ID, or a fork that keeps the parent's, is a protocol violation,
 //! never silently accepted.
+//!
+//! Steering writes another user message while the turn runs, as the Agent
+//! SDK does with streaming input. Claude Code 2.1.283, checked against a
+//! local stand-in API with no model call, queues it (`command_lifecycle`
+//! `queued`, reported as [`Event::SteerAccepted`]) and delivers it before
+//! its next model call: when the turn continues after a tool result, into
+//! that same request, as a system reminder that the user sent a message
+//! while it was working, and the turn's one `result` lists both messages
+//! in `user_message_uuids`. When the turn would end without another model
+//! call, the CLI runs the queued message right after as a follow-up with a
+//! `result` of its own; the driver keeps the turn open until a `result`
+//! has answered every steered message, so a steered turn still ends once.
+//! An interrupt with steered messages still queued is sent with
+//! `cancel_queued: true` (advertised as `interrupt_cancel_queued_v1`), so
+//! they are cancelled rather than run after the interrupt; their
+//! cancellation is [`Event::SteerRejected`].
 
 use std::collections::HashMap;
 
@@ -30,7 +52,7 @@ use serde_json::json;
 use crate::{
     frame, parse, Capabilities, Driver, Event, Frame, Instructions, LaunchSpec, McpServer,
     NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
-    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Usage, Value,
+    Rejected, RemoteMcpServer, SessionMode, Submitted, TurnOutcome, Turns, Usage, Value,
 };
 
 #[derive(Debug)]
@@ -54,6 +76,20 @@ pub struct ClaudeCode {
     /// acknowledged it.
     turn_uuid: Option<(String, bool)>,
     interrupting: bool,
+    /// Steered messages of the turn in flight that no `result` has answered
+    /// yet and the CLI has not cancelled.
+    steers: Vec<Steer>,
+    next_steer: u64,
+}
+
+/// One steered user message.
+#[derive(Debug)]
+struct Steer {
+    number: u64,
+    uuid: String,
+    accepted: bool,
+    /// The CLI started a turn cycle with it.
+    started: bool,
 }
 
 impl ClaudeCode {
@@ -71,6 +107,37 @@ impl ClaudeCode {
             turns: Turns::default(),
             turn_uuid: None,
             interrupting: false,
+            steers: Vec::new(),
+            next_steer: 0,
+        }
+    }
+
+    /// `command_lifecycle` for a steered message: queued is its
+    /// acceptance; cancelled, discarded and refused drop it undelivered.
+    fn steer_lifecycle(&mut self, uuid: &str, state: &str) -> Option<Event> {
+        let turn = self.turns.active?;
+        let at = self.steers.iter().position(|s| s.uuid == uuid)?;
+        match state {
+            "queued" if !self.steers[at].accepted => {
+                self.steers[at].accepted = true;
+                Some(Event::SteerAccepted {
+                    turn,
+                    steer: self.steers[at].number,
+                })
+            }
+            "started" => {
+                self.steers[at].started = true;
+                None
+            }
+            "cancelled" | "discarded" | "refused" => {
+                let steer = self.steers.remove(at);
+                Some(Event::SteerRejected {
+                    turn,
+                    steer: steer.number,
+                    reason: format!("Claude Code reported the message {state}"),
+                })
+            }
+            _ => None,
         }
     }
 
@@ -254,11 +321,39 @@ impl ClaudeCode {
         if let (Some((expected, _)), Some(echoed)) =
             (&self.turn_uuid, message["user_message_uuid"].as_str())
         {
-            if expected != echoed {
+            let steered = self.steers.iter().any(|s| s.uuid == echoed);
+            if expected != echoed && !steered {
                 return Output::event(Event::ProtocolViolation {
                     detail: format!("result answers {echoed}, not the turn in flight {expected}"),
                 });
             }
+        }
+        // Every message this result answered: several when steered
+        // messages joined the turn.
+        let answered: Vec<&str> = match message["user_message_uuids"].as_array() {
+            Some(uuids) => uuids.iter().filter_map(Value::as_str).collect(),
+            None => message["user_message_uuid"].as_str().into_iter().collect(),
+        };
+        self.steers.retain(|s| !answered.contains(&s.uuid.as_str()));
+        if let (Some(turn), false) = (self.turns.active, self.steers.is_empty()) {
+            // Queued steered messages run as a follow-up the CLI starts
+            // itself: the turn goes on until a result answers them.
+            events.push(Event::UsageObserved {
+                turn: Some(turn),
+                usage: usage(message),
+            });
+            match outcome(message, false) {
+                TurnOutcome::Completed => {}
+                other => events.push(Event::Warning {
+                    message: format!(
+                        "part of the turn ended {other:?}; it goes on with steered input"
+                    ),
+                }),
+            }
+            return Output {
+                events,
+                frames: Vec::new(),
+            };
         }
         let Some(turn) = self.turns.end() else {
             return Output::event(Event::ProtocolViolation {
@@ -339,8 +434,23 @@ fn outcome(message: &Value, interrupted: bool) -> TurnOutcome {
 }
 
 /// `--mcp-config` JSON: `{"mcpServers": {<name>: <McpStdioServerConfig>}}`,
-/// the value the Agent SDK passes for its `mcpServers` option.
-fn mcp_config(servers: &[McpServer]) -> String {
+/// the value the Agent SDK passes for its `mcpServers` option, with HTTP and
+/// SSE servers as `{"type": "http" | "sse", url, headers}`. This is also
+/// the content of [`Open::mcp_config_file`].
+pub fn mcp_config(servers: &[McpServer], remote: &[RemoteMcpServer]) -> String {
+    let remote = remote.iter().map(|server| {
+        let headers: serde_json::Map<String, Value> = server
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), json!(value)))
+            .collect();
+        let config = json!({
+            "type": server.transport.as_str(),
+            "url": server.url,
+            "headers": headers,
+        });
+        (server.name.clone(), config)
+    });
     let servers: serde_json::Map<String, Value> = servers
         .iter()
         .map(|server| {
@@ -357,6 +467,7 @@ fn mcp_config(servers: &[McpServer]) -> String {
             });
             (server.name.clone(), config)
         })
+        .chain(remote)
         .collect();
     json!({ "mcpServers": servers }).to_string()
 }
@@ -399,6 +510,7 @@ impl Driver for ClaudeCode {
             tool_approvals: true,
             turn_acknowledgment: true,
             usage: true,
+            steer: true,
         }
     }
 
@@ -426,9 +538,35 @@ impl Driver for ClaudeCode {
         if let Some(model) = &open.model {
             argv.extend(["--model".into(), model.clone()]);
         }
-        crate::check_mcp_servers(&open.mcp_servers)?;
-        if !open.mcp_servers.is_empty() {
-            argv.extend(["--mcp-config".into(), mcp_config(&open.mcp_servers)]);
+        crate::check_all_mcp_servers(&open)?;
+        let secret_bearing = open.mcp_servers.iter().any(|s| !s.env.is_empty())
+            || open
+                .remote_mcp_servers
+                .iter()
+                .any(|s| !s.headers.is_empty());
+        let any = !open.mcp_servers.is_empty() || !open.remote_mcp_servers.is_empty();
+        match &open.mcp_config_file {
+            Some(file) if !file.starts_with('/') => {
+                return Err(Rejected::InvalidOpen(format!(
+                    "the MCP configuration file must be an absolute path, not {file:?}"
+                )));
+            }
+            Some(file) => argv.extend(["--mcp-config".into(), file.clone()]),
+            None if secret_bearing => {
+                return Err(Rejected::InvalidOpen(
+                    "MCP server variables or headers would be readable by every process on the \
+                     host in Claude Code's command line; give the servers in a file \
+                     (Open::mcp_config_file)"
+                        .into(),
+                ));
+            }
+            None if any => {
+                argv.extend([
+                    "--mcp-config".into(),
+                    mcp_config(&open.mcp_servers, &open.remote_mcp_servers),
+                ]);
+            }
+            None => {}
         }
         match &open.instructions {
             Some(Instructions {
@@ -486,14 +624,19 @@ impl Driver for ClaudeCode {
             }
             "keep_alive" | "user" | "stream_event" => Output::default(),
             "command_lifecycle" => {
-                let started = matches!(message["state"].as_str(), Some("queued" | "started"));
+                let state = message["state"].as_str().unwrap_or_default();
                 let uuid = message["command_uuid"].as_str();
+                let started = matches!(state, "queued" | "started");
+                let mut events: Vec<Event> = started
+                    .then(|| self.acknowledge(uuid))
+                    .flatten()
+                    .into_iter()
+                    .collect();
+                if let Some(uuid) = uuid {
+                    events.extend(self.steer_lifecycle(uuid, state));
+                }
                 Output {
-                    events: started
-                        .then(|| self.acknowledge(uuid))
-                        .flatten()
-                        .into_iter()
-                        .collect(),
+                    events,
                     frames: Vec::new(),
                 }
             }
@@ -512,27 +655,40 @@ impl Driver for ClaudeCode {
         }
         let turn = self.turns.begin()?;
         let uuid = uuid_v4();
-        let message = json!({
-            "type": "user",
-            "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
-            "parent_tool_use_id": null,
-            "session_id": "",
-            "uuid": uuid,
-        });
-        self.turn_uuid = Some((uuid, false));
+        self.turn_uuid = Some((uuid.clone(), false));
+        self.steers.clear();
         Ok(Submitted {
             turn,
-            frames: vec![frame(&message)],
+            frames: vec![user_message(prompt, &uuid)],
         })
     }
 
     fn interrupt(&mut self) -> Result<Vec<Frame>, Rejected> {
         let turn = self.turns.active.ok_or(Rejected::NoTurn)?;
         self.interrupting = true;
-        Ok(vec![self.control_request(
-            Pending::Interrupt(turn),
-            json!({"subtype": "interrupt"}),
-        )])
+        // Steered messages still queued would otherwise run after the
+        // interrupt, as a turn of their own.
+        let request = match self.steers.iter().any(|s| !s.started) {
+            true => json!({"subtype": "interrupt", "cancel_queued": true}),
+            false => json!({"subtype": "interrupt"}),
+        };
+        Ok(vec![self.control_request(Pending::Interrupt(turn), request)])
+    }
+
+    fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
+        if !self.ready {
+            return Err(Rejected::NotReady);
+        }
+        self.turns.active.ok_or(Rejected::NoTurn)?;
+        let uuid = uuid_v4();
+        self.next_steer += 1;
+        self.steers.push(Steer {
+            number: self.next_steer,
+            uuid: uuid.clone(),
+            accepted: false,
+            started: false,
+        });
+        Ok(vec![user_message(text, &uuid)])
     }
 
     fn respond(
@@ -559,6 +715,18 @@ impl Driver for ClaudeCode {
         self.permissions.clear();
         self.pending.clear();
         self.turn_uuid = None;
+        self.steers.clear();
         self.turns.closed()
     }
+}
+
+/// A user message as stream-json input, stamped with `uuid`.
+fn user_message(text: &str, uuid: &str) -> Frame {
+    frame(&json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+        "uuid": uuid,
+    }))
 }

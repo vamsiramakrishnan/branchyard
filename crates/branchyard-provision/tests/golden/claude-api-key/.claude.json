@@ -1,10 +1,8 @@
 {
   "customApiKeyResponses": {
     "approved": [
-      "an-older-fingerprint",
-      "0123456789abcdefghij"
-    ],
-    "rejected": []
+      "an-older-fingerprint"
+    ]
   },
   "numStartups": 2,
   "projects": {

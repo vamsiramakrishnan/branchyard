@@ -26,6 +26,10 @@
 //!
 //! `result.usage` covers the whole session, not the turn, so usage is
 //! reported as cumulative.
+//!
+//! Steering is refused: the headless documentation says to wait for a
+//! turn's result before writing the next input, and describes no mid-turn
+//! input.
 
 use std::collections::BTreeSet;
 
@@ -220,7 +224,22 @@ impl Driver for Antigravity {
             tool_approvals: false,
             turn_acknowledgment: true,
             usage: true,
+            steer: false,
         }
+    }
+
+    fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
+        &[
+            ("fork", "the Antigravity CLI cannot fork a conversation"),
+            (
+                "cancellation",
+                "the Antigravity stream has no cancellation message; a signal ends the whole process",
+            ),
+            (
+                "tool_approvals",
+                "the stream carries no permission requests; a tool that needs approval is soft-denied under the permission rules in the harness's private settings file, never through Branchyard",
+            ),
+        ]
     }
 
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
@@ -294,6 +313,13 @@ impl Driver for Antigravity {
             turn,
             frames: vec![frame(&message)],
         })
+    }
+
+    fn steer(&mut self, _text: &str) -> Result<Vec<Frame>, Rejected> {
+        Err(Rejected::Unsupported(
+            "the Antigravity headless contract takes the next input only after a turn's result"
+                .into(),
+        ))
     }
 
     fn interrupt(&mut self) -> Result<Vec<Frame>, Rejected> {

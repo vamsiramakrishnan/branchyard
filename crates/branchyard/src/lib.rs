@@ -54,7 +54,9 @@
 //!   is unknown. A submitted prompt is never submitted again. See
 //!   `docs/durability.md`.
 //! - Cancellation is durable: [`Yard::cancel`] records a request that the
-//!   engine running the turn, in any process, observes.
+//!   engine running the turn, in any process, observes. So is steering:
+//!   [`Branch::steer`] queues input that engine delivers into the running
+//!   turn, where the harness supports it.
 //! - A turn over budget is interrupted and waited for, never abandoned; the
 //!   harness's process group is torn down when each call returns, and
 //!   descendants that outlived it are named in the event log.
@@ -99,6 +101,7 @@ mod delegation;
 mod engine;
 mod git;
 mod harness;
+mod inbox;
 mod lock;
 mod names;
 mod ops;
@@ -112,8 +115,11 @@ mod provisioning;
 mod record;
 mod recover;
 mod run;
+mod seats;
 mod sqlite;
 mod state;
+mod steer;
+mod storage;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -127,15 +133,20 @@ pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
 };
 pub use branchyard_provision::{
-    Effort, McpServerSpec, Provisioning, SecretFrom, SecretSource, Telemetry,
+    Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport, SecretFrom,
+    SecretSource, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
 pub use delegation::{
-    Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inspection, Sent, Spawn,
-    Spawned,
+    Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
+    Sent, Spawn, Spawned,
 };
+pub use inbox::{DeliveryHook, SteerDelivery};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
+pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
 
 /// A repository with Branchyard state. Cheap to clone; clones share state.
 #[derive(Clone, Debug)]
@@ -197,6 +208,65 @@ impl Yard {
     /// event log names.
     pub fn cancel_as(&self, branch: &str, by: &str) -> Result<Vec<String>, Error> {
         delegation::cancel_tree(&self.store(), branch, by)
+    }
+
+    /// Deliver `text` into `branch`'s running turn as input from `by`,
+    /// whom the branch's event log names ([`Activity::Steered`]). The turn
+    /// may run in this process or another using the repository: the input
+    /// is queued durably, bound to that turn like a cancel, and the engine
+    /// running it writes it to the harness within about 100 ms; it is never
+    /// delivered to a later turn. The harness takes it into the turn in
+    /// flight without ending or interrupting it, at a point its protocol
+    /// defines (`docs/harness-integration.md`), and the turn ends once, as
+    /// usual, with its budget and policy unchanged.
+    ///
+    /// Returns the queued [`Steer`]; [`Yard::wait_steer`] follows it.
+    /// Fails with [`Error::Unsupported`] and the reason when the branch's
+    /// profile cannot take input mid-turn (no silent interrupt), and with
+    /// [`Error::NotRunning`] when no turn is running.
+    pub fn steer_as(&self, branch: &str, text: &str, by: &str) -> Result<Steer, Error> {
+        steer::request(self, branch, text, by)
+    }
+
+    /// What became of steered input `id` of `branch`. Input still pending
+    /// when its turn has ended was never delivered, and is reported
+    /// [`SteerState::Refused`].
+    pub fn steer_state(&self, branch: &str, id: u64) -> Result<Steer, Error> {
+        steer::state(&self.store(), branch, id)
+    }
+
+    /// [`Yard::steer_state`], waiting up to `timeout` for the input to
+    /// leave [`SteerState::Pending`].
+    pub fn wait_steer(&self, branch: &str, id: u64, timeout: Duration) -> Result<Steer, Error> {
+        steer::wait(&self.store(), branch, id, timeout)
+    }
+
+    /// Try `hook` before a message waits for its recipient's next turn to
+    /// start; see [`DeliveryHook`]. Replaces any hook set before. Shared by
+    /// every clone of this `Yard`.
+    pub fn set_delivery_hook(&self, hook: Arc<dyn DeliveryHook>) {
+        *self
+            .hub
+            .delivery_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    /// Stop trying a hook set with [`Yard::set_delivery_hook`].
+    pub fn clear_delivery_hook(&self) {
+        *self
+            .hub
+            .delivery_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    pub(crate) fn delivery_hook(&self) -> Option<Arc<dyn DeliveryHook>> {
+        self.hub
+            .delivery_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Up to `limit` recorded events of every branch after feed position
@@ -265,9 +335,16 @@ impl Yard {
     }
 
     /// Remove a branch's worktree and record; deletes the git branch unless
-    /// it was merged.
+    /// it was merged. Its private home goes too unless a fork shares it,
+    /// and in any case the credential files provisioning wrote there; see
+    /// [`Yard::remove_with`] to keep those.
     pub fn remove(&self, branch: &str) -> Result<(), Error> {
-        ops::remove(self, branch)
+        ops::remove(self, branch, &RemoveOptions::default())
+    }
+
+    /// [`Yard::remove`], with options.
+    pub fn remove_with(&self, branch: &str, options: &RemoveOptions) -> Result<(), Error> {
+        ops::remove(self, branch, options)
     }
 
     /// Known harness profiles, whether their executable is on `PATH`, and
@@ -276,6 +353,106 @@ impl Yard {
         harness::list()
     }
 
+    /// Publish the file at `path` as a new immutable artifact of `branch`,
+    /// content-addressed by the blake3 digest of its bytes. See
+    /// [`Branch::publish`] and `docs/storage.md`.
+    pub fn publish_artifact(
+        &self,
+        branch: &str,
+        path: impl AsRef<Path>,
+        name: Option<String>,
+        media_type: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<ArtifactRef, Error> {
+        storage::publish(self, branch, path.as_ref(), name, media_type, labels)
+    }
+
+    /// Every artifact `reader` may read: what it published, what its
+    /// ancestors or descendants published, and what was explicitly shared
+    /// to it with [`Yard::share_artifact`].
+    pub fn artifacts(&self, reader: &str) -> Result<Vec<ArtifactRef>, Error> {
+        storage::list(self, reader)
+    }
+
+    /// Copy artifact `id`'s bytes to `out` for `reader`, checked against
+    /// its recorded digest, and return its provenance.
+    pub fn read_artifact(
+        &self,
+        reader: &str,
+        id: &str,
+        out: impl AsRef<Path>,
+    ) -> Result<ArtifactRef, Error> {
+        storage::get(self, reader, id, out.as_ref())
+    }
+
+    /// Share artifact `id` (published, or already shared, to `actor`) with
+    /// `to`: the explicit grant a sibling of the publisher needs.
+    pub fn share_artifact(&self, actor: &str, id: &str, to: &str) -> Result<(), Error> {
+        storage::share_artifact(self, actor, id, to)
+    }
+
+    /// Create scratch area `name`, a shared directory owned by `owner`,
+    /// visible to its authorized branches at [`Yard::scratch_path`]. See
+    /// `docs/storage.md`.
+    pub fn create_scratch(&self, owner: &str, name: &str) -> Result<ScratchArea, Error> {
+        storage::create_scratch(self, owner, name)
+    }
+
+    /// Every scratch area `reader` may reach.
+    pub fn scratch_areas(&self, reader: &str) -> Result<Vec<ScratchArea>, Error> {
+        storage::authorized_scratch(self, reader)
+    }
+
+    /// Share scratch area `name` (owned, or already shared, to `actor`)
+    /// with `to`.
+    pub fn share_scratch(&self, actor: &str, name: &str, to: &str) -> Result<(), Error> {
+        storage::share_scratch(self, actor, name, to)
+    }
+
+    /// Where scratch area `name` lives on disk in local mode.
+    pub fn scratch_path(&self, name: &str) -> PathBuf {
+        storage::scratch_dir(&self.store(), name)
+    }
+
+    /// Acquire scratch area `name`'s writer lock for `branch`. Refused with
+    /// [`Error::Running`] while another branch's turn holds it.
+    pub fn lock_scratch(&self, branch: &str, name: &str) -> Result<ScratchLock, Error> {
+        storage::lock_scratch(self, branch, name)
+    }
+
+    /// Release scratch area `name`'s lock if `branch` holds it.
+    pub fn unlock_scratch(&self, branch: &str, name: &str) -> Result<(), Error> {
+        storage::unlock_scratch(self, branch, name)
+    }
+
+    /// Scratch area `name`'s writer lock, if one is held.
+    pub fn scratch_lock_state(&self, name: &str) -> Result<Option<ScratchLock>, Error> {
+        storage::scratch_lock_state(self, name)
+    }
+}
+
+/// The profile a harness or profile ID selects, from the built-in
+/// registry, without looking for its executable.
+pub fn harness_profile(id: &str) -> Result<HarnessProfile, Error> {
+    let profile = harness::select(Some(id))?;
+    Ok(HarnessProfile {
+        harness: profile.harness.to_owned(),
+        profile: profile.id.to_owned(),
+        tool_approvals: profile.driver().capabilities().tool_approvals,
+    })
+}
+
+/// A harness profile as [`harness_profile`] resolves it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessProfile {
+    pub harness: String,
+    pub profile: String,
+    /// Whether its driver routes tool permission requests to the policy;
+    /// without it, a task needs [`TaskOptions::unapproved_tools`].
+    pub tool_approvals: bool,
+}
+
+impl Yard {
     /// Act as the branch whose running turn was issued `token`. The token
     /// is the authority and names the branch: it is issued when a
     /// delegating turn starts and revoked when it ends. Works in the
@@ -288,6 +465,17 @@ impl Yard {
     fn store(&self) -> state::Store {
         self.store.clone()
     }
+}
+
+/// How [`Yard::remove_with`] removes a branch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoveOptions {
+    /// Keep the credential files provisioning wrote in the branch's
+    /// private home (API keys, auth files, MCP configurations), recorded in
+    /// the home's `.branchyard/provisioned.json`. Off by default: they are
+    /// removed. It matters only when the home stays because a fork shares
+    /// it; a home no branch uses is deleted whole.
+    pub keep_credentials: bool,
 }
 
 /// Options shared by tasks, sends and forks.
@@ -356,6 +544,12 @@ pub struct TaskOptions {
     /// parent's. Secrets need a home private to the branch:
     /// [`TaskOptions::isolated`] or a sandbox provider.
     pub provision: Option<Provisioning>,
+    /// Make the branch the root of a rig: the seat it occupies and the
+    /// seats below it, which its harness then spawns by name (see
+    /// `docs/rigs.md`). Needs [`TaskOptions::delegation`], which still
+    /// bounds every child. Stored with the branch; a send without one keeps
+    /// the branch's.
+    pub seats: Option<Seats>,
 }
 
 /// Where a branch's harness runs.
@@ -619,6 +813,13 @@ impl Branch {
         run::send(&self.yard, &self.info.name, prompt, &options)
     }
 
+    /// [`Branch::send`], named for parity with [`Delegate::send_and_wait`]:
+    /// outside a harness a send already runs the turn and returns once it
+    /// settles, so this does exactly what `send` does.
+    pub fn send_and_wait(&self, prompt: &str, options: TaskOptions) -> Result<Branch, Error> {
+        self.send(prompt, options)
+    }
+
     /// A new branch from this branch's candidate. The harness session is
     /// forked when the harness supports it; otherwise this fails unless
     /// `fresh_session` is true, in which case the new branch starts a fresh
@@ -630,6 +831,18 @@ impl Branch {
         options: TaskOptions,
     ) -> Result<Branch, Error> {
         run::fork(&self.yard, &self.info.name, prompt, fresh_session, &options)
+    }
+
+    /// A new branch from this branch's latest candidate, always with a
+    /// fresh session, whose first prompt is a generated handoff brief: the
+    /// original task, turns so far, its last message, the candidate's
+    /// diffstat and why it was reincarnated. Works even when
+    /// `options.harness` or `options.provision`'s model differs from this
+    /// branch's own. This branch's record gets `superseded_by` set to the
+    /// new branch's name, best-effort (informational; never blocks the new
+    /// branch). See `docs/lifecycle.md`.
+    pub fn reincarnate(&self, options: TaskOptions) -> Result<Branch, Error> {
+        run::reincarnate(&self.yard, &self.info.name, &options)
     }
 
     /// Unified diff of the candidate against the branch's base; empty when
@@ -692,6 +905,36 @@ impl Branch {
         self.yard.cancel(&self.info.name)
     }
 
+    /// Deliver `text` into this branch's running turn, in whichever process
+    /// runs it, without interrupting it; see [`Yard::steer_as`]. The event
+    /// log names the SDK caller as its sender.
+    pub fn steer(&self, text: &str) -> Result<Steer, Error> {
+        self.yard.steer_as(&self.info.name, text, "the SDK caller")
+    }
+
+    /// Publish the file at `path` as a new immutable artifact of this
+    /// branch; see [`Yard::publish_artifact`].
+    pub fn publish(
+        &self,
+        path: impl AsRef<Path>,
+        name: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<ArtifactRef, Error> {
+        self.yard
+            .publish_artifact(&self.info.name, path, name, None, labels)
+    }
+
+    /// Every artifact this branch may read; see [`Yard::artifacts`].
+    pub fn artifacts(&self) -> Result<Vec<ArtifactRef>, Error> {
+        self.yard.artifacts(&self.info.name)
+    }
+
+    /// Copy artifact `id`'s bytes to `out` for this branch; see
+    /// [`Yard::read_artifact`].
+    pub fn read_artifact(&self, id: &str, out: impl AsRef<Path>) -> Result<ArtifactRef, Error> {
+        self.yard.read_artifact(&self.info.name, id, out)
+    }
+
     /// Wait until no descendant of this branch is running a turn, then
     /// return the descendants' records. Descendants on threads of this
     /// process are joined; one another process drives is waited for through
@@ -734,6 +977,15 @@ pub struct BranchInfo {
     pub cost_usd: Option<f64>,
     /// Seconds since the Unix epoch.
     pub created_at: u64,
+    /// A running turn has had no harness activity for its
+    /// [`Budget::stall_after`] window; see [`Activity::Stalled`]. Always
+    /// `false` once the turn has ended.
+    #[serde(default)]
+    pub stalled: bool,
+    /// The branch [`Branch::reincarnate`] started from this one's latest
+    /// candidate, with a fresh session and a handoff brief.
+    #[serde(default)]
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -774,6 +1026,16 @@ pub struct Budget {
     pub max_usd: Option<f64>,
     pub max_turns: Option<u32>,
     pub max_duration: Option<Duration>,
+    /// No harness activity (a protocol event, including a permission
+    /// answer) for this long marks the branch [`Activity::Stalled`]. Never
+    /// while the turn is waiting on a permission answer (the engine is
+    /// blocked delivering it, not polling) or on a running child
+    /// (delegation wait; see `docs/lifecycle.md`). `None` disables stall
+    /// detection, the default.
+    pub stall_after: Option<Duration>,
+    /// What a detected stall does. Ignored when [`Budget::stall_after`] is
+    /// `None`.
+    pub stall_action: StallAction,
 }
 
 impl Budget {
@@ -793,6 +1055,31 @@ impl Budget {
         self.max_duration = Some(limit);
         self
     }
+
+    /// Mark the branch stalled after this long without harness activity.
+    pub fn stall_after(mut self, window: Duration) -> Self {
+        self.stall_after = Some(window);
+        self
+    }
+
+    /// What a stall does; see [`Budget::stall_after`].
+    pub fn stall_action(mut self, action: StallAction) -> Self {
+        self.stall_action = action;
+        self
+    }
+}
+
+/// What a detected stall does to the turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StallAction {
+    /// Record [`Activity::Stalled`] and keep running; the branch shows
+    /// `stalled: true` until new activity or the turn ends.
+    #[default]
+    Notify,
+    /// Record [`Activity::Stalled`], then interrupt the turn as
+    /// [`BranchStatus::Interrupted`], the same way a cancel does.
+    Interrupt,
 }
 
 /// Answers permission requests, one invocation at a time. Never a bypass:
@@ -979,8 +1266,21 @@ pub enum Activity {
         files: Vec<String>,
         /// Variables set for the harness.
         env: Vec<String>,
+        /// How each secret the harness reads reaches it, and whether it is
+        /// in the environment of the harness's tool commands.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        secrets: Vec<Delivery>,
         /// Secrets given that this harness does not read.
         unused_secrets: Vec<String>,
+    },
+    /// Input from `by` was written into the running turn; see
+    /// [`Branch::steer`]. The harness's `steer_accepted` or
+    /// `steer_rejected` event follows.
+    Steered {
+        /// The steer's ID, as [`Steer::id`].
+        id: u64,
+        by: String,
+        text: String,
     },
     /// Recovery took over a turn whose engine stopped; see
     /// [`Yard::recover`].
@@ -990,6 +1290,133 @@ pub enum Activity {
         /// Harness processes that were still running and were killed.
         killed: Vec<u32>,
     },
+    /// No harness activity for the turn's [`Budget::stall_after`] window;
+    /// recorded once per stall. See `docs/lifecycle.md`.
+    Stalled {
+        /// Milliseconds since the Unix epoch when activity was last seen.
+        since_ms: u64,
+    },
+    /// Activity was observed after [`Activity::Stalled`]; the branch is no
+    /// longer stalled.
+    Resumed,
+    /// A harness-to-harness message was sent or delivered; see
+    /// [`crate::inbox`]. Recorded on both the sending and the receiving
+    /// branch's event log.
+    Message(Message),
+    /// Inbox messages reached this branch's turn, and by which path; see
+    /// `docs/delegation.md#delivery`. Each message is delivered once.
+    MessagesDelivered { ids: Vec<u64>, via: DeliveredVia },
+}
+
+/// How [`Activity::MessagesDelivered`] messages reached a turn. Serialized
+/// as an object tagged by `path`, such as `{"path": "steer", "steer": 3}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "path", rename_all = "snake_case")]
+pub enum DeliveredVia {
+    /// Prepended to the prompt at the start of the turn.
+    TurnStart,
+    /// Steered into the running turn as input `steer` ([`Steer::id`]).
+    Steer { steer: u64 },
+}
+
+/// Input for a branch's running turn, and what became of it; see
+/// [`Branch::steer`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Steer {
+    /// Unique in the repository's store.
+    pub id: u64,
+    pub branch: String,
+    /// Who sent it, as the branch's event log names them.
+    pub by: String,
+    pub text: String,
+    /// Milliseconds since the Unix epoch.
+    pub requested_at_ms: u64,
+    pub state: SteerState,
+}
+
+/// Where a [`Steer`] is. Serialized as an object tagged by `state`, such as
+/// `{"state": "refused", "reason": "..."}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SteerState {
+    /// Queued for the running turn; the engine running it writes it to the
+    /// harness within about 100 ms, in whichever process it runs.
+    Pending,
+    /// Written to the harness, which has not yet confirmed it.
+    Delivered,
+    /// The harness took it into the running turn.
+    Accepted,
+    /// Never reached the model: the harness refused or dropped it, an
+    /// interrupt cancelled it, or the turn ended first.
+    Refused { reason: String },
+}
+
+/// What a message means, and so who it may go to: a `question` and a
+/// `report` go to the sender's parent; an `escalation` goes to the parent
+/// too, or further up an ancestor its rig seat's `escalates_to` names; an
+/// `answer` goes from a branch to one of its own descendants, and normally
+/// carries `in_reply_to` a question's id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    Question,
+    Report,
+    Escalation,
+    Answer,
+}
+
+impl MessageKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MessageKind::Question => "question",
+            MessageKind::Report => "report",
+            MessageKind::Escalation => "escalation",
+            MessageKind::Answer => "answer",
+        }
+    }
+}
+
+impl fmt::Display for MessageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MessageKind {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Error> {
+        match value {
+            "question" => Ok(MessageKind::Question),
+            "report" => Ok(MessageKind::Report),
+            "escalation" => Ok(MessageKind::Escalation),
+            "answer" => Ok(MessageKind::Answer),
+            other => Err(Error::State(format!("unknown message kind {other:?}"))),
+        }
+    }
+}
+
+/// One harness-to-harness message, durable in the store; see
+/// `docs/delegation.md#inbox`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Message {
+    /// Assigned by the store when it is sent; counts from 1 across the
+    /// whole repository.
+    pub id: u64,
+    pub from: String,
+    pub to: String,
+    pub kind: MessageKind,
+    pub text: String,
+    /// The question this answers, for an `answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<u64>,
+    /// Milliseconds since the Unix epoch, when it was sent.
+    pub at_ms: u64,
+    /// Whether it has been delivered to its recipient's turn (at the start
+    /// of one, or through a running turn's delivery hook). `inbox --unread`
+    /// is the messages for which this is `false`.
+    #[serde(default)]
+    pub delivered: bool,
 }
 
 /// Activity from a named branch.
@@ -1072,6 +1499,8 @@ pub enum Error {
     NotARepository(PathBuf),
     UnknownBranch(String),
     BranchExists(String),
+    /// No message with this id in the branch's inbox.
+    UnknownMessage(u64),
     /// Not a usable branch name: lowercase `[a-z0-9._-]`, starting with a
     /// letter or digit, one path segment.
     InvalidName {
@@ -1117,6 +1546,9 @@ pub enum Error {
     Denied(String),
     /// The branch is running a turn, and the operation needs it idle.
     Running(String),
+    /// The branch is not running a turn, and the operation needs one, such
+    /// as [`Branch::steer`].
+    NotRunning(String),
     /// This engine lost the branch's lease to another, which recovered or
     /// took over the branch; its writes are refused.
     Fenced(String),
@@ -1140,6 +1572,7 @@ impl fmt::Display for Error {
             }
             Error::UnknownBranch(name) => write!(f, "no branch named {name}"),
             Error::BranchExists(name) => write!(f, "branch {name} already exists"),
+            Error::UnknownMessage(id) => write!(f, "no message #{id} in this inbox"),
             Error::InvalidName { name, reason } => {
                 write!(f, "{name:?} is not a usable branch name: {reason}")
             }
@@ -1178,6 +1611,7 @@ impl fmt::Display for Error {
             Error::InvalidCandidate(message) => write!(f, "invalid candidate: {message}"),
             Error::Denied(why) => write!(f, "denied: {why}"),
             Error::Running(name) => write!(f, "branch {name} is running a turn"),
+            Error::NotRunning(name) => write!(f, "branch {name} is not running a turn"),
             Error::Fenced(why) => write!(f, "fenced: {why}"),
             Error::Remote { message, .. } => f.write_str(message),
             Error::Git(message) => write!(f, "git: {message}"),
@@ -1197,6 +1631,7 @@ impl Error {
             Error::NotARepository(_) => "not_a_repository",
             Error::UnknownBranch(_) => "unknown_branch",
             Error::BranchExists(_) => "branch_exists",
+            Error::UnknownMessage(_) => "unknown_message",
             Error::InvalidName { .. } => "invalid_name",
             Error::UnknownHarness(_) => "unknown_harness",
             Error::HarnessUnavailable { .. } => "harness_unavailable",
@@ -1212,6 +1647,7 @@ impl Error {
             Error::InvalidCandidate(_) => "invalid_candidate",
             Error::Denied(_) => "denied",
             Error::Running(_) => "running",
+            Error::NotRunning(_) => "not_running",
             Error::Fenced(_) => "fenced",
             Error::Remote { kind, .. } => kind,
             Error::Git(_) => "git",

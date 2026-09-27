@@ -6,12 +6,12 @@ There is one set of operations and one authority model. Four surfaces reach them
 
 | Surface | Use it when |
 |---|---|
-| `by spawn`, `by inspect`, `by events`, `by send`, `by integrate`, `by cancel`, `by children` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
+| `by spawn`, `by inspect`, `by events`, `by send` (and `by send --steer`), `by integrate`, `by cancel`, `by children` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
 | The Python module `branchyard` | The harness writes Python to orchestrate: loops, fan-out, waiting. It runs `by --json` for you. |
 | The Rust SDK, `branchyard::Delegate` | You write the meta-harness in Rust, in or out of a harness. |
 | Branchyard's MCP server (`by mcp`) | The harness cannot run commands, or its shell cannot reach the repository, but it can call MCP tools. |
 
-Each surface calls the same operations in the engine that runs the harness's turn, so they give the same answers and refusals.
+Each surface calls the same operations in the engine that runs the harness's turn, so they give the same answers and refusals. The same four surfaces also reach [artifacts and scratch areas](storage.md) (`by artifact`, `by scratch`, `branchyard.publish`/`create_scratch`, `Delegate::publish_artifact`, the MCP `publish_artifact`/`create_scratch` tools and their siblings): shared storage a branch's descendants and ancestors can read without a merge, tested the same way.
 
 ## Turning it on
 
@@ -47,7 +47,7 @@ The delegation server and skill reach the harness through [provisioning](provisi
 
 | Harness | MCP server | Skill | Evidence |
 |---|---|---|---|
-| Claude Code (stream-json) | `--mcp-config '{"mcpServers": {"branchyard": {"type": "stdio", "command", "args", "env"}}}'`, the JSON the Agent SDK passes for its `mcpServers` option | `--plugin-dir .branchyard/plugin`, a plugin holding the skill | Claude Code 2.1.283, no model call: `initialize` lists `branchyard:delegate`; `mcp_status` reports the `by mcp` server connected. `claude --help`: `--mcp-config <configs...>`, `--plugin-dir <path>` |
+| Claude Code (stream-json) | `--mcp-config <file>`, a 0600 file holding `{"mcpServers": {"branchyard": {"type": "stdio", "command", "args", "env"}}}`, the JSON the Agent SDK passes for its `mcpServers` option; a file, because the token is a variable and a command line is readable by every process on the host | `--plugin-dir .branchyard/plugin`, a plugin holding the skill | Claude Code 2.1.283, no model call: `initialize` lists `branchyard:delegate`; `mcp_status` reports the `by mcp` server connected. `claude --help`: `--mcp-config <configs...>`, `--plugin-dir <path>` |
 | Codex (App Server) | `config: {"mcp_servers": {"branchyard": {command, args, env}}}` on `thread/start`, `thread/resume` and `thread/fork` | `developerInstructions` on the same requests | `codex app-server generate-json-schema` (0.157.1): all three requests carry `config` (open object) and `developerInstructions` (string). Live, no model call: `thread/start` accepted both, and `mcpServerStatus/list` showed `by mcp` connected with its seven tools. Resume and fork were not checked live. |
 | Antigravity | In a private home (`--isolated`): `mcpServers` in `~/.gemini/config/mcp_config.json` (mode 0600, since the server's variables carry the token); otherwise refused | In a private home: a managed block in `~/.gemini/GEMINI.md`; otherwise refused | Scion's Antigravity provisioner; not checked against `agy` |
 | Pi, Amp | Refused | Refused | No verified way to pass either, so a turn asking for delegation fails with the driver's refusal rather than running without the tools |
@@ -61,15 +61,16 @@ Inside a delegating harness, each command acts as the harness's branch, on its d
 
 | Command | Inside a harness | Outside a harness |
 |---|---|---|
-| `by spawn "<prompt>" [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--wait]` | Creates a child of this branch and returns once it has started; `--wait` waits for its turn to end | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
+| `by spawn "<prompt>" [--seat S] [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--wait]` | Creates a child of this branch and returns once it has started; `--wait` waits for its turn to end | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
 | `by inspect [<branch>]` | This branch, or a descendant | Any branch |
 | `by events [<branch>] [--cursor N] [--limit N]` | Same | Any branch |
 | `by send <branch> "<prompt>"` | Starts a descendant's next turn and returns | Runs the turn in the foreground, as before |
+| `by send <branch> --steer "<text>"` | Adds the text to a descendant's running turn without interrupting it, and waits up to 10 s for delivery | Any branch's running turn, in any process |
 | `by integrate <branch>` | Merges a descendant into this branch | Merges a delegated child into its parent |
 | `by cancel <branch>` | Stops a descendant's turn and every turn below it | Any branch and its subtree |
 | `by children [<branch>]` | This branch's descendants | Any branch's |
 
-Every command takes `--json`. With it, stdout holds exactly one JSON value, and harness activity goes to stderr. A failure prints `{"error": {"kind": "...", "message": "..."}}` and exits 1. Kinds are stable: `denied` (envelope, budget or authority), `running`, `unknown_branch`, `no_candidate`, `conflict`, `check_failed`, `target_moved`, `dirty_target`, `unsupported`, `state`, and the rest of `branchyard::Error::kind`.
+Every command takes `--json`. With it, stdout holds exactly one JSON value, and harness activity goes to stderr. A failure prints `{"error": {"kind": "...", "message": "..."}}` and exits 1. Kinds are stable: `denied` (envelope, budget or authority), `running`, `not_running`, `steer_refused`, `unknown_branch`, `no_candidate`, `conflict`, `check_failed`, `target_moved`, `dirty_target`, `unsupported`, `state`, and the rest of `branchyard::Error::kind`.
 
 ### JSON shapes
 
@@ -77,10 +78,11 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 
 | Command | Result |
 |---|---|
-| `spawn` | `Spawned`: `{name, git_branch, harness, profile, base, depth, status, budget: {max_usd, max_turns, max_minutes}}`. With `--wait`, or outside a harness: `Inspection` |
-| `inspect` | `Inspection`: `{name, status, harness, profile, parent, children, depth, turns, candidate, cost_usd, subtree_cost_usd, max_usd, remaining_usd, envelope, last_message}` |
+| `spawn` | `Spawned`: `{name, git_branch, harness, profile, base, depth, status, budget: {max_usd, max_turns, max_minutes}}`, and `seat` for a child spawned by seat. With `--wait`, or outside a harness: `Inspection` |
+| `inspect` | `Inspection`: `{name, status, harness, profile, parent, children, depth, turns, candidate, cost_usd, subtree_cost_usd, max_usd, remaining_usd, envelope, last_message}`, and for a branch in a rig its `seat` and the `seats` it may spawn |
 | `events` | `EventPage`: `{branch, events: [{at_ms, activity}], next_cursor, total}` |
 | `send` | `Sent`: `{name, status}` |
+| `send --steer` / `steer` | `Steer`: `{id, branch, by, text, requested_at_ms, state}`, `state` `{"state": "delivered" \| "accepted" \| "pending"}`; a refusal is the error `steer_refused`, carrying the `Steer` |
 | `integrate` | `Merged`: `{branch, target, previous, commit}` |
 | `cancel` | `Cancelled`: `{cancelled: [branch]}` |
 | `children` | `Children`: `{branch, descendants: [BranchInfo]}` |
@@ -89,7 +91,7 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 
 ## Python
 
-The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotFoundError` or `BranchyardError`, each with the `kind`.
+The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError` or `BranchyardError`, each with the `kind`. `branchyard.steer(branch, text)` adds to a running child's turn.
 
 ```python
 import branchyard
@@ -125,7 +127,45 @@ me.integrate(&done.name)?;
 
 ## MCP tools
 
-`spawn`, `inspect`, `events`, `send`, `propose_integration`, `cancel` and `children`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
+`spawn`, `inspect`, `events`, `send`, `steer` (`{branch, text}`), `propose_integration`, `cancel`, `children`, the storage tools (`publish_artifact`, `list_artifacts`, `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`, `share_scratch`, `lock_scratch`, `unlock_scratch`; see [storage](storage.md)), `ask`, `report`, `escalate`, `answer` and `inbox`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays; `seat` names a rig seat; `ask`'s `wait_seconds` blocks for an answer). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
+
+## Inbox
+
+A branch can message another branch it has authority over, not only inspect it: a running turn can ask its parent a question, report progress, escalate a problem, and a parent can answer. Every message is durable in the store (both SQLite and PostgreSQL), typed `{id, from, to, kind, text, in_reply_to, at}` where `kind` is `question`, `report`, `escalation` or `answer`, and is also an event (`Activity::Message`) on both the sending and the receiving branch's log, so `by events`/`log` show it.
+
+Authority follows the delegation tree, checked the same way spawning is:
+
+| `kind` | May go to |
+|---|---|
+| `question`, `report` | Only the sender's own parent |
+| `escalation` | The sender's parent, always; further up an ancestor only if the sender is in a [rig](rigs.md) and its seat's `escalates_to` names that ancestor's seat |
+| `answer` | From a branch to any of its own descendants, not only a direct child |
+
+A leaf branch (`max_depth` 0, such as a leaf rig seat) gets no delegation tools at all, spawning or messaging, the same as today; give it depth 1 (it need not use it to spawn) if it should be able to message its parent.
+
+Every surface reaches the same five operations, with the same authority and the same JSON:
+
+| Command | Tool / Python / Rust | What |
+|---|---|---|
+| `by ask "<text>" [--wait SECS]` | `ask` / `branchyard.ask(text, wait=None)` / `Delegate::ask` | Ask your parent a question. Without a wait, returns once it is sent (`Asked{message, answer: None}`). With one, blocks — in the process running your turn, so across processes when reached through the broker — for up to that long for an answer; a wait that passes with no answer yet is not an error, `answer` is `None`. |
+| `by report "<text>"` | `report` / `branchyard.report` / `Delegate::report` | Report to your parent; no answer is expected. |
+| `by escalate "<text>"` | `escalate` / `branchyard.escalate` / `Delegate::escalate` | Escalate to your parent, or, in a rig, further up if your seat's `escalates_to` allows it. |
+| `by answer <message-id> "<text>"` | `answer` / `branchyard.answer` / `Delegate::answer` | Answer one of your own descendants' messages (usually a question), addressed back to whoever sent it. |
+| `by inbox [--unread]` | `inbox` / `branchyard.inbox(unread=False)` / `Delegate::inbox` | Every message addressed to you, oldest first; `--unread` for only what has not yet been delivered to a turn. |
+
+Outside a harness, each of these needs `--as <branch>` (there is no other way to say who is asking); a person then acts with their own authority, bounded the same way. `by --remote` reaches the same operations over HTTP (`GET …/inbox`, `POST …/ask|report|escalate|answer`), with the same JSON and the same refusals; `by ask --remote --wait` blocks on the server, capped at 120 seconds so one request cannot tie up a worker indefinitely — poll `inbox` for a longer wait.
+
+### Delivery
+
+A message sits *pending* until it is acknowledged. Acknowledging it (marking it delivered) is the same store write as handing it to a turn, so a crash never delivers a message twice and never silently drops one — the same intent-before-effect discipline as [durable turns](durability.md). There are two paths, and each records `Activity::MessagesDelivered { ids, via }` on the recipient's log, `via` being `{"path": "steer", "steer": <id>}` or `{"path": "turn_start"}`; `by log` shows it as `delivered #7 into the running turn (steered input 3)` or `delivered #7 at the turn's start`.
+
+**Into a running turn, by steering.** Every `Yard` — so the SDK, `by` and `by serve` alike — starts with one `DeliveryHook`, `SteerDelivery`. When a message is sent and its recipient has a running turn, the hook queues it as [steered input](#how-it-runs) for that turn from the sender (`Activity::Steered { by: <sender> }` on the recipient's log), rendered as the same `<branchyard-inbox>` block as below with one message in it, and waits up to 2 seconds for the engine running the turn, in whichever process, to write it to the harness. The steer is linked to the message in the same store transaction that queues it, and the engine marks the message delivered in the same transaction that settles the steer as written or accepted; if the harness then refuses it, the same settle returns the message to pending. So `delivered` flips exactly when the running turn has the text, whether or not the sender was still waiting. No running turn (`NotRunning`), a profile that cannot take input mid-turn (`Unsupported`), or a harness that refuses it at runtime (an ACP agent without the `_session/steering` extension, say) leaves the message pending for the next turn's start.
+
+**At the start of the next turn.** Otherwise a branch's pending messages are given to it at the start of its next turn: prepended to the prompt it actually submits, as one `<branchyard-inbox>...</branchyard-inbox>` block, oldest first, each line `[#id] kind from sender: text`. The block is bounded (at most 20 messages or about 8,000 characters at once); whatever does not fit stays pending, noted as `...and N more messages queued for a later turn`. Only the messages actually included are acknowledged, so a large backlog drains gradually across turns rather than in one giant prompt. The recorded `Activity::Prompt` and the journaled `submit` step hold the combined text, so recovery's replay guarantee ([durability](durability.md)) covers it too: a crash before the prompt reaches the harness leaves those messages pending, and one after never gives them again.
+
+**Never both.** A message sent while its recipient's turn is still opening is steered (steered input waits for the prompt to be submitted), so that turn's start skips any message whose steer is still queued for the same turn. If the start reads the message just before the steer is queued and delivers it in the prompt, the steer later finds it already delivered and is refused unwritten. A steer queued for a turn that ended first is refused (or, if its engine died, is never written), and the message goes out at the next turn's start.
+
+`Yard::set_delivery_hook` replaces `SteerDelivery` with another hook (for a caller that keeps a branch's turn open outside this engine); `Yard::clear_delivery_hook` removes it, so that every message waits for the recipient's next turn.
 
 ## The envelope
 
@@ -141,6 +181,10 @@ me.integrate(&done.name)?;
 A child's limits and denials are stored with it and bound every later turn, whoever sends it.
 
 Branchyard also ships an opt-in permission rule, `Policy::allow_delegation_commands(by_path)` or `--allow-delegation`. It allows exactly the harness's shell commands that run `by` (by name, or the exposed path) with one of the seven delegation subcommands, as a single simple command: plain or quoted words, no variables, substitutions, globs, redirections, pipes or command lists. It looks through one `sh -c` or `bash -lc` wrapper, which is how Codex reports commands. Like any rule it is ordered, so an earlier deny, such as one a parent imposed, still wins. The subcommands act within the envelope, so the rule grants nothing beyond it. It trusts `PATH` to resolve `by` to the one the engine put first; a harness that can rewrite its `PATH` can already run anything.
+
+## Seats
+
+A branch started from a [rig](rigs.md) (`by rig run`, or `TaskOptions::seats`) spawns only by seat: `by spawn --seat NAME`, `branchyard.spawn(..., seat=NAME)`, `Spawn::seat`, or the MCP tool's `seat`, and only the seats its own seat `delegates_to`. The seat fixes the child's harness, check, isolation and instructions and sets limits and denials the request may only narrow; the envelope above still bounds everything. A branch outside a rig cannot name a seat. See [rigs](rigs.md#spawning-by-seat).
 
 ## Authority and its limits
 
@@ -172,6 +216,8 @@ Children run on threads of the process that runs their parent's turn, whether th
 
 `by cancel` records a durable cancel request for the running turn (see [durability](durability.md#cancellation-and-deadlines)), which the engine running it checks every 100 ms, in whichever process that is; the turn is interrupted like a budget stop, and ends `interrupted`. A request is bound to the turn it was asked of and never stops a later one. A branch none of whose turns submitted a prompt, such as a child cancelled before its harness opened a session, has no conversation to continue: a later `send` starts a fresh session with only the prompt it sends, and records a warning that says so. A branch that ran a prompt and has no session is still refused.
 
+`by send --steer`, `branchyard.steer(branch, text)`, `Delegate::steer` and the MCP `steer` tool add input to a descendant's running turn instead of waiting for it to end: queued durably and bound to that turn like a cancel, written to its harness by the engine running it, and recorded in the child's log as `steered` by the parent, and in the parent's as a `steer` delegation. They wait up to 10 seconds for delivery and return the `Steer`. When the harness takes the input depends on its protocol ([harness integration](harness-integration.md#steering-a-running-turn)): Claude Code, Pi and Codex before their next model call, claude-agent-acp at once, interrupting the response in progress but not the turn. A child whose harness cannot take input mid-turn (Amp, Antigravity, an ACP agent without the steering extension) is refused with the reason, never interrupted in its place; a child with no running turn is `not_running`, and `send` continues it instead. The child's budget and permissions do not change.
+
 A child's own spend counts against every ancestor through the reservations. `inspect` reports `subtree_cost_usd`, the reported spend of a branch and its descendants.
 
 ## Not guaranteed
@@ -182,3 +228,6 @@ A child's own spend counts against every ancestor through the reservations. `ins
 - Delegation from a sandboxed harness. The tools reach the engine over a host socket with the host's `by`, so a turn with `--provider microsandbox` and `--delegate` fails, and a sandboxed branch runs without the tools.
 - A boundary through a server. Harnesses on the server still run as the server's user unless a sandbox provider is used, and a sandboxed turn gets no tools; the envelope stops honest mistakes there too.
 - Any real harness delegating end to end. The projections were checked against Claude Code 2.1.283 and codex-cli 0.157.1 without model calls; the full loop was tested against the fake ACP agent only.
+- Messaging from a leaf branch (`max_depth` 0). It has no delegation tools at all, so it cannot `ask`, `report` or `escalate` either.
+- Delivering a message into a running turn. Without a `DeliveryHook` wired in (none is today), every message waits for the recipient's next turn to start; steering will fill this in.
+- `ask --wait` on a server past 120 seconds; it is capped, not refused, so poll `inbox` instead for a longer wait.

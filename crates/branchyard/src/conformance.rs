@@ -8,13 +8,16 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use crate::state::{now_ms, Acquired, Backend, Begun, Fence, Owner, ProcessRow, Record};
-use crate::{Activity, BranchStatus, Error, RecordedEvent};
+use crate::storage::StorageBackend;
+use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
 
 const TTL: Duration = Duration::from_secs(30);
 
 /// A store for one test, and whatever must outlive it.
 pub(crate) struct Opened {
     pub backend: Arc<dyn Backend>,
+    /// The same backend, as [`StorageBackend`]: see [`crate::storage`].
+    pub storage: Arc<dyn StorageBackend>,
     /// Opens another handle on the same store, as a second engine would.
     pub again: Box<dyn Fn() -> Arc<dyn Backend>>,
     _cleanup: Box<dyn std::any::Any>,
@@ -40,12 +43,14 @@ pub(crate) fn sqlite(name: &str) -> Opened {
     let dir = std::env::temp_dir().join(format!("branchyard-conformance-{}", unique(name)));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let shared = Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap());
     let open = {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn Backend>
     };
     Opened {
-        backend: open(),
+        backend: shared.clone(),
+        storage: shared,
         again: Box::new(open),
         _cleanup: Box::new(Temp(dir)),
     }
@@ -63,10 +68,15 @@ pub(crate) fn postgres_url() -> Option<String> {
 pub(crate) fn postgres(name: &str) -> Option<Opened> {
     let url = postgres_url()?;
     let scope = format!("conformance-{}", unique(name));
-    let open =
-        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn Backend>;
+    let shared = Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap());
+    let open = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn Backend>
+    };
     Some(Opened {
-        backend: open(),
+        backend: shared.clone(),
+        storage: shared,
         again: Box::new(open),
         _cleanup: Box::new(()),
     })
@@ -85,6 +95,13 @@ fn record(name: &str) -> Record {
         "cost_baseline": null
     }))
     .unwrap()
+}
+
+fn record_with_parent(name: &str, parent: Option<&str>) -> Record {
+    let mut record = record(name);
+    record.info.parent = parent.map(str::to_owned);
+    record.info.status = BranchStatus::Ready;
+    record
 }
 
 fn owner(id: &str) -> Owner {
@@ -250,6 +267,253 @@ pub(crate) fn cancels(s: Opened) {
     store.finish(&fence, None, None).unwrap();
     let next = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
     assert_eq!(store.cancel_requested(&next).unwrap(), None);
+}
+
+pub(crate) fn steers(s: Opened) {
+    let store = &s.backend;
+    store.reserve("b", &owner("a")).unwrap();
+    assert!(matches!(
+        store.request_steer("nope", "x", "t", None),
+        Err(Error::UnknownBranch(_))
+    ));
+    assert_eq!(
+        store.request_steer("b", "x", "t", None).unwrap(),
+        None,
+        "no turn"
+    );
+    let fence = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+    let first = store
+        .request_steer("b", "alice", "one", None)
+        .unwrap()
+        .unwrap();
+    let second = store
+        .request_steer("b", "bob", "two", None)
+        .unwrap()
+        .unwrap();
+    assert!(second > first);
+    let pending = store.pending_steers(&fence).unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|r| (
+                r.id,
+                r.by.as_str(),
+                r.text.as_str(),
+                r.turn,
+                r.state.clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (first, "alice", "one", fence.turn, SteerState::Pending),
+            (second, "bob", "two", fence.turn, SteerState::Pending)
+        ]
+    );
+    assert!(pending
+        .iter()
+        .all(|r| r.branch == "b" && r.requested_ms > 0));
+    store
+        .settle_steer(&fence, first, &SteerState::Delivered)
+        .unwrap();
+    store
+        .settle_steer(&fence, first, &SteerState::Accepted)
+        .unwrap();
+    let refused = SteerState::Refused {
+        reason: "no".into(),
+    };
+    store.settle_steer(&fence, second, &refused).unwrap();
+    assert!(store.pending_steers(&fence).unwrap().is_empty());
+    assert_eq!(
+        store.steer("b", first).unwrap().map(|r| r.state),
+        Some(SteerState::Accepted)
+    );
+    assert_eq!(
+        store.steer("b", second).unwrap().map(|r| r.state),
+        Some(refused)
+    );
+    assert_eq!(store.steer("b", second + 100).unwrap(), None);
+
+    // Settling is fenced: an engine whose lease was taken over cannot.
+    let third = store
+        .request_steer("b", "carol", "three", None)
+        .unwrap()
+        .unwrap();
+    let row = store.leases().unwrap().remove(0);
+    let taken = store.take_over(&row, &owner("b"), TTL).unwrap().unwrap();
+    assert!(matches!(
+        store.settle_steer(&fence, third, &SteerState::Delivered),
+        Err(Error::Fenced(_))
+    ));
+    // The takeover keeps the turn, so its input is still that turn's.
+    assert_eq!(store.pending_steers(&taken).unwrap().len(), 1);
+
+    // Bound to its turn: the next turn does not see it.
+    store.finish(&taken, None, None).unwrap();
+    let next = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+    assert!(store.pending_steers(&next).unwrap().is_empty());
+    let fourth = store
+        .request_steer("b", "dan", "four", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .pending_steers(&next)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>(),
+        [fourth]
+    );
+    store.finish(&next, None, None).unwrap();
+    store.delete("b").unwrap();
+    assert_eq!(store.steer("b", fourth).unwrap(), None);
+}
+
+pub(crate) fn messages(s: Opened) {
+    let store = &s.backend;
+    let sent = store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "kid".into(),
+            to: "parent".into(),
+            kind: crate::MessageKind::Question,
+            text: "should I rename the module?".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+    assert!(sent.id > 0);
+    assert!(sent.at_ms > 0);
+    assert!(!sent.delivered);
+    assert_eq!(store.message(sent.id).unwrap().as_ref(), Some(&sent));
+    assert_eq!(store.message(sent.id + 999).unwrap(), None);
+
+    // A second, unrelated message to someone else does not show up in
+    // parent's inbox or as an answer to the first.
+    store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "other".into(),
+            to: "elsewhere".into(),
+            kind: crate::MessageKind::Report,
+            text: "tests pass".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+
+    let inbox = store.inbox("parent").unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].id, sent.id);
+    assert!(!inbox[0].delivered);
+    assert!(store.answer_to(sent.id).unwrap().is_none());
+
+    store.mark_delivered(&[sent.id]).unwrap();
+    assert!(store.inbox("parent").unwrap()[0].delivered);
+    // Delivering twice, or an id nobody sent, is not an error.
+    store.mark_delivered(&[sent.id, sent.id + 999]).unwrap();
+
+    let answer = store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "parent".into(),
+            to: "kid".into(),
+            kind: crate::MessageKind::Answer,
+            text: "yes, rename it".into(),
+            in_reply_to: Some(sent.id),
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+    assert_eq!(store.answer_to(sent.id).unwrap().as_ref(), Some(&answer));
+    assert_eq!(store.inbox("kid").unwrap(), [answer]);
+
+    let note = |from: &str, to: &str, kind: crate::MessageKind| {
+        store
+            .send_message(&crate::Message {
+                id: 0,
+                from: from.into(),
+                to: to.into(),
+                kind,
+                text: "note".into(),
+                in_reply_to: None,
+                at_ms: 0,
+                delivered: false,
+            })
+            .unwrap()
+    };
+    let delivered = |id: u64| store.message(id).unwrap().unwrap().delivered;
+
+    // Steering a message: linked in the steer's own transaction, delivered
+    // as that input settles written or accepted, pending again if refused.
+    store.reserve("m", &owner("a")).unwrap();
+    let fence = granted(store.acquire(&record("m"), &owner("a"), TTL).unwrap());
+    let one = note("kid", "m", crate::MessageKind::Report);
+    let first = store
+        .request_steer("m", "kid", "one", Some(one.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.message_steer(one.id).unwrap(), Some(first));
+    let row = store.pending_steers(&fence).unwrap().remove(0);
+    assert_eq!((row.message, row.message_delivered), (Some(one.id), false));
+    // A delivered or unknown message is refused, and nothing is queued.
+    for id in [sent.id, one.id + 999] {
+        assert!(matches!(
+            store.request_steer("m", "kid", "x", Some(id)),
+            Err(Error::Denied(_))
+        ));
+    }
+    assert_eq!(store.pending_steers(&fence).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .settle_steer(&fence, first, &SteerState::Delivered)
+            .unwrap(),
+        Some(one.id)
+    );
+    assert!(delivered(one.id));
+    assert_eq!(
+        store
+            .settle_steer(&fence, first, &SteerState::Accepted)
+            .unwrap(),
+        None,
+        "delivered once"
+    );
+    let refused = SteerState::Refused {
+        reason: "dropped".into(),
+    };
+    assert_eq!(store.settle_steer(&fence, first, &refused).unwrap(), None);
+    assert!(!delivered(one.id), "refused after all: pending again");
+    assert_eq!(store.message_steer(one.id).unwrap(), None);
+
+    // The turn's start delivers it first: the queued input sees that, and
+    // refusing it does not undo the delivery.
+    let second = store
+        .request_steer("m", "kid", "one", Some(one.id))
+        .unwrap()
+        .unwrap();
+    store.mark_delivered(&[one.id]).unwrap();
+    let row = store.pending_steers(&fence).unwrap().remove(0);
+    assert_eq!((row.id, row.message_delivered), (second, true));
+    assert_eq!(store.settle_steer(&fence, second, &refused).unwrap(), None);
+    assert!(delivered(one.id));
+    store.finish(&fence, None, None).unwrap();
+
+    // A waiter for an answer counts until its deadline or the answer.
+    let question = note("asker", "parent", crate::MessageKind::Question);
+    assert!(!store.awaiting_answer("asker", 1_000).unwrap());
+    store.set_awaiting(question.id, Some(5_000)).unwrap();
+    assert!(store.awaiting_answer("asker", 1_000).unwrap());
+    assert!(!store.awaiting_answer("asker", 6_000).unwrap(), "past it");
+    assert!(!store.awaiting_answer("parent", 1_000).unwrap());
+    store.set_awaiting(question.id, None).unwrap();
+    assert!(!store.awaiting_answer("asker", 1_000).unwrap());
+    store.set_awaiting(question.id, Some(5_000)).unwrap();
+    let mut reply = note("parent", "asker", crate::MessageKind::Answer);
+    reply.in_reply_to = Some(question.id);
+    assert!(store.awaiting_answer("asker", 1_000).unwrap());
+    store.send_message(&reply).unwrap();
+    assert!(!store.awaiting_answer("asker", 1_000).unwrap(), "answered");
 }
 
 pub(crate) fn records(s: Opened) {
@@ -499,11 +763,397 @@ pub(crate) fn races(s: Opened) {
     }
 }
 
+/// A turn's `submit` step and the inbox messages its prompt carries become
+/// durable together: journaled with them marked delivered in one
+/// transaction, nothing when fenced, and undone together, leaving what
+/// another path delivered alone.
+pub(crate) fn delivery(s: Opened) {
+    let store = &s.backend;
+    let send = |to: &str| {
+        store
+            .send_message(&crate::Message {
+                id: 0,
+                from: "kid".into(),
+                to: to.into(),
+                kind: crate::MessageKind::Report,
+                text: "done".into(),
+                in_reply_to: None,
+                at_ms: 0,
+                delivered: false,
+            })
+            .unwrap()
+            .id
+    };
+    let delivered = |id: u64| store.message(id).unwrap().unwrap().delivered;
+    assert!(store.reserve("b", &owner("a")).unwrap());
+    let fence = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+    let (one, two, other) = (send("b"), send("b"), send("b"));
+    // `other` was delivered by another path first.
+    store.mark_delivered(&[other]).unwrap();
+    // Delivery is told apart by its millisecond stamp.
+    std::thread::sleep(Duration::from_millis(5));
+    let intent = serde_json::json!({"prompt": "p", "messages": [one, two, other]});
+
+    // Fenced: neither the step nor the delivery.
+    let stale = Fence {
+        generation: fence.generation + 1,
+        ..fence.clone()
+    };
+    assert!(matches!(
+        store.begin_step_delivering(&stale, 1, "submit", &intent, &[one, two, other]),
+        Err(Error::Fenced(_))
+    ));
+    assert!(!delivered(one) && !delivered(two));
+    assert!(store.steps("b", 1).unwrap().is_empty());
+
+    assert_eq!(
+        store
+            .begin_step_delivering(&fence, 1, "submit", &intent, &[one, two, other])
+            .unwrap(),
+        Begun::Fresh
+    );
+    assert!(delivered(one) && delivered(two));
+    // Already journaled: nothing is marked again.
+    let three = send("b");
+    assert_eq!(
+        store
+            .begin_step_delivering(&fence, 1, "submit", &intent, &[three])
+            .unwrap(),
+        Begun::Pending(intent.clone())
+    );
+    assert!(!delivered(three));
+
+    store
+        .abandon_step_delivering(&fence, 1, "submit", &[one, two, other])
+        .unwrap();
+    assert!(!delivered(one) && !delivered(two));
+    assert!(
+        delivered(other),
+        "delivered by another path, it stays delivered"
+    );
+    assert!(store.steps("b", 1).unwrap().is_empty());
+
+    // A finished step is not forgotten, nor are its messages returned.
+    store
+        .begin_step_delivering(&fence, 1, "submit", &intent, &[one])
+        .unwrap();
+    store
+        .finish_step(&fence, 1, "submit", &serde_json::json!({"turn": 1}))
+        .unwrap();
+    store
+        .abandon_step_delivering(&fence, 1, "submit", &[one])
+        .unwrap();
+    assert!(delivered(one));
+    assert_eq!(store.steps("b", 1).unwrap().len(), 1);
+}
+
+/// Artifacts and scratch areas: [`crate::storage::StorageBackend`]. Grants
+/// (ancestor, descendant, sibling refused until shared) decided on
+/// incarnations, a parent bound at creation and kept after its removal, a
+/// reused name inheriting no share or lock, digest dedup and refcounting,
+/// and a scratch lock reclaimed once its holder stops running.
+pub(crate) fn storage(s: Opened) {
+    use crate::storage::{Grants, Lineage, LockOutcome, NewArtifact, NewScratch};
+    let branches = &s.backend;
+    let storage = &s.storage;
+    // root -> a -> aa; root -> b (a sibling of a).
+    for (name, parent) in [
+        ("root", None),
+        ("a", Some("root")),
+        ("aa", Some("a")),
+        ("b", Some("root")),
+    ] {
+        branches
+            .write(&record_with_parent(name, parent), None)
+            .unwrap();
+    }
+    let lineage = || Lineage::from_identities(storage.identities().unwrap());
+    let id = |name: &str| lineage().id(name).unwrap();
+    let (root, a, aa, b) = (id("root"), id("a"), id("aa"), id("b"));
+    let identities = storage.identities().unwrap();
+    let parent_of = |name: &str| {
+        identities
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap()
+            .parent_incarnation
+    };
+    // Each parent was bound when its child's record was first written.
+    assert_eq!(parent_of("root"), None);
+    assert_eq!(parent_of("a"), Some(root));
+    assert_eq!(parent_of("aa"), Some(a));
+    assert!(root < a && a < aa && aa < b);
+
+    // Publishing the same bytes twice from different branches is recorded
+    // as two artifacts sharing one digest; each gets its own id.
+    let new = |publisher: &str, incarnation: i64, ancestry: Vec<i64>| NewArtifact {
+        digest: "d0".into(),
+        size: 3,
+        name: "n".into(),
+        media_type: "text/plain".into(),
+        publisher_branch: publisher.into(),
+        turn: 1,
+        labels: Default::default(),
+        ancestry: Vec::new(),
+        publisher_incarnation: incarnation,
+        ancestry_incarnations: ancestry,
+    };
+    let by_aa = storage
+        .create_artifact(&new("aa", aa, vec![root, a]))
+        .unwrap();
+    let by_b = storage.create_artifact(&new("b", b, vec![root])).unwrap();
+    assert_ne!(by_aa.artifact.id, by_b.artifact.id);
+    assert_eq!(by_aa.publisher_incarnation, Some(aa));
+    assert_eq!(
+        storage.artifact(&by_aa.artifact.id).unwrap().as_ref(),
+        Some(&by_aa)
+    );
+    assert_eq!(storage.digest_refcount("d0").unwrap(), 2);
+
+    let readable = |reader: i64, id: &str| {
+        let row = storage.artifact(id).unwrap().unwrap();
+        let shares = storage.artifact_shares(id).unwrap();
+        Grants {
+            owner: row.publisher_incarnation,
+            ancestry: &row.ancestry_incarnations,
+            shares: &shares,
+        }
+        .readable(&lineage(), reader)
+    };
+    // root and a (ancestors of aa) can read; b (a's sibling) cannot until
+    // shared; aa reads b's never, and a descendant reads its ancestor's.
+    assert!(readable(root, &by_aa.artifact.id));
+    assert!(readable(a, &by_aa.artifact.id));
+    assert!(!readable(b, &by_aa.artifact.id));
+    assert!(storage.share_artifact(&by_aa.artifact.id, "b", b).unwrap());
+    assert!(readable(b, &by_aa.artifact.id));
+    assert!(!storage.share_artifact("unknown", "b", b).unwrap());
+
+    // b is removed and an unrelated branch takes its name: a new
+    // incarnation, which the share to the old b does not reach.
+    branches.delete("b").unwrap();
+    branches
+        .write(&record_with_parent("b", None), None)
+        .unwrap();
+    let b2 = id("b");
+    assert!(b2 > b);
+    assert!(!readable(b2, &by_aa.artifact.id));
+    assert!(!readable(b2, &by_b.artifact.id), "b2 is not b's publisher");
+    // Sharing again binds the name's current holder, replacing the old.
+    assert!(storage.share_artifact(&by_aa.artifact.id, "b", b2).unwrap());
+    assert!(readable(b2, &by_aa.artifact.id));
+    assert_eq!(
+        storage.artifact_shares(&by_aa.artifact.id).unwrap().len(),
+        1
+    );
+
+    // a is removed: aa's parent stays bound, so aa still reads what a
+    // published, and a new holder of the name a is nobody's parent.
+    let by_a = storage.create_artifact(&new("a", a, vec![root])).unwrap();
+    branches.delete("a").unwrap();
+    branches
+        .write(&record_with_parent("a", None), None)
+        .unwrap();
+    let a2 = id("a");
+    assert!(readable(aa, &by_a.artifact.id));
+    assert!(!readable(a2, &by_a.artifact.id));
+    assert!(!readable(a2, &by_aa.artifact.id));
+    assert!(readable(root, &by_a.artifact.id));
+
+    assert_eq!(storage.artifacts().unwrap().len(), 3);
+    storage.delete_artifact(&by_aa.artifact.id).unwrap();
+    assert_eq!(storage.digest_refcount("d0").unwrap(), 2);
+    assert!(storage.artifact(&by_aa.artifact.id).unwrap().is_none());
+    assert!(storage
+        .artifact_shares(&by_aa.artifact.id)
+        .unwrap()
+        .is_empty());
+
+    // Scratch: one writer at a time, reclaimed once the holder is no
+    // longer running.
+    let scratch = |name: &str, owner: &str, incarnation: i64| NewScratch {
+        name: name.into(),
+        owner: owner.into(),
+        owner_incarnation: incarnation,
+        ancestry: vec!["root".into()],
+        ancestry_incarnations: vec![root],
+    };
+    assert!(storage.create_scratch(&scratch("cache", "aa", aa)).unwrap());
+    assert!(!storage.create_scratch(&scratch("cache", "b", b2)).unwrap());
+    let row = storage.scratch("cache").unwrap().unwrap();
+    assert_eq!(row.owner_incarnation, Some(aa));
+    assert_eq!(row.ancestry_incarnations, vec![root]);
+    assert!(storage.share_scratch("cache", "b", b2).unwrap());
+    assert_eq!(
+        storage.scratch_shares("cache").unwrap()[0].incarnation,
+        Some(b2)
+    );
+    match storage.scratch_lock("cache", "aa", aa).unwrap().unwrap() {
+        LockOutcome::Granted(lock) => assert_eq!(lock.holder_branch, "aa"),
+        LockOutcome::Held(_) => panic!("a free lock was reported held"),
+    }
+    // Re-entrant for its own holder.
+    assert!(matches!(
+        storage.scratch_lock("cache", "aa", aa).unwrap().unwrap(),
+        LockOutcome::Granted(_)
+    ));
+    // The backend enforces only the lock, not the grant (the grant is
+    // `crate::storage`'s job); it finds aa's turn not running, so it
+    // reclaims the lock for b.
+    match storage.scratch_lock("cache", "b", b2).unwrap().unwrap() {
+        LockOutcome::Granted(lock) => assert_eq!(lock.holder_branch, "b"),
+        LockOutcome::Held(_) => panic!("a lock whose holder is not running was still held"),
+    }
+    let mut running = record_with_parent("root", None);
+    running.info.status = BranchStatus::Running;
+    branches.write(&running, None).unwrap();
+    assert!(storage
+        .create_scratch(&scratch("busy", "root", root))
+        .unwrap());
+    storage.scratch_lock("busy", "root", root).unwrap();
+    match storage.scratch_lock("busy", "b", b2).unwrap().unwrap() {
+        LockOutcome::Held(lock) => assert_eq!(lock.holder_branch, "root"),
+        LockOutcome::Granted(_) => panic!("a live holder's lock was reclaimed"),
+    }
+    assert!(!storage.scratch_unlock("busy", b2).unwrap());
+    assert!(storage.scratch_unlock("busy", root).unwrap());
+    assert!(storage.scratch_lock_state("busy").unwrap().is_none());
+    // A running holder that is removed is not running any more, and a new
+    // holder of its name does not hold its lock.
+    storage.scratch_lock("busy", "root", root).unwrap();
+    branches.delete("root").unwrap();
+    branches.write(&running, None).unwrap();
+    let root2 = id("root");
+    assert!(!storage.scratch_unlock("busy", root2).unwrap());
+    assert!(matches!(
+        storage.scratch_lock("busy", "b", b2).unwrap().unwrap(),
+        LockOutcome::Granted(_)
+    ));
+    assert_eq!(storage.scratch_list().unwrap().len(), 2);
+    storage.delete_scratch("busy").unwrap();
+    assert!(storage.scratch("busy").unwrap().is_none());
+}
+
+/// Upgrading a schema 1 store binds its name-only grants once, by
+/// [`crate::storage::LegacyBinder`]'s rule. `downgrade` turns the freshly
+/// opened store back into schema 1 (dropping the identity columns) and
+/// inserts legacy rows through `legacy`'s SQL, with `{p}` the table prefix
+/// and `{r}`/`{rv}` the repository column and value, if any; `reopen`
+/// upgrades it.
+pub(crate) fn upgrade(
+    backend: &dyn Backend,
+    exec: &mut dyn FnMut(&str),
+    prefix: &str,
+    repo: Option<&str>,
+    reopen: &dyn Fn() -> Arc<dyn StorageBackend>,
+) {
+    use crate::storage::Lineage;
+    let at = |name: &str, parent: Option<&str>, created_ms: u64| {
+        let mut record = record_with_parent(name, parent);
+        record.created_ms = created_ms;
+        record
+    };
+    backend.write(&at("root", None, 0), None).unwrap();
+    backend.write(&at("kid", Some("root"), 10), None).unwrap();
+    // Took its name after the artifacts below were published.
+    backend.write(&at("late", None, 5000), None).unwrap();
+    let (r, rv) = match repo {
+        Some(repo) => ("repo, ".to_owned(), format!("'{repo}', ")),
+        None => (String::new(), String::new()),
+    };
+    let p = prefix;
+    for (table, column) in [
+        ("branches", "parent_incarnation"),
+        ("artifacts", "publisher_incarnation"),
+        ("artifacts", "ancestry_incarnations"),
+        ("artifact_shares", "incarnation"),
+        ("scratch_areas", "owner_incarnation"),
+        ("scratch_areas", "ancestry_incarnations"),
+        ("scratch_shares", "incarnation"),
+        ("scratch_locks", "holder_incarnation"),
+    ] {
+        exec(&format!("ALTER TABLE {p}{table} DROP COLUMN {column}"));
+    }
+    exec(&format!(
+        "UPDATE {p}meta SET value = '1' WHERE key = 'schema'"
+    ));
+    for (id, publisher) in [("art-kid", "kid"), ("art-late", "late")] {
+        exec(&format!(
+            "INSERT INTO {p}artifacts ({r}id, digest, size, name, media_type, publisher, \
+             ancestry, turn, created_ms, labels) VALUES ({rv}'{id}', 'd', 1, 'n', 't', \
+             '{publisher}', '[\"root\", \"gone\"]', 1, 1000, '{{}}')"
+        ));
+    }
+    exec(&format!(
+        "INSERT INTO {p}artifact_shares ({r}id, branch) VALUES ({rv}'art-late', 'kid')"
+    ));
+    exec(&format!(
+        "INSERT INTO {p}artifact_shares ({r}id, branch) VALUES ({rv}'art-late', 'gone')"
+    ));
+    exec(&format!(
+        "INSERT INTO {p}scratch_areas ({r}name, owner, ancestry, created_ms) \
+         VALUES ({rv}'s', 'kid', '[\"root\"]', 1000)"
+    ));
+    exec(&format!(
+        "INSERT INTO {p}scratch_shares ({r}name, branch) VALUES ({rv}'s', 'late')"
+    ));
+    exec(&format!(
+        "INSERT INTO {p}scratch_locks ({r}name, holder, acquired_ms) VALUES ({rv}'s', 'late', 1000)"
+    ));
+
+    let storage = reopen();
+    let identities = storage.identities().unwrap();
+    let lineage = Lineage::from_identities(identities.clone());
+    let (root, kid) = (lineage.id("root").unwrap(), lineage.id("kid").unwrap());
+    let kid_identity = identities.iter().find(|i| i.name == "kid").unwrap();
+    assert_eq!(kid_identity.parent_incarnation, Some(root));
+
+    // Bound where a branch holding the name existed when it published.
+    let art_kid = storage.artifact("art-kid").unwrap().unwrap();
+    assert_eq!(art_kid.publisher_incarnation, Some(kid));
+    assert_eq!(art_kid.ancestry_incarnations, vec![root]);
+    assert_eq!(art_kid.ancestry, vec!["root".to_owned(), "gone".to_owned()]);
+    // Not bound: late took the name after the artifact was published.
+    let art_late = storage.artifact("art-late").unwrap().unwrap();
+    assert_eq!(art_late.publisher_incarnation, None);
+    let mut shares = storage.artifact_shares("art-late").unwrap();
+    shares.sort_by(|x, y| x.branch.cmp(&y.branch));
+    assert_eq!(
+        shares
+            .iter()
+            .map(|s| (s.branch.as_str(), s.incarnation))
+            .collect::<Vec<_>>(),
+        vec![("gone", None), ("kid", Some(kid))]
+    );
+    let area = storage.scratch("s").unwrap().unwrap();
+    assert_eq!(area.owner_incarnation, Some(kid));
+    assert_eq!(area.ancestry_incarnations, vec![root]);
+    assert_eq!(
+        storage.scratch_shares("s").unwrap()[0].incarnation,
+        Some(lineage.id("late").unwrap())
+    );
+    // late's lock was taken before late existed: unbound, so reclaimable
+    // by anyone and releasable by no one.
+    assert!(!storage
+        .scratch_unlock("s", lineage.id("late").unwrap())
+        .unwrap());
+    // Upgrading is done once.
+    let again = reopen();
+    assert_eq!(
+        again
+            .artifact("art-kid")
+            .unwrap()
+            .unwrap()
+            .publisher_incarnation,
+        Some(kid)
+    );
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
-        suite!($open; fencing, expiry, steps, cancels, records, reservations, events,
-            concurrent_appends, races);
+        suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
+            concurrent_appends, races, storage, messages, delivery);
     };
     ($open:expr; $($check:ident),*) => {
         $(
@@ -522,9 +1172,65 @@ macro_rules! suite {
 
 mod sqlite {
     suite!(|name| Some(crate::conformance::sqlite(name)));
+
+    #[test]
+    fn upgrade() {
+        use crate::sqlite::Sqlite;
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!(
+            "branchyard-conformance-{}",
+            super::unique("upgrade")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let backend = Sqlite::open(&dir).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("state.db")).unwrap();
+        crate::conformance::upgrade(
+            &backend,
+            &mut |sql| conn.execute_batch(sql).unwrap(),
+            "",
+            None,
+            &|| Arc::new(Sqlite::open(&dir).unwrap()),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(feature = "postgres")]
 mod postgres {
     suite!(crate::conformance::postgres);
+
+    /// In a schema of its own: it drops columns, which would break every
+    /// other test sharing the tables.
+    #[test]
+    fn upgrade() {
+        use crate::pg::Postgres;
+        use std::sync::Arc;
+        let Some(base) = crate::conformance::postgres_url() else {
+            eprintln!("skipped: set BY_TEST_POSTGRES_URL to run the PostgreSQL conformance tests");
+            return;
+        };
+        let schema = format!("by_upgrade_{}", super::unique("x").replace('-', "_"));
+        let mut admin = crate::pg::connect(&base).unwrap();
+        admin
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
+            ))
+            .unwrap();
+        let separator = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let backend = Postgres::open(&url, "repo").unwrap();
+        let mut raw = crate::pg::connect(&url).unwrap();
+        crate::conformance::upgrade(
+            &backend,
+            &mut |sql| raw.batch_execute(sql).unwrap(),
+            "by_",
+            Some("repo"),
+            &|| Arc::new(Postgres::open(&url, "repo").unwrap()),
+        );
+        drop(raw);
+        drop(backend);
+        admin
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .unwrap();
+    }
 }

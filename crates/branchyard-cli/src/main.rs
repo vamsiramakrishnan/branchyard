@@ -9,6 +9,7 @@ mod console;
 mod json;
 mod remote;
 mod render;
+mod rig;
 mod watch;
 
 use std::io;
@@ -102,20 +103,38 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             branch,
             prompt,
             task,
+            steer: true,
+            wait: _,
             json,
-        } => commands::send(env, target, &branch, &prompt, &task, json),
+        } => commands::steer(target, &branch, &prompt, &task, json),
+        Command::Send {
+            branch,
+            prompt,
+            task,
+            steer: false,
+            wait,
+            json,
+        } => commands::send(env, target, &branch, &prompt, &task, wait, json),
         Command::Fork {
             branch,
             prompt,
             fresh_session,
             task,
         } => commands::fork(env, target, &branch, &prompt, fresh_session, &task),
+        Command::Reincarnate { branch, task } => commands::reincarnate(env, target, &branch, &task),
         Command::Ls { json } => commands::ls(env, target, json),
         Command::Show { branch, json } => commands::show(env, target, &branch, json),
         Command::Diff { branch } => commands::diff(env, target, &branch),
-        Command::Log { branch, json } => commands::log(env, target, &branch, json),
+        Command::Log {
+            branch,
+            json,
+            follow,
+        } => commands::log(env, target, &branch, json, follow),
         Command::Merge { branch, into } => commands::merge(target, &branch, into.as_deref()),
-        Command::Rm { branch } => commands::rm(target, &branch),
+        Command::Rm {
+            branch,
+            keep_credentials,
+        } => commands::rm(target, &branch, keep_credentials),
         Command::Harnesses { json } => commands::harnesses(env, target, json),
         Command::Watch { interval, once } => watch::run(env, target, interval, once),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
@@ -129,6 +148,36 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::events(env, target, branch, cursor, limit, json),
         Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
         Command::Children { branch, json } => commands::children(env, target, branch, json),
+        Command::Ask {
+            as_branch,
+            text,
+            wait_seconds,
+            json,
+        } => commands::ask(target, as_branch, &text, wait_seconds, json),
+        Command::Report {
+            as_branch,
+            text,
+            json,
+        } => commands::report(target, as_branch, &text, json),
+        Command::Escalate {
+            as_branch,
+            text,
+            json,
+        } => commands::escalate(target, as_branch, &text, json),
+        Command::Answer {
+            as_branch,
+            message_id,
+            text,
+            json,
+        } => commands::answer(target, as_branch, message_id, &text, json),
+        Command::Inbox {
+            as_branch,
+            unread,
+            json,
+        } => commands::inbox(target, as_branch, unread, json),
+        Command::Rig(args) => commands::rig(env, target, &args),
+        Command::Artifact(args) => commands::artifact(target, &args),
+        Command::Scratch(args) => commands::scratch(target, &args),
         Command::Help { .. } | Command::Version | Command::Serve { .. } | Command::Mcp { .. } => {
             unreachable!("handled before choosing a target")
         }

@@ -3,8 +3,12 @@
 //! The engine starts a harness with this server when the branch may
 //! delegate (`TaskOptions::delegation`), passing `--root <repository>
 //! --branch <name>` and the turn's token in `BRANCHYARD_DELEGATION`. The
-//! server offers `spawn`, `inspect`, `events`, `send`,
-//! `propose_integration`, `cancel` and `children`, and forwards each call
+//! server offers `spawn`, `inspect`, `events`, `send`, `steer`,
+//! `propose_integration`, `cancel`, `children`, and the artifact and
+//! scratch-area tools (`publish_artifact`, `list_artifacts`,
+//! `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`,
+//! `share_scratch`, `lock_scratch`, `unlock_scratch`; see
+//! `docs/storage.md`), and forwards each call
 //! through [`branchyard::Delegate`] to the engine running that turn, where
 //! children run on the engine's threads. `by spawn` and its siblings, and
 //! the Python module, reach the same operations the same way; this server
@@ -44,22 +48,41 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
 /// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 7] = [
+pub const TOOLS: [&str; 22] = [
     "spawn",
     "inspect",
     "events",
     "send",
+    "steer",
     "propose_integration",
     "cancel",
     "children",
+    "publish_artifact",
+    "list_artifacts",
+    "get_artifact",
+    "share_artifact",
+    "create_scratch",
+    "list_scratch",
+    "share_scratch",
+    "lock_scratch",
+    "unlock_scratch",
+    "ask",
+    "report",
+    "escalate",
+    "answer",
+    "inbox",
 ];
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
 delegate: spawn child branches with their own harness and budget, watch them with inspect \
-and events, continue them with send, merge a finished child into your own branch with \
+and events, continue them with send, add to a child's running turn with steer, merge a \
+finished child into your own branch with \
 propose_integration (its check must pass), stop them with cancel, and list them with \
 children. Children run in parallel; spawn returns once a child has started. You act only as your own branch and only \
-on your descendants. inspect with no branch shows your remaining budget.";
+on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
+may spawn. You can also message: ask your parent a question (optionally waiting for its \
+answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
+descendant's message; and read your own inbox.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {
@@ -142,6 +165,7 @@ pub fn tools() -> Vec<Tool> {
                     "max_children": {"type": "integer", "minimum": 0},
                     "harnesses": {"type": "array", "items": {"type": "string"}, "description": "Harnesses the child may delegate to; each must be allowed to you"},
                     "deny": {"type": "array", "items": {"type": "string"}, "description": "Tool names the child is denied outright; a trailing * matches a prefix"},
+                    "seat": {"type": "string", "description": "In a rig, the seat to fill; it sets the child's harness, limits, check and instructions. Required in a rig, and must be one of your seats (inspect shows them); refused outside one"},
                 },
                 "required": ["prompt"],
                 "additionalProperties": false,
@@ -160,6 +184,22 @@ pub fn tools() -> Vec<Tool> {
                     "prompt": {"type": "string"},
                 },
                 "required": ["branch", "prompt"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "steer",
+            "Add a message to a descendant's running turn without interrupting it; the \
+             harness reads it at its next step, such as after the current tool call. Refused \
+             when the descendant is not running a turn or its harness cannot take input \
+             mid-turn. Returns whether it was delivered.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "branch": branch_property("A descendant that is running a turn"),
+                    "text": {"type": "string"},
+                },
+                "required": ["branch", "text"],
                 "additionalProperties": false,
             })),
         ),
@@ -187,6 +227,170 @@ pub fn tools() -> Vec<Tool> {
             })),
         ),
         children,
+        Tool::new(
+            "publish_artifact",
+            "Publish a file at a path in your worktree as a new immutable artifact of your \
+             branch, content-addressed by its blake3 digest. Ancestors and descendants of your \
+             branch can read it; a sibling needs an explicit share_artifact.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file, in your worktree"},
+                    "name": {"type": "string", "description": "Defaults to the file's name"},
+                    "media_type": {"type": "string"},
+                    "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+                },
+                "required": ["path"],
+                "additionalProperties": false,
+            })),
+        ),
+        {
+            let mut t = Tool::new(
+                "list_artifacts",
+                "Every artifact you may read: what you published, what your ancestors or \
+                 descendants published, and what was explicitly shared to you.",
+                schema(json!({"type": "object", "properties": {}, "additionalProperties": false})),
+            );
+            t.annotations = Some(read_only("List readable artifacts"));
+            t
+        },
+        Tool::new(
+            "get_artifact",
+            "Copy an artifact's bytes to a path in your worktree, checked against its recorded \
+             digest, and return its provenance. Refused unless you may read it.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "out": {"type": "string", "description": "Destination path, in your worktree"},
+                },
+                "required": ["id", "out"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "share_artifact",
+            "Share an artifact you may read with another branch: the explicit grant a sibling \
+             of its publisher needs.",
+            schema(json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "to": branch_property("The branch to share with")},
+                "required": ["id", "to"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "create_scratch",
+            "Create a named shared scratch directory, owned by your branch, visible to your \
+             ancestors and descendants at BRANCHYARD_SCRATCH_<NAME> (Microsandbox: a mount). One \
+             writer at a time; see lock_scratch.",
+            schema(json!({
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Lowercase [a-z0-9-], starting with a letter"}},
+                "required": ["name"],
+                "additionalProperties": false,
+            })),
+        ),
+        {
+            let mut t = Tool::new(
+                "list_scratch",
+                "Every scratch area you may reach.",
+                schema(json!({"type": "object", "properties": {}, "additionalProperties": false})),
+            );
+            t.annotations = Some(read_only("List reachable scratch areas"));
+            t
+        },
+        Tool::new(
+            "share_scratch",
+            "Share a scratch area you may reach with another branch.",
+            schema(json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "to": branch_property("The branch to share with")},
+                "required": ["name", "to"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "lock_scratch",
+            "Acquire a scratch area's writer lock for your branch: granted when free, re-granted \
+             if you already hold it, or reclaimed once the current holder's turn has ended; \
+             refused while another branch is still running with it held.",
+            schema(json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "unlock_scratch",
+            "Release a scratch area's writer lock if your branch holds it.",
+            schema(json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "ask",
+            "Ask your parent a question. Without wait_seconds, returns once it is sent. With \
+             it, blocks for up to that long for an answer (in_reply_to your question); a wait \
+             that passes with no answer yet is not an error, answer is just absent, ask inbox \
+             or ask again.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "wait_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Block up to this long for an answer"},
+                },
+                "required": ["text"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "report",
+            "Report to your parent; no answer is expected.",
+            schema(json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "escalate",
+            "Escalate to your parent, or, if your rig seat's escalates_to allows it, an \
+             ancestor further up.",
+            schema(json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "answer",
+            "Answer a message (usually a question) from one of your own descendants.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "integer", "description": "The message's id, from inbox or the message you received"},
+                    "text": {"type": "string"},
+                },
+                "required": ["message_id", "text"],
+                "additionalProperties": false,
+            })),
+        ),
+        {
+            let mut inbox = Tool::new(
+                "inbox",
+                "Every message addressed to you, oldest first.",
+                schema(json!({"type": "object", "properties": {}, "additionalProperties": false})),
+            );
+            inbox.annotations = Some(read_only("Read your inbox"));
+            inbox
+        },
     ]
 }
 

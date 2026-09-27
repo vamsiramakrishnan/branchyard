@@ -29,7 +29,7 @@ use crate::auth::{Method, Spec};
 use crate::edit::{Edit, TomlEdit};
 use crate::{
     needs_private_home, pass_session, toml, unused, Context, EnvVar, Plan, Protocol, Provisioner,
-    Refused, Telemetry,
+    Refused, Telemetry, Via,
 };
 
 const AUTH_FILE: &str = ".codex/auth.json";
@@ -121,6 +121,17 @@ impl Provisioner for Codex {
                 _ => unreachable!("every method of AUTH is handled"),
             };
             plan.edit(AUTH_FILE, true, Edit::Put(content));
+            let secret = resolved
+                .env_key
+                .or(resolved.file_secret)
+                .expect("a method names its secret");
+            plan.deliver(
+                secret,
+                Via::File {
+                    path: AUTH_FILE.into(),
+                },
+                false,
+            );
         }
         plan.unused_secrets = unused(context, &AUTH.names());
 

@@ -22,6 +22,19 @@
 //! sandbox in `workspace-write` mode inside Branchyard's sandbox. Server
 //! requests this profile does not implement are answered with a JSON-RPC
 //! error rather than left pending.
+//!
+//! Steering is `turn/steer`, naming the turn in flight as
+//! `expectedTurnId`, so input meant for one turn never lands in another;
+//! until `turn/start` has answered with the turn's ID, a steer is
+//! [`Rejected::SteerNotYet`]. codex-cli 0.157.1, checked against a local
+//! stand-in Responses API with no model call, answers with the turn's ID
+//! ([`Event::SteerAccepted`]) and, once the model response in progress
+//! finishes, records the input as a `userMessage` item carrying the
+//! `clientUserMessageId` the driver sent, then samples again within the
+//! same turn: one `turn/completed` covers both. A steer for another turn,
+//! or with none active, is a JSON-RPC error ([`Event::SteerRejected`]).
+//! An interrupt drops accepted input not yet recorded; the driver reports
+//! each such steer as rejected when the turn completes.
 
 use std::collections::HashMap;
 
@@ -39,6 +52,8 @@ enum Pending {
     Thread,
     TurnStart(u64),
     Interrupt(u64),
+    /// A `turn/steer`: the turn and the steer's number.
+    Steer(u64, u64),
 }
 
 /// Approval requests this profile answers.
@@ -88,6 +103,13 @@ pub struct Codex {
     approvals: HashMap<String, Value>,
     turns: Turns,
     native_turn: Option<String>,
+    /// Steers of the turn in flight that Codex has not yet recorded as a
+    /// user message: number and client message ID.
+    steers: Vec<(u64, String)>,
+    /// Steers already reported rejected when their turn ended, whose
+    /// answer may still arrive.
+    dropped: Vec<u64>,
+    next_steer: u64,
 }
 
 impl Codex {
@@ -104,6 +126,9 @@ impl Codex {
             approvals: HashMap::new(),
             turns: Turns::default(),
             native_turn: None,
+            steers: Vec::new(),
+            dropped: Vec::new(),
+            next_steer: 0,
         }
     }
 
@@ -186,6 +211,18 @@ impl Codex {
             (Pending::Interrupt(_), Some(error)) => Output::event(Event::Warning {
                 message: format!("interrupt failed: {error}"),
             }),
+            (Pending::Steer(_, steer), _) if self.dropped.contains(&steer) => Output::default(),
+            (Pending::Steer(turn, steer), None) => {
+                Output::event(Event::SteerAccepted { turn, steer })
+            }
+            (Pending::Steer(turn, steer), Some(reason)) => {
+                self.steers.retain(|(n, _)| *n != steer);
+                Output::event(Event::SteerRejected {
+                    turn,
+                    steer,
+                    reason,
+                })
+            }
         }
     }
 
@@ -275,6 +312,10 @@ impl Codex {
             "item/started" => {
                 let item = &params["item"];
                 let kind = item["type"].as_str().unwrap_or_default();
+                if let ("userMessage", Some(client)) = (kind, item["clientId"].as_str()) {
+                    // A steer Codex has now put into the conversation.
+                    self.steers.retain(|(_, id)| id != client);
+                }
                 if TOOL_ITEMS.contains(&kind) {
                     Output::event(Event::ToolStarted {
                         turn,
@@ -328,6 +369,15 @@ impl Codex {
         self.turns.end();
         self.native_turn = None;
         self.approvals.clear();
+        let mut events: Vec<Event> = std::mem::take(&mut self.steers)
+            .into_iter()
+            .inspect(|(steer, _)| self.dropped.push(*steer))
+            .map(|(steer, _)| Event::SteerRejected {
+                turn,
+                steer,
+                reason: "the turn ended before Codex delivered it".into(),
+            })
+            .collect();
         let outcome = match completed["status"].as_str() {
             Some("completed") => TurnOutcome::Completed,
             Some("interrupted") => TurnOutcome::Interrupted,
@@ -338,7 +388,11 @@ impl Codex {
                     .to_owned(),
             },
         };
-        Output::event(Event::TurnEnded { turn, outcome })
+        events.push(Event::TurnEnded { turn, outcome });
+        Output {
+            events,
+            frames: Vec::new(),
+        }
     }
 }
 
@@ -361,6 +415,7 @@ impl Driver for Codex {
             tool_approvals: true,
             turn_acknowledgment: true,
             usage: true,
+            steer: true,
         }
     }
 
@@ -372,6 +427,9 @@ impl Driver for Codex {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
         crate::check_mcp_servers(&open.mcp_servers)?;
+        // Codex has `url` servers in `config.toml`, but their thread
+        // override has not been checked against codex-cli.
+        crate::refuse_remote_mcp(&open, "Codex")?;
         let mut argv = self.command.clone();
         argv.push("app-server".into());
         let launch = LaunchSpec {
@@ -411,6 +469,7 @@ impl Driver for Codex {
             _ => return Err(Rejected::NotReady),
         };
         let turn = self.turns.begin()?;
+        self.steers.clear();
         let request = self.request(
             Pending::TurnStart(turn),
             "turn/start",
@@ -431,6 +490,30 @@ impl Driver for Codex {
             Pending::Interrupt(turn),
             "turn/interrupt",
             json!({"threadId": thread, "turnId": native}),
+        )])
+    }
+
+    fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
+        let thread = match (&self.thread, self.ready) {
+            (Some(thread), true) => thread.to_string(),
+            _ => return Err(Rejected::NotReady),
+        };
+        let turn = self.turns.active.ok_or(Rejected::NoTurn)?;
+        // turn/steer names the native turn, known once turn/start answers.
+        let native = self.native_turn.clone().ok_or(Rejected::SteerNotYet)?;
+        self.next_steer += 1;
+        let steer = self.next_steer;
+        let client = format!("branchyard-steer-{steer}");
+        self.steers.push((steer, client.clone()));
+        Ok(vec![self.request(
+            Pending::Steer(turn, steer),
+            "turn/steer",
+            json!({
+                "threadId": thread,
+                "expectedTurnId": native,
+                "clientUserMessageId": client,
+                "input": [{"type": "text", "text": text}],
+            }),
         )])
     }
 
@@ -458,6 +541,7 @@ impl Driver for Codex {
         self.pending.clear();
         self.approvals.clear();
         self.native_turn = None;
+        self.steers.clear();
         self.turns.closed()
     }
 }

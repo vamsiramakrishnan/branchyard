@@ -55,7 +55,7 @@ In the throwaway repository:
 | Interrupt | Ctrl-C during a long turn | The harness and its process group are gone (`ps -eo pgid,comm`) |
 | Cancel | `by cancel <b>` from a second terminal during a long turn | The turn stops; `by log <b>` names who cancelled |
 | Crash recovery | `kill -9` the `by` process mid-turn (after the prompt is submitted), then `by ls` | The harness's process group is gone; the branch is `interrupted` with a `recovered` event saying the outcome is unknown; the prompt was not sent again; `by send <b> …` resumes the session |
-| One server | `by serve --data-dir D` in two terminals | The second fails at once, naming the first's pid |
+| One server | `by serve --data-dir D` in two terminals | The second fails within 2 seconds, naming the first's pid |
 | Two terminals | `by send <b> …` while another `by` runs a turn on `<b>` | Refused as running; no race |
 | Unapproved tools | `by run "…" --harness pi` | Refused; with `--allow-unapproved-tools` it runs |
 | Watch | `by watch` in a second terminal during the above | The tree updates live; `q` exits cleanly |
@@ -173,12 +173,17 @@ The Substrate provider has run only against the in-process fake. On a machine wi
 
 ## 7. Provisioning (model calls)
 
-[Provisioning](provisioning.md) writes each harness's native files from Scion's knowledge; none of those paths has been checked against a real harness. In the throwaway repository, with credentials in your environment and not logged in to the harnesses (`--isolated` gives each branch a fresh home):
+[Provisioning](provisioning.md) writes each harness's native files from Scion's knowledge; only Claude Code's key, MCP file and MCP headers have been checked against a real binary (offline, below). In the throwaway repository, with credentials in your environment and not logged in to the harnesses (`--isolated` gives each branch a fresh home):
 
 | Check | Command | Expect |
 |---|---|---|
-| Claude Code, API key | `by run "Say hi" --harness claude-code --isolated --secret ANTHROPIC_API_KEY --model large --yes --budget-usd 0.2` | The turn runs without a login; `by log` shows `provisioned: auth api-key; wrote .claude.json; …`; `.branchyard/homes/<b>/.claude.json` is 0600 and holds the fingerprint and the trusted workspace; the model reported is the one `large` maps to |
-| Claude Code over ACP | the same with `--harness claude-code-acp` | The same; `ANTHROPIC_MODEL` applies to claude-agent-acp |
+| Claude Code, API key | `by run "Run env in Bash and say whether ANTHROPIC_API_KEY is set" --harness claude-code --isolated --secret ANTHROPIC_API_KEY --model large --yes --budget-usd 0.2` | The turn runs without a login; `by log` shows `provisioned: auth api-key; wrote .branchyard/credentials/anthropic-api-key, .claude/settings.json, …` and no `… in the environment of its tool commands`; the key file is 0600, `settings.json` has `apiKeyHelper`; the model says the variable is not set; the model reported is the one `large` maps to |
+| Claude Code over ACP | the same with `--harness claude-code-acp` | The same; `ANTHROPIC_MODEL` applies to claude-agent-acp, and so does the helper (it loads user settings) |
+| Claude Code, OAuth token | `--secret CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), same prompt | `by log` says `CLAUDE_CODE_OAUTH_TOKEN in the environment of its tool commands`, and the model finds it set: record it if not |
+| Claude Code, no secret on a command line | `--delegate --mcp docs=/abs/path/to/an/mcp-server`, and while the turn runs, `ps -o args= -C claude` | `--mcp-config <home>/.branchyard/claude-mcp.json` (0600) and no JSON; without `--isolated`, a path under `.branchyard/turns/` that is gone after the turn |
+| Remote MCP server | the SDK or API with `remote_mcp_servers` (an HTTP server with an `Authorization` header from a secret), `--harness claude-code` and `claude-code-acp` | The server receives the header; the header is in the 0600 MCP file (stream-json) and not in `ps` output, the event log or `state.db` |
+| Credentials on removal | a Claude Code branch with a key, `by fork <b> "x"` (the fork shares the home), then `by rm <b>` | `.branchyard/homes/<b>/.branchyard/credentials/` is empty and `settings.json` has no `apiKeyHelper`; the fork's next send provisions them again; with `by rm --keep-credentials` they stay |
+| Tools' environment, other harnesses | for each harness whose key is a variable (Gemini CLI, OpenCode, Copilot, Hermes, Antigravity), ask it to run `env` and say whether its key's variable is set | Record the answer in the [table](provisioning.md#secrets-and-the-harnesss-tools), which assumes yes |
 | Codex, API key and effort | `by run "Say hi" --harness codex --isolated --secret OPENAI_API_KEY --effort high --yes --budget-usd 0.2` | `~/.codex/auth.json` (0600) is accepted by codex-cli 0.157.1; `config.toml` has `model_reasoning_effort = "high"` at the top level and Codex honors it |
 | Codex auth file | `--secret CODEX_AUTH=@$HOME/.codex/auth.json` after `codex login` | Codex runs with the copied login |
 | Codex over ACP, model | `--harness codex-acp --model <name>` | codex-acp uses the `model` from `config.toml` |
@@ -191,6 +196,29 @@ The Substrate provider has run only against the in-process fake. On a machine wi
 | Server | `by serve --secret OPENAI_API_KEY --allow-client-commands` with the key in the server's environment, then `by --remote … run "Say hi" --harness codex --isolated --secret OPENAI_API_KEY --yes` | The server's key is used; `--secret OPENAI_API_KEY=X` is refused by `by`; an undefined secret is refused with `secret_not_allowed` |
 
 **Record:** in [validation](validation.md), with the harness versions; correct [provisioning](provisioning.md) for every path or variable a harness does not read, and mark the harness's provisioning unverified until it does.
+
+**Without model calls.** Claude Code can be checked against a local stand-in for the Messages API: a small HTTP server on `127.0.0.1` that answers `POST /v1/messages` with a streamed `tool_use` of `Bash` (a command that writes `env` to a file), then with text. Put `{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:PORT"}}` in `.branchyard/homes/<name>/.claude/settings.json` before `by run --name <name> --isolated …` (provisioning merges into it, and isolation strips a base URL from the environment). The stand-in's log shows the key each request carried; the file shows the Bash tool's environment. This is how the Claude Code rows of the [table](provisioning.md#secrets-and-the-harnesss-tools) were checked against 2.1.283. Log only the keys you gave: on a host with its own Claude Code login, a harness with no credential of its own may send that one.
+
+## 8. Herdr plugin (no model calls)
+
+The [Herdr plugin](../plugins/herdr/README.md) has run only against a fake `herdr`. With Herdr 0.9.1 or newer installed and a `by serve` running (section 4; the fake ACP agent is enough, `--allow-client-commands` and `--command path/to/fake-acp-agent`):
+
+```sh
+cargo build --release --locked -p branchyard-herdr -p branchyard-cli
+herdr plugin link "$PWD/plugins/herdr"
+printf 'BRANCHYARD_REMOTE=%s\nBRANCHYARD_TOKEN_FILE=%s\n' "$BRANCHYARD_REMOTE" "$BRANCHYARD_TOKEN_FILE" \
+  > "$(herdr plugin config-dir branchyard)/config.env"
+herdr                                          # then, from another terminal:
+herdr plugin action invoke branchyard.start
+```
+
+- `herdr plugin list` shows the plugin with no warnings; `herdr plugin action list --plugin branchyard` lists `start`, `merge`, `cancel` and `send`.
+- `by run "WRITE a.txt=1" --name a --yes` and `by run HANG --name h --yes`: one tab each, named `by: <branch>`, not focused, showing `by log --follow`; the sidebar shows `h` working and `a` idle with `ready to merge` (`herdr pane get <pane>` shows the agent and status).
+- Focus `h`'s tab and invoke `branchyard.cancel`: a notification, then `h` idle with `interrupted`. Focus `a` and invoke `branchyard.merge`: `merged into main`. `branchyard.send` opens a popup; a prompt typed there runs `by send`.
+- Restart `by serve` on the same port: the bridge prints `reconnecting after cursor N` and a new branch still gets a tab. Close a branch's tab and send to the branch: a new tab opens. Close the bridge's tab and start it again: no new tabs.
+- A local `by run "PERMISSION WRITE p.txt=1" --ask` in the served repository, left unanswered: its tab shows `blocked` within a second.
+
+**Record:** in [the plugin's README](../plugins/herdr/README.md) and [validation](validation.md), with the Herdr version; fix any call Herdr refuses.
 
 ## Cleaning up
 

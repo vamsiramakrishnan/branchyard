@@ -33,6 +33,7 @@ Flags (`by serve --help` or `branchyard-server --help`):
 | `--allow-unapproved-tools` | Accept `unapproved_tools`: profiles whose tools bypass the request's policy (Antigravity, Pi, Amp) |
 | `--secret NAME[=VAR\|=@FILE]` | A secret requests may name in `provision.secrets`, read from this server's variable `NAME` or `VAR`, or from `FILE`, at each turn; repeatable. See [provisioning](provisioning.md#through-a-server) |
 | `--database URL` | Keep branch state and operations in PostgreSQL (`postgres://user@host/db`) instead of SQLite. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
+| `--max-artifact-bytes N` | Largest artifact a `POST .../artifacts` upload may publish, in bytes. Default 268435456 (256 MiB) |
 | `--max-running N` | Operations running at once; more wait queued. Default 8 |
 | `--shutdown-grace SECS` | At shutdown, how long running operations may finish. Default 60 |
 | `--quiet` | Do not log requests |
@@ -50,6 +51,7 @@ Configuration file (relative paths resolve against the file's directory; unknown
   ],
   "tls": { "cert": "/etc/branchyard/cert.pem", "key": "/etc/branchyard/key.pem" },
   "max_body_bytes": 1048576,
+  "max_artifact_bytes": 268435456,
   "max_running": 8,
   "shutdown_grace_seconds": 60,
   "harness_commands": { "codex": ["/opt/codex/bin/codex"] },
@@ -87,8 +89,10 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `GET /v1/repos/{repo}/branches/{b}` | One branch | `BranchInfo` |
 | `POST /v1/repos/{repo}/branches/{b}/send` | Continue its session with another prompt | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/fork` | New branch from its candidate | `202` operation |
+| `POST /v1/repos/{repo}/branches/{b}/reincarnate` | New branch from its candidate, always a fresh session, with a generated handoff brief | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/merge` | Validated merge of its candidate | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/cancel` | Stop its running turn and every running turn delegated below it | `{"cancelled": ["b", …]}` |
+| `POST /v1/repos/{repo}/branches/{b}/steer` | Add input to its running turn without interrupting it | `Steer`: `{id, branch, by, text, requested_at_ms, state}` |
 | `DELETE /v1/repos/{repo}/branches/{b}` | Remove worktree and record | `{"removed": "b"}` |
 | `GET /v1/repos/{repo}/branches/{b}/diff` | Candidate diff against the base | `{"diff": "..."}` |
 | `GET /v1/repos/{repo}/branches/{b}/events?cursor=N` | Recorded events after the first `N` (default 0); a branch's events are numbered from 1 | `{"events": [RecordedEvent], "cursor": M}`; pass `M` next |
@@ -97,8 +101,24 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `GET /v1/repos/{repo}/branches/{b}/inspection` | `b` as a delegating parent sees it, as `by inspect b --json` | `Inspection` |
 | `GET /v1/repos/{repo}/branches/{b}/event-page?cursor=N&limit=M` | Up to `M` (default 50, at most 200) events after the first `N`, or the most recent without a cursor, as `by events b --json` | `EventPage` |
 | `GET /v1/repos/{repo}/branches/{b}/children` | Every branch `b` delegated to, directly or below, as `by children b --json` | `Children` |
+| `GET /v1/repos/{repo}/branches/{b}/inbox` | Every message addressed to `b`, oldest first, as `by inbox --as b --json` | `Inbox` |
+| `POST /v1/repos/{repo}/branches/{b}/ask` | Ask `b`'s parent a question, as `by ask --as b`; `{text, wait_seconds}`, the latter optional and capped at 120s on the server | `Asked` |
+| `POST /v1/repos/{repo}/branches/{b}/report` | Report to `b`'s parent, as `by report --as b`; `{text}` | `Message` |
+| `POST /v1/repos/{repo}/branches/{b}/escalate` | Escalate to `b`'s parent, or further up if its rig seat allows, as `by escalate --as b`; `{text}` | `Message` |
+| `POST /v1/repos/{repo}/branches/{b}/answer` | Answer one of `b`'s own descendants' messages, as `by answer --as b`; `{message_id, text}` | `Message` |
 | `GET /v1/repos/{repo}/events/stream?cursor=N` | SSE of activity across branches after feed position `N`; without a cursor, from now | `text/event-stream` |
 | `GET /v1/operations/{id}` | An operation's status and result | operation |
+| `POST /v1/repos/{repo}/branches/{b}/artifacts` | Publish the body's bytes as a new artifact of `b`, acting with the server's authority as a person, like `by artifact publish --branch`. `name`, `media_type`, repeated `label` are query parameters; refused over `--max-artifact-bytes` | `201` `ArtifactRef` |
+| `GET /v1/repos/{repo}/branches/{b}/artifacts` | Every artifact `b` may read | `{"artifacts": [ArtifactRef]}` |
+| `GET /v1/repos/{repo}/branches/{b}/artifacts/{id}` | Artifact `id`'s provenance, checked against `b`'s grant | `ArtifactRef` |
+| `GET /v1/repos/{repo}/branches/{b}/artifacts/{id}/content` | Its bytes, with a digest header | streamed bytes |
+| `POST /v1/repos/{repo}/branches/{b}/artifacts/{id}/share` | Share it with `{"to": "BRANCH"}` | `{"ok": true}` |
+| `POST /v1/repos/{repo}/branches/{b}/scratch` | Create `{"name": "NAME"}`, owned by `b` | `ScratchArea` |
+| `GET /v1/repos/{repo}/branches/{b}/scratch` | Every scratch area `b` may reach | `{"areas": [ScratchArea]}` |
+| `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/share` | Share it with `{"to": "BRANCH"}` | `{"ok": true}` |
+| `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/lock` | Acquire its writer lock for `b` | `ScratchLock`, or `409 running` |
+| `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/unlock` | Release it if `b` holds it | `{"ok": true}` |
+| `GET /v1/repos/{repo}/scratch/{name}/lock` | Its current holder, if any (not access controlled) | `{"lock": ScratchLock?}` |
 
 ### Requests
 
@@ -110,7 +130,8 @@ POST /v1/repos/app/tasks
   "harnesses": ["claude-code", "codex"],
   "name": "flaky",
   "base": "main",
-  "budget": { "max_usd": 2.0, "max_turns": 3, "max_seconds": 1200 },
+  "budget": { "max_usd": 2.0, "max_turns": 3, "max_seconds": 1200,
+              "stall_after_seconds": 300, "stall_action": "notify" },
   "policy": { "mode": "deny", "rules": [{ "tool": "Read", "allow": true }, { "tool": "mcp__*", "allow": false }] },
   "check": ["cargo", "test"],
   "isolated": false,
@@ -123,19 +144,21 @@ POST /v1/repos/app/tasks
 }
 ```
 
-Only `prompt` is required. Give `harness` for one branch or `harnesses` for one branch each (`<name>-<harness>`), not both. `policy.mode` is `allow` or `deny` (the default); rules apply first, in order. There is no remote `ask`: the server has no terminal to ask on. `budget.max_seconds` applies per call, like the SDK's `max_duration`. `command` is refused (`403 command_not_allowed`) unless the server allows client commands; without it, the server uses its `harness_commands` entry for the harness, else the profile's executable on its `PATH`. One task runs one command, so harnesses with different configured commands must be separate tasks.
+Only `prompt` is required. Give `harness` for one branch or `harnesses` for one branch each (`<name>-<harness>`), not both. `policy.mode` is `allow` or `deny` (the default); rules apply first, in order. There is no remote `ask`: the server has no terminal to ask on. `budget.max_seconds` applies per call, like the SDK's `max_duration`. `budget.stall_after_seconds` and `budget.stall_action` (`notify`, the default, or `interrupt`) are the SDK's `Budget::stall_after`/`stall_action` (`docs/lifecycle.md#stall-detection`); a branch's `stalled` field then reflects the same live state a local `by ls` would show. `command` is refused (`403 command_not_allowed`) unless the server allows client commands; without it, the server uses its `harness_commands` entry for the harness, else the profile's executable on its `PATH`. One task runs one command, so harnesses with different configured commands must be separate tasks.
 
 `provider` is [`branchyard::Provider`](../crates/branchyard/src/lib.rs)'s serde form, tagged by `kind`: `local`, `microsandbox` or `substrate`, with [the provider's options](providers.md). Anything but `local` is refused (`403 provider_not_allowed`) unless the operator allowed that provider. Everything in it is about the server: `pass_env` names are read from **the server's environment** at each turn, a Substrate `key` must be an absolute path to a file on the server (`400` otherwise), and a Microsandbox provider needs a server built with the `microsandbox` feature on a host with KVM.
 
 `provision` is [`branchyard::Provisioning`](provisioning.md)'s serde form: `secrets` (names only, `[{"name": "ANTHROPIC_API_KEY"}]`; a `from` is refused with `400`, and a name the operator did not define with `403 secret_not_allowed`; values come from the server's table), `auth`, `mcp_servers` (commands the server runs: refused unless it allows client commands), `instructions`, `model`, `effort` and `telemetry`. It is accepted on task, send and fork requests and stored with the branch, with the server's sources.
 
-`delegation` is an [`Envelope`](delegation.md#the-envelope), `{max_depth, max_children, harnesses}`, all three required; with it the harness gets the delegation tools, through the server's `by`, for each of its turns. `allow_delegation` adds the rule that allows the harness's shell commands running that `by` with a delegation subcommand, after the policy's own rules, like `by --allow-delegation`. Either is refused (`403 delegation_not_allowed`) unless the server allows delegation. `unapproved_tools` runs a profile whose driver cannot route tool approvals, like `by --allow-unapproved-tools`, and is refused (`403 unapproved_tools_not_allowed`) unless the server allows it.
+`delegation` is an [`Envelope`](delegation.md#the-envelope), `{max_depth, max_children, harnesses}`, all three required; with it the harness gets the delegation tools, through the server's `by`, for each of its turns. `allow_delegation` adds the rule that allows the harness's shell commands running that `by` with a delegation subcommand, after the policy's own rules, like `by --allow-delegation`. Either is refused (`403 delegation_not_allowed`) unless the server allows delegation. `seats` makes the branch a [rig](rigs.md)'s root, in [`Seats`](../crates/branchyard/src/seats.rs)'s serde form (`{rig, seat, delegates_to, table}`); it needs `delegation`, is refused like it without the opt-in, and each seat's `provision` is held to the rules above, so its secrets come from the server's table. `by --remote rig run` sends it. `unapproved_tools` runs a profile whose driver cannot route tool approvals, like `by --allow-unapproved-tools`, and is refused (`403 unapproved_tools_not_allowed`) unless the server allows it.
 
-`send` takes `prompt`, `budget`, `policy`, `check`, `command`, `delegation`, `allow_delegation` and `unapproved_tools`; the branch keeps its harness, provider, recorded command, environment and envelope. A server that does not allow delegation refuses to send to a branch that was given an envelope, since its harness would get the tools. `fork` takes `prompt`, `name`, `fresh_session`, `harness`, `budget`, `policy`, `check`, `isolated`, `command`, `provider`, `delegation`, `allow_delegation` and `unapproved_tools`; without a provider it keeps its parent's. `merge` takes an optional `target`, defaulting to the branch checked out in the served repository.
+`send` takes `prompt`, `budget`, `policy`, `check`, `command`, `delegation`, `allow_delegation` and `unapproved_tools`; the branch keeps its harness, provider, recorded command, environment and envelope. A server that does not allow delegation refuses to send to a branch that was given an envelope, since its harness would get the tools. `fork` takes `prompt`, `name`, `fresh_session`, `harness`, `budget`, `policy`, `check`, `isolated`, `command`, `provider`, `delegation`, `allow_delegation` and `unapproved_tools`; without a provider it keeps its parent's. `reincarnate` (`docs/lifecycle.md#reincarnation`) takes the same fields as `fork` except `prompt` and `fresh_session` (there is no prompt to give: the engine generates a handoff brief, and the session is always fresh); without `harness` or `provision.model` it keeps its parent's, so a plain call reincarnates onto the same configuration with a fresh session. `merge` takes an optional `target`, defaulting to the branch checked out in the served repository.
 
-`spawn` takes `prompt`, `harness`, `name`, `base`, `budget`, `policy`, `check`, `max_depth`, `deny` and `unapproved_tools`, the flags of `by spawn`. It acts with the server's authority as a person, as `by spawn --parent` does locally: the parent's envelope bounds the child exactly as it bounds a local spawn, and a parent without delegation cannot spawn. The operation runs the child's first turn, waits for the parent's subtree on this server as the local command does, and its result holds the child's `inspection`. It locks the parent as well as the child, as `integrate` locks both branches, so a send to the parent or its removal is refused with `409 branch_busy` until the operation finishes. `integrate` takes `{}` and refuses (`403 denied`) a branch no other branch delegated; its result holds `merged`. The inspection, event page and children reads act with the same authority and need no opt-in.
+`spawn` takes `prompt`, `harness`, `name`, `base`, `budget`, `policy`, `check`, `max_depth`, `deny`, `unapproved_tools` and `seat`, the flags of `by spawn`; with a `seat` and no `name`, the child is named `<parent>-<seat>` before the operation starts. It acts with the server's authority as a person, as `by spawn --parent` does locally: the parent's envelope bounds the child exactly as it bounds a local spawn, and a parent without delegation cannot spawn. The operation runs the child's first turn, waits for the parent's subtree on this server as the local command does, and its result holds the child's `inspection`. It locks the parent as well as the child, as `integrate` locks both branches, so a send to the parent or its removal is refused with `409 branch_busy` until the operation finishes. `integrate` takes `{}` and refuses (`403 denied`) a branch no other branch delegated; its result holds `merged`. The inspection, event page and children reads act with the same authority and need no opt-in. So do the messaging routes: `inbox` reads `b`'s own inbox; `ask`, `report`, `escalate` and `answer` act as `b` with the server's authority, following the same delegation-tree rules as locally ([delegation](delegation.md#inbox)), and need no opt-in either, since none of them runs a turn. `ask`'s `wait_seconds` blocks the request handler for up to that long (capped at 120s server-side; poll `inbox` for longer) using the same store wait a local `ask --wait` does.
 
 `cancel` takes an empty object, `{}`. It is not an operation: it records a durable cancel request for the branch's running turn and each running turn delegated below it, and answers `200` with the branches that were running (an empty list when none was, and for a repeat). The engine running each turn, in the server or in another process on the repository such as a local `by run`, observes the request within 100 ms, interrupts the harness, and ends the branch `interrupted`; the operation that ran the turn then succeeds with that status. The branch's log records `cancelled by <token name> through the server`. It ignores branch locks, since the branches it is for are the ones an operation holds, and needs no idempotency key.
+
+`steer` takes `{"text": "..."}`. Like `cancel`, it is not an operation and ignores branch locks: the running turn's operation holds them, and the input is for exactly that turn. It queues the input durably, bound to the branch's running turn ([durability](durability.md#steered-input)); the engine running that turn, in the server or in another process on the repository, writes it to the harness within 100 ms through the harness's own mid-turn input ([which harnesses, and when the model sees it](harness-integration.md#steering-a-running-turn)). The answer waits up to 10 seconds for that and returns the `Steer`, whose `state` is `{"state": "delivered" | "accepted" | "pending"}` or `{"state": "refused", "reason": "..."}`. It is refused with `409 not_running` when no turn runs, and `422 unsupported`, with the reason, when the branch's harness cannot take input mid-turn; it never interrupts the turn instead. The branch's log records `steered` with `by` `<token name> through the server`. Budgets and permissions are the running turn's own. `by --remote send --steer` calls it.
 
 ### Operations
 
@@ -172,6 +195,35 @@ data: {"seq":42,"branch":"flaky","at_ms":1790000000123,"activity":{"harness":{"t
 
 The feed is the repository's own event store (see [durability](durability.md#reading-events-from-a-cursor)): each recorded event of every branch has a position, assigned in commit order, from 1. Per-branch order follows the branch's log; across branches it is the order events were recorded, not `at_ms`. Positions only grow and may skip numbers. Reconnecting with the last `id` continues with the next entry, with no gap or repeat, across server restarts. A cursor past the end gets `400 cursor_out_of_range`. Activity recorded by other processes in the same repository (a local `by run`) appears within the poll interval, 500 ms. Positions from a server of an earlier version, which kept its own copy of the feed, name different events.
 
+### Webhooks
+
+`by serve --webhook URL [--webhook-secret FILE] [--webhook-events KINDS] [--webhook-insecure]`, repeatable (each `--webhook-secret`/`--webhook-events` applies to the `--webhook` immediately before it), or in the JSON config:
+
+```json
+{ "webhooks": [
+    { "url": "https://ops.example/hooks/branchyard", "secret_file": "/etc/branchyard/hook.key",
+      "events": ["stall", "merge", "failure"] }
+  ],
+  "webhook_insecure": false
+}
+```
+
+Without `secret`/`secret_file`, a secret is generated into `DATA-DIR/webhook-N.secret` (mode 600), the same way an omitted token is. `events` filters which kinds of activity this target receives — `status`, `stall`, `permission_wait`, `merge`, `failure` — omitted or empty means every kind; a status change is also tagged `merge` or `failure` when it settles there. `url` must be `https://` unless its host is a loopback literal (`localhost`, `127.0.0.1`, `::1`) or `--webhook-insecure`/`webhook_insecure` is given.
+
+Each target gets every served repository's activity, delivered from the durable feed by its own cursor (`docs/durability.md#webhook-cursors`), so a restart resumes rather than replaying or skipping: at-least-once. A delivery is:
+
+```json
+POST https://ops.example/hooks/branchyard
+X-Branchyard-Signature: sha256=<hex HMAC-SHA256 of the body, with the target's secret>
+X-Branchyard-Delivery: 57
+Content-Type: application/json
+
+{"repo": "app", "seq": 57, "branch": "flaky", "at_ms": 1790000000123,
+ "kinds": ["stall"], "activity": {"stalled": {"since_ms": 1790000000000}}}
+```
+
+`seq` (also sent as `X-Branchyard-Delivery`) is the feed position: use it as the receiver's dedupe key, since at-least-once means the same entry can arrive more than once. `activity` is the same [`RecordedEvent::activity`](../crates/branchyard/src/lib.rs) shape the SSE stream and `by log --json` use. A delivery is retried with backoff on a non-2xx response or a connection failure; after repeated failure it is logged as dead-lettered to the server's stderr and the cursor still advances, so one broken target never blocks the others or the feed.
+
 ### Errors
 
 Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; messages are for people. SDK errors keep the SDK's own message, so `by --remote` prints what local `by` prints.
@@ -183,7 +235,7 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `unknown_repo`, `unknown_branch`, `unknown_operation` | 404 | No such thing |
 | `invalid_request` | 400 | Malformed JSON, unknown field, empty prompt, bad budget, bad cursor |
 | `unsupported_media_type` | 415 | `POST` body not declared as JSON |
-| `body_too_large` | 413 | Body over `max_body_bytes`; `detail.limit` |
+| `body_too_large` | 413 | Body over `max_body_bytes`, or an artifact upload over `max_artifact_bytes`; `detail.limit` |
 | `command_not_allowed` | 403 | A request `command`, or `provision.mcp_servers`, on a server that does not allow client commands |
 | `secret_not_allowed` | 403 | A `provision.secrets` name the server's operator did not define; `detail.secret` |
 | `provider_not_allowed` | 403 | A provider the server's operator did not allow; `detail.provider` |
@@ -209,12 +261,18 @@ export BRANCHYARD_REMOTE=https://by.example:8421
 export BRANCHYARD_TOKEN_FILE=~/.config/branchyard/token
 by --repo app run "Make the flaky parser test deterministic" --check "cargo test" --yes
 by fan "..." --harness claude-code,codex --yes
-by ls; by diff flaky; by merge flaky; by watch; by cancel flaky
+by ls; by diff flaky; by merge flaky; by watch; by send flaky --steer "also run the linter"; by cancel flaky
 ```
 
-Global options go before the command: `--remote URL`, `--token-file FILE`, `--repo NAME` (needed when the server serves several), `--ca-file FILE` (extra trust for `https`). Each has an environment variable: `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO`, `BRANCHYARD_CA_FILE`. Output is the local output: the CLI renders the same SDK values with the same code, and tests compare each command's output, `watch` aside, local against remote, including the `--json` output of `spawn`, `inspect`, `events`, `children`, `integrate` and `send`.
+Global options go before the command: `--remote URL`, `--token-file FILE`, `--repo NAME` (needed when the server serves several), `--ca-file FILE` (extra trust for `https`). Each has an environment variable: `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO`, `BRANCHYARD_CA_FILE`. Output is the local output: the CLI renders the same SDK values with the same code, and tests compare each command's output, `watch` aside, local against remote, including the `--json` output of `spawn` (with and without `--seat`), `inspect`, `events`, `children`, `integrate`, `send`, `rig run`, `ask`, `report`, `escalate`, `answer` and `inbox`.
 
 Every command runs remotely, with the same flags: `--provider` and its options, `--delegate`, `--allow-delegation` and `--allow-unapproved-tools` are sent in the request, and the server refuses what its operator did not allow. `spawn` needs `--parent`, as outside a harness locally, and the child runs on the server. Differences: `--ask` is refused (pass `--yes`, or leave requests denied); without `--yes` requests are denied; worktree paths, `--substrate-key` (which must be absolute) and `--pass-env` values are the server's; `by harnesses` shows the server's `PATH`. With `--json`, a server error prints `{"error": {"kind", "message"}}` with the kind local `by` reports (the server's `git_error` is `git`, and so on), and a server that cannot be reached is `unavailable`. Interrupting `by run` stops watching, not the work; `by cancel` stops the work. `by run --delegate` follows the activity of the children the branch spawns, and prints the `delegated` table once they have finished on the server.
+
+## Herdr
+
+[`plugins/herdr`](../plugins/herdr/README.md) is a [Herdr](https://github.com/herdrdev/herdr) plugin built on this API and `by`. Its bridge opens the event stream, lists the branches, and applies the entries after the stream's starting cursor ([`EventStream::open`](../crates/branchyard-client/src/lib.rs)); it keeps one Herdr tab per branch running `by log --follow <branch>`, and reports each branch's state on it with `herdr pane report-agent --source custom:branchyard` (`running` is `working`, a waiting permission request `blocked`, every settled status `idle` with what happened as the message). When the stream drops it reconnects after the last cursor it applied. Herdr actions run `by merge`, `by cancel` and `by send` for the branch in the focused pane. It uses the same `BRANCHYARD_*` settings as `by --remote`. It is tested against a fake `herdr`, not yet against Herdr itself.
+
+`by log --follow` works in both modes: locally it waits on the store; remotely it polls the branch's events by cursor every half second and keeps retrying while the server is unreachable.
 
 ## Deployment notes
 
@@ -233,6 +291,7 @@ Every command runs remotely, with the same flags: `--provider` and its options, 
 | Branches, candidates, event logs, the activity feed | Each repository's `.branchyard/state.db`, or the database with `--database`, written by the engine in transactions | Yes |
 | Operations and idempotency keys | `DATA-DIR/state.db` committed with `synchronous=FULL`, or the database's `by_operations` table committed with `synchronous_commit = on`, before `202` and at each state change | Yes; unfinished ones become `interrupted` |
 | Cancel requests, `max_duration` deadlines, turn leases, journaled steps, harness process identities | Each repository's `.branchyard/state.db`, or the database | Yes |
+| Webhook delivery cursors | `DATA-DIR/state.db`'s `webhook_cursors` table, or the database's `by_webhook_cursors` | Yes |
 | Branch locks | Memory | No; they end with the operations |
 | A turn in progress | The server process and its harness child | No: it is recovered, not continued |
 
@@ -246,7 +305,7 @@ Build with the `postgres` feature (`cargo install --locked --path crates/branchy
 by serve --database 'postgres://branchyard@db.internal/branchyard' --repo app=/srv/app
 ```
 
-Each served repository's branch records, event log and feed, leases, journaled steps, harness processes and cancels are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations` table. Tables are created when missing, in the connection's `search_path` schema, so one schema per server: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token.
+Each served repository's branch records, event log and feed, leases, journaled steps, harness processes, cancels and steered input are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations` table. Tables are created when missing, in the connection's `search_path` schema, so one schema per server: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token.
 
 What it is not yet:
 
@@ -270,6 +329,7 @@ What it is not yet:
 
 | Crate | Contents |
 |---|---|
-| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown. Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs) |
+| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown; [`storage_routes.rs`](../crates/branchyard-server/src/storage_routes.rs) for artifacts and scratch areas. Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs), [`storage.rs`](../crates/branchyard-server/tests/storage.rs) |
 | [`branchyard-client`](../crates/branchyard-client/src/lib.rs) | Wire types, a blocking HTTP/1.1 client over rustls, an SSE parser, and a reconnecting event stream |
 | [`branchyard-cli`](../crates/branchyard-cli/src/main.rs) | `by serve`, remote mode and `by watch` |
+| [`branchyard-herdr`](../crates/branchyard-herdr/src/main.rs) | The Herdr plugin's binary: the bridge, the branch pane, and the merge, cancel and send actions. Tests: [`bridge.rs`](../crates/branchyard-herdr/tests/bridge.rs) (against `by serve` and a fake `herdr`), [`manifest.rs`](../crates/branchyard-herdr/tests/manifest.rs) |

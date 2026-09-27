@@ -1,0 +1,11 @@
+{
+  "credentials": [
+    {
+      "keys": [
+        "OPENAI_API_KEY"
+      ],
+      "kind": "dotenv",
+      "path": ".hermes/.env"
+    }
+  ]
+}

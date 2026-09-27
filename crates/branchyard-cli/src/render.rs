@@ -180,6 +180,17 @@ pub fn event_line(event: &Event, style: Style) -> Option<String> {
         }
         Event::UsageObserved { usage, .. } => dim(usage_text(usage)),
         Event::InterruptAcknowledged { turn } => dim(format!("turn {turn} interrupt acknowledged")),
+        Event::SteerAccepted { turn, steer } => {
+            dim(format!("turn {turn} took steered input {steer}"))
+        }
+        Event::SteerRejected {
+            turn,
+            steer,
+            reason,
+        } => style.paint(
+            Tone::Yellow,
+            &format!("turn {turn} did not take steered input {steer}: {reason}"),
+        ),
         Event::TurnEnded { turn, outcome } => outcome_line(*turn, outcome, style),
         Event::OutcomeUnknown { turn, reason } => {
             style.paint(Tone::Red, &format!("turn {turn} outcome unknown: {reason}"))
@@ -253,6 +264,7 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             auth,
             files,
             env,
+            secrets,
             unused_secrets,
         } => {
             let mut parts = Vec::new();
@@ -268,8 +280,26 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             if !unused_secrets.is_empty() {
                 parts.push(format!("unused secrets {}", unused_secrets.join(", ")));
             }
+            let exposed: Vec<&str> = secrets
+                .iter()
+                .filter(|d| d.tool_env)
+                .map(|d| d.secret.as_str())
+                .collect();
+            if !exposed.is_empty() {
+                parts.push(format!(
+                    "{} in the environment of its tool commands",
+                    exposed.join(", ")
+                ));
+            }
             style.paint(Tone::Dim, &format!("provisioned: {}", parts.join("; ")))
         }
+        Activity::Steered { by, text, .. } => style.paint(
+            Tone::Bold,
+            &format!(
+                "steered by {by}: {}",
+                truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 100)
+            ),
+        ),
         Activity::Recovered { reason, killed } => {
             let killed = match killed.is_empty() {
                 true => String::new(),
@@ -283,6 +313,49 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 ),
             };
             style.paint(Tone::Yellow, &format!("recovered: {reason}{killed}"))
+        }
+        Activity::Stalled { .. } => style.paint(
+            Tone::Yellow,
+            "stalled: no harness activity for its stall window",
+        ),
+        Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
+        Activity::Message(message) => {
+            let reply = match message.in_reply_to {
+                Some(id) => format!(" (re #{id})"),
+                None => String::new(),
+            };
+            style.paint(
+                Tone::Cyan,
+                &format!(
+                    "message #{} {} {} -> {}{reply}: {}",
+                    message.id,
+                    message.kind,
+                    message.from,
+                    message.to,
+                    truncate(
+                        &message
+                            .text
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        100
+                    )
+                ),
+            )
+        }
+        Activity::MessagesDelivered { ids, via } => {
+            let ids = ids
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let via = match via {
+                branchyard::DeliveredVia::TurnStart => "at the turn's start".to_owned(),
+                branchyard::DeliveredVia::Steer { steer } => {
+                    format!("into the running turn (steered input {steer})")
+                }
+            };
+            style.paint(Tone::Cyan, &format!("delivered {ids} {via}"))
         }
     })
 }
@@ -512,6 +585,16 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
     }
 }
 
+/// [`status_text`], with a `stalled` marker while the branch's running turn
+/// has had no harness activity for its stall window.
+pub fn branch_status_text(info: &BranchInfo) -> (String, Tone) {
+    let (text, tone) = status_text(&info.status);
+    match info.stalled {
+        true => (format!("{text} (stalled)"), Tone::Yellow),
+        false => (text, tone),
+    }
+}
+
 pub fn candidate_text(candidate: Option<&CandidateInfo>) -> String {
     match candidate {
         None => "-".into(),
@@ -627,7 +710,7 @@ pub fn branch_table(infos: &[BranchInfo], now: u64, style: Style) -> String {
                 0 => info.name.clone(),
                 _ => format!("{}└ {}", "  ".repeat(depth - 1), info.name),
             };
-            let (status, tone) = status_text(&info.status);
+            let (status, tone) = branch_status_text(info);
             vec![
                 Cell::plain(name),
                 Cell::plain(&info.harness),
@@ -812,6 +895,10 @@ pub fn summary(info: &BranchInfo, style: Style) -> String {
 /// `by inspect`.
 pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let (status, tone) = status_text(&i.status);
+    let (status, tone) = match i.stalled {
+        true => (format!("{status} (stalled)"), Tone::Yellow),
+        false => (status, tone),
+    };
     let money = |v: Option<f64>| v.map_or("unknown".into(), usd);
     let mut pairs = vec![
         ("branch", i.name.clone()),
@@ -849,6 +936,13 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
             ),
         ));
     }
+    if let Some(seat) = &i.seat {
+        let spawns = match i.seats.is_empty() {
+            true => "none".to_owned(),
+            false => i.seats.join(", "),
+        };
+        pairs.push(("seat", format!("{seat}; spawns seats: {spawns}")));
+    }
     if !i.last_message.is_empty() {
         pairs.push(("last message", i.last_message.trim_end().to_owned()));
     }
@@ -857,7 +951,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
 
 /// `by show`.
 pub fn details(info: &BranchInfo, now: u64, style: Style) -> String {
-    let (status, tone) = status_text(&info.status);
+    let (status, tone) = branch_status_text(info);
     let mut pairs = vec![
         ("branch", info.name.clone()),
         ("git branch", info.git_branch.clone()),
@@ -867,6 +961,9 @@ pub fn details(info: &BranchInfo, now: u64, style: Style) -> String {
     ];
     if let Some(parent) = &info.parent {
         pairs.push(("forked from", parent.clone()));
+    }
+    if let Some(superseded_by) = &info.superseded_by {
+        pairs.push(("reincarnated as", superseded_by.clone()));
     }
     pairs.extend([
         ("base", short_commit(&info.base).to_owned()),
@@ -978,6 +1075,8 @@ mod tests {
             turns: 1,
             cost_usd: None,
             created_at: 10_000,
+            stalled: false,
+            superseded_by: None,
         }
     }
 

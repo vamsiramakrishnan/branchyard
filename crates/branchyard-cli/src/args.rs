@@ -30,6 +30,10 @@ pub struct TaskArgs {
     pub max_turns: Option<u32>,
     /// From `--max-minutes`.
     pub max_duration: Option<Duration>,
+    /// From `--stall-after`, in minutes.
+    pub stall_after: Option<Duration>,
+    /// From `--stall-action`; ignored without `--stall-after`.
+    pub stall_action: branchyard::StallAction,
     pub permissions: Permissions,
     pub isolated: bool,
     /// Executable and fixed arguments replacing the profile's.
@@ -108,6 +112,48 @@ pub struct SpawnArgs {
     pub wait: bool,
     pub max_depth: Option<u32>,
     pub deny: Vec<String>,
+    /// `--seat`: the rig seat the child fills.
+    pub seat: Option<String>,
+    pub json: bool,
+}
+
+/// `by rig check FILE` or `by rig run FILE PROMPT`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RigArgs {
+    /// `run` with its prompt; `None` for `check`.
+    pub prompt: Option<String>,
+    pub file: String,
+    /// The root branch's name, instead of the rig's.
+    pub name: Option<String>,
+    pub base: Option<String>,
+    /// The root's executable, for development and testing.
+    pub command: Option<Vec<String>>,
+    pub unapproved_tools: bool,
+    pub json: bool,
+}
+
+/// `by artifact publish|list|get|share ...`; see `docs/storage.md`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArtifactArgs {
+    pub action: String,
+    /// `publish`'s file, or `get`/`share`'s id.
+    pub arg: Option<String>,
+    pub name: Option<String>,
+    pub media_type: Option<String>,
+    pub labels: Vec<(String, String)>,
+    pub out: Option<String>,
+    pub to: Option<String>,
+    pub branch: Option<String>,
+    pub json: bool,
+}
+
+/// `by scratch create|list|lock|unlock|share ...`; see `docs/storage.md`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScratchArgs {
+    pub action: String,
+    pub name: Option<String>,
+    pub to: Option<String>,
+    pub branch: Option<String>,
     pub json: bool,
 }
 
@@ -126,12 +172,19 @@ pub enum Command {
         branch: String,
         prompt: String,
         task: TaskArgs,
+        /// `--steer`: into the running turn rather than a new one.
+        steer: bool,
+        wait: bool,
         json: bool,
     },
     Fork {
         branch: String,
         prompt: String,
         fresh_session: bool,
+        task: TaskArgs,
+    },
+    Reincarnate {
+        branch: String,
         task: TaskArgs,
     },
     Ls {
@@ -147,6 +200,7 @@ pub enum Command {
     Log {
         branch: String,
         json: bool,
+        follow: bool,
     },
     Merge {
         branch: String,
@@ -154,6 +208,7 @@ pub enum Command {
     },
     Rm {
         branch: String,
+        keep_credentials: bool,
     },
     Harnesses {
         json: bool,
@@ -198,6 +253,36 @@ pub enum Command {
         branch: Option<String>,
         json: bool,
     },
+    Ask {
+        as_branch: Option<String>,
+        text: String,
+        wait_seconds: Option<f64>,
+        json: bool,
+    },
+    Report {
+        as_branch: Option<String>,
+        text: String,
+        json: bool,
+    },
+    Escalate {
+        as_branch: Option<String>,
+        text: String,
+        json: bool,
+    },
+    Answer {
+        as_branch: Option<String>,
+        message_id: u64,
+        text: String,
+        json: bool,
+    },
+    Inbox {
+        as_branch: Option<String>,
+        unread: bool,
+        json: bool,
+    },
+    Rig(RigArgs),
+    Artifact(ArtifactArgs),
+    Scratch(ScratchArgs),
     /// General help, or one command's.
     Help {
         topic: Option<&'static Spec>,
@@ -368,6 +453,16 @@ const MAX_MINUTES: Flag = Flag {
     value: Some("N"),
     help: "Interrupt the turn after N minutes",
 };
+const STALL_AFTER: Flag = Flag {
+    long: "stall-after",
+    value: Some("N"),
+    help: "Mark the branch stalled after N minutes with no harness activity",
+};
+const STALL_ACTION: Flag = Flag {
+    long: "stall-action",
+    value: Some("notify|interrupt"),
+    help: "What a stall does (default: notify); needs --stall-after",
+};
 const ISOLATED: Flag = Flag {
     long: "isolated",
     value: None,
@@ -478,10 +573,21 @@ const FRESH_SESSION: Flag = Flag {
     value: None,
     help: "Start a new session if the harness cannot fork its conversation",
 };
+const STEER: Flag = Flag {
+    long: "steer",
+    value: None,
+    help: "Add the prompt to the branch's running turn without interrupting it, instead of \
+           starting a new turn; refused when no turn runs or the harness cannot take it",
+};
 const JSON: Flag = Flag {
     long: "json",
     value: None,
     help: "Print JSON",
+};
+const FOLLOW: Flag = Flag {
+    long: "follow",
+    value: None,
+    help: "Keep printing events as they are recorded, until interrupted; with --json, one object per line",
 };
 const INTERVAL: Flag = Flag {
     long: "interval",
@@ -526,7 +632,7 @@ const PARENT: Flag = Flag {
 const WAIT: Flag = Flag {
     long: "wait",
     value: None,
-    help: "Wait for the child's turn to end and show it (outside a harness, spawn always waits)",
+    help: "Wait for the turn to end and show it (outside a harness, spawn and send always wait)",
 };
 const MAX_DEPTH: Flag = Flag {
     long: "max-depth",
@@ -538,6 +644,26 @@ const DENY: Flag = Flag {
     value: Some("TOOL,TOOL,..."),
     help: "Tools the child is denied outright; a trailing * matches a prefix",
 };
+const SEAT: Flag = Flag {
+    long: "seat",
+    value: Some("NAME"),
+    help: "In a rig, the seat the child fills; it sets the child's harness, limits, check and instructions",
+};
+const AS_BRANCH: Flag = Flag {
+    long: "as",
+    value: Some("BRANCH"),
+    help: "Act as this branch (outside a harness; inside one, it is the harness's own)",
+};
+const WAIT_SECONDS: Flag = Flag {
+    long: "wait",
+    value: Some("SECS"),
+    help: "Block up to SECS seconds for an answer (default: return once the question is sent)",
+};
+const UNREAD: Flag = Flag {
+    long: "unread",
+    value: None,
+    help: "Only messages not yet delivered to a turn",
+};
 const CURSOR: Flag = Flag {
     long: "cursor",
     value: Some("N"),
@@ -547,6 +673,36 @@ const LIMIT: Flag = Flag {
     long: "limit",
     value: Some("N"),
     help: "At most N events (default 50, at most 200)",
+};
+const KEEP_CREDENTIALS: Flag = Flag {
+    long: "keep-credentials",
+    value: None,
+    help: "Keep the credential files provisioning wrote in a home a fork still uses",
+};
+const ACT_AS: Flag = Flag {
+    long: "branch",
+    value: Some("NAME"),
+    help: "Act as this branch (outside a harness; inside one, it is the harness's own)",
+};
+const ARTIFACT_LABEL: Flag = Flag {
+    long: "label",
+    value: Some("KEY=VALUE"),
+    help: "A label on the published artifact; repeatable",
+};
+const ARTIFACT_OUT: Flag = Flag {
+    long: "out",
+    value: Some("PATH"),
+    help: "Where to write the artifact's bytes",
+};
+const ARTIFACT_TO: Flag = Flag {
+    long: "to",
+    value: Some("BRANCH"),
+    help: "The branch to share with",
+};
+const MEDIA_TYPE: Flag = Flag {
+    long: "media-type",
+    value: Some("TYPE"),
+    help: "The artifact's media type (default: application/octet-stream)",
 };
 const INTO: Flag = Flag {
     long: "into",
@@ -591,7 +747,7 @@ const TELEMETRY: Flag = Flag {
 };
 
 /// Flags that may be given more than once.
-const REPEATABLE: &[&str] = &["secret", "mcp"];
+const REPEATABLE: &[&str] = &["secret", "mcp", "label"];
 
 pub static COMMANDS: &[Spec] = &[
     Spec {
@@ -606,6 +762,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -651,6 +809,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -689,10 +849,13 @@ pub static COMMANDS: &[Spec] = &[
         positionals: &["branch", "prompt"],
         summary: "Continue a branch's session with another prompt",
         flags: &[
+            STEER,
             CHECK,
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             COMMAND,
@@ -706,6 +869,7 @@ pub static COMMANDS: &[Spec] = &[
             MODEL,
             EFFORT,
             TELEMETRY,
+            WAIT,
             JSON,
         ],
     },
@@ -720,6 +884,54 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
+            YES,
+            ASK,
+            ISOLATED,
+            COMMAND,
+            PROVIDER,
+            IMAGE,
+            CPUS,
+            MEMORY,
+            PASS_ENV,
+            SUBSTRATE_ENDPOINT,
+            SUBSTRATE_ROUTER,
+            SUBSTRATE_TEMPLATE,
+            SUBSTRATE_KEY,
+            SUBSTRATE_ATESPACE,
+            SUBSTRATE_WORKDIR,
+            SUBSTRATE_HOME,
+            SUBSTRATE_CA,
+            SUBSTRATE_CLIENT_CERT,
+            SUBSTRATE_CLIENT_KEY,
+            SUBSTRATE_ROUTER_CA,
+            SUBSTRATE_INSECURE,
+            DELEGATE,
+            ALLOW_DELEGATION,
+            ALLOW_UNAPPROVED_TOOLS,
+            SECRET,
+            AUTH,
+            MCP,
+            INSTRUCTIONS,
+            MODEL,
+            EFFORT,
+            TELEMETRY,
+        ],
+    },
+    Spec {
+        name: "reincarnate",
+        positionals: &["branch"],
+        summary: "Fork a branch's candidate into a fresh session with a generated handoff brief",
+        flags: &[
+            NAME,
+            HARNESS,
+            CHECK,
+            BUDGET_USD,
+            MAX_TURNS,
+            MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -775,7 +987,7 @@ pub static COMMANDS: &[Spec] = &[
         name: "log",
         positionals: &["branch"],
         summary: "Show a branch's recorded events",
-        flags: &[JSON],
+        flags: &[JSON, FOLLOW],
     },
     Spec {
         name: "merge",
@@ -787,7 +999,7 @@ pub static COMMANDS: &[Spec] = &[
         name: "rm",
         positionals: &["branch"],
         summary: "Remove a branch's worktree and record",
-        flags: &[],
+        flags: &[KEEP_CREDENTIALS],
     },
     Spec {
         name: "harnesses",
@@ -813,6 +1025,7 @@ pub static COMMANDS: &[Spec] = &[
         summary: "Delegate to a new child branch of this branch",
         flags: &[
             PARENT,
+            SEAT,
             HARNESS,
             NAME,
             BASE,
@@ -820,6 +1033,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             MAX_DEPTH,
             DENY,
             ALLOW_UNAPPROVED_TOOLS,
@@ -858,6 +1073,62 @@ pub static COMMANDS: &[Spec] = &[
         positionals: &["branch?"],
         summary: "List the branches a branch delegated to",
         flags: &[JSON],
+    },
+    Spec {
+        name: "ask",
+        positionals: &["text"],
+        summary: "Ask this branch's parent a question",
+        flags: &[AS_BRANCH, WAIT_SECONDS, JSON],
+    },
+    Spec {
+        name: "report",
+        positionals: &["text"],
+        summary: "Report to this branch's parent",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "escalate",
+        positionals: &["text"],
+        summary: "Escalate to this branch's parent, or further up if its rig seat allows",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "answer",
+        positionals: &["message-id", "text"],
+        summary: "Answer a message (usually a question) from a descendant",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "inbox",
+        positionals: &[],
+        summary: "List messages addressed to this branch",
+        flags: &[AS_BRANCH, UNREAD, JSON],
+    },
+    Spec {
+        name: "rig",
+        positionals: &["check|run", "file", "prompt?"],
+        summary: "Check a rig spec and print its plan, or run its root seat with a prompt",
+        flags: &[NAME, BASE, COMMAND, ALLOW_UNAPPROVED_TOOLS, JSON],
+    },
+    Spec {
+        name: "artifact",
+        positionals: &["publish|list|get|share", "arg?"],
+        summary: "Publish, list, read or share an immutable artifact (see docs/storage.md)",
+        flags: &[
+            NAME,
+            MEDIA_TYPE,
+            ARTIFACT_LABEL,
+            ARTIFACT_OUT,
+            ARTIFACT_TO,
+            ACT_AS,
+            JSON,
+        ],
+    },
+    Spec {
+        name: "scratch",
+        positionals: &["create|list|lock|unlock|share", "name?"],
+        summary: "Create, list, lock, unlock or share a scratch area (see docs/storage.md)",
+        flags: &[ARTIFACT_TO, ACT_AS, JSON],
     },
     Spec {
         name: "mcp",
@@ -928,12 +1199,18 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             branch: next(),
             prompt: next(),
             task: m.task()?,
+            steer: m.switch("steer"),
+            wait: m.switch("wait"),
             json: m.switch("json"),
         },
         "fork" => Command::Fork {
             branch: next(),
             prompt: next(),
             fresh_session: m.switch("fresh-session"),
+            task: m.task()?,
+        },
+        "reincarnate" => Command::Reincarnate {
+            branch: next(),
             task: m.task()?,
         },
         "ls" => Command::Ls {
@@ -947,12 +1224,16 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "log" => Command::Log {
             branch: next(),
             json: m.switch("json"),
+            follow: m.switch("follow"),
         },
         "merge" => Command::Merge {
             branch: next(),
             into: m.value("into").map(str::to_owned),
         },
-        "rm" => Command::Rm { branch: next() },
+        "rm" => Command::Rm {
+            branch: next(),
+            keep_credentials: m.switch("keep-credentials"),
+        },
         "harnesses" => Command::Harnesses {
             json: m.switch("json"),
         },
@@ -985,6 +1266,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                     }
                     None => Vec::new(),
                 },
+                seat: m.value("seat").map(str::to_owned),
                 json: m.switch("json"),
             },
         },
@@ -1010,6 +1292,153 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             branch: optional.next(),
             json: m.switch("json"),
         },
+        "ask" => Command::Ask {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            wait_seconds: m.number("wait")?,
+            json: m.switch("json"),
+        },
+        "report" => Command::Report {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            json: m.switch("json"),
+        },
+        "escalate" => Command::Escalate {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            json: m.switch("json"),
+        },
+        "answer" => {
+            let message_id_text = next();
+            let message_id = message_id_text.parse::<u64>().map_err(|_| {
+                m.error(format!(
+                    "message-id must be a whole number, not '{message_id_text}'"
+                ))
+            })?;
+            Command::Answer {
+                as_branch: m.value("as").map(str::to_owned),
+                message_id,
+                text: next(),
+                json: m.switch("json"),
+            }
+        }
+        "inbox" => Command::Inbox {
+            as_branch: m.value("as").map(str::to_owned),
+            unread: m.switch("unread"),
+            json: m.switch("json"),
+        },
+        "rig" => {
+            let action = next();
+            let file = next();
+            let prompt = optional.next();
+            let prompt = match (action.as_str(), prompt) {
+                ("check", None) => None,
+                ("check", Some(extra)) => {
+                    return Err(m.error(format!(
+                        "rig check takes a file only, not '{extra}'; to run it, use rig run"
+                    )))
+                }
+                ("run", Some(prompt)) if !prompt.trim().is_empty() => Some(prompt),
+                ("run", _) => return Err(m.error("rig run needs a prompt for the root seat")),
+                (other, _) => {
+                    return Err(m.error(format!("unknown rig action '{other}'; use check or run")))
+                }
+            };
+            if prompt.is_none() {
+                for flag in ["name", "base", "command", "allow-unapproved-tools"] {
+                    if m.switch(flag) {
+                        return Err(m.error(format!("--{flag} applies to rig run")));
+                    }
+                }
+            }
+            let command = match m.value("command") {
+                None => None,
+                Some(line) => {
+                    let argv = split_words(line).map_err(|e| m.error(format!("--command: {e}")))?;
+                    if argv.is_empty() {
+                        return Err(m.error("--command needs an executable"));
+                    }
+                    Some(argv)
+                }
+            };
+            Command::Rig(RigArgs {
+                prompt,
+                file,
+                name: m.value("name").map(str::to_owned),
+                base: m.value("base").map(str::to_owned),
+                command,
+                unapproved_tools: m.switch("allow-unapproved-tools"),
+                json: m.switch("json"),
+            })
+        }
+        "artifact" => {
+            let action = next();
+            let arg = optional.next();
+            let labels = m
+                .values("label")
+                .iter()
+                .map(|kv| match kv.split_once('=') {
+                    Some((k, v)) => Ok((k.to_owned(), v.to_owned())),
+                    None => Err(m.error(format!("--label needs KEY=VALUE, not '{kv}'"))),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            match action.as_str() {
+                "publish" | "list" | "get" | "share" => {}
+                other => {
+                    return Err(m.error(format!(
+                        "unknown artifact action '{other}'; use publish, list, get or share"
+                    )))
+                }
+            }
+            if action == "publish" && arg.is_none() {
+                return Err(m.error("artifact publish needs a file"));
+            }
+            if (action == "get" || action == "share") && arg.is_none() {
+                return Err(m.error(format!("artifact {action} needs an id")));
+            }
+            if action == "get" && m.value("out").is_none() {
+                return Err(m.error("artifact get needs --out PATH"));
+            }
+            if action == "share" && m.value("to").is_none() {
+                return Err(m.error("artifact share needs --to BRANCH"));
+            }
+            Command::Artifact(ArtifactArgs {
+                action,
+                arg,
+                name: m.value("name").map(str::to_owned),
+                media_type: m.value("media-type").map(str::to_owned),
+                labels,
+                out: m.value("out").map(str::to_owned),
+                to: m.value("to").map(str::to_owned),
+                branch: m.value("branch").map(str::to_owned),
+                json: m.switch("json"),
+            })
+        }
+        "scratch" => {
+            let action = next();
+            let name = optional.next();
+            match action.as_str() {
+                "create" | "list" | "lock" | "unlock" | "share" => {}
+                other => {
+                    return Err(m.error(format!(
+                        "unknown scratch action '{other}'; use create, list, lock, unlock or share"
+                    )))
+                }
+            }
+            if action != "list" && name.is_none() {
+                return Err(m.error(format!("scratch {action} needs a name")));
+            }
+            if action == "share" && m.value("to").is_none() {
+                return Err(m.error("scratch share needs --to BRANCH"));
+            }
+            Command::Scratch(ScratchArgs {
+                action,
+                name,
+                to: m.value("to").map(str::to_owned),
+                branch: m.value("branch").map(str::to_owned),
+                json: m.switch("json"),
+            })
+        }
         "mcp" => {
             let mut args = Vec::new();
             for flag in ["root", "branch"] {
@@ -1217,6 +1646,37 @@ impl Matches {
                 }
             },
         };
+        let stall_after = match self.value("stall-after") {
+            None => None,
+            Some(text) => match text
+                .parse::<f64>()
+                .ok()
+                .filter(|m| m.is_finite() && *m > 0.0)
+            {
+                Some(minutes) => Some(
+                    Duration::try_from_secs_f64(minutes * 60.0)
+                        .map_err(|_| self.error(format!("--stall-after {text} is too large")))?,
+                ),
+                None => {
+                    return Err(self.error(format!(
+                        "--stall-after needs a positive number of minutes, not '{text}'"
+                    )))
+                }
+            },
+        };
+        let stall_action = match self.value("stall-action") {
+            None => branchyard::StallAction::Notify,
+            Some("notify") => branchyard::StallAction::Notify,
+            Some("interrupt") => branchyard::StallAction::Interrupt,
+            Some(text) => {
+                return Err(self.error(format!(
+                    "--stall-action must be 'notify' or 'interrupt', not '{text}'"
+                )))
+            }
+        };
+        if self.value("stall-action").is_some() && stall_after.is_none() {
+            return Err(self.error("--stall-action needs --stall-after"));
+        }
         let command = match self.value("command") {
             None => None,
             Some(line) => {
@@ -1254,6 +1714,8 @@ impl Matches {
             budget_usd,
             max_turns,
             max_duration,
+            stall_after,
+            stall_action,
             permissions,
             isolated: self.switch("isolated"),
             command,
@@ -1587,6 +2049,8 @@ mod tests {
                     budget_usd: Some(2.5),
                     max_turns: Some(3),
                     max_duration: Some(Duration::from_secs(90)),
+                    stall_after: None,
+                    stall_action: branchyard::StallAction::Notify,
                     permissions: Permissions::Yes,
                     isolated: true,
                     command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
@@ -1827,6 +2291,22 @@ mod tests {
     }
 
     #[test]
+    fn send_steer_is_a_switch() {
+        let Command::Send {
+            steer, json, task, ..
+        } = parse_str("send b --steer --json also-this").unwrap()
+        else {
+            panic!("not send")
+        };
+        assert!(steer && json);
+        assert_eq!(task, TaskArgs::default());
+        let Command::Send { steer, .. } = parse_str("send b go").unwrap() else {
+            panic!("not send")
+        };
+        assert!(!steer);
+    }
+
+    #[test]
     fn mcp_needs_a_root_and_a_branch() {
         assert_eq!(
             parse_str("mcp --root /r --branch b").unwrap(),
@@ -1882,6 +2362,8 @@ mod tests {
                     permissions: Permissions::Yes,
                     ..TaskArgs::default()
                 },
+                steer: false,
+                wait: false,
                 json: false,
             }
         );
@@ -1924,7 +2406,16 @@ mod tests {
             parse_str("log b").unwrap(),
             Command::Log {
                 branch: "b".into(),
-                json: false
+                json: false,
+                follow: false
+            }
+        );
+        assert_eq!(
+            parse_str("log --follow b").unwrap(),
+            Command::Log {
+                branch: "b".into(),
+                json: false,
+                follow: true
             }
         );
         assert_eq!(
@@ -1952,7 +2443,17 @@ mod tests {
         );
         assert_eq!(
             parse_str("rm b").unwrap(),
-            Command::Rm { branch: "b".into() }
+            Command::Rm {
+                branch: "b".into(),
+                keep_credentials: false
+            }
+        );
+        assert_eq!(
+            parse_str("rm b --keep-credentials").unwrap(),
+            Command::Rm {
+                branch: "b".into(),
+                keep_credentials: true
+            }
         );
         assert_eq!(err("merge b --into"), "--into needs a value TARGET");
     }
@@ -2147,6 +2648,6 @@ mod tests {
             "by fork <branch> <prompt> [options]"
         );
         assert_eq!(spec("ls").unwrap().usage(), "by ls [options]");
-        assert_eq!(spec("rm").unwrap().usage(), "by rm <branch>");
+        assert_eq!(spec("rm").unwrap().usage(), "by rm <branch> [options]");
     }
 }

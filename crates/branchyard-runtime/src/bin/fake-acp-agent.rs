@@ -41,9 +41,26 @@
 //! - `INSTRUCTED`: replies `instructed=<bool>`, whether a prompt this
 //!   process received began with Branchyard's instructions preamble. The
 //!   preamble is removed before any keyword is looked for.
+//! - `AWAIT_STEER`: replies `waiting for steering`, then waits until a
+//!   `_session/steering` request arrives, answers it `injected`, replies
+//!   `steered: <text>` and ends the turn. Until then it ends only on
+//!   `session/cancel`.
+//!
+//! It advertises the `_session/steering` extension
+//! (`_meta.steering.supported`) as claude-agent-acp does. Steering while a
+//! turn is open answers `injected` and replies `steered: <text>` into it;
+//! with none open, it answers `promptRequired`. With
+//! `FAKE_ACP_NO_STEER=1` it neither advertises nor handles the extension.
 //!
 //! With `FAKE_ACP_SILENT=1` in its environment it never answers
 //! `initialize`, so no prompt is ever submitted to it.
+//!
+//! Started as `fake-acp-agent --record-launch FILE ARG...`, standing in for
+//! a harness a driver launches with its own arguments, it writes to `FILE`
+//! as JSON what another process could see of it and exits: its command
+//! line as `/proc/self/cmdline` shows it, the names (not values) of its
+//! environment, and, for an argument after `--mcp-config` that names a
+//! file, that file's mode and the servers it lists.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -79,13 +96,54 @@ struct Active {
     permission: Option<u64>,
     /// The prompt, for writes that wait on the permission.
     text: String,
+    /// `AWAIT_STEER`: the first steer ends the turn.
+    awaits_steer: bool,
 }
 
 /// Branchyard's ACP instructions preamble, as the driver writes it.
 const PREAMBLE_OPEN: &str = "<branchyard-instructions>";
 const PREAMBLE_CLOSE: &str = "</branchyard-instructions>";
 
+/// Record what the process list shows of this process, and exit.
+fn record_launch(file: &str) {
+    let cmdline = std::fs::read("/proc/self/cmdline").unwrap_or_default();
+    let cmdline: Vec<String> = cmdline
+        .split(|b| *b == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect();
+    let mut env: Vec<String> = std::env::vars_os()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    env.sort();
+    let mcp_config = cmdline
+        .iter()
+        .position(|a| a == "--mcp-config")
+        .and_then(|at| cmdline.get(at + 1))
+        .filter(|path| path.starts_with('/'))
+        .map(|path| {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path)
+                .map(|m| format!("{:o}", m.permissions().mode() & 0o777))
+                .ok();
+            let servers: Vec<String> = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|config| config["mcpServers"].as_object().cloned())
+                .map(|servers| servers.keys().cloned().collect())
+                .unwrap_or_default();
+            json!({"path": path, "mode": mode, "servers": servers})
+        });
+    let record = json!({"cmdline": cmdline, "env": env, "mcp_config": mcp_config});
+    std::fs::write(file, record.to_string()).expect("the launch record is writable");
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--record-launch") {
+        record_launch(args.get(2).expect("--record-launch FILE"));
+        return;
+    }
     let mut instructed = false;
     let mut servers = Value::Null;
     let mut session = "fake-session-1".to_owned();
@@ -93,6 +151,7 @@ fn main() {
     let mut active: Option<Active> = None;
     let mut next_request = 1000;
     let silent = std::env::var_os("FAKE_ACP_SILENT").is_some_and(|v| v == "1");
+    let steering = std::env::var_os("FAKE_ACP_NO_STEER").is_none_or(|v| v != "1");
     let mut stubborn = false;
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -104,13 +163,34 @@ fn main() {
         let params = &message["params"];
         match (message["method"].as_str(), id) {
             (Some("initialize"), Some(_)) if silent => {}
-            (Some("initialize"), Some(id)) => reply(
-                &id,
-                json!({
+            (Some("initialize"), Some(id)) => {
+                let mut result = json!({
                     "protocolVersion": 1,
                     "agentCapabilities": {"loadSession": true, "sessionCapabilities": {"resume": {}}},
-                }),
-            ),
+                });
+                if steering {
+                    result["_meta"] = json!({"steering": {"supported": true}});
+                }
+                reply(&id, result)
+            }
+            (Some("_session/steering"), Some(id)) if steering => {
+                let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
+                match active.take() {
+                    Some(turn) => {
+                        reply(&id, json!({"outcome": "injected"}));
+                        chunk(&session, &format!("steered: {text}"));
+                        if turn.awaits_steer {
+                            reply(&turn.id, json!({"stopReason": "end_turn"}));
+                        } else {
+                            active = Some(turn);
+                        }
+                    }
+                    None => reply(
+                        &id,
+                        json!({"outcome": "promptRequired", "reason": "noRunningTurn"}),
+                    ),
+                }
+            }
             (Some("session/new"), Some(id)) => {
                 servers = params["mcpServers"].clone();
                 reply(&id, json!({"sessionId": session}));
@@ -162,6 +242,17 @@ fn main() {
                         id,
                         permission: None,
                         text: text.to_owned(),
+                        awaits_steer: false,
+                    });
+                    continue;
+                }
+                if text.contains("AWAIT_STEER") {
+                    chunk(&session, "waiting for steering");
+                    active = Some(Active {
+                        id,
+                        permission: None,
+                        text: text.to_owned(),
+                        awaits_steer: true,
                     });
                     continue;
                 }
@@ -275,6 +366,7 @@ fn prompt(
             id,
             permission: None,
             text: text.to_owned(),
+            awaits_steer: false,
         });
     }
     if text.contains("PERMISSION") {
@@ -296,6 +388,7 @@ fn prompt(
             id,
             permission: Some(*next_request),
             text: text.to_owned(),
+            awaits_steer: false,
         });
     }
     write_files(session, text);

@@ -29,6 +29,8 @@ pub fn open(dir: &Path, mode: SessionMode) -> Open {
         model: None,
         mcp_servers: Vec::new(),
         instructions: None,
+        mcp_config_file: None,
+        remote_mcp_servers: Vec::new(),
     }
 }
 

@@ -19,7 +19,7 @@ use crate::auth::{Method, Spec};
 use crate::edit::Edit;
 use crate::{
     needs_private_home, pass_session, unsupported, unused, Context, EnvVar, Plan, Provisioner,
-    Refused,
+    Refused, Via,
 };
 
 const DOTENV: &str = ".hermes/.env";
@@ -88,11 +88,24 @@ impl Provisioner for Hermes {
             needs_private_home(context, "Hermes's .env")?;
             plan.auth = Some(resolved.method.to_owned());
             let key = resolved.env_key.expect("an env method has a key");
+            // Hermes reads `~/.hermes/.env` into its own environment
+            // (python-dotenv); whether its terminal tool filters it could
+            // not be checked offline, so it is taken to reach tool
+            // commands.
             let pairs = match resolved.method {
-                "api-key" => vec![(
-                    key.to_owned(),
-                    context.secret(key).unwrap_or_default().to_owned(),
-                )],
+                "api-key" => {
+                    plan.deliver(
+                        key,
+                        Via::File {
+                            path: DOTENV.into(),
+                        },
+                        true,
+                    );
+                    vec![(
+                        key.to_owned(),
+                        context.secret(key).unwrap_or_default().to_owned(),
+                    )]
+                }
                 "vertex-ai" => {
                     let project = context
                         .secret("VERTEX_PROJECT_ID")
@@ -105,6 +118,26 @@ impl Provisioner for Hermes {
                     ];
                     for (name, value) in &pairs {
                         plan.set_env(EnvVar::secret(name, value.clone()));
+                    }
+                    let source = match context.secret("VERTEX_PROJECT_ID") {
+                        Some(_) => "VERTEX_PROJECT_ID",
+                        None => "GOOGLE_CLOUD_PROJECT",
+                    };
+                    plan.deliver(
+                        source,
+                        Via::Env {
+                            var: "VERTEX_PROJECT_ID".into(),
+                        },
+                        true,
+                    );
+                    if let Some(region) = REGIONS.iter().find(|r| context.secret(r).is_some()) {
+                        plan.deliver(
+                            region,
+                            Via::Env {
+                                var: "VERTEX_REGION".into(),
+                            },
+                            true,
+                        );
                     }
                     model.get_or_insert_with(|| VERTEX_DEFAULT_MODEL.to_owned());
                     pairs

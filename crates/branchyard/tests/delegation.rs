@@ -8,7 +8,8 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    Activity, BranchStatus, Budget, Delegate, Envelope, Error, Policy, Spawn, TaskOptions, Yard,
+    Activity, BranchStatus, Budget, ChildBudget, Delegate, Envelope, Error, Policy, Provisioning,
+    Seat, Seats, SecretSource, Spawn, SteerState, TaskOptions, Yard,
 };
 use common::{edit_record, fake_agent, Fixture};
 
@@ -225,6 +226,63 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
     let plain = plain.delegate(options).unwrap();
     assert_eq!(plain.inspect("plain").unwrap().envelope, None);
     denied(plain.spawn(spawn("say p", "p")), "not given delegation");
+}
+
+/// A parent adds input to its running child's turn: delivered by the
+/// engine running the child, recorded with the parent as its sender, and
+/// the child's turn goes on to end once. Only descendants can be steered.
+#[test]
+fn a_parent_steers_its_running_child() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::default());
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    delegate.spawn(spawn("AWAIT_STEER", "kid")).unwrap();
+    wait_until("the child to wait for steering", || {
+        delegate
+            .inspect("kid")
+            .is_ok_and(|i| i.last_message.contains("waiting for steering"))
+    });
+    // Through the tool as every surface calls it.
+    let steered = delegate
+        .call(
+            "steer",
+            serde_json::json!({"branch": "kid", "text": "use the fast path"}),
+        )
+        .unwrap();
+    let state: SteerState = serde_json::from_value(steered["state"].clone()).unwrap();
+    assert!(
+        matches!(state, SteerState::Delivered | SteerState::Accepted),
+        "{steered}"
+    );
+    assert_eq!(steered["by"], "root");
+    let finished = root.wait_subtree().unwrap();
+    assert_eq!(finished[0].status, BranchStatus::NoChanges);
+    let log = f.yard.branch("kid").unwrap().events().unwrap();
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Steered { by, text, .. } if by == "root" && text == "use the fast path")));
+    assert!(delegate
+        .inspect("kid")
+        .unwrap()
+        .last_message
+        .contains("steered: use the fast path"));
+    // Recorded on the asking branch, like every delegation operation.
+    let root_log = f.yard.branch("root").unwrap().events().unwrap();
+    assert!(root_log.iter().any(|e| matches!(&e.activity,
+        Activity::Delegation { tool, branch, refused: false, .. } if tool == "steer" && branch == "kid")));
+    // With no turn running, and outside the subtree, it is refused.
+    assert!(matches!(
+        delegate.steer("kid", "again"),
+        Err(Error::NotRunning(name)) if name == "kid"
+    ));
+    denied(delegate.steer("root", "hi"), "only on its descendants");
+    denied(delegate.steer("main", "hi"), "not a descendant");
 }
 
 #[test]
@@ -555,4 +613,219 @@ fn a_subtree_driven_by_another_engine_is_waited_for_and_a_stopped_ones_recovered
         "{}",
         reasons[2]
     );
+}
+
+fn seat(below: &[&str]) -> Seat {
+    Seat {
+        harness: "gemini-cli".into(),
+        budget: ChildBudget::default(),
+        check: None,
+        deny: Vec::new(),
+        isolated: false,
+        provision: None,
+        delegates_to: below.iter().map(|s| (*s).to_owned()).collect(),
+        escalates_to: Vec::new(),
+        instances: 1,
+    }
+}
+
+/// lead -> worker (twice, 3 turns, instructed), lead -> planner -> helper.
+fn team() -> Seats {
+    let worker = Seat {
+        budget: ChildBudget {
+            max_turns: Some(3),
+            ..ChildBudget::default()
+        },
+        deny: vec!["Bash".into()],
+        provision: Some(Provisioning {
+            instructions: Some("You are the worker.".into()),
+            ..Provisioning::default()
+        }),
+        instances: 2,
+        ..seat(&[])
+    };
+    Seats {
+        rig: "team".into(),
+        seat: "lead".into(),
+        delegates_to: vec!["worker".into(), "planner".into()],
+        escalates_to: Vec::new(),
+        table: [
+            ("worker".to_owned(), worker),
+            ("planner".to_owned(), seat(&["helper"])),
+            ("helper".to_owned(), seat(&[])),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
+fn by_seat(seat: &str, prompt: &str) -> Spawn {
+    Spawn {
+        seat: Some(seat.into()),
+        ..Spawn::new(prompt)
+    }
+}
+
+#[test]
+fn a_rigs_branches_spawn_only_the_seats_below_their_own() {
+    let f = Fixture::new();
+    let seats = team();
+    let envelope = seats.envelope();
+    assert_eq!((envelope.max_depth, envelope.max_children), (2, 3));
+    let options = TaskOptions {
+        seats: Some(seats),
+        ..delegating(&f, envelope)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let lead = root.delegate(options.clone()).unwrap();
+    let me = lead.inspect("root").unwrap();
+    assert_eq!(me.seat.as_deref(), Some("lead"));
+    assert_eq!(me.seats, ["worker", "planner"]);
+
+    denied(lead.spawn(spawn("x", "free")), "spawns only by seat");
+    denied(
+        lead.spawn(by_seat("helper", "x")),
+        "may spawn only worker, planner, not helper",
+    );
+    denied(
+        lead.spawn(Spawn {
+            harness: Some("qwen-code".into()),
+            ..by_seat("worker", "x")
+        }),
+        "fixes the child's harness",
+    );
+    denied(
+        lead.spawn(Spawn {
+            check: Some(vec!["true".into()]),
+            ..by_seat("worker", "x")
+        }),
+        "fixes the child's check",
+    );
+    denied(
+        lead.spawn(Spawn {
+            budget: Budget::default().turns(5),
+            ..by_seat("worker", "x")
+        }),
+        "exceeds seat worker's",
+    );
+
+    // The seat fills the child: its name, limits and instructions.
+    let first = lead.spawn(by_seat("worker", "INSTRUCTED")).unwrap();
+    assert_eq!(first.name, "root-worker");
+    assert_eq!(first.seat.as_deref(), Some("worker"));
+    assert_eq!(first.budget.max_turns, Some(3));
+    let second = lead
+        .spawn(Spawn {
+            budget: Budget::default().turns(2),
+            ..by_seat("worker", "say again")
+        })
+        .unwrap();
+    assert_eq!(second.name, "root-worker-2");
+    assert_eq!(second.budget.max_turns, Some(2));
+    denied(lead.spawn(by_seat("worker", "x")), "the seat's instances");
+    let planner = lead.spawn(by_seat("planner", "say plan")).unwrap();
+    root.wait_subtree().unwrap();
+
+    let worker = lead.inspect("root-worker").unwrap();
+    assert_eq!(worker.seat.as_deref(), Some("worker"));
+    assert!(worker.seats.is_empty());
+    assert_eq!(worker.envelope.as_ref().unwrap().max_depth, 0);
+    // A leaf seat gets no delegation skill: its instructions are its seat's.
+    assert_eq!(worker.last_message, "instructed=true");
+    let plan = lead.inspect(&planner.name).unwrap();
+    assert_eq!(plan.seats, ["helper"]);
+    assert_eq!(
+        plan.envelope,
+        Some(Envelope {
+            max_depth: 1,
+            max_children: 1,
+            harnesses: vec!["gemini-cli".into()],
+        })
+    );
+
+    // One level down, only that seat's own seats.
+    let planner = f
+        .yard
+        .branch(&planner.name)
+        .unwrap()
+        .delegate(options.clone())
+        .unwrap();
+    denied(
+        planner.spawn(by_seat("worker", "x")),
+        "seat planner of rig team may spawn only helper, not worker",
+    );
+    let helper = planner.spawn(by_seat("helper", "say help")).unwrap();
+    assert_eq!(helper.name, "root-planner-helper");
+    assert_eq!(helper.depth, 2);
+    root.wait_subtree().unwrap();
+
+    // Outside a rig, a seat means nothing.
+    let plain = f
+        .yard
+        .task("say plain")
+        .options(delegating(&f, Envelope::default()))
+        .name("plain")
+        .run()
+        .unwrap();
+    let plain = plain.delegate(options).unwrap();
+    denied(plain.spawn(by_seat("worker", "x")), "not in a rig");
+}
+
+#[test]
+fn seats_are_checked_before_anything_is_created() {
+    let f = Fixture::new();
+    let refused = |options: TaskOptions, needle: &str| {
+        match f.yard.task("say hi").options(options).name("r").run() {
+            Err(Error::Unsupported(why)) if why.contains(needle) => {}
+            other => panic!("expected {needle:?}, got {other:?}"),
+        }
+        assert!(f.yard.branch("r").is_err(), "nothing was created");
+    };
+    refused(
+        TaskOptions {
+            seats: Some(team()),
+            ..f.options()
+        },
+        "seats need a delegation envelope",
+    );
+    let mut loose = team();
+    loose.table.insert("loose".into(), seat(&[]));
+    refused(
+        TaskOptions {
+            seats: Some(loose),
+            ..delegating(&f, Envelope::default())
+        },
+        "loose is not below seat lead",
+    );
+    let mut secret = team();
+    secret.table.get_mut("helper").unwrap().provision = Some(Provisioning {
+        secrets: vec![SecretSource::parse("GEMINI_API_KEY").unwrap()],
+        ..Provisioning::default()
+    });
+    refused(
+        TaskOptions {
+            seats: Some(secret.clone()),
+            ..delegating(&f, Envelope::default())
+        },
+        "seat helper",
+    );
+    // An isolated seat above it gives it a private home.
+    secret.table.get_mut("planner").unwrap().isolated = true;
+    let root = f
+        .yard
+        .task("say hi")
+        .options(TaskOptions {
+            seats: Some(secret),
+            ..delegating(&f, Envelope::depth(2))
+        })
+        .name("r")
+        .run()
+        .unwrap();
+    assert_eq!(root.info().status, BranchStatus::NoChanges);
 }

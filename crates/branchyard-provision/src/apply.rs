@@ -19,7 +19,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use crate::edit::apply_all;
-use crate::{FileEdit, Installed, Plan, INSTALLED_PATH};
+use crate::{json_text, Credential, Edit, FileEdit, Installed, JsonEdit, Plan, INSTALLED_PATH};
 
 /// Largest file the executor reads before editing it.
 const MAX_FILE: u64 = 16 << 20;
@@ -85,6 +85,45 @@ pub fn installed(home: &Path) -> Installed {
         .flatten()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+/// Remove the credentials an earlier provisioning recorded in `home`
+/// ([`Installed::credentials`]): a whole file, or only Branchyard's
+/// variables or keys in it, and forget them. What else the harness or a
+/// person put there stays. Files already gone are skipped.
+pub fn remove_credentials(home: &Path) -> Result<Applied, ApplyError> {
+    let mut record = installed(home);
+    if record.credentials.is_empty() {
+        return Ok(Applied::default());
+    }
+    let mut plan = Plan::default();
+    for credential in std::mem::take(&mut record.credentials) {
+        let path = credential.path().to_owned();
+        let present = resolve(home, &path, false)
+            .ok()
+            .and_then(|target| read_regular(&target).ok().flatten())
+            .is_some();
+        if !present {
+            continue;
+        }
+        let edit = match credential {
+            Credential::File { .. } => Edit::Remove,
+            Credential::Dotenv { keys, .. } => Edit::DotenvUnset(keys),
+            Credential::Json { keys, .. } => Edit::Json {
+                edits: keys.into_iter().map(JsonEdit::Remove).collect(),
+                comment_lines: false,
+            },
+        };
+        plan.edit(&path, true, edit);
+    }
+    let rest = match record == Installed::default() {
+        true => Edit::Remove,
+        false => Edit::Put(json_text(
+            &serde_json::to_value(&record).expect("serializes"),
+        )),
+    };
+    plan.edit(INSTALLED_PATH, false, rest);
+    apply(&plan, home)
 }
 
 enum Outcome {

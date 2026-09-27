@@ -33,7 +33,10 @@ session, and merging overlapping edits produces conflicts.
    first.
 3. Watch. `by inspect <child>` shows status, diffstat, cost and its last
    message; `by events <child>` shows its activity. Wait with `--wait` or
-   by polling; do not busy-loop faster than every few seconds.
+   by polling; do not busy-loop faster than every few seconds. To correct
+   a child that is still running, `by send <child> --steer "<text>"` adds
+   to its running turn without stopping it; the child reads it at its next
+   step. Some harnesses cannot take it, and the refusal says so.
 4. Integrate. When a child is `ready`, `by integrate <child>` merges it
    into your branch after its check passes. Your working tree moves to the
    merge. A conflict or failed check is an error: send the child a fix with
@@ -54,6 +57,7 @@ by children
 by inspect parser-flake
 by events parser-flake --cursor 0
 by spawn "Add a regression test for issue 42" --name issue-42 --budget-usd 0.30 --wait
+by send parser-flake --steer "Use the fixture in tests/data, not a new one."
 by send parser-flake "The seed must come from the test name, not the clock."
 by integrate parser-flake
 by cancel retry-docs
@@ -63,6 +67,20 @@ Every command takes `--json` for a stable machine-readable result, and
 exits non-zero with `{"error": {"kind", "message"}}` on refusal. Run `by`
 by name or as `$BRANCHYARD_BY`; call it as a single command without pipes,
 `&&` or substitutions, so a permission policy can recognize it.
+
+## In a rig
+
+If your instructions say you fill a seat in a rig, or `by inspect` shows a
+`seat`, you spawn only by seat, and only the seats listed in its `seats`:
+
+```sh
+by spawn --seat implementer "Port the tokenizer to the new API; run its tests"
+by spawn --seat reviewer "Review the tokenizer candidate on by/parser-implementer" --wait
+```
+
+The seat sets the child's harness, budget, check and instructions; you
+may pass a smaller budget, never a larger one. In Python, pass `seat=`;
+the MCP `spawn` tool takes `seat`.
 
 ## With Python
 

@@ -132,6 +132,56 @@ fn an_interrupt_ends_the_turn_as_interrupted() {
 }
 
 #[test]
+fn steered_input_reaches_the_running_turn() {
+    let (mut session, _) = start("steer");
+    assert!(matches!(
+        session.steer("too early"),
+        Err(RuntimeError::Rejected(Rejected::NoTurn))
+    ));
+    let turn = session.submit("AWAIT_STEER").unwrap();
+    session
+        .wait_for(
+            WAIT,
+            |e| matches!(e, Event::MessageDelta { text, .. } if text == "waiting for steering"),
+        )
+        .unwrap();
+    session.steer("look at b.txt too").unwrap();
+    let accepted = session
+        .wait_for(WAIT, |e| matches!(e, Event::SteerAccepted { .. }))
+        .unwrap();
+    assert_eq!(accepted, Event::SteerAccepted { turn, steer: 1 });
+    let ended = session.wait_for(WAIT, is_turn_end(turn)).unwrap();
+    assert_eq!(
+        ended,
+        Event::TurnEnded {
+            turn,
+            outcome: TurnOutcome::Completed
+        }
+    );
+    assert!(session.events().iter().any(|e| matches!(e,
+        Event::MessageDelta { text, .. } if text == "steered: look at b.txt too")));
+    session.close(WAIT).unwrap();
+}
+
+#[test]
+fn an_agent_without_steering_refuses_it_with_the_reason() {
+    let dir = workdir("no-steer");
+    let mut session = start_with(
+        &dir,
+        SessionMode::Fresh,
+        &Environment::new(dir.join("home")).set("FAKE_ACP_NO_STEER", "1"),
+    );
+    let turn = session.submit("HANG").unwrap();
+    assert!(matches!(
+        session.steer("x"),
+        Err(RuntimeError::Rejected(Rejected::Unsupported(why))) if why.contains("_session/steering")
+    ));
+    session.interrupt().unwrap();
+    session.wait_for(WAIT, is_turn_end(turn)).unwrap();
+    session.close(WAIT).unwrap();
+}
+
+#[test]
 fn close_names_and_kills_descendants_that_outlive_the_harness() {
     let (mut session, _) = start("survivors");
     let report = session.run_turn("BACKGROUND", &mut allow, WAIT).unwrap();

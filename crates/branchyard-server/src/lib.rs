@@ -31,11 +31,16 @@
 //!   submitted again.
 //! - Cancellation is durable: `POST .../branches/{b}/cancel` records a
 //!   request that the engine running the turn observes, in this process or
-//!   another on the same repository.
+//!   another on the same repository. So is steering: `POST
+//!   .../branches/{b}/steer` queues input that engine delivers into the
+//!   running turn, where the harness supports it.
 //! - The activity feed is the engine's store, read from a cursor: a stream
 //!   resumed from a cursor continues with the next entry, across restarts.
 //! - Plain HTTP binds only to loopback unless TLS is configured or
 //!   `--insecure-bind` is given.
+//! - Configured webhooks ([`webhook`]) are delivered from the same durable
+//!   feed by their own cursor, so a restart resumes rather than replaying
+//!   or skipping; at-least-once, signed, with retry and a dead-letter note.
 //!
 //! What it does not guarantee:
 //!
@@ -57,7 +62,9 @@ pub mod error;
 pub mod feed;
 pub mod ops;
 pub mod serve;
+pub mod storage_routes;
 pub mod store;
+pub mod webhook;
 
 pub use config::Config;
 pub use serve::{start, Handle, Running, Stopped};

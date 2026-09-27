@@ -26,6 +26,12 @@
 //! (`amp.tools.disable`, `amp.mcpPermissions`, or a plugin) and must never
 //! set `amp.dangerouslyAllowAll`. Never add `-ox` or `--executor`: the
 //! thread must execute in Branchyard's sandbox, not on Amp's servers.
+//!
+//! Amp documents a top-level `steer: true` on a streaming input message,
+//! handled "at the next interruption point while the agent is busy", but
+//! not how the output then shows where the turn ends; since this driver
+//! ends a turn at the first terminal assistant message, steering is refused
+//! until it has been recorded against a binary.
 
 use serde_json::json;
 
@@ -239,7 +245,22 @@ impl Driver for Amp {
             tool_approvals: false,
             turn_acknowledgment: true,
             usage: true,
+            steer: false,
         }
+    }
+
+    fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
+        &[
+            ("fork", "Amp cannot fork a thread"),
+            (
+                "cancellation",
+                "Amp's streaming input has no cancellation message",
+            ),
+            (
+                "tool_approvals",
+                "Amp does not ask before running tools; Branchyard must restrict tools through the private settings file (amp.tools.disable, amp.mcpPermissions, or a plugin) and must never set amp.dangerouslyAllowAll",
+            ),
+        ]
     }
 
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
@@ -304,6 +325,12 @@ impl Driver for Amp {
             turn,
             frames: vec![frame(&message)],
         })
+    }
+
+    fn steer(&mut self, _text: &str) -> Result<Vec<Frame>, Rejected> {
+        Err(Rejected::Unsupported(
+            "Amp documents a `steer` flag on streaming input, but not where a steered message's answer ends; unrecorded, a turn's end could not be told apart".into(),
+        ))
     }
 
     fn interrupt(&mut self) -> Result<Vec<Frame>, Rejected> {

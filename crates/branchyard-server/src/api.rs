@@ -17,13 +17,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use branchyard::{
-    Branch, BranchEvent, Budget, Envelope, Observer, Policy, Provider, Provisioning, Spawn,
+    Branch, BranchEvent, Budget, Envelope, Observer, Policy, Provider, Provisioning, Seats, Spawn,
     TaskOptions, Yard,
 };
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, FeedEntry, ForkRequest,
     HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind, OperationResult,
-    PolicySpec, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
+    PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
+    SteerRequest, TaskRequest,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -48,6 +49,10 @@ pub struct App {
     pub tokens: Tokens,
     pub config: Config,
     pub shutdown: watch::Receiver<bool>,
+    /// Idempotency cache for the storage routes (artifacts, scratch
+    /// areas): quick, synchronous calls, unlike the operation registry's
+    /// durable one for long operations. See `storage_routes`.
+    pub storage_idem: crate::storage_routes::StorageIdem,
 }
 
 #[derive(Clone)]
@@ -59,14 +64,14 @@ pub struct RepoState {
     pub wake: Arc<Notify>,
 }
 
-type Shared = Arc<App>;
+pub(crate) type Shared = Arc<App>;
 
 /// The authenticated caller: its token's configured name.
 #[derive(Clone)]
 pub struct Caller(pub String);
 
 impl App {
-    fn repo(&self, name: &str) -> Result<&RepoState, ApiError> {
+    pub(crate) fn repo(&self, name: &str) -> Result<&RepoState, ApiError> {
         self.repos.get(name).ok_or_else(|| {
             ApiError::new(
                 StatusCode::NOT_FOUND,
@@ -190,7 +195,29 @@ impl App {
                  request's own commands with allow_client_commands",
             ));
         }
+        // A remote server receives its headers, which are the server's
+        // secrets: a request choosing the URL chooses where they go.
+        if !spec.remote_mcp_servers.is_empty() && !self.config.allow_client_commands {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "command_not_allowed",
+                "HTTP and SSE MCP servers receive this server's secrets as headers at a URL the \
+                 request chooses; its operator can accept them with allow_client_commands",
+            ));
+        }
         Ok(Some(spec))
+    }
+
+    /// A rig's seats, with each seat's provisioning held to the rules of
+    /// [`App::provision`].
+    fn seats(&self, requested: Option<Seats>) -> Result<Option<Seats>, ApiError> {
+        let Some(mut seats) = requested else {
+            return Ok(None);
+        };
+        for seat in seats.table.values_mut() {
+            seat.provision = self.provision(seat.provision.take())?;
+        }
+        Ok(Some(seats))
     }
 
     /// Refuse delegation and unapproved tools unless this server allows
@@ -290,12 +317,20 @@ pub fn router(app: Shared) -> Router {
             axum::routing::post(post_fork),
         )
         .route(
+            "/v1/repos/{repo}/branches/{branch}/reincarnate",
+            axum::routing::post(post_reincarnate),
+        )
+        .route(
             "/v1/repos/{repo}/branches/{branch}/merge",
             axum::routing::post(post_merge),
         )
         .route(
             "/v1/repos/{repo}/branches/{branch}/cancel",
             axum::routing::post(post_cancel),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/steer",
+            axum::routing::post(post_steer),
         )
         .route(
             "/v1/repos/{repo}/branches/{branch}/spawn",
@@ -314,9 +349,30 @@ pub fn router(app: Shared) -> Router {
             get(event_page),
         )
         .route("/v1/repos/{repo}/branches/{branch}/children", get(children))
+        .route("/v1/repos/{repo}/branches/{branch}/inbox", get(inbox))
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/ask",
+            axum::routing::post(post_ask),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/report",
+            axum::routing::post(post_report),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/escalate",
+            axum::routing::post(post_escalate),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/answer",
+            axum::routing::post(post_answer),
+        )
         .route("/v1/repos/{repo}/branches/{branch}/diff", get(diff))
         .route("/v1/repos/{repo}/branches/{branch}/events", get(events))
-        .route("/v1/repos/{repo}/events/stream", get(stream_events));
+        .route("/v1/repos/{repo}/events/stream", get(stream_events))
+        // Artifacts and scratch areas: see `storage_routes`, kept separate
+        // so this feature's routes are easy to merge alongside unrelated
+        // work on this router (inbox messages, branch lifecycle).
+        .merge(crate::storage_routes::router());
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -435,7 +491,7 @@ impl<T: DeserializeOwned + Serialize> FromRequest<Shared> for JsonBody<T> {
     }
 }
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(work)
@@ -451,6 +507,18 @@ fn fingerprint(text: &str) -> String {
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     format!("{hash:016x}")
+}
+
+/// A request that failed before it was registered, returned as the
+/// operation its idempotency key already names, if one does. A retry that
+/// passed the first replay check while its original attempt was still being
+/// admitted can fail on a name that attempt has since taken; the key, not
+/// the refusal, decides the answer.
+fn replay_or(app: &App, idem: Option<&Idempotency>, error: ApiError) -> Result<Response, ApiError> {
+    match idem.map(|i| app.registry.replay(i)).transpose()?.flatten() {
+        Some(op) => Ok(operation_response(op, true)),
+        None => Err(error),
+    }
 }
 
 fn idempotency(
@@ -619,10 +687,20 @@ async fn post_task(
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let provider = app.provider(request.provider.clone())?;
     app.opt_ins(
-        request.delegation.is_some(),
+        request.delegation.is_some() || request.seats.is_some(),
         request.allow_delegation,
         request.unapproved_tools,
     )?;
+    if let Some(seats) = &request.seats {
+        if request.delegation.is_none() {
+            return Err(ApiError::bad_request(
+                "seats need a delegation envelope to spawn them within",
+            ));
+        }
+        seats
+            .validate()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
     let targets: Vec<Option<&str>> = match request.harnesses.is_empty() {
         true => vec![request.harness.as_deref()],
         false => request.harnesses.iter().map(|h| Some(h.as_str())).collect(),
@@ -634,6 +712,7 @@ async fn post_task(
         base: request.base.clone(),
         isolated: request.isolated,
         provision: app.provision(request.provision.clone())?,
+        seats: app.seats(request.seats.clone())?,
         ..app.options(
             &repo,
             budget,
@@ -654,12 +733,15 @@ async fn post_task(
             prompt.clone(),
             harnesses.clone(),
         );
-        blocking(move || {
+        match blocking(move || {
             let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
             yard.task(prompt).options(options).planned_names(&ids)
         })
         .await?
-        .map_err(|e| error::sdk(&e))?
+        {
+            Ok(planned) => planned,
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+        }
     };
     let cursor = sync_feed(&repo.feed).await?;
     let yard = repo.yard.clone();
@@ -831,9 +913,10 @@ async fn post_fork(
     };
     let planned = {
         let (yard, options, prompt) = (repo.yard.clone(), options.clone(), request.prompt.clone());
-        blocking(move || yard.task(prompt).options(options).planned_names(&[]))
-            .await?
-            .map_err(|e| error::sdk(&e))?
+        match blocking(move || yard.task(prompt).options(options).planned_names(&[])).await? {
+            Ok(planned) => planned,
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+        }
     };
     let cursor = sync_feed(&repo.feed).await?;
     let (prompt, fresh) = (request.prompt.clone(), request.fresh_session);
@@ -846,6 +929,85 @@ async fn post_fork(
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Fork,
+        locks: planned.clone(),
+        branches: planned,
+        cursor,
+        idempotency: idem,
+    };
+    let (op, replayed) = app.registry.submit(new, work)?;
+    Ok(operation_response(op, replayed))
+}
+
+async fn post_reincarnate(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    JsonBody(request, canonical): JsonBody<ReincarnateRequest>,
+) -> Result<Response, ApiError> {
+    let repo = app.repo(&repo)?.clone();
+    let route = format!("POST /v1/repos/{}/branches/{branch}/reincarnate", repo.name);
+    let idem = idempotency(&headers, &caller, &route, &canonical)?;
+    if let Some(op) = idem
+        .as_ref()
+        .map(|i| app.registry.replay(i))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(operation_response(op, true));
+    }
+    let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
+    let provider = app.provider(request.provider.clone())?;
+    app.opt_ins(
+        request.delegation.is_some(),
+        request.allow_delegation,
+        request.unapproved_tools,
+    )?;
+    // Without a harness the reincarnation keeps its parent's, and its
+    // command.
+    let command = match (&request.command, &request.harness) {
+        (Some(_), _) => app.command(request.command.clone(), &[])?,
+        (None, Some(harness)) => app.command(None, &[Some(harness)])?,
+        (None, None) => None,
+    };
+    let source = existing(&repo.yard, &branch).await?;
+    let options = TaskOptions {
+        harness: request.harness.clone(),
+        name: request.name.clone(),
+        isolated: request.isolated,
+        provision: app.provision(request.provision.clone())?,
+        ..app.options(
+            &repo,
+            budget,
+            app.policy(&request.policy, request.allow_delegation),
+            request.check.clone(),
+            command,
+            request.delegation.clone(),
+            request.unapproved_tools,
+            provider,
+        )
+    };
+    let planned = {
+        let (yard, options, prompt) = (
+            repo.yard.clone(),
+            options.clone(),
+            source.info().prompt.clone(),
+        );
+        match blocking(move || yard.task(prompt).options(options).planned_names(&[])).await? {
+            Ok(planned) => planned,
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+        }
+    };
+    let cursor = sync_feed(&repo.feed).await?;
+    let work = job(repo.feed.clone(), move || {
+        source
+            .reincarnate(options)
+            .and_then(|b| finished(vec![b]))
+            .map_err(|e| *error::sdk(&e).body)
+    });
+    let new = NewOperation {
+        repo: repo.name.clone(),
+        kind: OperationKind::Reincarnate,
         locks: planned.clone(),
         branches: planned,
         cursor,
@@ -954,6 +1116,34 @@ async fn post_cancel(
     Ok(Json(CancelResult { cancelled }))
 }
 
+/// How long a steer request waits for the engine running the turn to
+/// deliver the input.
+const STEER_WAIT: Duration = Duration::from_secs(10);
+
+/// Add input to the branch's running turn without interrupting it, like
+/// `by send --steer`. Like a cancel, not an operation and not subject to
+/// branch locks: the running turn's operation holds them, and the input is
+/// for exactly that turn. It is queued durably, bound to the turn, and the
+/// engine running it, here or in another process, delivers it; the answer
+/// waits briefly for that. Refused with 409 `not_running` when no turn
+/// runs, and 422 `unsupported` when the harness cannot take input mid-turn.
+async fn post_steer(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(SteerRequest { text }, _): JsonBody<SteerRequest>,
+) -> Result<Json<branchyard::Steer>, ApiError> {
+    let yard = app.repo(&repo)?.yard.clone();
+    let by = format!("{} through the server", caller.0);
+    let steer = blocking(move || {
+        let steer = yard.steer_as(&branch, &text, &by)?;
+        yard.wait_steer(&branch, steer.id, STEER_WAIT)
+    })
+    .await?
+    .map_err(|e| error::sdk(&e))?;
+    Ok(Json(steer))
+}
+
 /// Create a child of `parent` with the server's authority as a person,
 /// bounded by the parent's envelope, and run its first turn: what
 /// `by spawn --parent` does. The operation waits for the parent's subtree,
@@ -990,13 +1180,29 @@ async fn post_spawn(
     }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let source = existing(&repo.yard, &parent).await?;
-    let planned = match &request.name {
+    // A seat's child is named `<parent>-<seat>` by default, as the engine
+    // names it; the name is fixed here so the operation locks and reports
+    // the branch it creates.
+    let name = match (&request.name, &request.seat) {
+        (Some(name), _) => Some(name.clone()),
+        (None, Some(seat)) => {
+            let (yard, stem) = (repo.yard.clone(), format!("{parent}-{seat}"));
+            let names = match blocking(move || yard.task(stem).planned_names(&[])).await? {
+                Ok(planned) => planned,
+                Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+            };
+            names.into_iter().next()
+        }
+        (None, None) => None,
+    };
+    let planned = match &name {
         Some(name) => vec![name.clone()],
         None => {
             let (yard, prompt) = (repo.yard.clone(), request.prompt.clone());
-            blocking(move || yard.task(prompt).planned_names(&[]))
-                .await?
-                .map_err(|e| error::sdk(&e))?
+            match blocking(move || yard.task(prompt).planned_names(&[])).await? {
+                Ok(planned) => planned,
+                Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+            }
         }
     };
     let options = app.options(
@@ -1012,12 +1218,13 @@ async fn post_spawn(
     let spawn = Spawn {
         prompt: request.prompt.clone(),
         harness: request.harness.clone(),
-        name: request.name.clone(),
+        name,
         base: request.base.clone(),
         budget,
         check: request.check.clone(),
         max_depth: request.max_depth,
         deny: request.deny.clone(),
+        seat: request.seat.clone(),
         ..Spawn::default()
     };
     let cursor = sync_feed(&repo.feed).await?;
@@ -1183,6 +1390,77 @@ async fn children(
     as_person(&app, &repo, branch, |d, _| d.children())
         .await
         .map(Json)
+}
+
+async fn inbox(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+) -> Result<Json<branchyard::Inbox>, ApiError> {
+    as_person(&app, &repo, branch, |d, _| d.inbox())
+        .await
+        .map(Json)
+}
+
+/// Blocking a server worker for a long wait is bounded: a caller that wants
+/// longer polls `inbox` instead.
+const MAX_ASK_WAIT: Duration = Duration::from_secs(120);
+
+async fn post_ask(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::AskRequest>,
+) -> Result<Json<branchyard::Asked>, ApiError> {
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("text is empty"));
+    }
+    let wait = request
+        .wait_seconds
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| Duration::from_secs_f64(s).min(MAX_ASK_WAIT));
+    as_person(&app, &repo, branch, move |d, _| d.ask(&request.text, wait))
+        .await
+        .map(Json)
+}
+
+async fn post_report(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::TextRequest>,
+) -> Result<Json<branchyard::Message>, ApiError> {
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("text is empty"));
+    }
+    as_person(&app, &repo, branch, move |d, _| d.report(&request.text))
+        .await
+        .map(Json)
+}
+
+async fn post_escalate(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::TextRequest>,
+) -> Result<Json<branchyard::Message>, ApiError> {
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("text is empty"));
+    }
+    as_person(&app, &repo, branch, move |d, _| d.escalate(&request.text))
+        .await
+        .map(Json)
+}
+
+async fn post_answer(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::AnswerRequest>,
+) -> Result<Json<branchyard::Message>, ApiError> {
+    if request.text.trim().is_empty() {
+        return Err(ApiError::bad_request("text is empty"));
+    }
+    as_person(&app, &repo, branch, move |d, _| {
+        d.answer(request.message_id, &request.text)
+    })
+    .await
+    .map(Json)
 }
 
 async fn branches(

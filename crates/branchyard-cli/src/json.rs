@@ -88,6 +88,14 @@ pub fn event(event: &Event) -> Value {
         Event::InterruptAcknowledged { turn } => {
             json!({ "type": "interrupt_acknowledged", "turn": turn })
         }
+        Event::SteerAccepted { turn, steer } => {
+            json!({ "type": "steer_accepted", "turn": turn, "steer": steer })
+        }
+        Event::SteerRejected {
+            turn,
+            steer,
+            reason,
+        } => json!({ "type": "steer_rejected", "turn": turn, "steer": steer, "reason": reason }),
         Event::TurnEnded { turn, outcome: o } => {
             json!({ "type": "turn_ended", "turn": turn, "outcome": outcome(o) })
         }
@@ -152,18 +160,37 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             auth,
             files,
             env,
+            secrets,
             unused_secrets,
         } => json!({
             "activity": "provisioned",
             "auth": auth,
             "files": files,
             "env": env,
+            "secrets": secrets,
             "unused_secrets": unused_secrets,
+        }),
+        Activity::Steered { id, by, text } => json!({
+            "activity": "steered",
+            "id": id,
+            "by": by,
+            "text": text,
         }),
         Activity::Recovered { reason, killed } => json!({
             "activity": "recovered",
             "reason": reason,
             "killed": killed,
+        }),
+        Activity::Stalled { since_ms } => json!({
+            "activity": "stalled",
+            "since_ms": since_ms,
+        }),
+        Activity::Resumed => json!({ "activity": "resumed" }),
+        Activity::Message(m) => json!({ "activity": "message", "message": m }),
+        Activity::MessagesDelivered { ids, via } => json!({
+            "activity": "messages_delivered",
+            "ids": ids,
+            "via": via,
         }),
     };
     value["at_ms"] = json!(recorded.at_ms);
@@ -207,6 +234,8 @@ mod tests {
             turns: 2,
             cost_usd: None,
             created_at: 7,
+            stalled: false,
+            superseded_by: None,
         };
         let value = branch(&info);
         assert_eq!(value["status"], json!({ "state": "failed", "reason": "r" }));
@@ -241,7 +270,9 @@ mod tests {
                 "status",
                 "turns",
                 "cost_usd",
-                "created_at"
+                "created_at",
+                "stalled",
+                "superseded_by"
             ]
         );
         let harness = harness(&HarnessInfo {

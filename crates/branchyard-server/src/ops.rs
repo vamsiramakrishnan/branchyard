@@ -550,6 +550,12 @@ mod tests {
             fn save(&self, op: &StoredOperation) -> io::Result<()> {
                 self.0.save(op)
             }
+            fn load_webhook_cursor(&self, id: &str) -> io::Result<Option<u64>> {
+                self.0.load_webhook_cursor(id)
+            }
+            fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
+                self.0.save_webhook_cursor(id, cursor)
+            }
         }
         let registry = Registry::open(Box::new(Shared(store.clone())), 1).unwrap();
         let (release, wait) = mpsc::channel::<()>();

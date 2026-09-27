@@ -7,7 +7,9 @@ mod common;
 use std::fs;
 use std::time::{Duration, Instant};
 
-use branchyard::{Activity, BranchStatus, Budget, Envelope, TaskOptions};
+use branchyard::{
+    Activity, BranchStatus, Budget, ChildBudget, Envelope, Provisioning, Seat, Seats, TaskOptions,
+};
 use common::{text, Client, Fixture};
 use serde_json::{json, Value};
 
@@ -55,7 +57,7 @@ fn a_harness_spawns_a_child_and_integrates_it_into_its_own_branch() {
         .unwrap();
     let said = reply(&f, "root");
     assert!(
-        said.contains("mcp tools: spawn,inspect,events,send,propose_integration,cancel,children"),
+        said.contains(&format!("mcp tools: {}", branchyard_mcp::TOOLS.join(","))),
         "{said}"
     );
     let spawned = result(&said, "spawn");
@@ -176,6 +178,45 @@ fn refusals_reach_the_harness_as_tool_errors() {
 }
 
 #[test]
+fn steer_adds_to_a_running_childs_turn() {
+    let f = Fixture::new();
+    let prompt = [
+        r#"MCP spawn {"prompt": "AWAIT_STEER", "name": "kid"}"#,
+        "MCP started kid",
+        r#"MCP steer {"branch": "kid", "text": "also update the docs"}"#,
+        "MCP wait kid",
+        r#"MCP steer {"branch": "kid", "text": "too late"}"#,
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let said = reply(&f, "root");
+    let steered = result(&said, "steer");
+    assert_eq!(steered["branch"], "kid");
+    assert_eq!(steered["by"], "root");
+    assert!(
+        matches!(
+            steered["state"]["state"].as_str(),
+            Some("delivered" | "accepted")
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("mcp steer error: branch kid is not running a turn"),
+        "{said}"
+    );
+    let kid = f.yard.branch("kid").unwrap();
+    assert_eq!(kid.info().status, BranchStatus::NoChanges);
+    assert!(text(&kid.events().unwrap()).contains("steered: also update the docs"));
+}
+
+#[test]
 fn cancel_stops_a_running_child_and_its_subtree() {
     let f = Fixture::new();
     let prompt = [
@@ -256,4 +297,115 @@ fn the_server_refuses_a_forged_token_while_the_real_one_works() {
     // Revoked with the turn.
     let (error, said) = real.call("inspect", json!({}));
     assert!(error, "{said}");
+}
+
+#[test]
+fn a_harness_in_a_rig_spawns_by_seat_over_mcp() {
+    let f = Fixture::new();
+    let worker = Seat {
+        harness: "gemini-cli".into(),
+        budget: ChildBudget::default(),
+        check: None,
+        deny: Vec::new(),
+        isolated: false,
+        provision: Some(Provisioning {
+            instructions: Some("You write files.".into()),
+            ..Provisioning::default()
+        }),
+        delegates_to: Vec::new(),
+        escalates_to: Vec::new(),
+        instances: 1,
+    };
+    let seats = Seats {
+        rig: "team".into(),
+        seat: "lead".into(),
+        delegates_to: vec!["worker".into()],
+        escalates_to: Vec::new(),
+        table: [("worker".to_owned(), worker)].into_iter().collect(),
+    };
+    let options = TaskOptions {
+        seats: Some(seats.clone()),
+        ..f.delegating(seats.envelope())
+    };
+    let prompt = [
+        "MCP inspect {}",
+        r#"MCP spawn {"prompt": "x"}"#,
+        r#"MCP spawn {"prompt": "x", "seat": "boss"}"#,
+        // Escaped, so the agent reads the keyword only in the child's prompt.
+        r#"MCP spawn {"prompt": "\u0049NSTRUCTED", "seat": "worker"}"#,
+        "MCP wait root-worker",
+        r#"MCP propose_integration {"branch": "root-worker"}"#,
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(options)
+        .name("root")
+        .run()
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let said = reply(&f, "root");
+    let me = result(&said, "inspect");
+    assert_eq!(me["seat"], "lead");
+    assert_eq!(me["seats"], json!(["worker"]));
+    let errors: Vec<&str> = said
+        .lines()
+        .filter(|line| line.contains(" error: "))
+        .collect();
+    assert_eq!(errors.len(), 3, "{said}");
+    assert!(
+        errors[0].contains("spawns only by seat: one of worker"),
+        "{said}"
+    );
+    assert!(
+        errors[1].contains("may spawn only worker, not boss"),
+        "{said}"
+    );
+    // Nothing to merge: the worker changed no file.
+    assert!(errors[2].contains("root-worker"), "{said}");
+    let spawned = result(&said, "spawn");
+    assert_eq!(spawned["name"], "root-worker");
+    assert_eq!(spawned["seat"], "worker");
+    assert_eq!(reply(&f, "root-worker"), "instructed=true");
+}
+
+#[test]
+fn artifacts_and_scratch_areas_are_reachable_over_mcp() {
+    let f = Fixture::new();
+    let prompt = [
+        r#"MCP publish_artifact {"path": "a.txt", "name": "payload.txt"}"#,
+        r#"MCP create_scratch {"name": "shared-cache"}"#,
+        r#"MCP spawn {"prompt": "MCP list_artifacts\nMCP list_scratch\nMCP lock_scratch {\"name\": \"shared-cache\"}", "name": "kid", "max_depth": 1}"#,
+        "MCP wait kid",
+    ]
+    .join("\n");
+    f.yard
+        .task(prompt)
+        .options(f.delegating(Envelope::depth(2)))
+        .name("root")
+        .run()
+        .unwrap();
+    let said = reply(&f, "root");
+    let published = result(&said, "publish_artifact");
+    assert_eq!(published["name"], "payload.txt");
+    assert!(!published["digest"].as_str().unwrap().is_empty());
+    let area = result(&said, "create_scratch");
+    assert_eq!(area["name"], "shared-cache");
+
+    // The child, a descendant of root, reads what root published and
+    // created without any explicit share.
+    let kid_said = reply(&f, "kid");
+    let listed = result(&kid_said, "list_artifacts");
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["payload.txt"]);
+    let scratch = result(&kid_said, "list_scratch");
+    assert_eq!(scratch[0]["name"], "shared-cache");
+    let lock = result(&kid_said, "lock_scratch");
+    assert_eq!(lock["holder_branch"], "kid");
 }

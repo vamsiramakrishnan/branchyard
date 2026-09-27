@@ -302,20 +302,136 @@ pub fn assert_contract_greeted(
     );
 }
 
+/// Assert the steering rules ([`Driver::steer`]) against a scripted
+/// exchange. `driver` must be unopened; it is opened with `open`, fed
+/// `greeting` as in [`assert_contract_greeted`] (empty for a harness that
+/// does not speak first), and `answer` plays the harness for the handshake
+/// and then for the frames of one submitted turn, as in [`handshake`], so a
+/// driver that needs the harness to acknowledge a turn before steering it
+/// gets that answer.
+///
+/// For a driver whose [`Capabilities::steer`](crate::Capabilities) is false,
+/// every steer, before and after the handshake and mid-turn, must be
+/// [`Rejected::Unsupported`] with a reason. Otherwise, checked in order:
+///
+/// - steering before [`Event::Ready`] is [`Rejected::NotReady`];
+/// - steering with no turn in flight is [`Rejected::NoTurn`];
+/// - steering the submitted turn writes at least one well-formed frame and
+///   leaves the turn in flight: a second submit is still
+///   [`Rejected::TurnInProgress`];
+/// - closing the transport then yields [`Event::OutcomeUnknown`] for that
+///   turn and [`Event::SessionClosed`], and steering after the close is
+///   [`Rejected::NotReady`].
+///
+/// # Panics
+///
+/// On the first rule the driver breaks.
+pub fn assert_steer_contract(
+    driver: &mut dyn Driver,
+    open: Open,
+    greeting: &[Value],
+    mut answer: impl FnMut(&Value) -> Vec<Value>,
+) {
+    let steers = driver.capabilities().steer;
+    let unsupported = |result: Result<Vec<Frame>, Rejected>, when: &str| match result {
+        Err(Rejected::Unsupported(reason)) if !reason.is_empty() => {}
+        other => panic!(
+            "a driver without steering must refuse it {when} as Unsupported with a reason, \
+             not {other:?}"
+        ),
+    };
+    if !steers {
+        unsupported(driver.steer("unopened"), "before open");
+    }
+    let opened = driver
+        .open(open)
+        .unwrap_or_else(|e| panic!("open rejected: {e}"));
+    match steers {
+        true => assert_eq!(
+            driver.steer("before ready").err(),
+            Some(Rejected::NotReady),
+            "steering before the handshake completes must be rejected"
+        ),
+        false => unsupported(driver.steer("before ready"), "before the handshake"),
+    }
+    let mut frames = opened.frames.clone();
+    let mut events = Vec::new();
+    for message in greeting {
+        let output = driver.receive(&line(message));
+        events.extend(output.events);
+        frames.extend(output.frames);
+    }
+    events.extend(handshake(driver, &frames, &mut answer));
+    assert!(
+        events.contains(&Event::Ready),
+        "the handshake did not produce Ready: {events:?}"
+    );
+    match steers {
+        true => assert_eq!(
+            driver.steer("no turn").err(),
+            Some(Rejected::NoTurn),
+            "steering with no turn in flight must be rejected"
+        ),
+        false => unsupported(driver.steer("no turn"), "with no turn"),
+    }
+    let submitted = driver
+        .submit("first")
+        .unwrap_or_else(|e| panic!("submit after Ready rejected: {e}"));
+    handshake(driver, &submitted.frames, &mut answer);
+    if !steers {
+        unsupported(driver.steer("mid-turn"), "mid-turn");
+        return;
+    }
+    let frames = driver
+        .steer("mid-turn")
+        .unwrap_or_else(|e| panic!("steering the turn in flight rejected: {e}"));
+    assert!(!frames.is_empty(), "a steer must write a frame");
+    decode_all(&frames);
+    assert_eq!(
+        driver.submit("second").err(),
+        Some(Rejected::TurnInProgress),
+        "a steer must not end the turn in flight"
+    );
+    let closed = driver.transport_closed();
+    assert!(
+        closed
+            .iter()
+            .any(|e| matches!(e, Event::OutcomeUnknown { turn, .. } if *turn == submitted.turn))
+            && closed.last() == Some(&Event::SessionClosed),
+        "closing a steered turn must yield OutcomeUnknown for turn {} and SessionClosed: \
+         {closed:?}",
+        submitted.turn
+    );
+    assert_eq!(
+        driver.steer("after close").err(),
+        Some(Rejected::NotReady),
+        "steering after the transport closed must be rejected"
+    );
+}
+
+/// Input a [`Replay`] writes on the client's initiative.
+#[derive(Clone, Debug)]
+enum Input {
+    Prompt(String),
+    Steer(String),
+    Interrupt,
+}
+
 /// Replays a [`Transcript`] through a driver.
 ///
 /// Recorded `in` frames are fed to [`Driver::receive`]. Each recorded `out`
 /// frame is compared with the next frame the driver wrote; when the driver
-/// has written nothing pending, the next [`prompt`](Self::prompt) is
-/// submitted first, because a prompt is the one frame a driver writes on its
-/// own initiative rather than in response to output.
+/// has written nothing pending, the next queued [`prompt`](Self::prompt),
+/// [`steer`](Self::steer) or [`interrupt`](Self::interrupt) is carried out
+/// first, because those are the frames a driver writes on its own
+/// initiative rather than in response to output.
 ///
 /// Fields that legitimately differ between runs are declared with
 /// [`alias`](Self::alias) or [`ignore`](Self::ignore).
 #[derive(Debug)]
 pub struct Replay<'t> {
     transcript: &'t Transcript,
-    prompts: VecDeque<String>,
+    inputs: VecDeque<Input>,
     aliases: Vec<String>,
     ignored: Vec<String>,
     permissions: Option<PermissionDecision>,
@@ -348,7 +464,7 @@ impl<'t> Replay<'t> {
     pub fn new(transcript: &'t Transcript) -> Self {
         Self {
             transcript,
-            prompts: VecDeque::new(),
+            inputs: VecDeque::new(),
             aliases: Vec::new(),
             ignored: Vec::new(),
             permissions: None,
@@ -356,9 +472,23 @@ impl<'t> Replay<'t> {
     }
 
     /// Queue a prompt to submit when a recorded outgoing frame has no pending
-    /// driver frame to match. Prompts are used in order.
+    /// driver frame to match. Prompts and steers are used in order.
     pub fn prompt(mut self, text: impl Into<String>) -> Self {
-        self.prompts.push_back(text.into());
+        self.inputs.push_back(Input::Prompt(text.into()));
+        self
+    }
+
+    /// Queue input to [`Driver::steer`] into the running turn, in order
+    /// with the prompts, when a recorded outgoing frame has no pending
+    /// driver frame to match.
+    pub fn steer(mut self, text: impl Into<String>) -> Self {
+        self.inputs.push_back(Input::Steer(text.into()));
+        self
+    }
+
+    /// Queue a [`Driver::interrupt`], in order with the prompts and steers.
+    pub fn interrupt(mut self) -> Self {
+        self.inputs.push_back(Input::Interrupt);
         self
     }
 
@@ -393,8 +523,8 @@ impl<'t> Replay<'t> {
     /// # Panics
     ///
     /// When an outgoing frame differs from the recorded one, the driver
-    /// writes nothing where the transcript records a frame, a submit is
-    /// rejected, or any frame is malformed.
+    /// writes nothing where the transcript records a frame, a submit, steer
+    /// or interrupt is rejected, or any frame is malformed.
     pub fn run(mut self, driver: &mut dyn Driver, opened: &Opened) -> Replayed {
         let mut written: VecDeque<Value> = decode_all(&opened.frames).into();
         let mut replayed = Replayed::default();
@@ -402,17 +532,32 @@ impl<'t> Replay<'t> {
             match row.direction {
                 Direction::Out => {
                     if written.is_empty() {
-                        if let Some(prompt) = self.prompts.pop_front() {
-                            let submitted = driver
-                                .submit(&prompt)
-                                .unwrap_or_else(|e| panic!("row {index}: submit rejected: {e}"));
-                            written.extend(decode_all(&submitted.frames));
+                        match self.inputs.pop_front() {
+                            Some(Input::Prompt(prompt)) => {
+                                let submitted = driver.submit(&prompt).unwrap_or_else(|e| {
+                                    panic!("row {index}: submit rejected: {e}")
+                                });
+                                written.extend(decode_all(&submitted.frames));
+                            }
+                            Some(Input::Steer(text)) => {
+                                let frames = driver
+                                    .steer(&text)
+                                    .unwrap_or_else(|e| panic!("row {index}: steer rejected: {e}"));
+                                written.extend(decode_all(&frames));
+                            }
+                            Some(Input::Interrupt) => {
+                                let frames = driver.interrupt().unwrap_or_else(|e| {
+                                    panic!("row {index}: interrupt rejected: {e}")
+                                });
+                                written.extend(decode_all(&frames));
+                            }
+                            None => {}
                         }
                     }
                     let Some(mut ours) = written.pop_front() else {
                         panic!(
                             "row {index}: the transcript records an outgoing frame the driver \
-                             did not write, and no prompt is queued: {}",
+                             did not write, and no input is queued: {}",
                             row.frame
                         );
                     };

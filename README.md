@@ -76,6 +76,8 @@ docs          gemini-cli   no changes      1      -   9m  The docs already cover
 
 On a terminal it redraws in place; `q` or Ctrl-C exits and restores the terminal. Piped, it prints one line per change instead, and `--once` prints the tree once. It reads event logs incrementally, and works the same with `--remote`, where it follows the server's event stream.
 
+`by log --follow <branch>` prints a branch's events as they are recorded. In [Herdr](https://github.com/herdrdev/herdr), the [Branchyard plugin](plugins/herdr/README.md) follows a server's event stream and gives each branch a tab running `by log --follow`, with the branch's state in Herdr's agent sidebar (`working`, `blocked` on a waiting permission request, `idle` with what happened) and actions to merge, cancel or send to the focused branch. It is tested against a fake `herdr`, not yet against Herdr itself.
+
 ## Sandbox providers
 
 A harness runs through a sandbox provider. The default **local** provider is the local mode above. The **Microsandbox** provider runs each turn's harness in a microVM booted from an OCI image with the harness installed: the branch's worktree is mounted at `/workspace`, the harness gets only `HOME` and the variables you name with `--pass-env`, and the microVM is destroyed when the turn ends.
@@ -116,6 +118,20 @@ by ls                               # the tree
 
 The same operations are a Python module, a Rust `Delegate`, and MCP tools (`by mcp`), with one authority model: a per-turn token that lets a branch act only on its descendants. In local mode that stops mistakes, not a hostile harness. See [delegation](docs/delegation.md).
 
+## Rigs
+
+A rig declares a team in a TOML file: a root seat and the seats below it, each with a harness, model, budget, check, policy and standing instructions. `by rig run` starts the root; its harness fills the other seats with `by spawn --seat`, and the envelope derived from the tree bounds them:
+
+```sh
+by rig check examples/rigs/feature.toml      # validate strictly and print the plan (--json for the plan itself)
+by rig run examples/rigs/feature.toml "Add a --json flag to the export command"
+# inside the lead's harness:
+#   by spawn --seat implementer "Add the flag and its tests"
+#   by integrate feature-implementer
+```
+
+A seat's `escalates_to` names an ancestor seat a branch there may escalate to, besides its own parent (always allowed); fields Branchyard still cannot honor, such as sibling messaging or a permission bypass, are refused by name at plan time. `by --remote` runs a rig on a server that allows delegation. See [rigs](docs/rigs.md).
+
 ## Architecture
 
 Clients submit work and observe results. All managed harness execution happens on servers.
@@ -155,23 +171,24 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 
 | Component | Status |
 |---|---|
-| `branchyard-controls` | Dependency-free Rust resume recipes adapted from Herdr, and one harness identity registry across Herdr, Scion and the integration matrix; 15 tests pass |
-| `branchyard` | The local-mode SDK engine: tasks, branches as git worktrees, forks, budgets, per-invocation permission policies, an event log per branch read from cursors, validated merges, and durable execution on SQLite or, with the `postgres` feature, PostgreSQL (leases, journaled steps, cancellation, crash recovery; see [durability](docs/durability.md)), and turns in Substrate actors, each harness's home [provisioned](docs/provisioning.md) before its turn; 112 hermetic tests against a fake ACP agent, including a killed engine, turns in a fake Substrate cluster and one storage conformance suite, none against a real harness, and 13 more on PostgreSQL |
-| `branchyard-harness` | Sans-IO protocol drivers: Claude Code stream-json, Codex App Server, Antigravity stream-json, Pi RPC, Amp stream-json, and ACP v1 for ten more harnesses; 15 of 16 targets have a default profile; 77 tests, including replays of recorded Claude Code, Codex, Antigravity and Pi sessions and of documentation-derived Amp sessions, and a conformance contract run against all 17 profiles; both Claude Code profiles pass live protocol qualification |
-| `branchyard-provision` | Harness home provisioning translated from Scion's provisioners: a sans-IO planner per harness (Claude Code, Codex, Gemini CLI, OpenCode, GitHub Copilot CLI, Hermes, Antigravity) for secrets, MCP servers, instructions, model, reasoning effort and telemetry, and an executor that merges into native configuration and writes secrets 0600 into the branch's private home only; 74 tests, including Scion's cases and golden files, none against a real harness; see [provisioning](docs/provisioning.md) |
+| `branchyard-controls` | One harness identity registry across Herdr, Scion and the integration matrix, and Herdr's official-agent-source check that validates it; the CLI resume-recipe builder once here was evaluated and removed as unused (no profile needed it; see [vendoring](docs/vendoring.md#herdr-reuse-the-official-agent-source-registry-only)); 7 tests pass |
+| `branchyard` | The local-mode SDK engine: tasks, branches as git worktrees, forks, budgets, per-invocation permission policies, an event log per branch read from cursors, validated merges, harness-to-harness messages ([delegation](docs/delegation.md#inbox): ask, report, escalate, answer, delivered by steering a running turn or at a turn's start), and durable execution on SQLite or, with the `postgres` feature, PostgreSQL (leases, journaled steps, cancellation, crash recovery; see [durability](docs/durability.md)), and turns in Substrate actors, each harness's home [provisioned](docs/provisioning.md) before its turn; 166 hermetic tests against a fake ACP agent, including a killed engine, turns in a fake Substrate cluster, one storage conformance suite, and messages steered into a running turn, none against a real harness, and 16 more on PostgreSQL |
+| `branchyard-harness` | Sans-IO protocol drivers: Claude Code stream-json, Codex App Server, Antigravity stream-json, Pi RPC, Amp stream-json, and ACP v1 for ten more harnesses; 15 of 16 targets have a default profile; every unsupported or partial capability carries a reason, quoted from the driver's own refusal message or docs, rendered in [compatibility](docs/compatibility.md) and looked up for admission errors; 96 tests, including replays of recorded Claude Code, Codex, Antigravity and Pi sessions and of documentation-derived Amp sessions, and a conformance contract run against all 17 profiles; both Claude Code profiles pass live protocol qualification |
+| `branchyard-provision` | Harness home provisioning translated from Scion's provisioners: a sans-IO planner per harness (Claude Code, Codex, Gemini CLI, OpenCode, GitHub Copilot CLI, Hermes, Antigravity) for secrets, MCP servers, instructions, model, reasoning effort and telemetry, and an executor that merges into native configuration and writes secrets 0600 into the branch's private home only; each plan says how every secret reaches the harness and whether its tools inherit it, nothing secret goes on a command line, and removing a branch removes the credentials it wrote; 81 tests, including Scion's cases and golden files; Claude Code's key and MCP delivery checked against its binary offline, the rest unverified against real harnesses; see [provisioning](docs/provisioning.md) |
 | `branchyard-qualify` | Runs driver qualification scenarios against real harness binaries; see [driver qualification](docs/qualification/README.md) |
 | `branchyard-workspace` | Git worktree branches, candidate commits and validated merges: compare-and-swap on the target, checks in a temporary worktree, conflicts returned for repair; 18 tests |
-| `branchyard-runtime` | Runs a driver against a harness process through any sandbox provider, and the local provider: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 28 hermetic tests, including the provider conformance checks, against a fake ACP agent |
-| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `cancel`, `harnesses`, `watch`, `serve`, and the delegation commands, each also in remote mode; 72 tests, 22 of them running the built binary against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent, and 1 more on PostgreSQL |
-| `branchyard-server` | The server: bearer-token authentication, durable operations with idempotency keys, cancellation, a resumable SSE activity feed read from the engine's store, recovery, one server per data directory, TLS and graceful shutdown, operator opt-ins for providers, delegation and unapproved tools, secrets resolved from the operator's own table, delegation endpoints, and a PostgreSQL store; 30 tests, 13 over real HTTP against a fake ACP agent, and 2 more on PostgreSQL; see [the server reference](docs/server.md) |
-| `branchyard-client` | The remote SDK: typed blocking client for every endpoint, SSE parsing and reconnect by cursor; 12 tests |
-| `branchyard-mcp` | Branchyard's delegation tools over MCP on stdio (`by mcp`), for harnesses whose shell is restricted; the same operations and token as `by spawn` and the SDKs; 7 tests |
+| `branchyard-runtime` | Runs a driver against a harness process through any sandbox provider, and the local provider: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 30 hermetic tests, including the provider conformance checks, against a fake ACP agent |
+| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log` (with `--follow`), `merge`, `rm`, `cancel`, `send --steer`, `harnesses`, `watch`, `serve`, `rig`, `artifact`, `scratch`, and the delegation commands, each also in remote mode; 91 tests, 32 of them running the built binary against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent, and 1 more on PostgreSQL |
+| `branchyard-server` | The server: bearer-token authentication, durable operations with idempotency keys, cancellation, steering a running turn, a resumable SSE activity feed read from the engine's store, recovery, one server per data directory, TLS and graceful shutdown, operator opt-ins for providers, delegation and unapproved tools, secrets resolved from the operator's own table, delegation endpoints, rig seats checked on submission, artifacts and scratch areas over HTTP (`--max-artifact-bytes`), and a PostgreSQL store; 51 tests, 27 over real HTTP against a fake ACP agent, and 2 more on PostgreSQL (with the feature, 1 SQLite-only parity test is left out); see [the server reference](docs/server.md) |
+| `branchyard-client` | The remote SDK: typed blocking client for every endpoint, including artifacts and scratch areas (digest-verified downloads), SSE parsing and reconnect by cursor; 13 tests |
+| `branchyard-herdr` | The [Herdr plugin](plugins/herdr/README.md)'s binary: a bridge from the server's event stream to one Herdr tab per branch and `herdr pane report-agent` states, with merge, cancel and send actions; 11 tests, 2 of them against a spawned server, the fake ACP agent and a fake `herdr`; not run against a real Herdr |
+| `branchyard-mcp` | Branchyard's delegation tools over MCP on stdio (`by mcp`), for harnesses whose shell is restricted; the same operations and token as `by spawn` and the SDKs; 10 tests |
 | `branchyard-sandbox` | The vendor-independent `SandboxProvider` contract, provider conformance checks, and capability admission; unsupported requirements are rejected, never weakened; 10 tests |
 | `branchyard-microsandbox` | A [Microsandbox](https://github.com/superradcompany/microsandbox) provider over its public SDK 0.7.3, behind the off-by-default `microsandbox` feature (the SDK needs Rust 1.94); 11 mapping tests, 4 more with the SDK, and 14 ignored tests for a KVM host; **unqualified** |
 | `branchyard-substrate` | An [Agent Substrate](https://github.com/agent-substrate/substrate) `SandboxProvider` over a client generated from its unmodified proto, exec through the bridge, TLS on both hops, UID fencing before and after each call, quiescence checks, git transfer that keeps the harness's commits, the bridge's actor template, and a fake cluster (optionally over TLS) for tests; 41 tests, including the conformance checks, against the fake, and 4 ignored tests for a cluster; **unqualified** |
 | `branchyard-bridge` | The in-sandbox exec bridge for runtimes without an exec API: a versioned frame protocol over WebSocket, optionally over TLS, Ed25519-signed per-attempt credentials with tamper-evident state, process groups with teardown, reaping and signal handling as process 1, execs as another user, file and tree transfer, and its host-side client; 27 tests, 2 of them only as root |
 | Scion controls | Nine provisioners at `d9b9e6a`, adjacent helpers/configuration, the authoring guide, and tests; eight suites run 261 tests, 260 passing and 1 skipped; seven provisioners translated into `branchyard-provision` |
-| Herdr controls | Original resume source and 22 terminal-observation manifests |
+| Herdr controls | Original resume source (kept down to the official-agent-source registry check) and 22 terminal-observation manifests |
 | OpenRig controls | Launch/readiness contract and configuration fragments; not a standalone adapter |
 | Warp controls | Separate AGPL source references for process supervision; excluded from the Rust build |
 | Architecture and plan | Server design, harness contracts, implementation milestones, and release gates |
@@ -204,6 +221,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Harness integration](docs/harness-integration.md): interfaces, callback placement, session semantics, and qualification.
 - [Implementation plan](docs/implementation-plan.md): ordered milestones and acceptance gates.
 - [Comparison](docs/comparison.md): Scion, OpenRig and Herdr against Branchyard, and what to absorb from each.
+- [Lifecycle](docs/lifecycle.md): stall detection, webhook notifications and reincarnation.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
 
 ## License

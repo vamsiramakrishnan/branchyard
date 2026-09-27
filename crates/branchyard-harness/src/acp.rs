@@ -19,6 +19,21 @@
 //! client also answers every outstanding permission request as cancelled. The
 //! turn's terminal state arrives as the prompt response's `cancelled` stop
 //! reason, not as an acknowledgment.
+//!
+//! ACP v1 has no method for input into a running prompt; a second
+//! `session/prompt` is a new turn, which agents queue or refuse. Steering
+//! uses the `_session/steering` extension request, only when the agent's
+//! `initialize` response advertises `_meta.steering.supported`, and always
+//! with `_meta.steering.idleBehavior: "promptRequired"`, so input that
+//! arrives after the prompt settled is returned undelivered
+//! ([`Event::SteerRejected`]) rather than started as a turn no one tracks.
+//! claude-agent-acp 0.81.2 advertises it; checked against a local stand-in
+//! API with no model call, it answers `injected`
+//! ([`Event::SteerAccepted`]), aborts the model response in progress, keeps
+//! its partial text, and continues the same prompt with the steered
+//! message, whose one response covers both; a `session/cancel` afterwards
+//! ends the prompt `cancelled` with no further model call. An agent that
+//! does not advertise the extension refuses steering with the reason.
 
 use std::collections::HashMap;
 
@@ -31,7 +46,8 @@ use serde_json::json;
 use crate::{
     frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, McpServer,
     NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
-    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Value, PREAMBLE_CLOSE, PREAMBLE_OPEN,
+    Rejected, RemoteMcpServer, RemoteTransport, SessionMode, Submitted, TurnOutcome, Turns, Value,
+    PREAMBLE_CLOSE, PREAMBLE_OPEN,
 };
 
 /// The ACP protocol version this client speaks.
@@ -42,21 +58,34 @@ enum Pending {
     Initialize,
     Session,
     Prompt(u64),
+    /// A `_session/steering` request: the turn and the steer's number.
+    Steer(u64, u64),
 }
 
+/// The ACP extension request that injects input into a running prompt.
+const STEER_METHOD: &str = "_session/steering";
+
 /// ACP stdio servers: `{name, command, args, env: [{name, value}]}` with no
-/// `type`, the untagged `McpServer::Stdio` variant every agent must accept.
-fn mcp_servers(servers: &[McpServer]) -> Value {
+/// `type`, the untagged `McpServer::Stdio` variant every agent must accept;
+/// then HTTP and SSE servers, `{type, name, url, headers: [{name, value}]}`,
+/// which an agent accepts only when it advertises `mcpCapabilities`.
+fn mcp_servers(servers: &[McpServer], remote: &[RemoteMcpServer]) -> Value {
+    let pairs = |pairs: &[(String, String)]| -> Vec<Value> {
+        pairs
+            .iter()
+            .map(|(name, value)| json!({"name": name, "value": value}))
+            .collect()
+    };
     servers
         .iter()
         .map(|server| {
-            let env: Vec<Value> = server
-                .env
-                .iter()
-                .map(|(name, value)| json!({"name": name, "value": value}))
-                .collect();
-            json!({"name": server.name, "command": server.command, "args": server.args, "env": env})
+            json!({"name": server.name, "command": server.command, "args": server.args,
+                   "env": pairs(&server.env)})
         })
+        .chain(remote.iter().map(|server| {
+            json!({"type": server.transport.as_str(), "name": server.name, "url": server.url,
+                   "headers": pairs(&server.headers)})
+        }))
         .collect()
 }
 
@@ -77,6 +106,9 @@ pub struct Acp {
     session_meta: Option<Value>,
     /// Instructions to put before the next prompt, once.
     preamble: Option<String>,
+    /// The agent advertised `_meta.steering.supported`.
+    steering: bool,
+    next_steer: u64,
 }
 
 impl Acp {
@@ -94,6 +126,8 @@ impl Acp {
             turns: Turns::default(),
             session_meta: None,
             preamble: None,
+            steering: false,
+            next_steer: 0,
         }
     }
 
@@ -128,8 +162,27 @@ impl Acp {
             });
         }
         let open = self.open.clone().expect("initialize follows open()");
+        // A top-level `_meta` extension, beside `agentCapabilities`.
+        self.steering = result["_meta"]["steering"]["supported"] == true;
         let capabilities = response.agent_capabilities;
-        let servers = mcp_servers(&open.mcp_servers);
+        let accepted = |transport: RemoteTransport| match transport {
+            RemoteTransport::Http => capabilities.mcp_capabilities.http,
+            RemoteTransport::Sse => capabilities.mcp_capabilities.sse,
+        };
+        if let Some(server) = open
+            .remote_mcp_servers
+            .iter()
+            .find(|s| !accepted(s.transport))
+        {
+            return Output::event(Event::OpenFailed {
+                reason: format!(
+                    "the agent does not accept {} MCP servers ({})",
+                    server.transport.as_str().to_uppercase(),
+                    server.name
+                ),
+            });
+        }
+        let servers = mcp_servers(&open.mcp_servers, &open.remote_mcp_servers);
         let (method, mut params) = match &open.mode {
             SessionMode::Fresh => (
                 "session/new",
@@ -207,6 +260,24 @@ impl Acp {
                 self.loading = false;
                 Output::event(Event::OpenFailed { reason: error })
             }
+            (Pending::Steer(turn, steer), Some(reason)) => Output::event(Event::SteerRejected {
+                turn,
+                steer,
+                reason,
+            }),
+            (Pending::Steer(turn, steer), None) => match message["result"]["outcome"].as_str() {
+                Some("injected") => Output::event(Event::SteerAccepted { turn, steer }),
+                Some("promptRequired") => Output::event(Event::SteerRejected {
+                    turn,
+                    steer,
+                    reason: "the agent's prompt had already ended".into(),
+                }),
+                other => Output::event(Event::SteerRejected {
+                    turn,
+                    steer,
+                    reason: format!("the agent answered with outcome {other:?}"),
+                }),
+            },
             (Pending::Prompt(turn), error) => {
                 self.turns.end();
                 self.permissions.clear();
@@ -345,7 +416,24 @@ impl Driver for Acp {
             tool_approvals: true,
             turn_acknowledgment: false,
             usage: false,
+            // Enforced again against the agent's `_meta.steering`.
+            steer: true,
         }
+    }
+
+    fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
+        &[
+            (
+                "resume",
+                "uses session/resume when the agent advertises it, else session/load; a session that cannot resume fails to open rather than starting fresh",
+            ),
+            (
+                "fork",
+                "ACP session/fork is an unstable method; a driver that cannot fork must say so rather than start a fresh session",
+            ),
+            ("turn_acknowledgment", "not verified"),
+            ("usage", "not verified"),
+        ]
     }
 
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
@@ -364,7 +452,7 @@ impl Driver for Acp {
             // ACP v1 has no model parameter; selection belongs to the profile.
             return Err(Rejected::Unsupported("model selection over ACP".into()));
         }
-        crate::check_mcp_servers(&open.mcp_servers)?;
+        crate::check_all_mcp_servers(&open)?;
         self.preamble = open.instructions.as_ref().map(|i| i.text.clone());
         let launch = LaunchSpec {
             argv: self.command.clone(),
@@ -450,6 +538,30 @@ impl Driver for Acp {
         Ok(frames)
     }
 
+    fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
+        let session = match (&self.session, self.ready) {
+            (Some(session), true) => session.to_string(),
+            _ => return Err(Rejected::NotReady),
+        };
+        let turn = self.turns.active.ok_or(Rejected::NoTurn)?;
+        if !self.steering {
+            return Err(Rejected::Unsupported(format!(
+                "the agent does not advertise the {STEER_METHOD} extension"
+            )));
+        }
+        self.next_steer += 1;
+        let steer = self.next_steer;
+        Ok(vec![self.request(
+            Pending::Steer(turn, steer),
+            STEER_METHOD,
+            json!({
+                "sessionId": session,
+                "prompt": [{"type": "text", "text": text}],
+                "_meta": {"steering": {"idleBehavior": "promptRequired"}},
+            }),
+        )])
+    }
+
     fn respond(
         &mut self,
         key: &PermissionKey,
@@ -482,6 +594,7 @@ impl Driver for Acp {
     fn transport_closed(&mut self) -> Vec<Event> {
         self.ready = false;
         self.loading = false;
+        self.steering = false;
         self.pending.clear();
         self.permissions.clear();
         self.turns.closed()

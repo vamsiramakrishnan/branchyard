@@ -2,7 +2,7 @@
 
 use branchyard_harness::claude_code::ClaudeCode;
 use branchyard_harness::conformance::{
-    assert_contract_greeted, check_frame, Direction, Replay, Transcript,
+    assert_contract_greeted, assert_steer_contract, check_frame, Direction, Replay, Transcript,
 };
 use branchyard_harness::profiles::{Protocol, PROFILES};
 use branchyard_harness::{Driver, Event, Open, PermissionDecision, SessionMode, TurnOutcome};
@@ -15,6 +15,8 @@ fn fresh() -> Open {
         model: None,
         mcp_servers: Vec::new(),
         instructions: None,
+        mcp_config_file: None,
+        remote_mcp_servers: Vec::new(),
     }
 }
 
@@ -73,6 +75,45 @@ fn every_profile_follows_the_driver_contract() {
             answer(profile.protocol),
         );
     }
+}
+
+/// [`answer`], also acknowledging a Codex turn with its ID and, for ACP,
+/// advertising the steering extension.
+fn answer_steering(protocol: Protocol) -> impl Fn(&Value) -> Vec<Value> {
+    let answer = answer(protocol);
+    move |frame| match (protocol, frame["method"].as_str()) {
+        (Protocol::CodexAppServer, Some("turn/start")) => {
+            vec![json!({"id": frame["id"], "result": {"turn": {"id": "turn-1"}}})]
+        }
+        (Protocol::Acp, Some("initialize")) => vec![json!({"jsonrpc": "2.0", "id": frame["id"],
+            "result": {"protocolVersion": 1, "_meta": {"steering": {"supported": true}}}})],
+        _ => answer(frame),
+    }
+}
+
+#[test]
+fn every_profile_follows_the_steering_contract() {
+    let mut steering = Vec::new();
+    for profile in PROFILES {
+        let mut driver = profile.driver();
+        if driver.capabilities().steer {
+            steering.push(profile.id);
+        }
+        assert_steer_contract(
+            driver.as_mut(),
+            fresh(),
+            &greeting(profile.protocol),
+            answer_steering(profile.protocol),
+        );
+    }
+    // Where each profile stands: verified against a binary (Claude Code,
+    // Codex, Pi, claude-agent-acp) or, for the other ACP agents, negotiated.
+    assert!(steering.contains(&"claude-code-stream-json"));
+    assert!(steering.contains(&"codex-app-server"));
+    assert!(steering.contains(&"pi-rpc"));
+    assert!(steering.contains(&"claude-code-acp"));
+    assert!(!steering.contains(&"amp-stream-json"));
+    assert!(!steering.contains(&"antigravity-stream-json"));
 }
 
 #[test]

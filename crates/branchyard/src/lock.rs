@@ -11,8 +11,16 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::Error;
+
+/// How long [`DirLock::acquire`] retries a lock that is held. A process
+/// starting a child copies every open file, the lock file included, until
+/// the child runs its program; for that instant the copy still holds a lock
+/// its owner has just released, as when a server in this process stops and
+/// another starts while any thread starts a child.
+const WAIT: Duration = Duration::from_secs(2);
 
 /// An exclusive lock on a directory, released when dropped or when the
 /// process exits. See [`DirLock::acquire`].
@@ -28,7 +36,14 @@ impl DirLock {
     /// without waiting, while another process (or another open of it in
     /// this process) holds it; the error names who holds it, as that
     /// holder wrote.
+    ///
+    /// A lock that stays held for [`WAIT`] is refused; one released within
+    /// it, such as a copy a starting child held for an instant, is taken.
     pub fn acquire(dir: &Path, what: &str) -> Result<DirLock, Error> {
+        Self::acquire_within(dir, what, WAIT)
+    }
+
+    fn acquire_within(dir: &Path, what: &str, wait: Duration) -> Result<DirLock, Error> {
         std::fs::create_dir_all(dir)
             .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
         let path = dir.join("lock");
@@ -39,7 +54,13 @@ impl DirLock {
             .truncate(false)
             .open(&path)
             .map_err(|e| Error::State(format!("open {}: {e}", path.display())))?;
-        match file.try_lock() {
+        let deadline = Instant::now() + wait;
+        let mut held = file.try_lock();
+        while matches!(held, Err(TryLockError::WouldBlock)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            held = file.try_lock();
+        }
+        match held {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
                 let mut holder = String::new();
@@ -88,7 +109,7 @@ mod tests {
         assert_eq!(first.path(), dir.join("lock"));
         // A separate open of the file is a separate holder, in this
         // process as in another.
-        let refused = DirLock::acquire(&dir, "the second")
+        let refused = DirLock::acquire_within(&dir, "the second", Duration::from_millis(100))
             .unwrap_err()
             .to_string();
         assert!(refused.contains("already in use"), "{refused}");
@@ -102,6 +123,23 @@ mod tests {
         drop(first);
         let again = DirLock::acquire(&dir, "the second").unwrap();
         drop(again);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_lock_released_while_waiting_is_taken() {
+        let dir = std::env::temp_dir().join(format!("by-lock-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = DirLock::acquire(&dir, "the first").unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(first);
+        });
+        let started = Instant::now();
+        let second = DirLock::acquire(&dir, "the second").unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        releaser.join().unwrap();
+        drop(second);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

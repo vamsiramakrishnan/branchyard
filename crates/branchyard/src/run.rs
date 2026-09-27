@@ -10,14 +10,15 @@ use branchyard_harness::SessionMode;
 use branchyard_workspace::Commit;
 use serde_json::json;
 
-use crate::delegation::Grant;
+use crate::delegation::{self, Grant};
 use crate::engine::{self, Turn};
 use crate::placement;
+use crate::record;
 use crate::recover;
 use crate::state::{now_ms, Lease, Record, Taken};
 use crate::{
-    git, harness, names, Branch, BranchInfo, BranchStatus, Error, NativeSession, Provider,
-    Provisioning, TaskOptions, Yard,
+    git, harness, names, Branch, BranchInfo, BranchStatus, CandidateInfo, Error, NativeSession,
+    Provider, Provisioning, TaskOptions, Yard,
 };
 
 pub(crate) fn planned_names(
@@ -112,6 +113,8 @@ pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<(Record, Lease),
             turns: 0,
             cost_usd: None,
             created_at: created_ms / 1000,
+            stalled: false,
+            superseded_by: None,
         },
         created_ms,
         check: new.check,
@@ -189,14 +192,30 @@ fn new_home_private(options: &TaskOptions) -> bool {
     options.isolated || placement::sandboxed(options.provider.as_ref())
 }
 
-/// The grant for a branch the caller starts: the envelope, with nothing
-/// imposed by a parent. Checks that the MCP server can be found first.
-fn root_grant(options: &TaskOptions) -> Result<Option<Grant>, Error> {
+/// The grant for a branch the caller starts: the envelope and any seats,
+/// with nothing imposed by a parent. Checks that the MCP server can be
+/// found first, and that the seats are a tree whose provisioning can be
+/// honored when the branch's home is `private`.
+fn root_grant(options: &TaskOptions, private: bool) -> Result<Option<Grant>, Error> {
     let Some(envelope) = &options.delegation else {
+        if options.seats.is_some() {
+            return Err(seats_need_delegation());
+        }
         return Ok(None);
     };
     crate::projection::tools(options)?;
-    Ok(Some(Grant::root(envelope.clone())))
+    if let Some(seats) = &options.seats {
+        seats.validate()?;
+        seats.check_provisioning(private)?;
+    }
+    Ok(Some(Grant {
+        seats: options.seats.clone(),
+        ..Grant::root(envelope.clone())
+    }))
+}
+
+fn seats_need_delegation() -> Error {
+    Error::Unsupported("seats need a delegation envelope to spawn them within".into())
 }
 
 pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Branch, Error> {
@@ -206,7 +225,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
         options.provider.as_ref(),
         options.unapproved_tools,
     )?;
-    let grant = root_grant(options)?;
+    let grant = root_grant(options, new_home_private(options))?;
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
@@ -266,7 +285,7 @@ pub(crate) fn run_on(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let grant = root_grant(options)?;
+    let grant = root_grant(options, new_home_private(options))?;
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
@@ -459,15 +478,30 @@ pub(crate) fn prepare_send(
         record.provision = options.provision.clone();
     }
     crate::provisioning::check(record.provision.as_ref(), record.home.is_some())?;
-    // A delegated child keeps the envelope its parent gave it.
+    // A delegated child keeps the envelope and seats its parent gave it.
     if let (Some(envelope), 0) = (&options.delegation, record.info.depth) {
         crate::projection::tools(options)?;
+        if let Some(seats) = &options.seats {
+            seats.validate()?;
+            seats.check_provisioning(record.home.is_some())?;
+        }
         record.grant = Some(match record.grant.take() {
             Some(grant) => Grant {
                 envelope: envelope.clone(),
+                seats: options.seats.clone().or(grant.seats),
                 ..grant
             },
-            None => Grant::root(envelope.clone()),
+            None => Grant {
+                seats: options.seats.clone(),
+                ..Grant::root(envelope.clone())
+            },
+        });
+    } else if options.seats.is_some() {
+        return Err(match record.info.depth {
+            0 => seats_need_delegation(),
+            _ => Error::Denied(format!(
+                "{name} is a delegated child; its seats come from its parent's rig"
+            )),
         });
     }
     record.info.status = BranchStatus::Running;
@@ -547,13 +581,13 @@ pub(crate) fn fork(
             &launch_command,
         )?;
     }
-    let grant = root_grant(options)?;
+    let private =
+        options.isolated || parent.home.is_some() || placement::sandboxed(provider.as_ref());
+    let grant = root_grant(options, private)?;
     // Checked before the name is reserved, so a refusal holds no name. The
     // fork has a private home when its parent had one, when it runs
     // isolated, or when its provider is a sandbox (`create` gives it one).
     let provision = options.provision.clone().or(parent.provision.clone());
-    let private =
-        options.isolated || parent.home.is_some() || placement::sandboxed(provider.as_ref());
     crate::provisioning::check(provision.as_ref(), private)?;
     let reserved =
         names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
@@ -601,4 +635,149 @@ pub(crate) fn fork(
         },
         lease,
     )
+}
+
+/// A new branch from `name`'s latest candidate, always with a fresh session
+/// and a generated handoff brief as its first prompt. Marks `name`
+/// `superseded_by` the new branch, best-effort. See `docs/lifecycle.md`.
+pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Result<Branch, Error> {
+    let store = yard.store();
+    let parent = store.read(name)?;
+    let candidate = parent
+        .info
+        .candidate
+        .clone()
+        .ok_or_else(|| Error::NoCandidate(name.to_owned()))?;
+    let parent_profile = profiles::by_id(&parent.info.profile)
+        .ok_or_else(|| Error::UnknownHarness(parent.info.profile.clone()))?;
+    let profile = match &options.harness {
+        Some(id) => harness::select(Some(id))?,
+        None => parent_profile,
+    };
+    let command = match (&options.command, profile.id == parent_profile.id) {
+        (Some(command), _) => Some(command.clone()),
+        (None, true) => parent.command.clone(),
+        (None, false) => None,
+    };
+    harness::check_approvals(profile, options.unapproved_tools)?;
+    let launch_command = harness::command(profile, command.as_deref());
+    let provider = options.provider.clone().or(parent.provider.clone());
+    placement::check(provider.as_ref())?;
+    if !placement::sandboxed(provider.as_ref()) {
+        harness::check_available(
+            options.harness.as_deref().unwrap_or(profile.harness),
+            &launch_command,
+        )?;
+    }
+    let private = options.isolated || placement::sandboxed(provider.as_ref());
+    let grant = root_grant(options, private)?;
+    let provision = options.provision.clone().or(parent.provision.clone());
+    crate::provisioning::check(provision.as_ref(), private)?;
+    let brief = handoff_brief(&store, name, &parent, &candidate, profile, parent_profile);
+    let reserved = names::reserve(
+        &store,
+        &yard.root,
+        options.name.as_deref(),
+        &parent.info.prompt,
+        &[],
+    )?
+    .remove(0);
+    // A reincarnation never continues a session, so it never shares its
+    // parent's home unless isolation or a sandbox provider asks for one.
+    let home = private.then(|| store.home(&reserved));
+    let record = create(
+        yard,
+        NewBranch {
+            name: &reserved,
+            prompt: &brief,
+            profile,
+            base: candidate.commit,
+            parent: Some(name.to_owned()),
+            check: options.check.clone().or(parent.check.clone()),
+            command,
+            home,
+            cost_baseline: None,
+            provider,
+            grant,
+            depth: 0,
+            provision,
+        },
+    )
+    .inspect_err(|_| store.release(&reserved))?;
+    let (record, lease) = record;
+    let new_name = record.info.name.clone();
+    // Best-effort and informational only: never blocks the new branch from
+    // starting, and races harmlessly with a concurrent write to the old
+    // branch the way any out-of-turn `store.write` does.
+    if let Ok(mut old) = store.read(name) {
+        old.info.superseded_by = Some(new_name);
+        let _ = store.write(&old);
+    }
+    engine::execute(
+        Turn {
+            yard,
+            record,
+            profile,
+            command: launch_command,
+            mode: SessionMode::Fresh,
+            prompt: &brief,
+            options,
+            fork_source: None,
+            note: Some(format!(
+                "reincarnated from {name} with a fresh session and a handoff brief"
+            )),
+        },
+        lease,
+    )
+}
+
+/// The first prompt for a reincarnated branch: the original task, turns so
+/// far, its last message, the latest candidate's diffstat, and why it was
+/// reincarnated.
+fn handoff_brief(
+    store: &crate::state::Store,
+    name: &str,
+    parent: &Record,
+    candidate: &CandidateInfo,
+    profile: &Profile,
+    parent_profile: &Profile,
+) -> String {
+    let events = record::read(store, name).unwrap_or_default();
+    let last = delegation::last_message(&events);
+    let mut brief = format!(
+        "{name} is being reincarnated: continue its work in a fresh session.\n\n\
+         ## Original task\n{}\n\n\
+         ## Progress so far\n{} turn(s) completed with {}.\n\n\
+         ## Latest candidate\n{} ({} file(s) changed, +{} -{})\n",
+        parent.info.prompt,
+        parent.info.turns,
+        parent_profile.id,
+        candidate.commit,
+        candidate.files_changed,
+        candidate.insertions,
+        candidate.deletions,
+    );
+    if profile.id != parent_profile.id {
+        brief.push_str(&format!(
+            "\nThis run switches harness from {} to {}.\n",
+            parent_profile.id, profile.id
+        ));
+    }
+    if !last.is_empty() {
+        brief.push_str(&format!("\n## Its last message\n{last}\n"));
+    }
+    match &parent.info.status {
+        BranchStatus::Failed { reason } => brief.push_str(&format!(
+            "\n## Why it was reincarnated\nIts last turn failed: {reason}\n"
+        )),
+        BranchStatus::BudgetExceeded { limit } => brief.push_str(&format!(
+            "\n## Why it was reincarnated\nIts last turn hit its {limit} limit.\n"
+        )),
+        BranchStatus::Interrupted => {
+            brief.push_str("\n## Why it was reincarnated\nIts last turn was interrupted.\n")
+        }
+        _ => {}
+    }
+    brief.push_str("\nPick up from the candidate above and continue the task.");
+    brief
 }

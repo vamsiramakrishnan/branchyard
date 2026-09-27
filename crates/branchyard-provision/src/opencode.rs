@@ -19,8 +19,7 @@
 use crate::auth::{Method, Spec};
 use crate::edit::Edit;
 use crate::{
-    needs_private_home, pass_session, unsupported, unused, Context, EnvVar, Plan, Provisioner,
-    Refused,
+    needs_private_home, pass_session, unsupported, unused, Context, Plan, Provisioner, Refused, Via,
 };
 
 const AUTH_FILE: &str = ".local/share/opencode/auth.json";
@@ -71,7 +70,7 @@ impl Provisioner for OpenCode {
             match resolved.method {
                 "api-key" => {
                     let key = resolved.env_key.expect("an env method has a key");
-                    plan.set_env(EnvVar::secret(key, context.secret(key).unwrap_or_default()));
+                    plan.secret_env(key, key, context.secret(key).unwrap_or_default(), true);
                 }
                 "auth-file" => {
                     needs_private_home(context, "OpenCode's auth.json")?;
@@ -83,6 +82,13 @@ impl Provisioner for OpenCode {
                         return Err(Refused("the OPENCODE_AUTH secret is not valid JSON".into()));
                     }
                     plan.edit(AUTH_FILE, true, Edit::Put(content.to_owned()));
+                    plan.deliver(
+                        "OPENCODE_AUTH",
+                        Via::File {
+                            path: AUTH_FILE.into(),
+                        },
+                        false,
+                    );
                 }
                 _ => unreachable!("every method of AUTH is handled"),
             }

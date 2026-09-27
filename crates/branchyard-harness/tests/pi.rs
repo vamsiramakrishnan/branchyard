@@ -389,3 +389,103 @@ fn slash_prompts_permissions_and_transport_loss() {
     )));
     assert_eq!(driver.transport_closed(), vec![Event::SessionClosed]);
 }
+
+/// Recorded from pi 0.87.1 and a stand-in API: a steered message is queued
+/// and delivered before the next model call, in the same run.
+#[test]
+fn a_steered_message_joins_the_run() {
+    let (mut driver, opened) = open(SessionMode::Fresh);
+    let replayed = Replay::new(&fixture("pi-0.87.1-rpc-steer.jsonl"))
+        .prompt("TEXTTURN: please start")
+        .steer("STEER-MESSAGE: bananas")
+        .run(&mut driver, &opened);
+    assert_eq!(replayed.sent, 3, "get_state, prompt and steer");
+    assert!(replayed.unsent.is_empty(), "nothing is left to clear");
+    let events = replayed.events;
+    assert!(events.contains(&Event::SteerAccepted { turn: 1, steer: 1 }));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::SteerRejected { .. })));
+    assert!(events.iter().any(|e| matches!(e,
+        Event::MessageDelta { text, .. } if text.contains("STEER-MESSAGE: bananas"))));
+    let ends = events
+        .iter()
+        .filter(|e| matches!(e, Event::TurnEnded { .. }))
+        .count();
+    assert_eq!(ends, 1);
+    assert_eq!(
+        events.last(),
+        Some(&Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::Completed
+        })
+    );
+}
+
+/// Pi keeps a queued message through an abort; the driver clears the queue
+/// first, and reports the message undelivered.
+#[test]
+fn an_abort_clears_queued_steered_messages_first() {
+    let (mut driver, opened) = open(SessionMode::Fresh);
+    let replayed = Replay::new(&fixture("pi-0.87.1-rpc-steer-abort.jsonl"))
+        .prompt("TEXTTURN: please start")
+        .steer("STEER-MESSAGE: bananas")
+        .interrupt()
+        .run(&mut driver, &opened);
+    assert_eq!(
+        replayed.sent, 5,
+        "get_state, prompt, steer, clear_queue, abort"
+    );
+    let events = replayed.events;
+    assert!(events.contains(&Event::SteerRejected {
+        turn: 1,
+        steer: 1,
+        reason: "cleared from Pi's queue before it was delivered".into()
+    }));
+    assert!(events.contains(&Event::TurnEnded {
+        turn: 1,
+        outcome: TurnOutcome::Interrupted
+    }));
+}
+
+/// A message still queued when the run settles would join the next prompt:
+/// the driver clears it and reports it undelivered.
+#[test]
+fn a_message_left_queued_at_settle_is_cleared() {
+    let (mut driver, _) = ready(SessionMode::Fresh, "s1");
+    let submitted = driver.submit("go").unwrap();
+    let prompt = decode(&submitted.frames[0]);
+    feed(&mut driver, &response(&prompt["id"], "prompt"));
+    assert_eq!(
+        driver.steer("/skill:x"),
+        Err(Rejected::Unsupported(
+            "a steered message beginning with / can run a Pi command".into()
+        ))
+    );
+    let steer = decode(&driver.steer("late").unwrap()[0]);
+    assert_eq!(steer["type"], "steer");
+    assert_eq!(steer["message"], "late");
+    feed(
+        &mut driver,
+        &json!({"type": "queue_update", "steering": ["late"], "followUp": []}),
+    );
+    let (events, _) = feed(&mut driver, &response(&steer["id"], "steer"));
+    assert_eq!(events, [Event::SteerAccepted { turn: 1, steer: 1 }]);
+    let (events, frames) = feed(&mut driver, &json!({"type": "agent_settled"}));
+    assert_eq!(
+        events,
+        [
+            Event::SteerRejected {
+                turn: 1,
+                steer: 1,
+                reason: "the run settled before Pi delivered it".into()
+            },
+            Event::TurnEnded {
+                turn: 1,
+                outcome: TurnOutcome::Completed
+            }
+        ]
+    );
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["type"], "clear_queue");
+}

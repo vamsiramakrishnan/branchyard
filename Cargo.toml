@@ -6,6 +6,7 @@ members = [
     "crates/branchyard-client",
     "crates/branchyard-controls",
     "crates/branchyard-harness",
+    "crates/branchyard-herdr",
     "crates/branchyard-microsandbox",
     "crates/branchyard-mcp",
     "crates/branchyard-provision",

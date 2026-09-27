@@ -1,7 +1,8 @@
 //! Durable execution against the fake ACP agent: an engine killed mid-turn
 //! and recovered, leases between two yards, journaled steps replayed rather
 //! than repeated, durable cancellation, event cursors, and the import of
-//! state left by earlier versions.
+//! state left by earlier versions, and input steered into a turn another
+//! process runs.
 //!
 //! Crashes are real: a child process (this test binary, running the
 //! ignored `engine_child` test) starts a turn and is sent SIGKILL.
@@ -13,7 +14,9 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use branchyard::{Activity, BranchStatus, Error, Event, Policy, RecordedEvent, Yard};
+use branchyard::{
+    Activity, BranchStatus, Error, Event, Policy, RecordedEvent, SteerState, TurnOutcome, Yard,
+};
 use common::{edit_record, fake_agent, text, Fixture};
 
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
@@ -89,6 +92,29 @@ fn recovered(events: &[RecordedEvent]) -> Vec<(String, Vec<u32>)> {
         .collect()
 }
 
+/// Leave a report pending for `to` directly in the store, as a child's
+/// `by report` would, before `to`'s engine starts; its id.
+fn pending_report(f: &Fixture, to: &str) -> i64 {
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.execute(
+        "INSERT INTO messages (from_branch, to_branch, kind, text, at_ms) \
+         VALUES ('kid', ?1, 'report', 'tests pass', 1)",
+        [to],
+    )
+    .unwrap();
+    db.last_insert_rowid()
+}
+
+fn delivered(f: &Fixture, id: i64) -> bool {
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.query_row(
+        "SELECT delivered_ms IS NOT NULL FROM messages WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
 fn prompts(events: &[RecordedEvent]) -> usize {
     events
         .iter()
@@ -99,6 +125,9 @@ fn prompts(events: &[RecordedEvent]) -> usize {
 #[test]
 fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     let f = Fixture::new();
+    // Opens the store, so the message can be written before the child
+    // starts; the child's turn start prepends it to the prompt.
+    let report = pending_report(&f, "crashy");
     let mut child = start_child(&f, "ORPHAN", &[]);
     let mut pids = Vec::new();
     wait_until("the harness to report its processes", || {
@@ -157,6 +186,17 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
         "the prompt reached the harness once"
     );
     assert_eq!(prompts(&log), 1);
+    // The report went out with the journaled prompt: it counts delivered
+    // and is not given again.
+    assert!(log.iter().any(|e| matches!(
+        &e.activity,
+        Activity::Prompt(prompt) if prompt.contains("tests pass") && prompt.ends_with("ORPHAN")
+    )));
+    assert!(delivered(&f, report));
+    assert!(log.iter().any(|e| matches!(
+        &e.activity,
+        Activity::MessagesDelivered { ids, .. } if ids == &[report as u64]
+    )));
 
     // A second recovery finds nothing, and the branch continues its
     // session with a new turn.
@@ -173,6 +213,7 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
 #[test]
 fn a_crash_before_the_prompt_was_submitted_says_the_turn_never_ran() {
     let f = Fixture::new();
+    let report = pending_report(&f, "crashy");
     let mut child = start_child(&f, "WRITE never.txt=1", &[("FAKE_ACP_SILENT", "1")]);
     let db = f.root.join(".branchyard/state.db");
     wait_until("the harness to start", || {
@@ -199,6 +240,10 @@ fn a_crash_before_the_prompt_was_submitted_says_the_turn_never_ran() {
     );
     assert_eq!(prompts(&log), 0);
     assert!(!branch.info().worktree.join("never.txt").exists());
+    assert!(
+        !delivered(&f, report),
+        "a turn that never ran delivers nothing"
+    );
 }
 
 #[test]
@@ -720,4 +765,145 @@ fn a_harness_started_just_before_its_engine_stopped_is_found_by_its_marker() {
     wait_until("the unrecorded harness to die", || {
         !running(agent) && !running(sleeper)
     });
+}
+
+/// A child engine process, killed if a test fails before it exits.
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn steered(events: &[RecordedEvent]) -> Vec<(u64, String, String)> {
+    events
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Steered { id, by, text } => Some((*id, by.clone(), text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A turn running in another process takes steered input from this one:
+/// the input is queued durably, bound to that turn, delivered by the engine
+/// that runs it, recorded with its sender, and the turn ends once.
+#[test]
+fn input_steered_from_another_process_reaches_the_running_turn() {
+    let f = Fixture::new();
+    let mut child = Reaped(start_child(&f, "AWAIT_STEER", &[]));
+    wait_until("the harness to wait for steering", || {
+        text(&events(&f.yard, "crashy")).contains("waiting for steering")
+    });
+    // Another yard on the repository, as a separate process would open it.
+    let other = Yard::open(&f.root).unwrap();
+    let steer = other
+        .steer_as("crashy", "also look at b.txt", "the other process")
+        .unwrap();
+    assert_eq!(steer.branch, "crashy");
+    assert_eq!(steer.by, "the other process");
+    let settled = other
+        .wait_steer("crashy", steer.id, Duration::from_secs(30))
+        .unwrap();
+    assert!(
+        matches!(settled.state, SteerState::Delivered | SteerState::Accepted),
+        "{settled:?}"
+    );
+    assert!(child.0.wait().unwrap().success());
+
+    let branch = other.branch("crashy").unwrap();
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    let log = branch.events().unwrap();
+    assert_eq!(
+        steered(&log),
+        [(
+            steer.id,
+            "the other process".to_owned(),
+            "also look at b.txt".to_owned()
+        )]
+    );
+    assert!(text(&log).contains("steered: also look at b.txt"));
+    assert!(log
+        .iter()
+        .any(|e| matches!(e.activity, Activity::Harness(Event::SteerAccepted { .. }))));
+    let ends = log
+        .iter()
+        .filter(|e| matches!(e.activity, Activity::Harness(Event::TurnEnded { .. })))
+        .count();
+    assert_eq!(ends, 1);
+    assert_eq!(
+        other.steer_state("crashy", steer.id).unwrap().state,
+        SteerState::Accepted
+    );
+    // Bound to that turn: with none running, steering is refused.
+    assert!(matches!(
+        branch.steer("too late"),
+        Err(Error::NotRunning(name)) if name == "crashy"
+    ));
+}
+
+/// An agent that does not offer steering is never interrupted in its
+/// place: the input is refused with the reason, and the turn goes on.
+#[test]
+fn steering_an_agent_without_the_extension_is_refused_not_an_interrupt() {
+    let f = Fixture::new();
+    let mut child = Reaped(start_child(&f, "HANG", &[("FAKE_ACP_NO_STEER", "1")]));
+    wait_until("the prompt", || prompts(&events(&f.yard, "crashy")) == 1);
+    let steer = f.yard.steer_as("crashy", "hello", "a test").unwrap();
+    let settled = f
+        .yard
+        .wait_steer("crashy", steer.id, Duration::from_secs(30))
+        .unwrap();
+    assert!(
+        matches!(&settled.state, SteerState::Refused { reason } if reason.contains("_session/steering")),
+        "{settled:?}"
+    );
+    // Still running: the refusal did not stop the turn.
+    assert_eq!(
+        f.yard.branch("crashy").unwrap().info().status,
+        BranchStatus::Running
+    );
+    assert_eq!(f.yard.cancel_as("crashy", "the test").unwrap(), ["crashy"]);
+    assert!(child.0.wait().unwrap().success());
+    let log = events(&f.yard, "crashy");
+    assert!(steered(&log).is_empty());
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Warning(w) if w.starts_with(&format!("steered input {} from a test was not delivered", steer.id)))));
+    assert!(log.iter().any(|e| matches!(
+        e.activity,
+        Activity::Harness(Event::TurnEnded {
+            outcome: TurnOutcome::Interrupted,
+            ..
+        })
+    )));
+}
+
+/// A profile that cannot take input mid-turn is refused before anything
+/// is queued, with its driver's reason; so is empty input.
+#[test]
+fn a_profile_without_steering_is_refused_up_front() {
+    let f = Fixture::new();
+    let branch = f.task("hello").name("quiet").run().unwrap();
+    assert!(matches!(
+        branch.steer(" "),
+        Err(Error::Denied(why)) if why.contains("needs some text")
+    ));
+    assert!(matches!(
+        branch.steer("x"),
+        Err(Error::NotRunning(name)) if name == "quiet"
+    ));
+    edit_record(&f.root, "quiet", |record| {
+        record["info"]["harness"] = "amp".into();
+        record["info"]["profile"] = "amp-stream-json".into();
+    });
+    let error = f.yard.branch("quiet").unwrap().steer("x").unwrap_err();
+    assert_eq!(error.kind(), "unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("amp-stream-json cannot take input during a running turn"),
+        "{error}"
+    );
 }

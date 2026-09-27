@@ -14,12 +14,16 @@
 //! `turn_end` (how the turn ended) and `snapshot` (the candidate). Recovery
 //! reads them to say truthfully what a turn whose engine stopped did; a
 //! submitted prompt is never submitted again.
+//!
+//! Steered input ([`crate::Branch::steer`]) is polled from the store like a
+//! cancel, bound to this turn, and written to the harness while the turn
+//! runs; what became of each is recorded in the store and the event log.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use branchyard_harness::profiles::Profile;
-use branchyard_harness::{Open, SessionMode};
+use branchyard_harness::{Open, Rejected, SessionMode};
 use branchyard_runtime::{RuntimeError, Session};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,9 +34,9 @@ use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
 use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
 use crate::{
-    git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource, Error,
-    Event, NativeSession, PermissionDecision, PermissionRequest, Policy, TaskOptions, TurnOutcome,
-    Yard,
+    git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource,
+    DeliveredVia, Error, Event, NativeSession, PermissionDecision, PermissionRequest, Policy,
+    StallAction, SteerState, TaskOptions, TurnOutcome, Yard,
 };
 
 /// How long a harness may take to complete its handshake.
@@ -86,6 +90,9 @@ pub(crate) enum End {
     Lost {
         reason: String,
     },
+    /// Interrupted by the engine after a stall; see
+    /// [`crate::StallAction::Interrupt`].
+    Stalled,
 }
 
 /// The journaled steps of a turn.
@@ -123,6 +130,9 @@ enum Stop {
     Limit(&'static str),
     Cancelled(String),
     Failure(String),
+    /// Stopping after a stall, with [`Budget::stall_action`]
+    /// [`StallAction::Interrupt`].
+    Stall,
 }
 
 /// Run the turn under `lease` and record its result. Harness failures
@@ -314,8 +324,12 @@ fn run(
     // The one path for MCP servers and instructions, the task's and the
     // delegation tools', and for everything else the home needs. Applied
     // before a sandbox exists, so its mount or home transfer carries it.
-    let provisioned = match crate::provisioning::prepare(record, turn.profile, projection.as_ref())
-    {
+    let provisioned = match crate::provisioning::prepare(
+        record,
+        turn.profile,
+        projection.as_ref(),
+        store.dir(),
+    ) {
         Ok(provisioned) => provisioned,
         Err(reason) => {
             driven.end = End::failed(format!("could not provision {}: {reason}", turn.profile.id));
@@ -338,22 +352,48 @@ fn run(
     if !placement.is_sandbox() {
         placement.set_env(ENV_ROOT, &turn.yard.root.display().to_string());
         placement.set_env(ENV_BRANCH, &record.info.name);
+        // A local process runs directly on the host filesystem, so every
+        // scratch area this branch may reach is simply its host directory;
+        // see `docs/storage.md`. Microsandbox gets these as mounts instead
+        // (`placement::scratch_mounts`); Substrate gets none (it has no
+        // host mounts and the worktree crosses as a bundle, not scratch
+        // areas too).
+        if let Ok(areas) = crate::storage::authorized_scratch(turn.yard, &record.info.name) {
+            for area in areas {
+                let path = crate::storage::scratch_dir(&store, &area.name);
+                placement.set_env(
+                    &crate::storage::scratch_env_var(&area.name),
+                    &path.display().to_string(),
+                );
+            }
+        }
     }
     if let Some(projection) = &projection {
         for (name, value) in &projection.env {
             placement.set_env(name, value);
         }
     }
+    // A secret's source variable is not the harness's: it gets the secret
+    // only as its plan delivers it.
+    for name in &provisioned.scrub {
+        placement.remove_env(name);
+    }
     for var in &provisioned.env {
         placement.set_env(&var.name, &var.value);
     }
+    // A per-turn MCP file lives until this function returns, after the
+    // harness is gone.
+    let _turn_file = provisioned.turn_file;
     let open = Open {
         mcp_servers: provisioned.session.mcp_servers,
         instructions: provisioned.session.instructions,
         model: provisioned.session.model,
+        mcp_config_file: provisioned.mcp_config_file,
+        remote_mcp_servers: provisioned.session.remote_mcp_servers,
         ..Open::new(turn.mode.clone(), placement.cwd())
     };
     let driver = turn.profile.driver_with(turn.command.clone());
+    let mut steering = Steering::new(turn.profile.id, driver.capabilities().steer);
     // Journaled before the spawn: every process of a local harness carries
     // this marker, so recovery finds them even if this engine stops before
     // the harness's pid is recorded below.
@@ -423,6 +463,20 @@ fn run(
     // resume or fork may have landed somewhere else.
     let mut confirmed = false;
     let mut kill = false;
+    // Stall detection: `last_activity` moves forward on every protocol
+    // event, including a permission answer. It is never checked while the
+    // engine itself is blocked (delivering a permission answer synchronously
+    // stops the loop from ticking at all), while a child branch is running
+    // (`delegation::any_child_running`), or while the harness is blocked in
+    // `ask --wait` for an answer (`inbox::waiting_for_answer`, recorded in
+    // the store by whichever process runs the wait).
+    let mut last_activity = started;
+    let mut stalled = false;
+    let write_stalled = |value: bool| -> Result<(), Error> {
+        let mut updated = record.clone();
+        updated.info.stalled = value;
+        store.write_fenced(&updated, fence)
+    };
     let fail = |confirmed: bool, detail: String| -> End {
         End::failed(match (&turn.mode, confirmed) {
             (SessionMode::Fresh, _) | (_, true) => detail,
@@ -478,6 +532,33 @@ fn run(
             }
             _ => {}
         }
+        steering.poll(recorder, &mut session, &store, fence, &phase)?;
+        if let (Phase::Running(n), Some(window)) = (&phase, bounds.budget.stall_after) {
+            let n = *n;
+            let idle = now.duration_since(last_activity);
+            if !stalled
+                && idle >= window
+                && !delegation::any_child_running(&store, &record.info.name)
+                && !crate::inbox::waiting_for_answer(&store, &record.info.name)
+            {
+                stalled = true;
+                let since_ms = now_ms().saturating_sub(idle.as_millis() as u64);
+                recorder.record(Activity::Stalled { since_ms })?;
+                write_stalled(true)?;
+                if bounds.budget.stall_action == StallAction::Interrupt {
+                    if let Err(error) = session.interrupt() {
+                        recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                        kill = true;
+                        break End::Stalled;
+                    }
+                    phase = Phase::Stopping {
+                        turn: n,
+                        why: Stop::Stall,
+                        since: now,
+                    };
+                }
+            }
+        }
         match &phase {
             Phase::Opening if late => {
                 kill = true;
@@ -513,6 +594,7 @@ fn run(
                     Stop::Limit(limit) => End::budget(*limit),
                     Stop::Cancelled(by) => End::cancelled(by.clone()),
                     Stop::Failure(reason) => End::failed(reason.clone()),
+                    Stop::Stall => End::Stalled,
                 };
             }
             _ => {}
@@ -531,16 +613,32 @@ fn run(
             Err(error) => break fail(confirmed, error.to_string()),
         };
         recorder.record(Activity::Harness(event.clone()))?;
+        steering.event(recorder, &store, fence, &event)?;
+        last_activity = Instant::now();
+        if stalled && matches!(phase, Phase::Running(_)) {
+            stalled = false;
+            recorder.record(Activity::Resumed)?;
+            write_stalled(false)?;
+        }
         match event {
             Event::Ready if matches!(phase, Phase::Opening) => {
-                recorder.record(Activity::Prompt(turn.prompt.to_owned()))?;
-                // Journaled first: from here the prompt may have reached the
-                // harness, and recovery must never submit it again.
-                let intent = json!({ "prompt": turn.prompt });
-                store
-                    .backend()
-                    .begin_step(fence, fence.turn, STEP_SUBMIT, &intent)?;
-                match session.submit(turn.prompt) {
+                // Pending inbox messages are prepended here, at the last
+                // point before the prompt may reach the harness. Journaled
+                // first, and the messages it carries acknowledged (marked
+                // delivered) in the same transaction: from here the prompt
+                // may have reached the harness, and recovery must never
+                // submit it or its messages again; a failure before leaves
+                // them pending (see `crate::inbox`).
+                let submission =
+                    crate::inbox::begin_submit(&store, fence, &record.info.name, turn.prompt)?;
+                if !submission.delivered.is_empty() {
+                    recorder.record(Activity::MessagesDelivered {
+                        ids: submission.delivered.clone(),
+                        via: DeliveredVia::TurnStart,
+                    })?;
+                }
+                recorder.record(Activity::Prompt(submission.prompt.clone()))?;
+                match session.submit(&submission.prompt) {
                     Ok(n) => {
                         driven.submitted = true;
                         store.backend().finish_step(
@@ -550,6 +648,19 @@ fn run(
                             &json!({ "turn": n }),
                         )?;
                         phase = Phase::Running(n);
+                    }
+                    // Refused with nothing written: the prompt never
+                    // reached the harness, so its messages are pending
+                    // again for the next turn.
+                    Err(error @ RuntimeError::Rejected(_)) => {
+                        crate::inbox::abandon_submit(&store, fence, &submission)?;
+                        if !submission.delivered.is_empty() {
+                            recorder.record(Activity::Warning(format!(
+                                "the harness refused the prompt; messages {:?} are pending again",
+                                submission.delivered
+                            )))?;
+                        }
+                        break fail(confirmed, format!("submit failed: {error}"));
                     }
                     Err(error) => break fail(confirmed, format!("submit failed: {error}")),
                 }
@@ -571,14 +682,20 @@ fn run(
             }
             Event::PermissionRequested { request, .. } => {
                 let stopping = matches!(phase, Phase::Stopping { .. });
-                if let Some(reason) = answer(
+                let answered = answer(
                     recorder,
                     &mut session,
                     turn,
                     &bounds.policy,
                     &request,
                     stopping,
-                )? {
+                )?;
+                // The policy may have blocked delivering this answer for a
+                // while (an `--ask` prompt, say); that time is never a
+                // stall, so the idle window starts over from here rather
+                // than from when the request first arrived.
+                last_activity = Instant::now();
+                if let Some(reason) = answered {
                     if let Phase::Running(n) = phase {
                         if session.interrupt().is_err() {
                             kill = true;
@@ -629,6 +746,9 @@ fn run(
                         why: Stop::Failure(reason),
                         ..
                     } => End::failed(reason),
+                    Phase::Stopping {
+                        why: Stop::Stall, ..
+                    } => End::Stalled,
                     _ => End::Outcome { outcome },
                 };
             }
@@ -647,11 +767,15 @@ fn run(
         // Whatever the harness already sent after the turn ended.
         for _ in 0..DRAIN_MAX {
             match session.next_event(Duration::ZERO) {
-                Ok(Some(event)) => recorder.record(Activity::Harness(event))?,
+                Ok(Some(event)) => {
+                    recorder.record(Activity::Harness(event.clone()))?;
+                    steering.event(recorder, &store, fence, &event)?;
+                }
                 _ => break,
             }
         }
     }
+    steering.finish(recorder, &store, fence)?;
     if let Some(id) = session.session_id() {
         driven.session = Some(id.clone());
     }
@@ -696,6 +820,167 @@ fn run(
         recorder.record(Activity::Warning(warning))?;
     }
     Ok(driven)
+}
+
+/// This turn's steered input: polled from the store at most every
+/// [`TICK`], written to the harness while the turn runs, and settled as the
+/// harness answers.
+struct Steering {
+    profile: &'static str,
+    /// Whether the driver can take input mid-turn at all.
+    offered: bool,
+    /// Store IDs of the input written to the driver, in the driver's
+    /// numbering from 1.
+    written: Vec<u64>,
+    next_poll: Instant,
+}
+
+impl Steering {
+    fn new(profile: &'static str, offered: bool) -> Steering {
+        Steering {
+            profile,
+            offered,
+            written: Vec::new(),
+            next_poll: Instant::now(),
+        }
+    }
+
+    fn refuse(
+        recorder: &mut Recorder,
+        store: &Store,
+        fence: &Fence,
+        id: u64,
+        by: &str,
+        reason: String,
+    ) -> Result<(), Error> {
+        recorder.record(Activity::Warning(format!(
+            "steered input {id} from {by} was not delivered: {reason}"
+        )))?;
+        store
+            .backend()
+            .settle_steer(fence, id, &SteerState::Refused { reason })
+            .map(|_| ())
+    }
+
+    /// Record that steered input `steer` delivered inbox message `message`.
+    fn delivered(recorder: &mut Recorder, steer: u64, message: Option<u64>) -> Result<(), Error> {
+        match message {
+            Some(id) => recorder.record(Activity::MessagesDelivered {
+                ids: vec![id],
+                via: DeliveredVia::Steer { steer },
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Write pending input into a running turn. Before the prompt is
+    /// submitted it waits; while the turn is being stopped it is refused.
+    fn poll(
+        &mut self,
+        recorder: &mut Recorder,
+        session: &mut Session,
+        store: &Store,
+        fence: &Fence,
+        phase: &Phase,
+    ) -> Result<(), Error> {
+        let now = Instant::now();
+        if now < self.next_poll || matches!(phase, Phase::Opening) {
+            return Ok(());
+        }
+        self.next_poll = now + TICK;
+        // A failed read is retried at the next poll, as a cancel's is.
+        let Ok(pending) = store.backend().pending_steers(fence) else {
+            return Ok(());
+        };
+        for row in pending {
+            let refusal = match phase {
+                Phase::Stopping { .. } => Some("the turn is being stopped".to_owned()),
+                _ if !self.offered => Some(format!(
+                    "{} cannot take input during a running turn",
+                    self.profile
+                )),
+                // Its message raced the turn's start and is in the prompt.
+                _ if row.message.is_some() && row.message_delivered => {
+                    Some("its message was delivered at the turn's start".to_owned())
+                }
+                _ => match session.steer(&row.text) {
+                    Ok(()) => {
+                        self.written.push(row.id);
+                        recorder.record(Activity::Steered {
+                            id: row.id,
+                            by: row.by.clone(),
+                            text: row.text.clone(),
+                        })?;
+                        let message =
+                            store
+                                .backend()
+                                .settle_steer(fence, row.id, &SteerState::Delivered)?;
+                        Self::delivered(recorder, row.id, message)?;
+                        None
+                    }
+                    // The harness cannot take it yet; the next poll retries.
+                    Err(RuntimeError::Rejected(Rejected::SteerNotYet)) => break,
+                    Err(RuntimeError::Rejected(rejected)) => Some(rejected.to_string()),
+                    Err(error) => Some(format!("could not write it to the harness: {error}")),
+                },
+            };
+            if let Some(reason) = refusal {
+                Self::refuse(recorder, store, fence, row.id, &row.by, reason)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Settle written input the harness accepted or dropped.
+    fn event(
+        &mut self,
+        recorder: &mut Recorder,
+        store: &Store,
+        fence: &Fence,
+        event: &Event,
+    ) -> Result<(), Error> {
+        let (steer, state) = match event {
+            Event::SteerAccepted { steer, .. } => (*steer, SteerState::Accepted),
+            Event::SteerRejected { steer, reason, .. } => (
+                *steer,
+                SteerState::Refused {
+                    reason: reason.clone(),
+                },
+            ),
+            _ => return Ok(()),
+        };
+        let index = usize::try_from(steer).ok().and_then(|n| n.checked_sub(1));
+        match index.and_then(|i| self.written.get(i)) {
+            Some(id) => {
+                let message = store.backend().settle_steer(fence, *id, &state)?;
+                Self::delivered(recorder, *id, message)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse what the turn never took: it ended first.
+    fn finish(
+        &mut self,
+        recorder: &mut Recorder,
+        store: &Store,
+        fence: &Fence,
+    ) -> Result<(), Error> {
+        let Ok(pending) = store.backend().pending_steers(fence) else {
+            return Ok(());
+        };
+        for row in pending {
+            Self::refuse(
+                recorder,
+                store,
+                fence,
+                row.id,
+                &row.by,
+                "the turn ended before it could be delivered".into(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 fn phase_turn(phase: &Phase) -> Option<u64> {
@@ -868,6 +1153,12 @@ pub(crate) fn conclude(
         End::Failed { reason } => BranchStatus::Failed { reason },
         End::Lost { reason } => {
             recorder.record(Activity::Warning(reason))?;
+            BranchStatus::Interrupted
+        }
+        End::Stalled => {
+            recorder.record(Activity::Warning(
+                "interrupted after a stall: no harness activity for its stall window".into(),
+            ))?;
             BranchStatus::Interrupted
         }
     };

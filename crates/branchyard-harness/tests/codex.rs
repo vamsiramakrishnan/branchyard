@@ -21,6 +21,8 @@ fn fresh() -> Open {
         model: None,
         mcp_servers: Vec::new(),
         instructions: None,
+        mcp_config_file: None,
+        remote_mcp_servers: Vec::new(),
     }
 }
 
@@ -421,4 +423,146 @@ fn instructions_are_developer_instructions_on_every_open_mode() {
     }
     let (_, _, request) = ready(SessionMode::Fresh, "t1");
     assert!(request["params"].get("developerInstructions").is_none());
+}
+
+#[test]
+fn remote_mcp_servers_are_refused_until_checked_against_codex() {
+    let mut driver = Codex::new(vec!["codex".into()]);
+    let refused = driver.open(Open {
+        remote_mcp_servers: vec![branchyard_harness::RemoteMcpServer {
+            name: "search".into(),
+            transport: branchyard_harness::RemoteTransport::Http,
+            url: "https://mcp.example.com/mcp".into(),
+            headers: Vec::new(),
+        }],
+        ..fresh()
+    });
+    assert!(matches!(refused, Err(Rejected::Unsupported(why)) if why.contains("search")));
+}
+
+fn steer_fixture(name: &str) -> Transcript {
+    Transcript::load(format!(
+        "{}/tests/fixtures/codex-0.157.1-{name}.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+}
+
+/// Recorded against codex-cli 0.157.1 and a stand-in Responses API:
+/// `turn/steer` names the turn in flight, Codex records the input as a user
+/// message with the client ID the driver chose, and the same turn goes on.
+#[test]
+fn turn_steer_joins_the_turn_in_flight() {
+    let recorded = steer_fixture("steer");
+    let (mut driver, opened) = open(SessionMode::Fresh);
+    assert_eq!(driver.steer("early"), Err(Rejected::NotReady));
+    let replayed = Replay::new(&recorded)
+        .ignore("/params/clientInfo/version")
+        .prompt("TEXTTURN: please start")
+        .steer("STEER-MESSAGE: bananas")
+        .run(&mut driver, &opened);
+    assert_eq!(
+        replayed.sent, 5,
+        "initialize, initialized, thread, turn and steer"
+    );
+    assert!(replayed.unsent.is_empty());
+    let events = replayed.events;
+    assert!(events.contains(&Event::SteerAccepted { turn: 1, steer: 1 }));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::SteerRejected { .. })));
+    assert!(events.iter().any(|e| matches!(e,
+        Event::MessageDelta { text, .. } if text.contains("STEER-MESSAGE: bananas"))));
+    let ends: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::TurnEnded { .. }))
+        .collect();
+    assert_eq!(
+        ends,
+        [&Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::Completed
+        }]
+    );
+}
+
+/// An interrupt drops accepted input Codex has not yet recorded; the driver
+/// reports it undelivered when the turn completes.
+#[test]
+fn an_interrupt_drops_undelivered_steered_input() {
+    let recorded = steer_fixture("steer-interrupt");
+    let (mut driver, opened) = open(SessionMode::Fresh);
+    let replayed = Replay::new(&recorded)
+        .ignore("/params/clientInfo/version")
+        .prompt("TEXTTURN: please start")
+        .steer("STEER-MESSAGE: bananas")
+        .interrupt()
+        .run(&mut driver, &opened);
+    assert_eq!(replayed.sent, 6);
+    let events = replayed.events;
+    let accepted = events
+        .iter()
+        .position(|e| *e == Event::SteerAccepted { turn: 1, steer: 1 })
+        .unwrap();
+    let rejected = events
+        .iter()
+        .position(|e| {
+            *e == Event::SteerRejected {
+                turn: 1,
+                steer: 1,
+                reason: "the turn ended before Codex delivered it".into(),
+            }
+        })
+        .unwrap();
+    assert!(accepted < rejected);
+    assert_eq!(
+        events.last(),
+        Some(&Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::Interrupted
+        })
+    );
+}
+
+/// A steer waits for the turn's ID, and a refused one is reported with
+/// codex-cli's reason, as 0.157.1 words it.
+#[test]
+fn a_steer_waits_for_the_turn_id_and_reports_refusals() {
+    let (mut driver, _, _) = ready(SessionMode::Fresh, "t1");
+    assert_eq!(driver.steer("x"), Err(Rejected::NoTurn));
+    let submitted = driver.submit("go").unwrap();
+    assert_eq!(driver.steer("x"), Err(Rejected::SteerNotYet));
+    let start = decode(&submitted.frames[0]);
+    feed(
+        &mut driver,
+        &json!({"id": start["id"], "result": {"turn": {"id": "turn-9"}}}),
+    );
+    let steer = decode(&driver.steer("more").unwrap()[0]);
+    assert_eq!(steer["method"], "turn/steer");
+    assert_eq!(steer["params"]["expectedTurnId"], "turn-9");
+    assert_eq!(steer["params"]["threadId"], "t1");
+    assert_eq!(steer["params"]["input"][0]["text"], "more");
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"id": steer["id"], "error": {"code": -32600, "message": "no active turn to steer"}}),
+    );
+    assert_eq!(
+        events,
+        [Event::SteerRejected {
+            turn: 1,
+            steer: 1,
+            reason: "no active turn to steer".into()
+        }]
+    );
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"method": "turn/completed", "params": {"turn": {"id": "turn-9", "status": "completed"}}}),
+    );
+    assert_eq!(
+        events,
+        [Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::Completed
+        }],
+        "a refused steer is not reported twice"
+    );
 }

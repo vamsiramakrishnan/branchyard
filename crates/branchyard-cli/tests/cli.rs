@@ -542,6 +542,99 @@ fn a_harness_delegates_with_by_in_its_shell() {
 }
 
 #[test]
+fn a_harness_steers_its_running_children_with_by_and_python() {
+    let repo = Repo::new();
+    let script = "import branchyard as b; b.spawn('AWAIT_STEER', name='py'); \
+                  s = b.steer('py', 'from python'); print('steered', s.by, s.state['state']); \
+                  d = b.wait('py', timeout=60, poll=0.05); print('finished', d.status['state']); \
+                  exec('try:\\n b.steer(\\'py\\', \\'late\\')\\nexcept b.NotRunningError as e:\\n print(\\'refused\\', e.kind)')";
+    let prompt = [
+        "SH by spawn AWAIT_STEER --name kid --json".to_owned(),
+        "SH by send kid --steer 'check the edge case' --json".to_owned(),
+        format!("SH python3 -c \"{script}\""),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, steered) = sh_json(&said, 1);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(steered["branch"], "kid");
+    assert_eq!(steered["by"], "root");
+    assert!(
+        matches!(
+            steered["state"]["state"].as_str(),
+            Some("delivered" | "accepted")
+        ),
+        "{said}"
+    );
+    for expected in ["steered root", "finished no_changes", "refused not_running"] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    for (child, text) in [("kid", "check the edge case"), ("py", "from python")] {
+        let said = reply(&repo, child);
+        assert!(said.contains(&format!("steered: {text}")), "{said}");
+    }
+}
+
+/// `by send --steer` from another process adds to a turn a separate `by
+/// run` process is running, and is refused, with a reason and a failing
+/// exit, when no turn runs.
+#[test]
+fn send_steer_reaches_a_turn_another_process_runs() {
+    let repo = Repo::new();
+    let agent = fake_agent().display().to_string();
+    /// Kills the turn's process if the test fails before it ends.
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut running = Running(
+        repo.command(env!("CARGO_BIN_EXE_by"))
+            .args(["run", "AWAIT_STEER", "--name", "live", "--yes"])
+            .args(["--harness", "gemini-cli", "--command", &agent])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let waiting = || {
+        let log = repo.by(&["log", "live", "--json"]);
+        log.status.success() && stdout(&log).contains("waiting for steering")
+    };
+    while !waiting() {
+        assert!(std::time::Instant::now() < deadline, "live never started");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let limited = repo.by(&["send", "live", "--steer", "x", "--budget-usd", "1"]);
+    assert!(!limited.status.success());
+    assert!(stderr(&limited).contains("send --steer takes only --json"));
+    let out = repo.by(&["send", "live", "--steer", "try the other file"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(
+        stdout(&out).starts_with("delivered into live's running turn"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(running.0.wait().unwrap().success());
+    assert!(reply(&repo, "live").contains("steered: try the other file"));
+    let log = stdout(&repo.by(&["log", "live"]));
+    assert!(
+        log.contains("steered by by send --steer: try the other file"),
+        "{log}"
+    );
+
+    let late = repo.by(&["send", "live", "--steer", "late", "--json"]);
+    assert!(!late.status.success());
+    let error: Value = serde_json::from_slice(&late.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "not_running");
+}
+
+#[test]
 fn a_harness_delegates_with_the_python_module() {
     let repo = Repo::new();
     let script = "import branchyard as b; c = b.spawn('WRITE py.txt=p', name='py'); \
@@ -567,6 +660,147 @@ fn a_harness_delegates_with_the_python_module() {
     let root = repo.json(&["show", "root", "--json"]);
     assert_eq!(root["status"]["state"], "ready");
     assert_eq!(root["candidate"]["files_changed"], 1);
+}
+
+#[test]
+fn artifacts_and_scratch_reach_the_python_module() {
+    let repo = Repo::new();
+    let script = "import branchyard as b; \
+                  a = b.publish('a.txt', name='a.txt', labels={'k': 'v'}); \
+                  print('published', a.name, a.labels); \
+                  print('listed', [x.name for x in b.list_artifacts()]); \
+                  s = b.create_scratch('cache'); print('scratch', s.name, s.owner_branch); \
+                  print('reachable', [x.name for x in b.list_scratch()]); \
+                  l = b.lock_scratch('cache'); print('locked', l.holder_branch); \
+                  b.unlock_scratch('cache'); print('unlocked')";
+    let prompt = format!("SH python3 -c \"{script}\"");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "published a.txt {'k': 'v'}",
+        "listed ['a.txt']",
+        "scratch cache root",
+        "reachable ['cache']",
+        "locked root",
+        "unlocked",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+}
+
+#[test]
+fn a_child_messages_its_parent_with_the_python_module_and_is_delivered_next_turn() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "run",
+        "WRITE root.txt=r",
+        "--name",
+        "root",
+        "--delegate=2",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+
+    // The child's own turn reports, asks and reads its inbox through the
+    // Python module, which shells out to `by` exactly as a harness would.
+    let script = "import branchyard as b; r = b.report('tests pass'); \
+                  print('reported', r.id, r.kind); \
+                  a = b.ask('should I rename the module?'); \
+                  print('asked', a.message.id, a.answer); \
+                  i = b.inbox(); print('inbox', len(i.messages))";
+    let kid_prompt = format!("SH python3 -c \"{script}\"");
+    let kid = repo.json(&[
+        "spawn",
+        &kid_prompt,
+        "--parent",
+        "root",
+        "--name",
+        "kid",
+        "--wait",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(kid["status"]["state"], "no_changes", "{kid}");
+    let said = reply(&repo, "kid");
+    assert!(said.contains("reported"), "{said}");
+    assert!(said.contains("asked"), "{said}");
+    assert!(
+        said.contains("inbox 0"),
+        "no messages delivered yet: {said}"
+    );
+
+    // Both a report and a question reach the parent's inbox, unread, and
+    // are recorded on both event logs.
+    let root_inbox = repo.json(&["inbox", "--as", "root", "--json"]);
+    let messages = root_inbox["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "{root_inbox}");
+    assert!(
+        messages.iter().all(|m| m["delivered"] == false),
+        "{root_inbox}"
+    );
+    let report_id = messages.iter().find(|m| m["kind"] == "report").unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    let question_id = messages.iter().find(|m| m["kind"] == "question").unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    let kid_log = repo.json(&["log", "kid", "--json"]);
+    let kid_log = kid_log.as_array().unwrap();
+    assert!(
+        kid_log
+            .iter()
+            .any(|e| e["activity"] == "message" && e["message"]["id"] == report_id),
+        "{kid_log:?}"
+    );
+
+    // Authority: a branch answers only its own descendants.
+    let refused = repo.by(&[
+        "answer",
+        &question_id.to_string(),
+        "no",
+        "--as",
+        "kid",
+        "--json",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["kind"], "denied");
+
+    let answer = repo.json(&[
+        "answer",
+        &question_id.to_string(),
+        "yes, rename it",
+        "--as",
+        "root",
+        "--json",
+    ]);
+    assert_eq!(answer["to"], "kid");
+    assert_eq!(answer["in_reply_to"], question_id);
+
+    // Delivered at kid's next turn, prepended to the prompt it actually
+    // ran, and acknowledged so it is not delivered twice.
+    let sent = repo.json(&["send", "kid", "WHOAMI", "--wait", "--json"]);
+    assert_eq!(sent["status"]["state"], "no_changes", "{sent}");
+    let kid_log = repo.json(&["log", "kid", "--json"]);
+    let prompt = kid_log
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|e| e["activity"] == "prompt")
+        .unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(prompt.contains("<branchyard-inbox>"), "{prompt}");
+    assert!(prompt.contains("yes, rename it"), "{prompt}");
+    assert!(prompt.ends_with("WHOAMI"), "{prompt}");
+
+    let kid_inbox = repo.json(&["inbox", "--as", "kid", "--json"]);
+    let messages = kid_inbox["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{kid_inbox}");
+    assert_eq!(messages[0]["delivered"], true, "{kid_inbox}");
 }
 
 #[test]
@@ -670,8 +904,9 @@ fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     let tools = repo.by_agent(&["run", "MCP tools", "--name", "mcp", "--delegate", "--yes"]);
     assert!(tools.status.success(), "{}", stderr(&tools));
     assert!(
-        reply(&repo, "mcp")
-            .contains("mcp tools: spawn,inspect,events,send,propose_integration,cancel,children"),
+        reply(&repo, "mcp").contains(
+            "mcp tools: spawn,inspect,events,send,steer,propose_integration,cancel,children"
+        ),
         "{}",
         reply(&repo, "mcp")
     );
@@ -707,4 +942,286 @@ fn by_mcp_needs_a_token() {
         "{}",
         stderr(&out)
     );
+}
+
+/// The example rigs, from the repository root.
+fn example(name: &str) -> String {
+    format!("{}/../../examples/rigs/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn rig_check_prints_the_plan_and_names_what_it_refuses() {
+    let repo = Repo::new();
+    let text = repo.by(&["rig", "check", &example("feature.toml")]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    let text = stdout(&text);
+    for expected in [
+        "rig feature: ",
+        "root   lead as branch feature, claude-code (claude-code-stream-json)",
+        "envelope depth 1, 3 children, harnesses claude-code, codex",
+        "implementer (under lead), codex (codex-app-server), up to 2 at once",
+        "deny Edit, Write, MultiEdit, NotebookEdit",
+    ] {
+        assert!(text.contains(expected), "{expected:?} missing from\n{text}");
+    }
+    // --json prints the plan the golden file holds.
+    let json = repo.by(&["rig", "check", &example("parser.toml"), "--json"]);
+    assert!(json.status.success(), "{}", stderr(&json));
+    let golden = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/parser.plan.json"
+    ))
+    .unwrap();
+    assert_eq!(stdout(&json), golden);
+
+    let spec = repo.dir.join("bad.toml");
+    fs::write(
+        &spec,
+        "version = 1\nname = \"bad\"\nroot = \"lead\"\n[seats.lead]\ncollaborates_with = [\"x\"]\n",
+    )
+    .unwrap();
+    let spec = spec.display().to_string();
+    let refused = repo.by(&["rig", "check", &spec]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(
+        stderr(&refused),
+        format!(
+            "by: {spec}: line 5: seats.lead.collaborates_with: not supported: Branchyard has no \
+             messaging between branches; a branch acts only on its descendants\n"
+        )
+    );
+    let refused = repo.by(&["rig", "run", &spec, "go", "--json"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "invalid_rig");
+    assert_eq!(error["error"]["field"], "seats.lead.collaborates_with");
+    assert_eq!(error["error"]["line"], 5);
+    assert!(repo.json(&["ls", "--json"]).as_array().unwrap().is_empty());
+
+    for usage in [
+        &["rig", "run", &spec][..],
+        &["rig", "check", &spec, "extra"],
+        &["rig", "start", &spec],
+        &["rig", "check", &spec, "--name", "x"],
+    ] {
+        assert_eq!(repo.by(usage).status.code(), Some(2), "{usage:?}");
+    }
+    // Profiles that cannot route permissions need consent before anything runs.
+    fs::write(
+        repo.dir.join("pi.toml"),
+        "version = 1\nname = \"pi\"\nroot = \"lead\"\n[seats.lead]\nharness = \"pi\"\n",
+    )
+    .unwrap();
+    let pi = repo.dir.join("pi.toml").display().to_string();
+    let check = stdout(&repo.by(&["rig", "check", &pi]));
+    assert!(
+        check.contains("needs --allow-unapproved-tools: lead"),
+        "{check}"
+    );
+    let run = repo.by(&["rig", "run", &pi, "go"]);
+    assert_eq!(run.status.code(), Some(1));
+    assert!(
+        stderr(&run).contains("--allow-unapproved-tools"),
+        "{}",
+        stderr(&run)
+    );
+}
+
+/// A rig of the fake agent: a lead that may spawn two workers and a
+/// reviewer.
+const TEAM: &str = r#"
+version = 1
+name = "team"
+root = "lead"
+
+[seats.lead]
+harness = "gemini-cli"
+delegates_to = ["worker", "reviewer"]
+policy = { default = "allow", deny = ["WebFetch"] }
+
+[seats.worker]
+description = "Writes files."
+instances = 2
+
+[seats.reviewer]
+description = "Reviews, never edits."
+policy = { deny = ["Edit"] }
+"#;
+
+#[test]
+fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
+    let repo = Repo::new();
+    let spec = repo.dir.join("team.toml");
+    fs::write(&spec, TEAM).unwrap();
+    let script = "import branchyard as b; c = b.spawn('INSTRUC' + 'TED', seat='reviewer'); \
+                  print('seat', c.seat, c.name); d = b.wait(c.name, timeout=60, poll=0.05); \
+                  print('reviewed', d.status['state'], d.last_message, d.seat)";
+    let prompt = [
+        "SH by inspect --json".to_owned(),
+        "SH by spawn --seat worker 'WRITE w.txt=w' --wait --json".into(),
+        "SH by spawn 'say free' --json".into(),
+        format!("SH python3 -c \"{script}\""),
+        "SH by integrate team-worker --json".into(),
+    ]
+    .join("\n");
+    let agent = fake_agent().display().to_string();
+    let spec = spec.display().to_string();
+    let out = repo.by(&["rig", "run", &spec, &prompt, "--command", &agent, "--json"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(
+        stderr(&out).contains(
+            "by: rig team: root seat lead on gemini-cli; it may spawn seats worker, reviewer"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["rig"], "team");
+    assert_eq!(result["root"]["name"], "team");
+    assert_eq!(
+        result["root"]["children"],
+        serde_json::json!(["team-worker", "team-reviewer"])
+    );
+    let descendants: Vec<(&str, &str)> = result["descendants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["name"].as_str().unwrap(),
+                d["status"]["state"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        descendants,
+        [("team-worker", "merged"), ("team-reviewer", "no_changes")]
+    );
+
+    let said = reply(&repo, "team");
+    let (_, me) = sh_json(&said, 0);
+    assert_eq!(me["seat"], "lead");
+    assert_eq!(me["seats"], serde_json::json!(["worker", "reviewer"]));
+    assert_eq!(me["envelope"]["max_children"], 3);
+    let (code, worker) = sh_json(&said, 1);
+    assert_eq!(
+        (code, worker["status"]["state"].as_str()),
+        (0, Some("ready"))
+    );
+    assert_eq!(worker["seat"], "worker");
+    let (code, free) = sh_json(&said, 2);
+    assert_eq!(code, 1);
+    assert!(
+        free["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("spawns only by seat: one of worker, reviewer"),
+        "{free}"
+    );
+    // The reviewer got its seat's instructions and nothing else.
+    assert!(said.contains("seat reviewer team-reviewer"), "{said}");
+    assert!(
+        said.contains("reviewed no_changes instructed=true reviewer"),
+        "{said}"
+    );
+    let (code, merged) = sh_json(&said, 4);
+    assert_eq!((code, merged["target"].as_str()), (0, Some("by/team")));
+    assert_eq!(repo.git(&["show", "by/team:w.txt"]), "w\n");
+    // Nothing was written into a worktree but the harnesses' own work.
+    let status = repo.git(&[
+        "-C",
+        ".branchyard/worktrees/team-reviewer",
+        "status",
+        "--short",
+    ]);
+    assert_eq!(status, "");
+
+    let inspected = stdout(&repo.by(&["inspect", "team"]));
+    assert!(
+        inspected.contains("lead; spawns seats: worker, reviewer"),
+        "{inspected}"
+    );
+
+    // Outside a harness, a person fills a seat the same way.
+    let second = repo.json(&[
+        "spawn",
+        "WRITE x.txt=x",
+        "--parent",
+        "team",
+        "--seat",
+        "worker",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(second["name"], "team-worker-2");
+    assert_eq!(second["seat"], "worker");
+    let third = repo.by(&[
+        "spawn", "x", "--parent", "team", "--seat", "worker", "--yes", "--json",
+    ]);
+    assert_eq!(third.status.code(), Some(1));
+    let third: Value = serde_json::from_slice(&third.stdout).unwrap();
+    // The envelope still bounds everything: three seats' worth of children.
+    assert!(
+        third["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already has 3 children, its envelope's max_children"),
+        "{third}"
+    );
+}
+
+#[test]
+fn artifact_and_scratch_commands_follow_the_delegation_tree() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "WRITE payload.txt=hi", "--name", "root"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let out = repo.by_agent(&["run", "no changes", "--name", "sibling"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let published = repo.json(&[
+        "artifact",
+        "publish",
+        ".branchyard/worktrees/root/payload.txt",
+        "--branch",
+        "root",
+        "--json",
+    ]);
+    let id = published["id"].as_str().unwrap().to_owned();
+    assert_eq!(published["name"], "payload.txt");
+    assert!(!published["digest"].as_str().unwrap().is_empty());
+
+    let listed = repo.json(&["artifact", "list", "--branch", "root", "--json"]);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let listed_sibling = repo.json(&["artifact", "list", "--branch", "sibling", "--json"]);
+    assert_eq!(listed_sibling.as_array().unwrap().len(), 0);
+
+    let out = repo.by(&[
+        "artifact", "share", &id, "--to", "sibling", "--branch", "root",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let listed_sibling = repo.json(&["artifact", "list", "--branch", "sibling", "--json"]);
+    assert_eq!(listed_sibling.as_array().unwrap().len(), 1);
+
+    let out_path = repo.dir.join("out.bin");
+    let out = repo.by(&[
+        "artifact",
+        "get",
+        &id,
+        "--out",
+        out_path.to_str().unwrap(),
+        "--branch",
+        "sibling",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(fs::read_to_string(&out_path).unwrap(), "hi\n");
+
+    let area = repo.json(&["scratch", "create", "cache", "--branch", "root", "--json"]);
+    assert_eq!(area["name"], "cache");
+    let lock = repo.json(&["scratch", "lock", "cache", "--branch", "root", "--json"]);
+    assert_eq!(lock["holder_branch"], "root");
+    let denied = repo.by(&["scratch", "lock", "cache", "--branch", "sibling"]);
+    assert_eq!(denied.status.code(), Some(1));
+    assert!(stderr(&denied).contains("may not"), "{}", stderr(&denied));
+    let out = repo.by(&["scratch", "unlock", "cache", "--branch", "root"]);
+    assert!(out.status.success(), "{}", stderr(&out));
 }
