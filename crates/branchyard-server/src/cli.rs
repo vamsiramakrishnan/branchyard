@@ -16,6 +16,7 @@ Serve Branchyard repositories over an authenticated HTTP API.
 
 Usage: branchyard-server [options]
        by serve [options]
+       by worker --database URL [options]
 
 Options:
   --config FILE             JSON configuration; see docs/server.md
@@ -42,8 +43,11 @@ Options:
   --secret NAME[=VAR|=@FILE]
                             A secret requests may name, read from this server's
                             variable NAME or VAR, or from FILE; repeatable
-  --database URL            Keep branch state and operations in PostgreSQL
-                            (postgres://...); needs a build with the postgres feature
+  --database URL            Keep branch state, operations and their queue in
+                            PostgreSQL (postgres://...), which several servers and
+                            workers may share; needs a build with the postgres feature
+  --worker                  Only run operations queued in --database, by any server
+                            on it: no listener, no webhooks (what by worker does)
   --max-artifact-bytes N    Largest artifact a publish may upload (default: 268435456)
   --webhook URL             Notify URL of every served repository's activity
                             (branch status changes, stalls, permission requests);
@@ -55,6 +59,8 @@ Options:
                             failure (default: every kind)
   --webhook-insecure        Allow a --webhook URL that is plain http:// off loopback
   --max-running N           Operations running at once (default: 8)
+  --operation-lease SECS    How long a claim on a queued operation lasts without
+                            renewal before another worker takes it over (default: 30)
   --shutdown-grace SECS     At shutdown, wait this long for running operations (default: 60)
   --quiet                   Do not log requests
   -h, --help                Show this help
@@ -85,6 +91,8 @@ struct Flags {
     database: Option<String>,
     max_artifact_bytes: Option<u64>,
     max_running: Option<usize>,
+    operation_lease: Option<Duration>,
+    worker: bool,
     shutdown_grace: Option<Duration>,
     webhooks: Vec<FlagWebhook>,
     webhook_insecure: bool,
@@ -239,6 +247,19 @@ fn parse(args: &[String]) -> Result<Flags, String> {
                 }
             }
             "--webhook-insecure" if inline.is_none() => flags.webhook_insecure = true,
+            "--worker" if inline.is_none() => flags.worker = true,
+            "--operation-lease" => {
+                once(flags.operation_lease.is_some())?;
+                let text = value("SECS")?;
+                let secs = text
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| s.is_finite() && *s >= 0.1 && *s < 1e6)
+                    .ok_or_else(|| {
+                        format!("--operation-lease needs a number of seconds, at least 0.1, not {text:?}")
+                    })?;
+                flags.operation_lease = Some(Duration::from_secs_f64(secs));
+            }
             "--shutdown-grace" => {
                 once(flags.shutdown_grace.is_some())?;
                 let text = value("SECS")?;
@@ -363,6 +384,10 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         .max_running
         .or(partial.max_running)
         .unwrap_or(config.max_running);
+    if let Some(lease) = flags.operation_lease {
+        config.operation_lease = lease;
+    }
+    config.worker_only = flags.worker;
     config.shutdown_grace = flags
         .shutdown_grace
         .or(partial.shutdown_grace)
@@ -489,13 +514,24 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        println!("listening on {}", running.url());
-        let _ = std::io::stdout().flush();
-        eprintln!(
-            "{program}: serving {} on {}; harnesses run as this user, with no isolation beyond it",
-            repos.join(", "),
-            running.url()
-        );
+        if running.is_worker() {
+            println!("working on {}", repos.join(", "));
+            let _ = std::io::stdout().flush();
+            eprintln!(
+                "{program}: running operations queued for {} in the database; harnesses run \
+                 as this user, with no isolation beyond it",
+                repos.join(", ")
+            );
+        } else {
+            println!("listening on {}", running.url());
+            let _ = std::io::stdout().flush();
+            eprintln!(
+                "{program}: serving {} on {}; harnesses run as this user, with no isolation \
+                 beyond it",
+                repos.join(", "),
+                running.url()
+            );
+        }
         let handle = running.handle();
         let name = program.to_owned();
         tokio::spawn(async move {
@@ -534,9 +570,12 @@ mod tests {
             "--listen 0.0.0.0:1 --repo a=/x --repo=b=/y --insecure-bind --token-file t \
              --harness-command gemini-cli=/bin/agent --max-running 2 --shutdown-grace 1.5 \
              --allow-provider substrate --allow-provider=microsandbox,local --allow-delegation \
-             --by-path /opt/by --allow-unapproved-tools --database postgres://u@h/d",
+             --by-path /opt/by --allow-unapproved-tools --database postgres://u@h/d \
+             --worker --operation-lease 2.5",
         ))
         .unwrap();
+        assert!(flags.worker);
+        assert_eq!(flags.operation_lease, Some(Duration::from_millis(2500)));
         assert_eq!(
             flags.allow_providers,
             ["substrate", "microsandbox", "local"]
@@ -568,6 +607,8 @@ mod tests {
                 "unknown option --allow-delegation",
             ),
             ("extra", "unexpected argument"),
+            ("--operation-lease 0", "at least 0.1"),
+            ("--worker=1", "unknown option --worker"),
         ] {
             let got = parse(&args(line)).unwrap_err();
             assert!(got.contains(error), "{line}: {got}");

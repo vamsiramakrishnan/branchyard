@@ -32,9 +32,11 @@ Flags (`by serve --help` or `branchyard-server --help`):
 | `--by-path PATH` | The `by` a delegating harness gets. Default: this executable when it is `by` (as under `by serve`), else `by` beside it, else on `PATH` |
 | `--allow-unapproved-tools` | Accept `unapproved_tools`: profiles whose tools bypass the request's policy (Antigravity, Pi, Amp) |
 | `--secret NAME[=VAR\|=@FILE]` | A secret requests may name in `provision.secrets`, read from this server's variable `NAME` or `VAR`, or from `FILE`, at each turn; repeatable. See [provisioning](provisioning.md#through-a-server) |
-| `--database URL` | Keep branch state and operations in PostgreSQL (`postgres://user@host/db`) instead of SQLite. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
+| `--database URL` | Keep branch state, operations, their queue and branch locks in PostgreSQL (`postgres://user@host/db`) instead of SQLite; several servers may share it. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
+| `--worker` | Only run operations queued in `--database`: no listener, no webhooks. `by worker` is `by serve --worker`; see [several servers](#several-servers-on-one-database) |
 | `--max-artifact-bytes N` | Largest artifact a `POST .../artifacts` upload may publish, in bytes. Default 268435456 (256 MiB) |
-| `--max-running N` | Operations running at once; more wait queued. Default 8 |
+| `--max-running N` | Operations this process runs at once; more wait queued. Default 8 |
+| `--operation-lease SECS` | How long a claim on a queued operation lasts without renewal before another worker takes it over; renewed every third of it. Default 30 |
 | `--shutdown-grace SECS` | At shutdown, how long running operations may finish. Default 60 |
 | `--quiet` | Do not log requests |
 
@@ -67,7 +69,7 @@ Configuration file (relative paths resolve against the file's directory; unknown
 
 The server refuses to start with no repository, no token, a token shorter than 16 characters, an unknown provider name, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
 
-SIGINT or SIGTERM starts a graceful shutdown: no new connections or operations (`503 shutting_down`), event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`. A second signal stops waiting at once.
+SIGINT or SIGTERM starts a graceful shutdown: no new connections or operations (`503 shutting_down`), no more operations claimed from the queue, event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`; queued ones stay queued, and run after the restart or on another server sharing the database. A second signal stops waiting at once.
 
 ## Authentication
 
@@ -107,7 +109,8 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/branches/{b}/escalate` | Escalate to `b`'s parent, or further up if its rig seat allows, as `by escalate --as b`; `{text}` | `Message` |
 | `POST /v1/repos/{repo}/branches/{b}/answer` | Answer one of `b`'s own descendants' messages, as `by answer --as b`; `{message_id, text}` | `Message` |
 | `GET /v1/repos/{repo}/events/stream?cursor=N` | SSE of activity across branches after feed position `N`; without a cursor, from now | `text/event-stream` |
-| `GET /v1/operations/{id}` | An operation's status and result | operation |
+| `GET /v1/operations/{id}` | An operation's status and result, on any server sharing the operation store | operation |
+| `GET /v1/operations?idempotency_key=K` | The operation the caller's request with key `K` created, for a client that lost the response | operation, or `404 unknown_operation` |
 | `POST /v1/repos/{repo}/branches/{b}/artifacts` | Publish the body's bytes as a new artifact of `b`, acting with the server's authority as a person, like `by artifact publish --branch`. `name`, `media_type`, repeated `label` are query parameters; refused over `--max-artifact-bytes` | `201` `ArtifactRef` |
 | `GET /v1/repos/{repo}/branches/{b}/artifacts` | Every artifact `b` may read | `{"artifacts": [ArtifactRef]}` |
 | `GET /v1/repos/{repo}/branches/{b}/artifacts/{id}` | Artifact `id`'s provenance, checked against `b`'s grant | `ArtifactRef` |
@@ -162,22 +165,28 @@ Only `prompt` is required. Give `harness` for one branch or `harnesses` for one 
 
 ### Operations
 
-Task, send, fork and merge are long operations. The server validates the request, records the operation durably, and answers `202 Accepted` with `Location: /v1/operations/{id}` before the work starts:
+Task, send, fork, reincarnate, merge, spawn and integrate are long operations. The server validates the request, admits the operation durably (see [dispatch](#dispatch)), and answers `202 Accepted` with `Location: /v1/operations/{id}` before the work starts:
 
 ```json
 { "id": "op_…", "repo": "app", "kind": "task", "state": "queued",
   "branches": ["flaky"], "cursor": 41, "created_at_ms": 1790000000000 }
 ```
 
-`kind` is `task`, `send`, `fork`, `merge`, `spawn` or `integrate`. `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
+`kind` is `task`, `send`, `fork`, `reincarnate`, `merge`, `spawn` or `integrate`. `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
 
 `branches` are the names planned at acceptance. `cursor` is the feed position at acceptance and `end_cursor` the position once the operation's activity was ingested: to watch one operation, stream from `cursor` until the operation finishes and the stream reaches `end_cursor`, keeping entries for its branches. That is what `by --remote … run` does.
 
-While an operation runs, the branches it works on are locked: another send, merge, fork into the same name, or removal gets `409 branch_busy`. The lock is the server's; a local `by` on the same repository does not see it.
+From admission until it finishes, the branches an operation works on are locked: another send, merge, fork into the same name, or removal gets `409 branch_busy`. The locks are rows in the operation store, taken in the admission's transaction and released in the one that records the outcome, so they hold across every server sharing the store; a removal holds its branch the same way for as long as it takes (at most 10 minutes if its server dies meanwhile). A local `by` on the same repository does not see them.
+
+### Dispatch
+
+Admission is a durable enqueue. In one transaction the server writes the operation's record, its idempotency binding (a unique index on the caller and key), its branch locks, and a queue row holding a description of the work: the request as sent, plus what admission fixed (planned names, a merge's target, an integration's parent, a seat child's name). Only then does it answer `202`. If any of those writes fails, including the queue write, the transaction rolls back and nothing of the operation remains: the client gets `500` and may retry with the same key. The description holds no secret values; a request names secrets, and the server that runs it reads them, like commands, providers and policies, from its own configuration.
+
+A dispatcher in each server claims queue rows oldest first, for the repositories it serves, up to `--max-running` at once. A claim carries a lease, renewed every third of `--operation-lease`, and a fence, its attempt number, which every later write for the operation names. The worker records the operation `running` before it calls the engine, and its outcome after, deleting the queue row and releasing the branch locks in the same transaction; a worker whose claim was taken over is refused both writes. A claim whose lease expired, or whose process is gone from this host, is claimed again by any worker: an operation still `queued` then runs, and one recorded `running` is recorded `interrupted` and never run again, since its turn may have started, and the engine recovers that turn's branch as it recovers any whose engine died.
 
 ### Idempotency
 
-Send `Idempotency-Key: <1–255 visible ASCII characters>` on any `POST`. The key is scoped to the caller (token name) and fingerprinted with the route and the canonical request. A repeat with the same request returns the original operation, `200` if it has finished (with its result) or `202` if not, with `Idempotent-Replayed: true`, and never starts a second run; this holds across restarts. The same key with a different request gets `422 idempotency_key_reused`. Keys are kept for as long as the registry is. `branchyard-client` and `by` send a fresh key per command and retry a `POST` with the same key after a connection failure.
+Send `Idempotency-Key: <1–255 visible ASCII characters>` on any `POST`. The key is scoped to the caller (token name) and fingerprinted with the route and the canonical request. A repeat with the same request returns the original operation, `200` if it has finished (with its result) or `202` if not, with `Idempotent-Replayed: true`, and never starts a second run; this holds across restarts and across servers sharing the operation store, since the key is bound in the admission's transaction. Two concurrent requests with one key meet at the store's unique index: the second waits for the first to commit, then replays it. The same key with a different request gets `422 idempotency_key_reused`. Keys are kept for as long as the registry is. `branchyard-client` and `by` send a fresh key per command and retry a `POST` with the same key after a connection failure; a client that lost the response can also look the operation up with `GET /v1/operations?idempotency_key=` (`Client::operation_by_key`).
 
 ### Event stream
 
@@ -246,7 +255,7 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `cursor_out_of_range` | 400 | Stream cursor past the feed's end; `detail.head` |
 | `detached_head` | 409 | Merge without a target while the served repository's HEAD is detached |
 | `shutting_down` | 503 | The server is stopping |
-| `interrupted` | (operation) | The server stopped before the operation finished |
+| `interrupted` | (operation) | The server stopped before the operation finished, or its worker's claim expired after it started |
 | `internal`, `git_error`, `io_error`, `state_error`, `harness_error`, `not_a_repository` | 500 | Server-side failure |
 | `branch_exists`, `no_candidate`, `target_moved`, `conflict`, `dirty_target`, `already_merged`, `running`, `fenced` | 409 | SDK refusals; `target_moved` has `detail.expected`/`actual`, `conflict` has `detail.files`. `running`: another engine, such as a local `by`, runs a turn on the branch. `fenced`: the engine lost the branch's lease to another |
 | `invalid_name`, `unknown_harness` | 400 | SDK refusals |
@@ -280,12 +289,12 @@ Every command runs remotely, with the same flags: `--provider` and its options, 
 
 ## Deployment notes
 
-- **One server per data directory** is enforced with an advisory lock on `DATA-DIR/lock`; a second server on the directory fails at start. On a network file system it is only as good as that file system's `flock`.
+- **One server per data directory** is enforced with an advisory lock on `DATA-DIR/lock`; a second server on the directory fails at start. On a network file system it is only as good as that file system's `flock`. With `--database` there is no lock: the database holds operations, and several servers may share it.
 - **TLS.** Terminate TLS in the server (`--tls-cert`/`--tls-key`, rustls with the ring provider, HTTP/1.1) or in a reverse proxy in front of a loopback bind. A proxy must not buffer `text/event-stream` responses. Clients trust the Mozilla roots plus `--ca-file`.
 - **Harnesses** run as the server's user, with its `PATH`, `HOME` and harness logins. Install and log in the harnesses as that user, or set `harness_commands`.
 - **Limits.** Request bodies are bounded (`max_body_bytes`, default 1 MiB), request heads must arrive within 30 seconds, at most 256 requests are handled at once (more wait), and at most `max_running` operations run at once (more queue). There is no per-request deadline beyond those, and no rate limiting per token.
 - **Health.** `GET /healthz` needs no token. Each request is logged to stderr as `request-id method path status duration`, never with headers or bodies.
-- **Backups.** Branch state and event logs are each repository's `.branchyard/state.db`, with worktrees under `.branchyard/worktrees/`; server state is `DATA-DIR/state.db` (operations, idempotency keys). Both are SQLite databases in write-ahead-log mode: back them up with `sqlite3 FILE ".backup COPY"` or while the server is stopped, not by copying the file alone. With `--database`, both are in PostgreSQL instead: back it up with `pg_dump` of the schema. Either way they grow without bound for now. An `operations.jsonl` from an earlier version is imported on first start and renamed `operations.jsonl.imported`; `DATA-DIR/feeds/` is no longer used.
+- **Backups.** Branch state and event logs are each repository's `.branchyard/state.db`, with worktrees under `.branchyard/worktrees/`; server state is `DATA-DIR/state.db` (operations, idempotency keys, the dispatch queue, branch locks). Both are SQLite databases in write-ahead-log mode: back them up with `sqlite3 FILE ".backup COPY"` or while the server is stopped, not by copying the file alone. With `--database`, both are in PostgreSQL instead: back it up with `pg_dump` of the schema. Either way they grow without bound for now. An `operations.jsonl` from an earlier version is imported on first start and renamed `operations.jsonl.imported`; `DATA-DIR/feeds/` is no longer used.
 - **Providers and delegation.** Allow a provider only once its cluster, image or runtime is set up for this server (see [providers](providers.md)); the credentials a turn gets are the server's `pass_env` variables. Delegation runs children on the server's threads and gives harnesses the server's `by`, which must be the same version as the server.
 
 ## What is durable
@@ -293,13 +302,13 @@ Every command runs remotely, with the same flags: `--provider` and its options, 
 | State | Where | Survives a restart |
 |---|---|---|
 | Branches, candidates, event logs, the activity feed | Each repository's `.branchyard/state.db`, or the database with `--database`, written by the engine in transactions | Yes |
-| Operations and idempotency keys | `DATA-DIR/state.db` committed with `synchronous=FULL`, or the database's `by_operations` table committed with `synchronous_commit = on`, before `202` and at each state change | Yes; unfinished ones become `interrupted` |
+| Operations, idempotency keys and the dispatch queue | `DATA-DIR/state.db` committed with `synchronous=FULL`, or the database's `by_operations` and `by_operation_queue` tables committed with `synchronous_commit = on`, in one transaction before `202`, and at each state change | Yes; queued ones run after the restart, running ones become `interrupted` |
 | Cancel requests, `max_duration` deadlines, turn leases, journaled steps, harness process identities | Each repository's `.branchyard/state.db`, or the database | Yes |
 | Webhook delivery cursors | `DATA-DIR/state.db`'s `webhook_cursors` table, or the database's `by_webhook_cursors` | Yes |
-| Branch locks | Memory | No; they end with the operations |
+| Branch locks | The same store's `branch_locks` (`by_branch_locks`), with the operation's admission and outcome | Yes, with their operations; a removal's expires after 10 minutes |
 | A turn in progress | The server process and its harness child | No: it is recovered, not continued |
 
-If the server dies mid-turn, the operation becomes `interrupted` at the next start, and opening the repository recovers the branch: the engine kills the harness's process group if its pid and start time still match, ends the branch `interrupted` with a `recovered` event that says whether the prompt had been submitted, and never submits it again. The server also recovers every 30 seconds, which covers a local `by run` on a served repository that was killed. [Durability](durability.md) describes the leases, the journal and the recovery rules, and what is not guaranteed.
+If the server dies before a worker starts an operation, the operation stays queued and runs once, after the restart or on another server. If it dies mid-turn, the operation becomes `interrupted` when its claim is next taken (at once when a server on the same data directory restarts, otherwise once the lease expires), and opening the repository recovers the branch: the engine kills the harness's process group if its pid and start time still match, ends the branch `interrupted` with a `recovered` event that says whether the prompt had been submitted, and never submits it again. The server also recovers every 30 seconds, which covers a local `by run` on a served repository that was killed. [Durability](durability.md) describes the leases, the journal and the recovery rules, and what is not guaranteed.
 
 ## PostgreSQL
 
@@ -309,11 +318,30 @@ Build with the `postgres` feature (`cargo install --locked --path crates/branchy
 by serve --database 'postgres://branchyard@db.internal/branchyard' --repo app=/srv/app
 ```
 
-Each served repository's branch records, event log and feed, leases, journaled steps, harness processes, cancels and steered input are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations` table. Tables are created when missing, in the connection's `search_path` schema, so one schema per server: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token.
+Each served repository's branch records, event log and feed, leases, journaled steps, harness processes, cancels and steered input are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations`, `by_operation_queue` and `by_branch_locks` tables. Tables are created when missing, in the connection's `search_path` schema: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token.
+
+### Several servers on one database
+
+Servers, and `by worker` processes, started with the same `--database` share its operations, queue and branch locks:
+
+```sh
+by serve  --database "$DB" --repo app=/srv/app --listen 10.0.0.5:8421 --tls-cert … --tls-key …
+by serve  --database "$DB" --repo app=/srv/app --listen 10.0.0.5:8422 --tls-cert … --tls-key …
+by worker --database "$DB" --repo app=/srv/app --max-running 16
+```
+
+Any of them accepts an operation, any claims it, and each answers for every operation. A claim is a single `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED LIMIT 1)` on `by_operation_queue`, so two workers never claim one row; leases are measured by the database's clock. An idle dispatcher looks for work every `poll_interval` (500 ms), and at once for what its own server admitted. The queue is plain tables so that it needs no extension; PGMQ could replace `by_operation_queue` without changing the admission transaction's shape.
+
+Limits:
+
+- **Same repositories, same checkouts.** Servers sharing a database must serve the same repositories under the same names, at paths that are the same checkout: the same host, or one shared file system. Worktrees and delegation tokens live in the checkout, and the engine's recovery kills a dead engine's harness only on its own host (elsewhere it waits for the turn's lease to expire).
+- **Same configuration.** An operation runs with its worker's `harness_commands`, secrets and allow flags; a worker that would refuse the request fails the operation with the error the request would have got from it.
+- **Webhooks** are delivered by every server that configures them, each from the shared cursor: configure them on one.
+- **Throughput.** Each server uses one database connection for its registry; claims poll rather than `LISTEN`.
+- **No automatic failover of a running turn.** A turn whose server died is recovered as interrupted, never resumed elsewhere.
 
 What it is not yet:
 
-- **Several servers on one schema.** Each registry recovers the other's unfinished operations as interrupted, branch locks are in each server's memory, and nothing delivers accepted operations through a queue: design §8's PGMQ is not built. One server per schema.
 - **Shared with local `by`.** A local `by` on a served repository opens its SQLite `state.db` and sees none of the server's branches; use `by --remote`. Nothing is imported from an existing `state.db` when a repository moves to the database.
 - **TLS to the database.** Connections are plain; keep the database on a trusted network or a Unix socket.
 - **Waits** poll every 100 ms, as SQLite's do across processes; nothing listens for `NOTIFY`.

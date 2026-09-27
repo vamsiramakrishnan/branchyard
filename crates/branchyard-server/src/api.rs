@@ -17,14 +17,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use branchyard::{
-    Branch, BranchEvent, Budget, Envelope, Observer, Policy, Provider, Provisioning, Seats, Spawn,
-    TaskOptions, Yard,
+    BranchEvent, Budget, Envelope, Observer, Policy, Provider, Provisioning, Seats, TaskOptions,
+    Yard,
 };
 use branchyard_client::api::{
-    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, FeedEntry, ForkRequest,
-    HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind, OperationResult,
-    PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
-    SteerRequest, TaskRequest,
+    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, FeedEntry, ForkRequest,
+    HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind, PolicySpec,
+    ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest,
+    TaskRequest,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -35,8 +35,9 @@ use crate::auth::Tokens;
 use crate::config::Config;
 use crate::error::{self, ApiError};
 use crate::feed::Feed;
-use crate::ops::{Finished, Job, NewOperation, Registry};
+use crate::ops::{NewOperation, Registry};
 use crate::store::Idempotency;
+use crate::work::{self, Work};
 
 /// Requests handled at once; more wait.
 const MAX_CONCURRENT_REQUESTS: usize = 256;
@@ -83,7 +84,7 @@ impl App {
 
     /// The command for a new branch: the request's own when allowed, else
     /// the configured one for its harness, else the profile's.
-    fn command(
+    pub(crate) fn command(
         &self,
         requested: Option<Vec<String>>,
         harnesses: &[Option<&str>],
@@ -124,7 +125,10 @@ impl App {
 impl App {
     /// The request's provider, if this server allows it. `local` always
     /// is; a Substrate key must be an absolute path on this server.
-    fn provider(&self, requested: Option<Provider>) -> Result<Option<Provider>, ApiError> {
+    pub(crate) fn provider(
+        &self,
+        requested: Option<Provider>,
+    ) -> Result<Option<Provider>, ApiError> {
         let Some(provider) = requested else {
             return Ok(None);
         };
@@ -159,7 +163,10 @@ impl App {
     /// secret: a request names secrets and never chooses where they come
     /// from. MCP servers are commands this server runs, so they need
     /// client commands allowed.
-    fn provision(&self, requested: Option<Provisioning>) -> Result<Option<Provisioning>, ApiError> {
+    pub(crate) fn provision(
+        &self,
+        requested: Option<Provisioning>,
+    ) -> Result<Option<Provisioning>, ApiError> {
         let Some(mut spec) = requested else {
             return Ok(None);
         };
@@ -210,7 +217,7 @@ impl App {
 
     /// A rig's seats, with each seat's provisioning held to the rules of
     /// [`App::provision`].
-    fn seats(&self, requested: Option<Seats>) -> Result<Option<Seats>, ApiError> {
+    pub(crate) fn seats(&self, requested: Option<Seats>) -> Result<Option<Seats>, ApiError> {
         let Some(mut seats) = requested else {
             return Ok(None);
         };
@@ -222,7 +229,7 @@ impl App {
 
     /// Refuse delegation and unapproved tools unless this server allows
     /// them.
-    fn opt_ins(
+    pub(crate) fn opt_ins(
         &self,
         delegation: bool,
         allow_delegation: bool,
@@ -257,7 +264,7 @@ impl App {
 
     /// The request's policy, with the delegation command rule last when
     /// asked for, as `by --allow-delegation` adds it.
-    fn policy(&self, spec: &PolicySpec, allow_delegation: bool) -> Policy {
+    pub(crate) fn policy(&self, spec: &PolicySpec, allow_delegation: bool) -> Policy {
         let policy = spec.to_policy();
         match allow_delegation {
             true => policy.allow_delegation_commands(self.by_path()),
@@ -267,7 +274,7 @@ impl App {
 
     /// Options every request that runs a harness shares.
     #[allow(clippy::too_many_arguments)]
-    fn options(
+    pub(crate) fn options(
         &self,
         repo: &RepoState,
         budget: Budget,
@@ -293,7 +300,7 @@ impl App {
     }
 }
 
-fn delegation_not_allowed(message: &str) -> ApiError {
+pub(crate) fn delegation_not_allowed(message: &str) -> ApiError {
     ApiError::new(StatusCode::FORBIDDEN, "delegation_not_allowed", message)
 }
 
@@ -301,6 +308,7 @@ pub fn router(app: Shared) -> Router {
     let v1 = Router::new()
         .route("/v1/repos", get(repos))
         .route("/v1/harnesses", get(harnesses))
+        .route("/v1/operations", get(operation_by_key))
         .route("/v1/operations/{id}", get(operation))
         .route("/v1/repos/{repo}/tasks", axum::routing::post(post_task))
         .route("/v1/repos/{repo}/branches", get(branches))
@@ -514,9 +522,13 @@ fn fingerprint(text: &str) -> String {
 /// passed the first replay check while its original attempt was still being
 /// admitted can fail on a name that attempt has since taken; the key, not
 /// the refusal, decides the answer.
-fn replay_or(app: &App, idem: Option<&Idempotency>, error: ApiError) -> Result<Response, ApiError> {
-    match idem.map(|i| app.registry.replay(i)).transpose()?.flatten() {
-        Some(op) => Ok(operation_response(op, true)),
+async fn replay_or(
+    app: &Shared,
+    idem: Option<&Idempotency>,
+    error: ApiError,
+) -> Result<Response, ApiError> {
+    match replayed(app, idem).await? {
+        Some(response) => Ok(response),
         None => Err(error),
     }
 }
@@ -583,42 +595,9 @@ async fn sync_feed(feed: &Arc<Feed>) -> Result<u64, ApiError> {
         .map_err(|e| ApiError::internal(format!("could not read the event feed: {e}")))
 }
 
-/// Run `work` as an operation's job: afterwards, read the feed's head so
-/// the operation's end cursor covers all of its activity.
-fn job(
-    feed: Arc<Feed>,
-    work: impl FnOnce() -> Result<OperationResult, ErrorBody> + Send + 'static,
-) -> Job {
-    Box::new(move || {
-        let result = work();
-        let end_cursor = match feed.sync() {
-            Ok(head) => Some(head),
-            Err(e) => {
-                eprintln!("branchyard-server: could not read the event feed: {e}");
-                None
-            }
-        };
-        Finished { result, end_cursor }
-    })
-}
-
-fn observer(wake: &Arc<Notify>) -> Observer {
+pub(crate) fn observer(wake: &Arc<Notify>) -> Observer {
     let wake = wake.clone();
     Arc::new(move |_: &BranchEvent| wake.notify_one())
-}
-
-/// The branches an operation ran, once every branch they delegated to on
-/// this server has finished, as `by run` waits for them.
-fn finished(branches: Vec<Branch>) -> Result<OperationResult, branchyard::Error> {
-    let mut descendants = Vec::new();
-    for branch in &branches {
-        descendants.extend(branch.wait_subtree()?);
-    }
-    Ok(OperationResult {
-        branches: branches.iter().map(|b| b.info().clone()).collect(),
-        descendants,
-        ..OperationResult::default()
-    })
 }
 
 async fn repos(State(app): State<Shared>) -> Json<RepoList> {
@@ -645,17 +624,95 @@ async fn harnesses(State(app): State<Shared>) -> Result<Json<HarnessList>, ApiEr
     Ok(Json(HarnessList { harnesses: list }))
 }
 
+fn unknown_operation(what: String) -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        "unknown_operation",
+        format!("no operation {what}"),
+    )
+}
+
 async fn operation(
     State(app): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<Operation>, ApiError> {
-    app.registry.get(&id).map(Json).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "unknown_operation",
-            format!("no operation {id}"),
-        )
-    })
+    let registry = app.registry.clone();
+    let found = {
+        let id = id.clone();
+        blocking(move || registry.get(&id)).await??
+    };
+    found.map(Json).ok_or_else(|| unknown_operation(id))
+}
+
+/// `GET /v1/operations?idempotency_key=KEY`: the operation the caller's
+/// request with that key created, on any server sharing the operation
+/// store. What a client that lost the response to its `POST` reconciles
+/// with, besides retrying the `POST` with the same key.
+async fn operation_by_key(
+    State(app): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<Operation>, ApiError> {
+    let key = query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("idempotency_key="))
+        .map(percent_decode)
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| ApiError::bad_request("give idempotency_key"))?;
+    let registry = app.registry.clone();
+    let found = {
+        let key = key.clone();
+        blocking(move || registry.by_key(&caller.0, &key)).await??
+    };
+    found
+        .map(Json)
+        .ok_or_else(|| unknown_operation(format!("with idempotency key {key}")))
+}
+
+/// `%XX` escapes and `+` in a query value.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                        continue;
+                    }
+                    None => out.push(b'%'),
+                }
+            }
+            b'+' => out.push(b' '),
+            byte => out.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Admit `work` as an operation: durably enqueued before this returns.
+async fn admit(app: &Shared, new: NewOperation, work: Work) -> Result<Response, ApiError> {
+    let value = work.to_value()?;
+    let registry = app.registry.clone();
+    let (op, replayed) = blocking(move || registry.submit(new, value)).await??;
+    Ok(operation_response(op, replayed))
+}
+
+/// The operation a request's idempotency key already names, if any.
+async fn replayed(app: &Shared, idem: Option<&Idempotency>) -> Result<Option<Response>, ApiError> {
+    let Some(idem) = idem.cloned() else {
+        return Ok(None);
+    };
+    let registry = app.registry.clone();
+    let found = blocking(move || registry.replay(&idem)).await??;
+    Ok(found.map(|op| operation_response(op, true)))
 }
 
 async fn post_task(
@@ -668,70 +725,15 @@ async fn post_task(
     let repo = app.repo(&repo)?.clone();
     let route = format!("POST /v1/repos/{}/tasks", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(op) = idem
-        .as_ref()
-        .map(|i| app.registry.replay(i))
-        .transpose()?
-        .flatten()
-    {
-        return Ok(operation_response(op, true));
+    if let Some(response) = replayed(&app, idem.as_ref()).await? {
+        return Ok(response);
     }
-    if request.prompt.trim().is_empty() {
-        return Err(ApiError::bad_request("prompt is empty"));
-    }
-    if request.harness.is_some() && !request.harnesses.is_empty() {
-        return Err(ApiError::bad_request(
-            "give harness for one branch or harnesses for several, not both",
-        ));
-    }
-    let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
-    let provider = app.provider(request.provider.clone())?;
-    app.opt_ins(
-        request.delegation.is_some() || request.seats.is_some(),
-        request.allow_delegation,
-        request.unapproved_tools,
-    )?;
-    if let Some(seats) = &request.seats {
-        if request.delegation.is_none() {
-            return Err(ApiError::bad_request(
-                "seats need a delegation envelope to spawn them within",
-            ));
-        }
-        seats
-            .validate()
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    }
-    let targets: Vec<Option<&str>> = match request.harnesses.is_empty() {
-        true => vec![request.harness.as_deref()],
-        false => request.harnesses.iter().map(|h| Some(h.as_str())).collect(),
-    };
-    let command = app.command(request.command.clone(), &targets)?;
-    let options = TaskOptions {
-        harness: request.harness.clone(),
-        name: request.name.clone(),
-        base: request.base.clone(),
-        isolated: request.isolated,
-        provision: app.provision(request.provision.clone())?,
-        seats: app.seats(request.seats.clone())?,
-        ..app.options(
-            &repo,
-            budget,
-            app.policy(&request.policy, request.allow_delegation),
-            request.check.clone(),
-            command,
-            request.delegation.clone(),
-            request.unapproved_tools,
-            provider,
-        )
-    };
-    let harnesses = request.harnesses.clone();
-    let prompt = request.prompt.clone();
+    let options = work::task_options(&app, &repo, &request)?;
     let planned = {
-        let (yard, options, prompt, harnesses) = (
+        let (yard, prompt, harnesses) = (
             repo.yard.clone(),
-            options.clone(),
-            prompt.clone(),
-            harnesses.clone(),
+            request.prompt.clone(),
+            request.harnesses.clone(),
         );
         match blocking(move || {
             let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
@@ -740,22 +742,10 @@ async fn post_task(
         .await?
         {
             Ok(planned) => planned,
-            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)).await,
         }
     };
     let cursor = sync_feed(&repo.feed).await?;
-    let yard = repo.yard.clone();
-    let work = job(repo.feed.clone(), move || {
-        let builder = yard.task(prompt).options(options);
-        let result = match harnesses.is_empty() {
-            true => builder.run().map(|b| vec![b]),
-            false => {
-                let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
-                builder.run_on(&ids)
-            }
-        };
-        result.and_then(finished).map_err(|e| *error::sdk(&e).body)
-    });
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Task,
@@ -764,8 +754,7 @@ async fn post_task(
         cursor,
         idempotency: idem,
     };
-    let (op, replayed) = app.registry.submit(new, work)?;
-    Ok(operation_response(op, replayed))
+    admit(&app, new, Work::Task { request }).await
 }
 
 /// The branch's record, or `unknown_branch`.
@@ -786,78 +775,25 @@ async fn post_send(
     let repo = app.repo(&repo)?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/send", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(op) = idem
-        .as_ref()
-        .map(|i| app.registry.replay(i))
-        .transpose()?
-        .flatten()
-    {
-        return Ok(operation_response(op, true));
+    if let Some(response) = replayed(&app, idem.as_ref()).await? {
+        return Ok(response);
     }
-    if request.prompt.trim().is_empty() {
-        return Err(ApiError::bad_request("prompt is empty"));
-    }
-    let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
-    // A send keeps the branch's recorded command unless the request
-    // replaces it.
-    let command = match request.command.clone() {
-        Some(command) => app.command(Some(command), &[])?,
-        None => None,
-    };
-    app.opt_ins(
-        request.delegation.is_some(),
-        request.allow_delegation,
-        request.unapproved_tools,
-    )?;
+    work::send_options(&app, &repo, &request)?;
     let target = existing(&repo.yard, &branch).await?;
-    if !app.config.allow_delegation && request.delegation.is_none() {
-        // A send keeps the branch's envelope; this server offers none.
-        let held = target.clone();
-        let envelope = blocking(move || {
-            held.delegate(TaskOptions::default())
-                .and_then(|d| d.inspect(&held.info().name))
-                .map(|i| i.envelope)
-        })
-        .await?
-        .map_err(|e| error::sdk(&e))?;
-        if envelope.is_some_and(|e| e.max_depth > 0) {
-            return Err(delegation_not_allowed(&format!(
-                "{branch} was given delegation, and this server does not offer delegation to \
-                 its harnesses; its operator can allow it with --allow-delegation"
-            )));
-        }
+    {
+        let (app, branch, request) = (app.clone(), branch.clone(), request.clone());
+        blocking(move || work::send_allowed(&app, &target, &branch, &request)).await??;
     }
-    let options = TaskOptions {
-        provision: app.provision(request.provision.clone())?,
-        ..app.options(
-            &repo,
-            budget,
-            app.policy(&request.policy, request.allow_delegation),
-            request.check.clone(),
-            command,
-            request.delegation.clone(),
-            request.unapproved_tools,
-            None,
-        )
-    };
     let cursor = sync_feed(&repo.feed).await?;
-    let prompt = request.prompt.clone();
-    let work = job(repo.feed.clone(), move || {
-        target
-            .send(&prompt, options)
-            .and_then(|b| finished(vec![b]))
-            .map_err(|e| *error::sdk(&e).body)
-    });
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Send,
         branches: vec![branch.clone()],
         cursor,
-        locks: vec![branch],
+        locks: vec![branch.clone()],
         idempotency: idem,
     };
-    let (op, replayed) = app.registry.submit(new, work)?;
-    Ok(operation_response(op, replayed))
+    admit(&app, new, Work::Send { branch, request }).await
 }
 
 async fn post_fork(
@@ -870,62 +806,19 @@ async fn post_fork(
     let repo = app.repo(&repo)?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/fork", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(op) = idem
-        .as_ref()
-        .map(|i| app.registry.replay(i))
-        .transpose()?
-        .flatten()
-    {
-        return Ok(operation_response(op, true));
+    if let Some(response) = replayed(&app, idem.as_ref()).await? {
+        return Ok(response);
     }
-    if request.prompt.trim().is_empty() {
-        return Err(ApiError::bad_request("prompt is empty"));
-    }
-    let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
-    let provider = app.provider(request.provider.clone())?;
-    app.opt_ins(
-        request.delegation.is_some(),
-        request.allow_delegation,
-        request.unapproved_tools,
-    )?;
-    // Without a harness the fork keeps its parent's, and its command.
-    let command = match (&request.command, &request.harness) {
-        (Some(_), _) => app.command(request.command.clone(), &[])?,
-        (None, Some(harness)) => app.command(None, &[Some(harness)])?,
-        (None, None) => None,
-    };
-    let source = existing(&repo.yard, &branch).await?;
-    let options = TaskOptions {
-        harness: request.harness.clone(),
-        name: request.name.clone(),
-        isolated: request.isolated,
-        provision: app.provision(request.provision.clone())?,
-        ..app.options(
-            &repo,
-            budget,
-            app.policy(&request.policy, request.allow_delegation),
-            request.check.clone(),
-            command,
-            request.delegation.clone(),
-            request.unapproved_tools,
-            provider,
-        )
-    };
+    let options = work::fork_options(&app, &repo, &request)?;
+    existing(&repo.yard, &branch).await?;
     let planned = {
-        let (yard, options, prompt) = (repo.yard.clone(), options.clone(), request.prompt.clone());
+        let (yard, prompt) = (repo.yard.clone(), request.prompt.clone());
         match blocking(move || yard.task(prompt).options(options).planned_names(&[])).await? {
             Ok(planned) => planned,
-            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)).await,
         }
     };
     let cursor = sync_feed(&repo.feed).await?;
-    let (prompt, fresh) = (request.prompt.clone(), request.fresh_session);
-    let work = job(repo.feed.clone(), move || {
-        source
-            .fork(&prompt, fresh, options)
-            .and_then(|b| finished(vec![b]))
-            .map_err(|e| *error::sdk(&e).body)
-    });
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Fork,
@@ -934,8 +827,7 @@ async fn post_fork(
         cursor,
         idempotency: idem,
     };
-    let (op, replayed) = app.registry.submit(new, work)?;
-    Ok(operation_response(op, replayed))
+    admit(&app, new, Work::Fork { branch, request }).await
 }
 
 async fn post_reincarnate(
@@ -948,63 +840,19 @@ async fn post_reincarnate(
     let repo = app.repo(&repo)?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/reincarnate", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(op) = idem
-        .as_ref()
-        .map(|i| app.registry.replay(i))
-        .transpose()?
-        .flatten()
-    {
-        return Ok(operation_response(op, true));
+    if let Some(response) = replayed(&app, idem.as_ref()).await? {
+        return Ok(response);
     }
-    let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
-    let provider = app.provider(request.provider.clone())?;
-    app.opt_ins(
-        request.delegation.is_some(),
-        request.allow_delegation,
-        request.unapproved_tools,
-    )?;
-    // Without a harness the reincarnation keeps its parent's, and its
-    // command.
-    let command = match (&request.command, &request.harness) {
-        (Some(_), _) => app.command(request.command.clone(), &[])?,
-        (None, Some(harness)) => app.command(None, &[Some(harness)])?,
-        (None, None) => None,
-    };
+    let options = work::reincarnate_options(&app, &repo, &request)?;
     let source = existing(&repo.yard, &branch).await?;
-    let options = TaskOptions {
-        harness: request.harness.clone(),
-        name: request.name.clone(),
-        isolated: request.isolated,
-        provision: app.provision(request.provision.clone())?,
-        ..app.options(
-            &repo,
-            budget,
-            app.policy(&request.policy, request.allow_delegation),
-            request.check.clone(),
-            command,
-            request.delegation.clone(),
-            request.unapproved_tools,
-            provider,
-        )
-    };
     let planned = {
-        let (yard, options, prompt) = (
-            repo.yard.clone(),
-            options.clone(),
-            source.info().prompt.clone(),
-        );
+        let (yard, prompt) = (repo.yard.clone(), source.info().prompt.clone());
         match blocking(move || yard.task(prompt).options(options).planned_names(&[])).await? {
             Ok(planned) => planned,
-            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)).await,
         }
     };
     let cursor = sync_feed(&repo.feed).await?;
-    let work = job(repo.feed.clone(), move || {
-        source
-            .reincarnate(options)
-            .and_then(|b| finished(vec![b]))
-            .map_err(|e| *error::sdk(&e).body)
-    });
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Reincarnate,
@@ -1013,8 +861,7 @@ async fn post_reincarnate(
         cursor,
         idempotency: idem,
     };
-    let (op, replayed) = app.registry.submit(new, work)?;
-    Ok(operation_response(op, replayed))
+    admit(&app, new, Work::Reincarnate { branch, request }).await
 }
 
 /// The branch checked out in the served repository.
@@ -1053,13 +900,8 @@ async fn post_merge(
     let repo = app.repo(&repo)?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/merge", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(op) = idem
-        .as_ref()
-        .map(|i| app.registry.replay(i))
-        .transpose()?
-        .flatten()
-    {
-        return Ok(operation_response(op, true));
+    if let Some(response) = replayed(&app, idem.as_ref()).await? {
+        return Ok(response);
     }
     existing(&repo.yard, &branch).await?;
     let target = match request.target.clone() {
@@ -1070,31 +912,15 @@ async fn post_merge(
         }
     };
     let cursor = sync_feed(&repo.feed).await?;
-    let (yard, name) = (repo.yard.clone(), branch.clone());
-    let work = job(repo.feed.clone(), move || {
-        let merged = yard
-            .merge(&name, &target)
-            .map_err(|e| *error::sdk(&e).body)?;
-        let branches = yard
-            .branch(&name)
-            .map(|b| vec![b.info().clone()])
-            .unwrap_or_default();
-        Ok(OperationResult {
-            branches,
-            merged: Some(merged),
-            ..OperationResult::default()
-        })
-    });
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Merge,
         branches: vec![branch.clone()],
         cursor,
-        locks: vec![branch],
+        locks: vec![branch.clone()],
         idempotency: idem,
     };
-    let (op, replayed) = app.registry.submit(new, work)?;
-    Ok(operation_response(op, replayed))
+    admit(&app, new, Work::Merge { branch, target }).await
 }
 
 /// Ask the branch's running turn and every running turn below it to stop.
@@ -1158,28 +984,11 @@ async fn post_spawn(
     let repo = app.repo(&repo)?.clone();
     let route = format!("POST /v1/repos/{}/branches/{parent}/spawn", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(op) = idem
-        .as_ref()
-        .map(|i| app.registry.replay(i))
-        .transpose()?
-        .flatten()
-    {
-        return Ok(operation_response(op, true));
+    if let Some(response) = replayed(&app, idem.as_ref()).await? {
+        return Ok(response);
     }
-    if !app.config.allow_delegation {
-        return Err(delegation_not_allowed(
-            "this server does not offer delegation, so it does not spawn children; its \
-             operator can allow it with --allow-delegation",
-        ));
-    }
-    app.opt_ins(false, false, request.unapproved_tools)?;
-    if request.prompt.trim().is_empty() {
-        return Err(error::sdk(&branchyard::Error::Denied(
-            "a child needs a prompt".into(),
-        )));
-    }
-    let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
-    let source = existing(&repo.yard, &parent).await?;
+    work::spawn_parts(&app, &repo, &request, None)?;
+    existing(&repo.yard, &parent).await?;
     // A seat's child is named `<parent>-<seat>` by default, as the engine
     // names it; the name is fixed here so the operation locks and reports
     // the branch it creates.
@@ -1189,7 +998,7 @@ async fn post_spawn(
             let (yard, stem) = (repo.yard.clone(), format!("{parent}-{seat}"));
             let names = match blocking(move || yard.task(stem).planned_names(&[])).await? {
                 Ok(planned) => planned,
-                Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+                Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)).await,
             };
             names.into_iter().next()
         }
@@ -1201,53 +1010,15 @@ async fn post_spawn(
             let (yard, prompt) = (repo.yard.clone(), request.prompt.clone());
             match blocking(move || yard.task(prompt).planned_names(&[])).await? {
                 Ok(planned) => planned,
-                Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+                Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)).await,
             }
         }
     };
-    let options = app.options(
-        &repo,
-        budget.clone(),
-        app.policy(&request.policy, false),
-        request.check.clone(),
-        None,
-        None,
-        request.unapproved_tools,
-        None,
-    );
-    let spawn = Spawn {
-        prompt: request.prompt.clone(),
-        harness: request.harness.clone(),
-        name,
-        base: request.base.clone(),
-        budget,
-        check: request.check.clone(),
-        max_depth: request.max_depth,
-        deny: request.deny.clone(),
-        seat: request.seat.clone(),
-        ..Spawn::default()
-    };
     let cursor = sync_feed(&repo.feed).await?;
-    let yard = repo.yard.clone();
-    let work = job(repo.feed.clone(), move || {
-        let run = || {
-            let delegate = source.delegate(options)?;
-            let spawned = delegate.spawn(spawn)?;
-            source.wait_subtree()?;
-            let inspection = delegate.inspect(&spawned.name)?;
-            let info = yard.branch(&spawned.name)?.info().clone();
-            Ok::<_, branchyard::Error>(OperationResult {
-                branches: vec![info],
-                inspection: Some(inspection),
-                ..OperationResult::default()
-            })
-        };
-        run().map_err(|e| *error::sdk(&e).body)
-    });
     // The parent too: the spawn reads its work and changes its children, so
     // a send or removal of it must not run meanwhile.
     let mut locks = planned.clone();
-    locks.push(parent);
+    locks.push(parent.clone());
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Spawn,
@@ -1256,23 +1027,16 @@ async fn post_spawn(
         cursor,
         idempotency: idem,
     };
-    let (op, replayed) = app.registry.submit(new, work)?;
-    Ok(operation_response(op, replayed))
-}
-
-/// The branch that delegated `name` and still lists it as a child.
-fn delegator(yard: &Yard, name: &str) -> Result<String, branchyard::Error> {
-    let info = yard.branch(name)?.info().clone();
-    info.parent
-        .filter(|p| {
-            yard.branch(p)
-                .is_ok_and(|p| p.info().children.iter().any(|c| c == name))
-        })
-        .ok_or_else(|| {
-            branchyard::Error::Denied(format!(
-                "{name} was not delegated by another branch; merge it with by merge"
-            ))
-        })
+    admit(
+        &app,
+        new,
+        Work::Spawn {
+            parent,
+            name,
+            request,
+        },
+    )
+    .await
 }
 
 /// Merge a delegated child into the parent that delegated it, with the
@@ -1288,48 +1052,25 @@ async fn post_integrate(
     let repo = app.repo(&repo)?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/integrate", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(op) = idem
-        .as_ref()
-        .map(|i| app.registry.replay(i))
-        .transpose()?
-        .flatten()
-    {
-        return Ok(operation_response(op, true));
+    if let Some(response) = replayed(&app, idem.as_ref()).await? {
+        return Ok(response);
     }
     let parent = {
         let (yard, name) = (repo.yard.clone(), branch.clone());
-        blocking(move || delegator(&yard, &name))
+        blocking(move || work::delegator(&yard, &name))
             .await?
             .map_err(|e| error::sdk(&e))?
     };
     let cursor = sync_feed(&repo.feed).await?;
-    let (yard, name, target) = (repo.yard.clone(), branch.clone(), parent.clone());
-    let wake = repo.wake.clone();
-    let work = job(repo.feed.clone(), move || {
-        let run = || {
-            let options = TaskOptions {
-                observer: Some(observer(&wake)),
-                ..TaskOptions::default()
-            };
-            let merged = yard.branch(&target)?.delegate(options)?.integrate(&name)?;
-            Ok::<_, branchyard::Error>(OperationResult {
-                branches: vec![yard.branch(&name)?.info().clone()],
-                merged: Some(merged),
-                ..OperationResult::default()
-            })
-        };
-        run().map_err(|e| *error::sdk(&e).body)
-    });
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Integrate,
         branches: vec![branch.clone()],
         cursor,
-        locks: vec![branch, parent],
+        locks: vec![branch.clone(), parent.clone()],
         idempotency: idem,
     };
-    let (op, replayed) = app.registry.submit(new, work)?;
-    Ok(operation_response(op, replayed))
+    admit(&app, new, Work::Integrate { branch, parent }).await
 }
 
 /// Act as `branch` with the server's authority, as `by inspect`, `by events`
@@ -1525,15 +1266,17 @@ async fn delete_branch(
     Path((repo, branch)): Path<(String, String)>,
 ) -> Result<Json<Removed>, ApiError> {
     let repo = app.repo(&repo)?.clone();
-    let hold = app.registry.hold(&repo.name, &branch, "a removal")?;
+    let registry = app.registry.clone();
     let name = branch.clone();
     blocking(move || {
-        let removed = repo.yard.remove(&name);
+        // Held in the operation store, so no operation on any server
+        // sharing it changes the branch meanwhile.
+        let hold = registry.hold(&repo.name, &name, "a removal")?;
+        let removed = repo.yard.remove(&name).map_err(|e| error::sdk(&e));
         drop(hold);
         removed
     })
-    .await?
-    .map_err(|e| error::sdk(&e))?;
+    .await??;
     Ok(Json(Removed { removed: branch }))
 }
 

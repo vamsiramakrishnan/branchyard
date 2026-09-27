@@ -148,6 +148,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
 
+/// This process as the engine names a lease's holder: its host and boot,
+/// its pid, and its start time. For leases kept outside the engine, such as
+/// the server's claims on queued operations.
+pub fn process_identity() -> (String, u32, String) {
+    (
+        proc::host().to_owned(),
+        std::process::id(),
+        proc::own_start().to_owned(),
+    )
+}
+
+/// Whether the process `pid` that started at `start` on `host`, as
+/// [`process_identity`] named it, is known to be gone: it ran on this host
+/// and boot and is not running now. Never true for another host, or when
+/// the start time is unknown.
+pub fn process_gone(host: &str, pid: u32, start: &str) -> bool {
+    !start.is_empty() && state::gone(host, pid, start)
+}
+
 /// A repository with Branchyard state. Cheap to clone; clones share state.
 #[derive(Clone, Debug)]
 pub struct Yard {

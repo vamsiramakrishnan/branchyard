@@ -233,6 +233,14 @@ impl Client {
         self.get(&format!("/v1/operations/{}", encode(id)))
     }
 
+    /// The operation this caller's request with idempotency `key` created,
+    /// on any server sharing the operation store: how a caller that lost
+    /// the response to a `POST` finds what it started, besides retrying the
+    /// `POST` with the same key.
+    pub fn operation_by_key(&self, key: &str) -> Result<Operation, Error> {
+        self.get(&format!("/v1/operations?idempotency_key={}", encode(key)))
+    }
+
     /// Poll an operation until it finishes.
     pub fn wait(&self, id: &str, poll: Duration) -> Result<Operation, Error> {
         loop {
