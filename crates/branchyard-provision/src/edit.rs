@@ -266,7 +266,7 @@ fn toml_document(current: &str, edits: &[TomlEdit]) -> String {
             TomlEdit::RemoveKey(key) => toml::strip_top_level_key(&content, key),
             TomlEdit::SetKey { key, literal } => {
                 let stripped = toml::strip_top_level_key(&content, key);
-                toml::insert_top_level(&stripped, &format!("{key} = {literal}"))
+                toml::set_top_level(&stripped, key, literal)
             }
             TomlEdit::RemoveTables(name) => {
                 let exact = format!("[{name}]");
@@ -275,10 +275,7 @@ fn toml_document(current: &str, edits: &[TomlEdit]) -> String {
                     header == exact || header.starts_with(&prefix)
                 })
             }
-            TomlEdit::AppendTable(text) => match content.trim_end().is_empty() {
-                true => text.clone(),
-                false => format!("{}\n\n{text}", content.trim_end()),
-            },
+            TomlEdit::AppendTable(text) => toml::merge_document(&content, text),
         };
     }
     let normalized = format!("{}\n", content.trim());
