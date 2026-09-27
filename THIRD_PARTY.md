@@ -16,6 +16,8 @@ Retrieved 2026-09-16; Agent Substrate retrieved 2026-09-26. Files under `vendor/
 
 The Substrate adapter's Cargo dependencies (Tonic, Prost and their transitive crates) are resolved from `Cargo.lock` and are not vendored. `protoc-bin-vendored` supplies a prebuilt `protoc` used only at build time. Review their licenses when producing a distributable image.
 
+The optional `postgres` feature of `branchyard`, `branchyard-server` and `branchyard-cli` depends on `postgres` and `tokio-postgres` (MIT OR Apache-2.0) and their transitive crates from crates.io, resolved from `Cargo.lock` and not vendored.
+
 `crates/branchyard-harness` depends on `agent-client-protocol-schema` (Apache-2.0) and `serde_json` (MIT OR Apache-2.0) from crates.io. Its test fixtures are redacted transcripts recorded from Claude Code 2.1.283, codex-cli 0.157.1 and claude-agent-acp 0.81.2; they contain protocol frames and harness output, not harness source. Frame shapes also follow the Agent SDK's published TypeScript types and Codex's generated JSON Schema, neither of which is vendored.
 
 Warp licenses its UI framework crates under MIT and the rest of its repository under AGPL v3. The selected harness helpers belong to the latter category. The retained MIT license text does not grant an MIT license to these helpers. See [Warp's licensing statement](https://github.com/warpdotdev/warp/tree/2f0db5c5edd8134f0e858aebbc0ecd0db2f91d38#licensing).

@@ -348,6 +348,25 @@ impl Store {
         })
     }
 
+    /// Open the repository's store in the PostgreSQL database at `url`,
+    /// scoped to `scope`, keeping `.branchyard/` for worktrees, homes and
+    /// delegation tokens. Nothing is imported from `state.db`.
+    #[cfg(feature = "postgres")]
+    pub fn open_postgres(root: &Path, url: &str, scope: &str) -> Result<Store, Error> {
+        let dir = dir(root);
+        let worktrees = dir.join("worktrees");
+        std::fs::create_dir_all(&worktrees)
+            .map_err(|e| Error::State(format!("create {}: {e}", worktrees.display())))?;
+        let backend = crate::pg::Postgres::open(url, scope)?;
+        let signal = signal_for(&dir.join(format!("postgres/{scope}")));
+        Ok(Store {
+            dir,
+            backend: Arc::new(backend),
+            owner: Arc::new(Owner::new()),
+            signal,
+        })
+    }
+
     /// The `.branchyard` directory.
     pub fn dir(&self) -> &Path {
         &self.dir

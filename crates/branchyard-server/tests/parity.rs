@@ -297,3 +297,13 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         "{error}"
     );
 }
+
+#[cfg(not(feature = "postgres"))]
+#[test]
+fn a_database_needs_a_build_with_postgres() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.database = Some("postgres://nobody@127.0.0.1:1/none".into());
+    let error = Server::try_start(config).err().unwrap();
+    assert!(error.contains("no PostgreSQL support"), "{error}");
+}

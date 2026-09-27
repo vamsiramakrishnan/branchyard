@@ -819,3 +819,36 @@ fn unapproved_tools_need_the_operators_consent() {
         text(&out.stdout)
     );
 }
+
+/// `by serve --database`: the same commands with the server's state in
+/// PostgreSQL. Runs with the `postgres` feature when
+/// `BY_TEST_POSTGRES_URL` is set.
+#[cfg(feature = "postgres")]
+#[test]
+fn by_serve_keeps_its_state_in_postgres() {
+    let Some(url) = std::env::var("BY_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+    else {
+        eprintln!("skipped: set BY_TEST_POSTGRES_URL to run the PostgreSQL remote test");
+        return;
+    };
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    // A repository name no other run uses, since it scopes the state.
+    let name = format!("pg-{}", std::process::id());
+    let server = Served::start(
+        &dir.0,
+        &[(&name, &there)],
+        &["--allow-client-commands", "--database", &url],
+    );
+    let args = with_agent(&["run", "WRITE p.txt=1", "--name", "p", "--yes"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = server.by(&dir.0, &args);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let listed = server.by(&dir.0, &["ls", "--json"]);
+    let branches: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(branches[0]["name"], "p");
+    assert_eq!(branches[0]["status"]["state"], "ready");
+    assert!(!there.join(".branchyard/state.db").exists());
+}

@@ -18,10 +18,18 @@ pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const EXCLUDE: &str = ".branchyard/";
 
 pub(crate) fn open(path: &Path) -> Result<Yard, Error> {
+    open_with(path, Store::open)
+}
+
+/// [`open`] with the store `store` opens at the repository root.
+pub(crate) fn open_with(
+    path: &Path,
+    store: impl FnOnce(&Path) -> Result<Store, Error>,
+) -> Result<Yard, Error> {
     let repo = Repository::open(path).map_err(git::error)?;
     let root = repo.root().to_path_buf();
     exclude(&root)?;
-    let store = Store::open(&root)?;
+    let store = store(&root)?;
     let yard = Yard {
         root,
         repo,
