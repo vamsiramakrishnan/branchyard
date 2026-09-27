@@ -1356,3 +1356,149 @@ fn a_person_applies_a_graph_and_spawns_dependents() {
     let usage = repo.by(&["spawn", "x", "--parent", "root", "--after", "soon"]);
     assert_eq!(usage.status.code(), Some(2));
 }
+
+#[test]
+fn help_version_typos_and_exit_codes() {
+    let repo = Repo::new();
+    let help = repo.by(&["--help"]);
+    assert!(help.status.success());
+    let text = stdout(&help);
+    for heading in [
+        "Work on branches:",
+        "Inspect:",
+        "Servers:",
+        "Options:",
+        "Examples:",
+    ] {
+        assert!(text.contains(heading), "{heading}: {text}");
+    }
+    assert_eq!(stdout(&repo.by(&[])), text, "no command prints the help");
+    assert_eq!(stdout(&repo.by(&["help"])), text);
+    assert_eq!(
+        stdout(&repo.by(&["-V"])),
+        format!("by {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    let run = repo.by(&["help", "run"]);
+    assert!(run.status.success());
+    assert!(stdout(&run).contains("Usage: by run [OPTIONS] <PROMPT>"));
+    assert_eq!(stdout(&repo.by(&["run", "--help"])), stdout(&run));
+    let nested = repo.by(&["help", "graph", "apply"]);
+    assert!(
+        stdout(&nested).contains("Usage: by graph apply"),
+        "{}",
+        stdout(&nested)
+    );
+
+    let typo = repo.by(&["mrege", "b"]);
+    assert_eq!(typo.status.code(), Some(2));
+    assert!(stdout(&typo).is_empty());
+    assert!(
+        stderr(&typo).contains("tip: a similar subcommand exists: 'merge'"),
+        "{}",
+        stderr(&typo)
+    );
+    let flag = repo.by(&["run", "go", "--budget", "1"]);
+    assert_eq!(flag.status.code(), Some(2));
+    assert!(
+        stderr(&flag).contains("'--budget-usd'"),
+        "{}",
+        stderr(&flag)
+    );
+    let checked = repo.by(&["run", "go", "--image", "alpine"]);
+    assert_eq!(checked.status.code(), Some(2));
+    assert!(stderr(&checked).contains("error: --image needs --provider microsandbox"));
+    assert!(stderr(&checked).contains("Usage: by run"));
+}
+
+#[test]
+fn completions_and_the_man_page_print() {
+    let repo = Repo::new();
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let out = repo.by(&["completions", shell]);
+        assert!(out.status.success(), "{shell}: {}", stderr(&out));
+        let script = stdout(&out);
+        assert!(
+            script.contains("spawn") && script.contains("budget-usd"),
+            "{shell}"
+        );
+    }
+    assert_eq!(repo.by(&["completions", "tcsh"]).status.code(), Some(2));
+    let man = repo.by(&["man"]);
+    assert!(man.status.success());
+    assert!(stdout(&man).starts_with(".ie"), "{}", &stdout(&man)[..80]);
+    assert!(stdout(&man).contains(".TH by"));
+}
+
+#[test]
+fn global_options_come_from_anywhere_and_blank_variables_are_unset() {
+    let repo = Repo::new();
+    // Before or after the command, the same check: remote options need a
+    // server.
+    for args in [&["--repo", "app", "ls"][..], &["ls", "--repo", "app"]] {
+        let out = repo.by(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(stderr(&out).contains("apply to remote mode"), "{args:?}");
+    }
+    let from_env = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .arg("ls")
+        .env("BRANCHYARD_REMOTE", "http://127.0.0.1:9")
+        .env_remove("BRANCHYARD_TOKEN_FILE")
+        .output()
+        .unwrap();
+    assert_eq!(from_env.status.code(), Some(1));
+    assert!(
+        stderr(&from_env).contains("remote mode needs a token"),
+        "{}",
+        stderr(&from_env)
+    );
+    let blank = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["ls", "--json"])
+        .env("BRANCHYARD_REMOTE", " ")
+        .env("BRANCHYARD_REPO", "")
+        .output()
+        .unwrap();
+    assert!(blank.status.success(), "{}", stderr(&blank));
+    assert_eq!(stdout(&blank).trim(), "[]");
+    let empty_flag = repo.by(&["--remote=", "ls"]);
+    assert_eq!(empty_flag.status.code(), Some(2));
+}
+
+#[test]
+fn serve_and_worker_hand_their_arguments_to_the_server() {
+    let repo = Repo::new();
+    for (args, usage) in [
+        (&["help", "serve"][..], "Usage: by serve [OPTIONS]"),
+        (&["serve", "--help"], "Usage: by serve [OPTIONS]"),
+        (&["worker", "--help"], "Usage: by worker [OPTIONS]"),
+        (
+            &["--repo", "x", "help", "worker"],
+            "Usage: by worker [OPTIONS]",
+        ),
+    ] {
+        let out = repo.by(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+        assert!(stdout(&out).contains(usage), "{args:?}: {}", stdout(&out));
+        assert!(stdout(&out).contains("--webhook-events <KINDS>"));
+    }
+    // `--repo` after `serve` is the server's own NAME=PATH, not by's.
+    let bad = repo.by(&["serve", "--repo", "nopath"]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(stderr(&bad).contains("needs NAME=PATH"), "{}", stderr(&bad));
+    let token = repo.by(&[
+        "serve", "token", "new", "--tenant", "acme", "--scopes", "read",
+    ]);
+    assert!(token.status.success(), "{}", stderr(&token));
+    let credential: Value = serde_json::from_slice(&token.stdout).unwrap();
+    assert_eq!(credential["tenant"], "acme");
+    assert_eq!(credential["scopes"], serde_json::json!(["read"]));
+    let remote = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .env("BRANCHYARD_REMOTE", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    assert_eq!(remote.status.code(), Some(2));
+    assert!(stderr(&remote).contains("does not take --remote"));
+}

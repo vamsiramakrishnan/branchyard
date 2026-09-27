@@ -141,5 +141,12 @@ fn the_launcher_runs_the_binary() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("usage: branchyard-herdr"));
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Usage: branchyard-herdr"), "{help}");
+    for command in ["bridge", "start", "log", "action", "send"] {
+        assert!(
+            help.contains(&format!("\n  {command} ")),
+            "{command}: {help}"
+        );
+    }
 }

@@ -12,6 +12,7 @@ mod render;
 mod rig;
 mod watch;
 
+use std::ffi::OsString;
 use std::io;
 use std::process::ExitCode;
 
@@ -19,45 +20,25 @@ use args::{Command, Globals};
 use commands::{Env, Failure, Target};
 
 fn main() -> ExitCode {
-    let argv: Result<Vec<String>, _> = std::env::args_os()
-        .skip(1)
-        .map(|arg| arg.into_string())
-        .collect();
-    let parsed = match &argv {
-        Ok(argv) => {
-            args::parse_globals(argv).and_then(|(globals, rest)| Ok((globals, args::parse(rest)?)))
-        }
-        Err(_) => Err(args::UsageError {
-            message: "arguments must be valid UTF-8".into(),
-            command: None,
-        }),
-    };
-    let (globals, command) = match parsed {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            eprintln!("by: {error}");
-            match error.command {
-                Some(name) => eprintln!("Try 'by help {name}'."),
-                None => eprintln!("Try 'by help'."),
-            }
-            return ExitCode::from(2);
-        }
-    };
-    let globals = globals.with_env(|name| std::env::var(name).ok());
-    if let Command::Serve { args } = &command {
-        if globals.remote.is_some() {
-            eprintln!(
-                "by: serve runs a server here; it does not take --remote or BRANCHYARD_REMOTE"
-            );
-            return ExitCode::from(2);
-        }
-        let program = match args.first().map(String::as_str) {
-            Some("--worker") => "by worker",
-            _ => "by serve",
-        };
-        return branchyard_server::cli::main(args, program);
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    args::unset_blank_env();
+    if let Some(call) = args::server_call(&argv[1..]) {
+        return serve(&argv[..=call.prefix], call);
     }
-    match run(&Env::detect(), &globals, command) {
+    let cli = match args::parse_from(&argv) {
+        Ok(cli) => cli,
+        // Help and --version come this way too, to stdout with exit 0;
+        // usage errors go to stderr with exit 2.
+        Err(error) => {
+            let _ = error.print();
+            return ExitCode::from(error.exit_code() as u8);
+        }
+    };
+    let Some(command) = cli.command else {
+        let _ = args::command().print_help();
+        return ExitCode::SUCCESS;
+    };
+    match run(&Env::detect(), &cli.globals, command) {
         Ok(()) => ExitCode::SUCCESS,
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
@@ -69,18 +50,45 @@ fn main() -> ExitCode {
     }
 }
 
+/// `by serve`, `by worker` and their help: the server's own command line.
+/// `prefix` is `by`'s part, parsed only for its global options.
+fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
+    let globals = match args::parse_from(prefix) {
+        Ok(cli) => cli.globals,
+        Err(error) => {
+            let _ = error.print();
+            return ExitCode::from(error.exit_code() as u8);
+        }
+    };
+    if call.help {
+        return match commands::print(&branchyard_server::cli::help(call.program)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
+    if globals.remote.is_some() {
+        eprintln!("by: serve runs a server here; it does not take --remote or BRANCHYARD_REMOTE");
+        return ExitCode::from(2);
+    }
+    branchyard_server::cli::main(&call.args, call.program)
+}
+
 /// Commands that need no repository or server run first; the rest run
 /// where `globals` point.
 fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
     match command {
-        Command::Help { topic: None } => return commands::print(&args::general_help()),
-        Command::Help { topic: Some(spec) } if spec.name == "serve" || spec.name == "worker" => {
-            return commands::print(branchyard_server::cli::USAGE)
-        }
-        Command::Help { topic: Some(spec) } => return commands::print(&args::command_help(spec)),
-        Command::Version => return commands::print(&format!("by {}\n", env!("CARGO_PKG_VERSION"))),
         // Started by the engine for one branch, always beside it.
-        Command::Mcp { args } => return commands::mcp(&args),
+        Command::Mcp { root, branch } => return commands::mcp(&root, &branch),
+        Command::Completions { shell } => {
+            let mut out = Vec::new();
+            clap_complete::generate(shell, &mut args::command(), "by", &mut out);
+            return commands::print(&String::from_utf8_lossy(&out));
+        }
+        Command::Man => {
+            let mut out = Vec::new();
+            clap_mangen::Man::new(args::command()).render(&mut out)?;
+            return commands::print(&String::from_utf8_lossy(&out));
+        }
         _ => {}
     }
     let target = match &globals.remote {
@@ -95,6 +103,8 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
     dispatch(env, &target, command)
 }
 
+/// One arm per command that runs against a repository or a server; see
+/// "Adding a command" in `args.rs`.
 fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
     match command {
         Command::Run { prompt, task } => commands::run(env, target, &prompt, &task),
@@ -152,7 +162,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::events(env, target, branch, cursor, limit, json),
         Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
         Command::Children { branch, json } => commands::children(env, target, branch, json),
-        Command::Graph(args) => commands::graph(env, target, &args),
+        Command::Graph { json, action } => commands::graph(env, target, &action.into_args(json)),
         Command::Ask {
             as_branch,
             text,
@@ -180,11 +190,21 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             unread,
             json,
         } => commands::inbox(target, as_branch, unread, json),
-        Command::Rig(args) => commands::rig(env, target, &args),
-        Command::Artifact(args) => commands::artifact(target, &args),
-        Command::Scratch(args) => commands::scratch(target, &args),
-        Command::Help { .. } | Command::Version | Command::Serve { .. } | Command::Mcp { .. } => {
-            unreachable!("handled before choosing a target")
-        }
+        Command::Rig { json, action } => commands::rig(env, target, &action.into_args(json)),
+        Command::Artifact {
+            branch,
+            json,
+            action,
+        } => commands::artifact(target, &action.into_args(branch, json)),
+        Command::Scratch {
+            branch,
+            json,
+            action,
+        } => commands::scratch(target, &action.into_args(branch, json)),
+        Command::Serve { .. }
+        | Command::Worker { .. }
+        | Command::Mcp { .. }
+        | Command::Completions { .. }
+        | Command::Man => unreachable!("handled before choosing a target"),
     }
 }
