@@ -1,0 +1,64 @@
+# A Herdr plugin (Herdr's plugin v1 manifest, read against herdr
+# fff6c82: src/app/api/plugins/manifest.rs). Every command runs from this
+# directory; `./bin/...` is resolved against it. See README.md.
+id = "branchyard"
+name = "Branchyard"
+version = "0.0.1"
+min_herdr_version = "0.9.1"
+description = "Show a Branchyard server's branches as Herdr panes, with their state in the sidebar"
+platforms = ["linux", "macos"]
+
+# `herdr plugin install` runs this in its checkout of the repository;
+# `herdr plugin link` does not, so build first when linking.
+[[build]]
+command = ["cargo", "build", "--release", "--locked", "-p", "branchyard-herdr", "-p", "branchyard-cli"]
+
+[[actions]]
+id = "start"
+title = "Branchyard: follow branches"
+description = "Open the bridge in a tab: one tab per branch, state in the sidebar"
+contexts = ["global", "workspace"]
+command = ["./bin/branchyard-herdr", "start"]
+
+[[actions]]
+id = "merge"
+title = "Branchyard: merge this branch"
+description = "by merge the branch shown in the focused pane"
+contexts = ["pane"]
+command = ["./bin/branchyard-herdr", "action", "merge"]
+
+[[actions]]
+id = "cancel"
+title = "Branchyard: cancel this branch"
+description = "by cancel the branch shown in the focused pane"
+contexts = ["pane"]
+command = ["./bin/branchyard-herdr", "action", "cancel"]
+
+[[actions]]
+id = "send"
+title = "Branchyard: send a prompt to this branch"
+description = "Ask for a prompt in a popup, then by send it to the branch in the focused pane"
+contexts = ["pane"]
+command = ["./bin/branchyard-herdr", "action", "send"]
+
+[[panes]]
+id = "bridge"
+title = "Branchyard"
+description = "Follows the server's activity feed and keeps one tab per branch"
+placement = "tab"
+command = ["./bin/branchyard-herdr", "bridge"]
+
+[[panes]]
+id = "log"
+title = "Branchyard branch"
+description = "by log --follow for one branch; opened by the bridge"
+placement = "tab"
+command = ["./bin/branchyard-herdr", "log"]
+
+[[panes]]
+id = "send"
+title = "Send to branch"
+placement = "popup"
+width = "80%"
+height = 12
+command = ["./bin/branchyard-herdr", "send"]
