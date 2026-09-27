@@ -13,6 +13,7 @@
 | [Compatibility](compatibility.md) | Which profile drives each harness, with which capabilities, and has it passed live qualification? |
 | [Writing a driver](writing-a-driver.md) | How do I add a harness profile or driver, test it against a recorded transcript, and qualify it? |
 | [Vendoring](vendoring.md) | Which controls have been copied, why, and how are they adapted and upgraded? |
+| [Live testing](testing-live.md) | What do I run on a machine with real harnesses, credentials and KVM, what should happen, and where do I record it? |
 | [Validation](validation.md) | What has actually passed, what failed upstream, and what remains untested? |
 | [Third-party notices](../THIRD_PARTY.md) | Which revisions and licenses apply to the copied sources? |
 
