@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use branchyard::{
     Branch, BranchInfo, BranchStatus, Budget, Delegate, Envelope, Policy, Provider, SandboxOptions,
-    Spawn, TaskOptions, Yard, ENV_BRANCH, ENV_TOKEN,
+    Spawn, SubstrateOptions, TaskOptions, Yard, ENV_BRANCH, ENV_TOKEN,
 };
 use serde::Serialize;
 
@@ -161,6 +161,12 @@ impl Live {
                 "by: harnesses run in Microsandbox microVMs from {}; the worktree is mounted at {}",
                 sandbox.image,
                 branchyard::SANDBOX_WORKSPACE
+            ),
+            Some(Provider::Substrate(options)) => eprintln!(
+                "by: harnesses run in Agent Substrate actors from template {} (unqualified); \
+                 the worktree is copied to {} and back",
+                options.template,
+                options.workdir()
             ),
         }
         if choice == (Choice::DenyAll { notice: true }) {
@@ -831,8 +837,32 @@ pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
     print(&render::harness_table(&harnesses, env.style()))
 }
 
+/// `path` made absolute against the current directory, since the branch
+/// stores it and later commands may run elsewhere.
+fn absolute(path: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(path);
+    match path.is_absolute() {
+        true => path,
+        false => std::env::current_dir()
+            .map(|dir| dir.join(&path))
+            .unwrap_or(path),
+    }
+}
+
 /// The SDK provider for `--provider`, if given.
 fn provider(task: &TaskArgs) -> Option<Provider> {
+    if let Some(substrate) = &task.substrate {
+        return Some(Provider::Substrate(SubstrateOptions {
+            endpoint: substrate.endpoint.clone(),
+            router: substrate.router.clone(),
+            atespace: substrate.atespace.clone().unwrap_or_default(),
+            template: substrate.template.clone(),
+            key: absolute(&substrate.key),
+            workdir: substrate.workdir.clone().unwrap_or_default(),
+            home: substrate.home.clone().unwrap_or_default(),
+            pass_env: substrate.pass_env.clone(),
+        }));
+    }
     match (&task.sandbox, task.local) {
         (Some(sandbox), _) => Some(Provider::Microsandbox(SandboxOptions {
             image: sandbox.image.clone(),

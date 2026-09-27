@@ -15,38 +15,50 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 static HERMETIC: Once = Once::new();
 
 /// The `fake-acp-agent` binary from branchyard-runtime, built once per test
-/// binary into this build's target directory. Cargo exposes a binary's path
-/// only to its own package's tests, so it is built here.
+/// binary into this build's target directory.
 pub fn fake_agent() -> &'static Path {
     static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let exe = std::env::current_exe().unwrap();
-        // target/<profile>/deps/<test binary>
-        let profile_dir = exe.parent().and_then(Path::parent).unwrap().to_path_buf();
-        let target_dir = profile_dir.parent().unwrap();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", target_dir);
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected test binary location {}", exe.display()),
+    AGENT.get_or_init(|| built("branchyard-runtime", "fake-acp-agent"))
+}
+
+/// The `branchyard-bridge` binary, built once per test binary.
+pub fn bridge_binary() -> &'static Path {
+    static BRIDGE: OnceLock<PathBuf> = OnceLock::new();
+    BRIDGE.get_or_init(|| built("branchyard-bridge", "branchyard-bridge"))
+}
+
+/// Build `bin` of `package` into this build's target directory. Cargo
+/// exposes a binary's path only to its own package's tests, so it is built
+/// here.
+fn built(package: &str, bin: &str) -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    // target/<profile>/deps/<test binary>
+    let profile_dir = exe.parent().and_then(Path::parent).unwrap().to_path_buf();
+    let target_dir = profile_dir.parent().unwrap();
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command
+        .args(["build", "--quiet", "--offline", "--manifest-path"])
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+        .args(["-p", package, "--bin", bin])
+        .env("CARGO_TARGET_DIR", target_dir);
+    match profile_dir.file_name().and_then(|n| n.to_str()) {
+        Some("debug") => {}
+        Some("release") => {
+            command.arg("--release");
         }
-        let status = command.status().expect("run cargo to build fake-acp-agent");
-        assert!(status.success(), "building fake-acp-agent failed");
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file(), "{} was not built", agent.display());
-        agent
-    })
+        Some(other) => {
+            command.args(["--profile", other]);
+        }
+        None => panic!("unexpected test binary location {}", exe.display()),
+    }
+    let status = command
+        .status()
+        .unwrap_or_else(|e| panic!("run cargo to build {bin}: {e}"));
+    assert!(status.success(), "building {bin} failed");
+    let path = profile_dir.join(bin);
+    assert!(path.is_file(), "{} was not built", path.display());
+    path
 }
 
 /// A temporary directory holding a repository at `repo/` with one commit

@@ -273,7 +273,7 @@ fn run(
         cost: None,
     };
     // Declared before the session so a sandbox outlives it.
-    let mut placement = match Placement::prepare(turn.yard, record) {
+    let mut placement = match Placement::prepare(turn.yard, record, fence) {
         Ok(placement) => placement,
         Err(reason) => {
             driven.end = End::failed(reason);

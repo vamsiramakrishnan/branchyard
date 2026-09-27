@@ -7,7 +7,8 @@
 //! repository root. Local mode provides no isolation beyond your operating
 //! system user; see `docs/design.md` §4. [`TaskOptions::provider`] runs a
 //! branch's harness in a Microsandbox microVM instead, with the worktree
-//! mounted into it; see `docs/providers.md`.
+//! mounted into it, or in an Agent Substrate actor, with the worktree
+//! carried in and out as git bundles; see `docs/providers.md`.
 //!
 //! ```no_run
 //! use branchyard::{Budget, Policy, Yard};
@@ -335,6 +336,10 @@ pub enum Provider {
     /// harness installed. Needs a build with the `microsandbox` feature and
     /// a Linux host with KVM.
     Microsandbox(SandboxOptions),
+    /// An Agent Substrate actor per turn, from a template that runs the
+    /// Branchyard bridge and has the harness installed. Unqualified: see
+    /// `docs/substrate.md`.
+    Substrate(SubstrateOptions),
 }
 
 /// A sandboxed harness's image, limits and credentials.
@@ -351,6 +356,67 @@ pub struct SandboxOptions {
     /// `HOME`. Names are stored with the branch; values are not.
     #[serde(default)]
     pub pass_env: Vec<String>,
+}
+
+/// Where an Agent Substrate cluster is and how a harness runs in it.
+///
+/// Each turn creates an actor from [`SubstrateOptions::template`], copies the
+/// worktree into it at [`SubstrateOptions::workdir`] and the branch's private
+/// home to [`SubstrateOptions::home`], runs the harness there through the
+/// bridge, copies both back and deletes the actor. See `docs/substrate.md`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubstrateOptions {
+    /// The `Control` API, as `http://host:port`.
+    pub endpoint: String,
+    /// The router URL of an actor's bridge, with `{atespace}` and `{actor}`
+    /// in place of the names.
+    pub router: String,
+    /// The atespace actors are created in. Empty means `default`.
+    #[serde(default)]
+    pub atespace: String,
+    /// An actor template that runs `branchyard-bridge` with the public half
+    /// of [`SubstrateOptions::key`], with git and the harness installed.
+    pub template: String,
+    /// The host's bridge signing key, from `branchyard-bridge keygen`. The
+    /// path is stored with the branch; the key is not.
+    pub key: PathBuf,
+    /// Where the worktree is placed in the actor. Empty means `/workspace`.
+    #[serde(default)]
+    pub workdir: String,
+    /// The harness's `HOME` in the actor. Empty means `/branchyard/home`.
+    #[serde(default)]
+    pub home: String,
+    /// Variables copied by name from this process into the actor, such as
+    /// `ANTHROPIC_API_KEY`. Names are stored with the branch; values are
+    /// not.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+}
+
+impl SubstrateOptions {
+    /// [`SubstrateOptions::atespace`], defaulted.
+    pub fn atespace(&self) -> &str {
+        match self.atespace.is_empty() {
+            true => "default",
+            false => &self.atespace,
+        }
+    }
+
+    /// [`SubstrateOptions::workdir`], defaulted.
+    pub fn workdir(&self) -> &str {
+        match self.workdir.is_empty() {
+            true => placement::WORKSPACE,
+            false => &self.workdir,
+        }
+    }
+
+    /// [`SubstrateOptions::home`], defaulted.
+    pub fn home(&self) -> &str {
+        match self.home.is_empty() {
+            true => placement::HOME,
+            false => &self.home,
+        }
+    }
 }
 
 /// Receives every activity as it is recorded, from any branch's thread.

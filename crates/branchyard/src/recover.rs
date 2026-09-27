@@ -7,7 +7,8 @@
 //! so the stopped engine's writes are fenced from then on, and then:
 //!
 //! 1. kills the turn's harness process group, only if its leader's pid and
-//!    start time still match what was recorded on this host and boot;
+//!    start time still match what was recorded on this host and boot, and
+//!    deletes the Substrate actor the turn journaled, if it still exists;
 //! 2. reads the turn's journal: a recorded `turn_end` is finished as the
 //!    engine would have (the snapshot too, unless it was recorded); a
 //!    submitted prompt with no recorded end becomes `interrupted`, its
@@ -24,7 +25,7 @@ use serde_json::Value;
 use crate::engine::{self, Driven, End, STEP_START, STEP_SUBMIT, STEP_TURN_END};
 use crate::record::{self, Recorder};
 use crate::state::{now_ms, Lease, LeaseRow, Record, Taken, LEASE_TTL};
-use crate::{proc, Activity, BranchStatus, Error, Event, NativeSession, Recovery, Yard};
+use crate::{placement, proc, Activity, BranchStatus, Error, Event, NativeSession, Recovery, Yard};
 
 /// Recover every branch that needs it. A branch that cannot be recovered
 /// does not stop the others; the first such error is returned after all
@@ -94,6 +95,10 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     }
     let steps = store.backend().steps(&row.branch, row.turn)?;
     let step = |name: &str| steps.iter().find(|s| s.step == name);
+    let sandbox = step(placement::STEP_SANDBOX)
+        .and_then(|s| placement::recover(&record, &s.intent))
+        .map(|done| format!("; {done}"))
+        .unwrap_or_default();
     let ended = step(STEP_TURN_END).and_then(|s| {
         let end = serde_json::from_value::<End>(s.outcome.clone()?).ok()?;
         let submitted = s.intent.get("submitted").and_then(Value::as_bool)?;
@@ -111,12 +116,12 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         Some((end, submitted)) => (
             end,
             submitted,
-            format!("{why}; the turn had ended, and recovery recorded its result{late}"),
+            format!("{why}; the turn had ended, and recovery recorded its result{late}{sandbox}"),
         ),
         None if step(STEP_SUBMIT).is_some() => {
             let reason = format!(
                 "{why}; the prompt had been submitted and the turn's outcome is unknown. \
-                 It was not submitted again{late}"
+                 It was not submitted again{late}{sandbox}"
             );
             (
                 End::Lost {
@@ -131,7 +136,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
                 Some(_) => "the prompt was submitted",
                 None => "the harness was started",
             };
-            let reason = format!("{why} before {started}; the turn never ran");
+            let reason = format!("{why} before {started}; the turn never ran{sandbox}");
             (
                 End::Lost {
                     reason: reason.clone(),

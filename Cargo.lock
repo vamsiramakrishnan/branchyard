@@ -516,10 +516,12 @@ dependencies = [
 name = "branchyard"
 version = "0.0.1"
 dependencies = [
+ "branchyard-bridge",
  "branchyard-harness",
  "branchyard-microsandbox",
  "branchyard-runtime",
  "branchyard-sandbox",
+ "branchyard-substrate",
  "branchyard-workspace",
  "rusqlite",
  "serde",
@@ -540,9 +542,11 @@ name = "branchyard-cli"
 version = "0.0.1"
 dependencies = [
  "branchyard",
+ "branchyard-bridge",
  "branchyard-client",
  "branchyard-mcp",
  "branchyard-server",
+ "branchyard-substrate",
  "serde",
  "serde_json",
 ]

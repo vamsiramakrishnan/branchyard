@@ -36,6 +36,8 @@ pub struct TaskArgs {
     pub command: Option<Vec<String>>,
     /// `--provider microsandbox` and its options; `None` keeps the default.
     pub sandbox: Option<SandboxArgs>,
+    /// `--provider substrate` and its options.
+    pub substrate: Option<SubstrateArgs>,
     /// `--provider local`.
     pub local: bool,
     /// From `--delegate[=DEPTH]`: levels of children the harness may create.
@@ -55,6 +57,27 @@ pub struct SandboxArgs {
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
     pub pass_env: Vec<String>,
+}
+
+/// Options for `--provider substrate`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubstrateArgs {
+    pub endpoint: String,
+    pub router: String,
+    pub template: String,
+    pub key: String,
+    pub atespace: Option<String>,
+    pub workdir: Option<String>,
+    pub home: Option<String>,
+    pub pass_env: Vec<String>,
+}
+
+/// Which `--provider` was chosen, with its options.
+#[derive(Clone, Debug, PartialEq)]
+enum Chosen {
+    Local,
+    Microsandbox(SandboxArgs),
+    Substrate(SubstrateArgs),
 }
 
 /// Options of `by spawn`.
@@ -339,7 +362,7 @@ const COMMAND: Flag = Flag {
 };
 const PROVIDER: Flag = Flag {
     long: "provider",
-    value: Some("local|microsandbox"),
+    value: Some("local|microsandbox|substrate"),
     help: "Where the harness runs (default: local, or the branch's own)",
 };
 const IMAGE: Flag = Flag {
@@ -360,7 +383,42 @@ const MEMORY: Flag = Flag {
 const PASS_ENV: Flag = Flag {
     long: "pass-env",
     value: Some("NAME,NAME,..."),
-    help: "Variables to copy into the sandbox, such as API keys; nothing else is (microsandbox)",
+    help: "Variables to copy into the sandbox, such as API keys; nothing else is",
+};
+const SUBSTRATE_ENDPOINT: Flag = Flag {
+    long: "substrate-endpoint",
+    value: Some("URL"),
+    help: "Agent Substrate Control API, http://HOST:PORT (substrate)",
+};
+const SUBSTRATE_ROUTER: Flag = Flag {
+    long: "substrate-router",
+    value: Some("URL"),
+    help: "Router URL of an actor's bridge, with {atespace} and {actor} (substrate)",
+};
+const SUBSTRATE_TEMPLATE: Flag = Flag {
+    long: "substrate-template",
+    value: Some("NAME"),
+    help: "Actor template that runs branchyard-bridge and the harness (substrate)",
+};
+const SUBSTRATE_KEY: Flag = Flag {
+    long: "substrate-key",
+    value: Some("FILE"),
+    help: "Bridge signing key from `branchyard-bridge keygen` (substrate)",
+};
+const SUBSTRATE_ATESPACE: Flag = Flag {
+    long: "substrate-atespace",
+    value: Some("NAME"),
+    help: "Atespace for the actors (substrate; default: default)",
+};
+const SUBSTRATE_WORKDIR: Flag = Flag {
+    long: "substrate-workdir",
+    value: Some("PATH"),
+    help: "Where the worktree is copied in the actor (substrate; default: /workspace)",
+};
+const SUBSTRATE_HOME: Flag = Flag {
+    long: "substrate-home",
+    value: Some("PATH"),
+    help: "The harness's HOME in the actor (substrate; default: /branchyard/home)",
 };
 const YES: Flag = Flag {
     long: "yes",
@@ -475,6 +533,13 @@ pub static COMMANDS: &[Spec] = &[
             CPUS,
             MEMORY,
             PASS_ENV,
+            SUBSTRATE_ENDPOINT,
+            SUBSTRATE_ROUTER,
+            SUBSTRATE_TEMPLATE,
+            SUBSTRATE_KEY,
+            SUBSTRATE_ATESPACE,
+            SUBSTRATE_WORKDIR,
+            SUBSTRATE_HOME,
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
@@ -501,6 +566,13 @@ pub static COMMANDS: &[Spec] = &[
             CPUS,
             MEMORY,
             PASS_ENV,
+            SUBSTRATE_ENDPOINT,
+            SUBSTRATE_ROUTER,
+            SUBSTRATE_TEMPLATE,
+            SUBSTRATE_KEY,
+            SUBSTRATE_ATESPACE,
+            SUBSTRATE_WORKDIR,
+            SUBSTRATE_HOME,
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
@@ -544,6 +616,13 @@ pub static COMMANDS: &[Spec] = &[
             CPUS,
             MEMORY,
             PASS_ENV,
+            SUBSTRATE_ENDPOINT,
+            SUBSTRATE_ROUTER,
+            SUBSTRATE_TEMPLATE,
+            SUBSTRATE_KEY,
+            SUBSTRATE_ATESPACE,
+            SUBSTRATE_WORKDIR,
+            SUBSTRATE_HOME,
             DELEGATE,
             ALLOW_DELEGATION,
             ALLOW_UNAPPROVED_TOOLS,
@@ -1041,30 +1120,65 @@ impl Matches {
             permissions,
             isolated: self.switch("isolated"),
             command,
-            sandbox: provider.clone().flatten(),
-            local: provider == Some(None),
+            sandbox: match &provider {
+                Some(Chosen::Microsandbox(args)) => Some(args.clone()),
+                _ => None,
+            },
+            substrate: match &provider {
+                Some(Chosen::Substrate(args)) => Some(args.clone()),
+                _ => None,
+            },
+            local: provider == Some(Chosen::Local),
             delegate,
             allow_delegation: self.switch("allow-delegation"),
             unapproved_tools: self.switch("allow-unapproved-tools"),
         })
     }
 
-    /// `Some(None)` for `--provider local`, `Some(Some(..))` for
-    /// microsandbox, `None` when not given.
-    #[allow(clippy::option_option)]
-    fn provider(&self) -> Result<Option<Option<SandboxArgs>>, UsageError> {
-        let sandbox_flags = ["image", "cpus", "memory", "pass-env"];
-        let given: Vec<&str> = sandbox_flags
-            .into_iter()
-            .filter(|flag| self.switch(flag))
-            .collect();
-        match self.value("provider") {
-            None | Some("local") => {
-                if let Some(flag) = given.first() {
-                    return Err(self.error(format!("--{flag} needs --provider microsandbox")));
-                }
-                Ok(self.value("provider").map(|_| None))
+    /// The chosen provider and its options; `None` when `--provider` was
+    /// not given.
+    fn provider(&self) -> Result<Option<Chosen>, UsageError> {
+        let micro_flags = ["image", "cpus", "memory"];
+        let substrate_flags = [
+            "substrate-endpoint",
+            "substrate-router",
+            "substrate-template",
+            "substrate-key",
+            "substrate-atespace",
+            "substrate-workdir",
+            "substrate-home",
+        ];
+        let given = |flags: &[&'static str]| -> Option<&'static str> {
+            flags.iter().copied().find(|flag| self.switch(flag))
+        };
+        let chosen = self.value("provider");
+        if chosen != Some("microsandbox") {
+            if let Some(flag) = given(&micro_flags) {
+                return Err(self.error(format!("--{flag} needs --provider microsandbox")));
             }
+        }
+        if chosen != Some("substrate") {
+            if let Some(flag) = given(&substrate_flags) {
+                return Err(self.error(format!("--{flag} needs --provider substrate")));
+            }
+        }
+        if matches!(chosen, None | Some("local")) && self.switch("pass-env") {
+            return Err(self.error("--pass-env needs --provider microsandbox or substrate"));
+        }
+        let mut pass_env = Vec::new();
+        if let Some(list) = self.value("pass-env") {
+            for name in list.split(',').map(str::trim) {
+                if name.is_empty() || name.contains('=') {
+                    return Err(
+                        self.error(format!("--pass-env takes variable names, not '{list}'"))
+                    );
+                }
+                pass_env.push(name.to_owned());
+            }
+        }
+        match chosen {
+            None => Ok(None),
+            Some("local") => Ok(Some(Chosen::Local)),
             Some("microsandbox") => {
                 let image = self
                     .value("image")
@@ -1092,25 +1206,34 @@ impl Matches {
                         }
                     },
                 };
-                let mut pass_env = Vec::new();
-                if let Some(list) = self.value("pass-env") {
-                    for name in list.split(',').map(str::trim) {
-                        if name.is_empty() || name.contains('=') {
-                            return Err(self
-                                .error(format!("--pass-env takes variable names, not '{list}'")));
-                        }
-                        pass_env.push(name.to_owned());
-                    }
-                }
-                Ok(Some(Some(SandboxArgs {
+                Ok(Some(Chosen::Microsandbox(SandboxArgs {
                     image: image.to_owned(),
                     cpus,
                     memory_mib,
                     pass_env,
                 })))
             }
+            Some("substrate") => {
+                let required = |flag: &str| -> Result<String, UsageError> {
+                    self.value(flag)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| self.error(format!("--provider substrate needs --{flag}")))
+                };
+                let optional = |flag: &str| self.value(flag).map(str::to_owned);
+                Ok(Some(Chosen::Substrate(SubstrateArgs {
+                    endpoint: required("substrate-endpoint")?,
+                    router: required("substrate-router")?,
+                    template: required("substrate-template")?,
+                    key: required("substrate-key")?,
+                    atespace: optional("substrate-atespace"),
+                    workdir: optional("substrate-workdir"),
+                    home: optional("substrate-home"),
+                    pass_env,
+                })))
+            }
             Some(other) => Err(self.error(format!(
-                "--provider is local or microsandbox, not '{other}'"
+                "--provider is local, microsandbox or substrate, not '{other}'"
             ))),
         }
     }
@@ -1288,6 +1411,7 @@ mod tests {
                     isolated: true,
                     command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
                     sandbox: None,
+                    substrate: None,
                     local: false,
                     delegate: None,
                     allow_delegation: false,
@@ -1332,7 +1456,7 @@ mod tests {
             err("run go --provider local --cpus 2"),
             "--cpus needs --provider microsandbox"
         );
-        assert!(err("run go --provider docker").contains("local or microsandbox"));
+        assert!(err("run go --provider docker").contains("local, microsandbox or substrate"));
         assert!(err("run go --provider microsandbox --image a --cpus 0").contains("--cpus"));
         assert!(err("run go --provider microsandbox --image a --memory 1g").contains("--memory"));
         assert!(err("run go --provider microsandbox --image a --pass-env A=1").contains("names"));
