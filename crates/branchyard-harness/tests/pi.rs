@@ -19,11 +19,7 @@ fn fixture(name: &str) -> Transcript {
 }
 
 fn fresh() -> Open {
-    Open {
-        mode: SessionMode::Fresh,
-        cwd: "/workspace".into(),
-        model: None,
-    }
+    Open::new(SessionMode::Fresh, "/workspace")
 }
 
 fn session(id: &str) -> NativeSession {

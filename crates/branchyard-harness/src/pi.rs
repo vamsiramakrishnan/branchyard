@@ -337,6 +337,7 @@ impl Driver for Pi {
         if self.mode.is_some() {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
+        crate::refuse_projection(&open, "Pi")?;
         let mut argv = self.command.clone();
         argv.extend(["--mode".into(), "rpc".into()]);
         if let Some(model) = &open.model {

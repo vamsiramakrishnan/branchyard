@@ -97,19 +97,27 @@ pub(crate) fn find_on_path(program: &str) -> Option<PathBuf> {
         .find(|candidate| executable(candidate))
 }
 
-fn executable(path: &Path) -> bool {
+pub(crate) fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// Whether an inherited variable is Branchyard's own: a server to talk to,
+/// or an outer harness's branch and delegation token. The engine sets the
+/// ones this branch should have; none is inherited.
+pub(crate) fn is_branchyard_variable(name: &str) -> bool {
+    name.starts_with("BRANCHYARD_")
+}
+
 /// The harness's environment: this process's, minus the parent Claude Code
-/// session's variables; or, isolated, the runtime's scrubbed environment with `home`.
+/// session's variables and Branchyard's own; or, isolated, the runtime's
+/// scrubbed environment with `home`.
 pub(crate) fn environment(isolated_home: Option<&Path>) -> Environment {
     match isolated_home {
-        Some(home) => Environment::new(home),
+        Some(home) => Environment::new(home).strip("BRANCHYARD_"),
         None => std::env::vars_os()
             .filter_map(|(name, _)| name.into_string().ok())
-            .filter(|name| is_parent_session_variable(name))
+            .filter(|name| is_parent_session_variable(name) || is_branchyard_variable(name))
             .fold(Environment::inherit(), |env, name| env.remove(name)),
     }
 }

@@ -21,7 +21,11 @@ pub(crate) fn open(path: &Path) -> Result<Yard, Error> {
     let root = repo.root().to_path_buf();
     Store::new(&root).create_dirs()?;
     exclude(&root)?;
-    Ok(Yard { root, repo })
+    Ok(Yard {
+        root,
+        repo,
+        hub: Default::default(),
+    })
 }
 
 /// Add `.branchyard/` to the repository's `info/exclude` unless it is there.

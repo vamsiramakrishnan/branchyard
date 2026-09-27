@@ -679,12 +679,12 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
 #[test]
 fn harnesses_inherit_the_environment_without_nested_session_markers() {
     let f = Fixture::new();
-    let prompt = "ENV CLAUDECODE BRANCHYARD_TEST_VISIBLE";
+    let prompt = "ENV CLAUDECODE BRANCHYARD_REMOTE BY_TEST_VISIBLE";
     let shared = f.task(prompt).name("shared").run().unwrap();
     let home = std::env::var("HOME").unwrap();
     assert_eq!(
         text(&shared.events().unwrap()),
-        format!("HOME={home}\nCLAUDECODE unset\nBRANCHYARD_TEST_VISIBLE=yes\n")
+        format!("HOME={home}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n")
     );
 
     let isolated = f
@@ -698,7 +698,7 @@ fn harnesses_inherit_the_environment_without_nested_session_markers() {
     assert_eq!(
         text(&isolated.events().unwrap()),
         format!(
-            "HOME={}\nCLAUDECODE unset\nBRANCHYARD_TEST_VISIBLE=yes\n",
+            "HOME={}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n",
             private.display()
         )
     );

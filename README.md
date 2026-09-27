@@ -86,6 +86,22 @@ by run "Fix the flaky parser test" --provider microsandbox --image ghcr.io/you/c
 
 It needs Linux with KVM and the `msb` 0.7.3 runtime, and the `microsandbox` cargo feature, which is off by default because the pinned SDK needs Rust 1.94 while the workspace pins 1.90. It is **unqualified**: its unit tests pass, but its KVM tests have not run. See [sandbox providers](docs/providers.md) for the contract, each provider's guarantees, and how to run those tests.
 
+## Delegation
+
+A harness can act as a meta-harness. With `--delegate`, the harness runs `by` in its own shell to create and coordinate child branches, within an envelope of depth, width, harnesses and budget:
+
+```sh
+by run "Split the parser rewrite: delegate the tokenizer to codex and the formatter to yourself, then integrate both" \
+  --delegate --budget-usd 3 --yes
+# inside the harness, as its own branch:
+#   by spawn "Port the tokenizer to the new API; run its tests" --name tokenizer --harness codex --budget-usd 1
+#   by inspect tokenizer --json
+#   by integrate tokenizer          # merges into the parent's branch, never into yours
+by ls                               # the tree
+```
+
+The same operations are a Python module, a Rust `Delegate`, and MCP tools (`by mcp`), with one authority model: a per-turn token that lets a branch act only on its descendants. In local mode that stops mistakes, not a hostile harness. See [delegation](docs/delegation.md).
+
 ## Architecture
 
 Clients submit work and observe results. All managed harness execution happens on servers.
@@ -134,6 +150,7 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `harnesses`, `watch`, `serve`, each also in remote mode; 53 tests, 9 of them running the built binary against temporary repositories, a spawned server and a fake ACP agent |
 | `branchyard-server` | The server: bearer-token authentication, durable operations with idempotency keys, a resumable SSE activity feed, TLS and graceful shutdown; 26 tests, 8 over real HTTP against a fake ACP agent; see [the server reference](docs/server.md) |
 | `branchyard-client` | The remote SDK: typed blocking client, SSE parsing and reconnect by cursor; 12 tests |
+| `branchyard-mcp` | Branchyard's delegation tools over MCP on stdio (`by mcp`), for harnesses whose shell is restricted; the same operations and token as `by spawn` and the SDKs |
 | `branchyard-sandbox` | The vendor-independent `SandboxProvider` contract, provider conformance checks, and capability admission; unsupported requirements are rejected, never weakened |
 | `branchyard-microsandbox` | A [Microsandbox](https://github.com/superradcompany/microsandbox) provider over its public SDK 0.7.3, behind the off-by-default `microsandbox` feature (the SDK needs Rust 1.94); 11 mapping tests, 4 more with the SDK, and 14 ignored tests for a KVM host; **unqualified** |
 | `branchyard-substrate` | [Agent Substrate](https://github.com/agent-substrate/substrate) provider adapter over a client generated from its unmodified proto; tested against an in-process fake, **unqualified** against a cluster |

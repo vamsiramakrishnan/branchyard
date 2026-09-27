@@ -449,7 +449,12 @@ async fn post_task(
         observer: Some(observer(&repo.wake)),
         isolated: request.isolated,
         command,
+        // The server runs harnesses locally and offers them no delegation
+        // tools yet.
         provider: None,
+        delegation: None,
+        delegation_cli: None,
+        delegation_server: None,
     };
     let harnesses = request.harnesses.clone();
     let prompt = request.prompt.clone();

@@ -630,6 +630,8 @@ mod tests {
             profile: "codex-app-server".into(),
             session: None,
             parent: parent.map(Into::into),
+            children: Vec::new(),
+            depth: 0,
             base: "b".into(),
             candidate: None,
             status,

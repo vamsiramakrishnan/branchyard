@@ -3,16 +3,16 @@
 //! `agent-client-protocol-schema` request types.
 
 use agent_client_protocol_schema::v1::{
-    CancelNotification, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
-    RequestPermissionResponse, ResumeSessionRequest,
+    CancelNotification, InitializeRequest, LoadSessionRequest, McpServer as AcpMcpServer,
+    NewSessionRequest, PromptRequest, RequestPermissionResponse, ResumeSessionRequest,
 };
 use branchyard_harness::acp::Acp;
 use branchyard_harness::conformance::{
     assert_conforms, decode, decode_all, feed, handshake, Replay, Transcript,
 };
 use branchyard_harness::{
-    Driver, Event, NativeSession, Open, Opened, PermissionDecision, Rejected, SessionMode,
-    TurnOutcome,
+    Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
+    Rejected, SessionMode, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -26,6 +26,8 @@ fn fresh() -> Open {
         mode: SessionMode::Fresh,
         cwd: "/workspace".into(),
         model: None,
+        mcp_servers: Vec::new(),
+        instructions: None,
     }
 }
 
@@ -154,6 +156,8 @@ fn fork_and_model_selection_are_rejected_before_launch() {
         mode,
         cwd: "/workspace".into(),
         model,
+        mcp_servers: Vec::new(),
+        instructions: None,
     };
     assert!(matches!(
         driver.open(open(SessionMode::Fork(session("p")), None)),
@@ -350,6 +354,8 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
             mode: SessionMode::Fresh,
             cwd: "/workspace".into(),
             model: None,
+            mcp_servers: Vec::new(),
+            instructions: None,
         })
         .unwrap();
     let initialize = decode(&opened.frames[0]);
@@ -369,6 +375,8 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
             mode: SessionMode::Fresh,
             cwd: "/workspace".into(),
             model: None,
+            mcp_servers: Vec::new(),
+            instructions: None,
         })
         .unwrap();
     let initialize = decode(&opened.frames[0]);
@@ -391,4 +399,113 @@ fn updates_for_another_session_are_violations() {
     assert!(
         matches!(&events[..], [Event::ProtocolViolation { detail }] if detail.contains("other"))
     );
+}
+
+#[test]
+fn mcp_servers_are_stdio_servers_on_new_resume_and_load() {
+    let server = McpServer {
+        name: "branchyard".into(),
+        command: "/usr/local/bin/by".into(),
+        args: vec!["mcp".into()],
+        env: vec![("BRANCHYARD_TOKEN".into(), "t0k".into())],
+    };
+    let cases = [
+        (SessionMode::Fresh, json!({}), "session/new"),
+        (
+            SessionMode::Resume(session("old")),
+            json!({"sessionCapabilities": {"resume": {}}}),
+            "session/resume",
+        ),
+        (
+            SessionMode::Resume(session("old")),
+            json!({"loadSession": true}),
+            "session/load",
+        ),
+    ];
+    for (mode, capabilities, method) in cases {
+        let mut driver = Acp::new(vec!["agent".into()]);
+        let opened = driver
+            .open(Open {
+                mcp_servers: vec![server.clone()],
+                mode,
+                ..fresh()
+            })
+            .unwrap();
+        let initialize = decode(&opened.frames[0]);
+        let (_, frames) = feed(
+            &mut driver,
+            &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1, "agentCapabilities": capabilities}}),
+        );
+        let request = &frames[0];
+        assert_eq!(request["method"], method);
+        match method {
+            "session/new" => {
+                let _: NewSessionRequest = assert_conforms(request, "/params");
+            }
+            "session/resume" => {
+                let _: ResumeSessionRequest = assert_conforms(request, "/params");
+            }
+            _ => {
+                let _: LoadSessionRequest = assert_conforms(request, "/params");
+            }
+        }
+        let servers = &request["params"]["mcpServers"];
+        assert_eq!(
+            servers,
+            &json!([{"name": "branchyard", "command": "/usr/local/bin/by", "args": ["mcp"],
+                "env": [{"name": "BRANCHYARD_TOKEN", "value": "t0k"}]}])
+        );
+        let parsed: AcpMcpServer = serde_json::from_value(servers[0].clone()).unwrap();
+        let AcpMcpServer::Stdio(stdio) = parsed else {
+            panic!("not a stdio server: {parsed:?}")
+        };
+        assert_eq!(
+            (
+                stdio.name.as_str(),
+                stdio.command.to_str(),
+                stdio.env[0].value.as_str()
+            ),
+            ("branchyard", Some("/usr/local/bin/by"), "t0k")
+        );
+    }
+    let mut driver = Acp::new(vec!["agent".into()]);
+    let relative = Open {
+        mcp_servers: vec![McpServer {
+            command: "by".into(),
+            ..server
+        }],
+        ..fresh()
+    };
+    assert!(matches!(
+        driver.open(relative),
+        Err(Rejected::InvalidOpen(_))
+    ));
+}
+
+#[test]
+fn instructions_precede_only_the_first_prompt_in_delimiters() {
+    let mut driver = Acp::new(vec!["agent".into()]);
+    let opened = driver
+        .open(Open {
+            instructions: Some(Instructions {
+                text: "Delegate with by.".into(),
+                plugin_dir: None,
+            }),
+            ..fresh()
+        })
+        .unwrap();
+    let events = handshake(&mut driver, &opened.frames, answer);
+    assert!(events.contains(&Event::Ready));
+    let first = decode(&driver.submit("Fix it.").unwrap().frames[0]);
+    let _: PromptRequest = assert_conforms(&first, "/params");
+    assert_eq!(
+        first["params"]["prompt"][0]["text"],
+        "<branchyard-instructions>\nDelegate with by.\n</branchyard-instructions>\n\nFix it."
+    );
+    feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": first["id"], "result": {"stopReason": "end_turn"}}),
+    );
+    let second = decode(&driver.submit("Again.").unwrap().frames[0]);
+    assert_eq!(second["params"]["prompt"][0]["text"], "Again.");
 }

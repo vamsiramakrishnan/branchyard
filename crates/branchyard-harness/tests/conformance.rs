@@ -13,6 +13,8 @@ fn fresh() -> Open {
         mode: SessionMode::Fresh,
         cwd: "/workspace".into(),
         model: None,
+        mcp_servers: Vec::new(),
+        instructions: None,
     }
 }
 
@@ -210,4 +212,49 @@ fn replay_rejects_a_recorded_frame_the_driver_never_writes() {
     Replay::new(&transcript)
         .alias("/request_id")
         .run(&mut driver, &opened);
+}
+
+#[test]
+fn drivers_without_a_verified_projection_refuse_servers_and_instructions() {
+    let server = branchyard_harness::McpServer {
+        name: "branchyard".into(),
+        command: "/usr/local/bin/by".into(),
+        args: vec!["mcp".into()],
+        env: Vec::new(),
+    };
+    let instructions = branchyard_harness::Instructions {
+        text: "Delegate with by spawn.".into(),
+        plugin_dir: None,
+    };
+    let unprojected = [
+        Protocol::AntigravityStreamJson,
+        Protocol::PiRpc,
+        Protocol::AmpStreamJson,
+    ];
+    let mut checked = 0;
+    for profile in PROFILES
+        .iter()
+        .filter(|p| unprojected.contains(&p.protocol))
+    {
+        for open in [
+            Open {
+                mcp_servers: vec![server.clone()],
+                ..fresh()
+            },
+            Open {
+                instructions: Some(instructions.clone()),
+                ..fresh()
+            },
+        ] {
+            let refused = profile.driver().open(open).err();
+            assert!(
+                matches!(refused, Some(branchyard_harness::Rejected::Unsupported(_))),
+                "{} must refuse, not drop, what it cannot pass: {refused:?}",
+                profile.id
+            );
+        }
+        profile.driver().open(fresh()).expect("a plain open works");
+        checked += 1;
+    }
+    assert_eq!(checked, 3);
 }

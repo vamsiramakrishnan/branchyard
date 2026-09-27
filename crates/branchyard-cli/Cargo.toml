@@ -19,4 +19,6 @@ microsandbox = ["branchyard/microsandbox"]
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
 branchyard-server = { path = "../branchyard-server" }
+branchyard-mcp = { path = "../branchyard-mcp" }
+serde = "1"
 serde_json = "1"

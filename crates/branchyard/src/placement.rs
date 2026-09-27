@@ -124,6 +124,21 @@ impl Placement {
         })
     }
 
+    /// Whether the harness runs in a sandbox rather than on this host.
+    pub fn is_sandbox(&self) -> bool {
+        matches!(self.kind, Kind::Sandbox { .. })
+    }
+
+    /// Add a variable to the harness's environment.
+    pub fn set_env(&mut self, name: &str, value: &str) {
+        match &mut self.kind {
+            Kind::Local(env) => *env = env.clone().set(name, value),
+            Kind::Sandbox { env, .. } => {
+                env.insert(name.into(), value.into());
+            }
+        }
+    }
+
     /// The harness's working directory, as the harness sees it.
     pub fn cwd(&self) -> String {
         self.cwd.clone()

@@ -230,6 +230,7 @@ impl Driver for Antigravity {
         if self.mode.is_some() {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
+        crate::refuse_projection(&open, "the Antigravity CLI")?;
         if let SessionMode::Fork(_) = open.mode {
             return Err(Rejected::Unsupported(
                 "the Antigravity CLI cannot fork a conversation".into(),

@@ -6,6 +6,17 @@
 //! `initialized` handshake, `thread/start`, `thread/resume` or `thread/fork`,
 //! then `turn/start` and `turn/interrupt`.
 //!
+//! MCP servers travel in the thread request's `config`, which the schema
+//! types as an open object of configuration overrides (`ThreadStartParams`,
+//! `ThreadResumeParams` and `ThreadForkParams` all carry it), as
+//! `{"mcp_servers": {<name>: {command, args, env}}}`, the shape of the
+//! `[mcp_servers.<name>]` tables in `config.toml`. codex-cli 0.157.1 started
+//! and connected such a server on `thread/start` when checked; resume and
+//! fork send the same override but were not checked live.
+//!
+//! Instructions go in `developerInstructions`, a string field of all three
+//! thread requests in the same schema.
+//!
 //! Threads start with `approvalPolicy: "on-request"` so command and file
 //! change approvals reach Branchyard as server requests, and Codex's own
 //! sandbox in `workspace-write` mode inside Branchyard's sandbox. Server
@@ -17,9 +28,9 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use crate::{
-    frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open,
-    Opened, Output, PermissionDecision, PermissionKey, PermissionRequest, Rejected, SessionMode,
-    Submitted, TurnOutcome, Turns, Usage, Value,
+    frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, McpServer,
+    NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
+    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Usage, Value,
 };
 
 #[derive(Debug)]
@@ -45,6 +56,24 @@ const TOOL_ITEMS: [&str; 6] = [
     "webSearch",
     "imageGeneration",
 ];
+
+/// `mcp_servers` as a thread `config` override: the `[mcp_servers.<name>]`
+/// tables of Codex's `config.toml`, with `command`, `args` and `env`.
+fn mcp_servers(servers: &[McpServer]) -> Value {
+    let servers: serde_json::Map<String, Value> = servers
+        .iter()
+        .map(|server| {
+            let env: serde_json::Map<String, Value> = server
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), json!(value)))
+                .collect();
+            let table = json!({"command": server.command, "args": server.args, "env": env});
+            (server.name.clone(), table)
+        })
+        .collect();
+    Value::Object(servers)
+}
 
 /// A Codex App Server session.
 #[derive(Debug)]
@@ -93,6 +122,12 @@ impl Codex {
         });
         if let Some(model) = open.model {
             params["model"] = json!(model);
+        }
+        if !open.mcp_servers.is_empty() {
+            params["config"] = json!({ "mcp_servers": mcp_servers(&open.mcp_servers) });
+        }
+        if let Some(instructions) = &open.instructions {
+            params["developerInstructions"] = json!(instructions.text);
         }
         let method = match &open.mode {
             SessionMode::Fresh => "thread/start",
@@ -336,6 +371,7 @@ impl Driver for Codex {
         if self.open.is_some() {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
+        crate::check_mcp_servers(&open.mcp_servers)?;
         let mut argv = self.command.clone();
         argv.push("app-server".into());
         let launch = LaunchSpec {

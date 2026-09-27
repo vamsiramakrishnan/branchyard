@@ -22,9 +22,25 @@
 //! - `GARBAGE`: writes a non-JSON line before the normal reply.
 //! - `ENV A B`: replies `NAME=value` or `NAME unset` for `HOME` and each name
 //!   after the keyword.
+//! - `MCP <tool> <json>`, one per line: starts the first MCP server the
+//!   client passed in `mcpServers` (its command, arguments and variables),
+//!   initializes it, calls `tools/call` with the JSON as arguments, and
+//!   replies `mcp <tool>: <text>` or `mcp <tool> error: <text>` for each
+//!   line. `MCP tools` replies the listed tool names instead,
+//!   `MCP wait <branch>` calls `inspect` until the branch is not running,
+//!   and `MCP started <branch>` calls `events` until the branch's prompt
+//!   has been recorded, which it is just before the prompt is submitted.
+//!   Without a server it replies `mcp: no server`.
+//! - `SH <command>`, one per line: runs the command with `sh -c` in its
+//!   working directory and environment, and replies `sh: <exit status>`
+//!   followed by the command's output, for each line.
+//! - `INSTRUCTED`: replies `instructed=<bool>`, whether a prompt this
+//!   process received began with Branchyard's instructions preamble. The
+//!   preamble is removed before any keyword is looked for.
 
-use std::io::{self, BufRead, Write};
-use std::process::{Command, Stdio};
+use std::io::{self, BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -58,7 +74,13 @@ struct Active {
     text: String,
 }
 
+/// Branchyard's ACP instructions preamble, as the driver writes it.
+const PREAMBLE_OPEN: &str = "<branchyard-instructions>";
+const PREAMBLE_CLOSE: &str = "</branchyard-instructions>";
+
 fn main() {
+    let mut instructed = false;
+    let mut servers = Value::Null;
     let mut session = "fake-session-1".to_owned();
     let mut resumed = false;
     let mut active: Option<Active> = None;
@@ -79,7 +101,10 @@ fn main() {
                     "agentCapabilities": {"loadSession": true, "sessionCapabilities": {"resume": {}}},
                 }),
             ),
-            (Some("session/new"), Some(id)) => reply(&id, json!({"sessionId": session})),
+            (Some("session/new"), Some(id)) => {
+                servers = params["mcpServers"].clone();
+                reply(&id, json!({"sessionId": session}));
+            }
             (Some("session/resume" | "session/load"), Some(id))
                 if params["sessionId"]
                     .as_str()
@@ -92,12 +117,34 @@ fn main() {
                 }));
             }
             (Some("session/resume" | "session/load"), Some(id)) => {
+                servers = params["mcpServers"].clone();
                 session = params["sessionId"].as_str().unwrap_or_default().to_owned();
                 resumed = true;
                 reply(&id, json!({}));
             }
             (Some("session/prompt"), Some(id)) => {
-                let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
+                let mut text = params["prompt"][0]["text"].as_str().unwrap_or_default();
+                if let Some(rest) = text.strip_prefix(PREAMBLE_OPEN) {
+                    if let Some((_, prompt)) = rest.split_once(PREAMBLE_CLOSE) {
+                        instructed = true;
+                        text = prompt.trim_start();
+                    }
+                }
+                if text.contains("INSTRUCTED") {
+                    chunk(&session, &format!("instructed={instructed}"));
+                    reply(&id, json!({"stopReason": "end_turn"}));
+                    continue;
+                }
+                if text.lines().any(|line| line.starts_with("SH ")) {
+                    chunk(&session, &shell(text));
+                    reply(&id, json!({"stopReason": "end_turn"}));
+                    continue;
+                }
+                if text.lines().any(|line| line.starts_with("MCP ")) {
+                    chunk(&session, &mcp(&servers[0], text));
+                    reply(&id, json!({"stopReason": "end_turn"}));
+                    continue;
+                }
                 active = prompt(&session, resumed, id, text, &mut next_request);
             }
             (Some("session/cancel"), None) => {
@@ -238,4 +285,206 @@ fn prompt(
     }
     reply(&id, json!({"stopReason": "end_turn"}));
     None
+}
+
+/// A minimal MCP client over a server's stdio.
+struct McpClient {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next: u64,
+}
+
+impl McpClient {
+    fn start(server: &Value) -> Result<McpClient, String> {
+        let command = server["command"]
+            .as_str()
+            .ok_or("the server has no command")?;
+        let mut process = Command::new(command);
+        for arg in server["args"].as_array().into_iter().flatten() {
+            process.arg(arg.as_str().unwrap_or_default());
+        }
+        for var in server["env"].as_array().into_iter().flatten() {
+            process.env(
+                var["name"].as_str().unwrap_or_default(),
+                var["value"].as_str().unwrap_or_default(),
+            );
+        }
+        let mut child = process
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("could not start {command}: {e}"))?;
+        let stdin = child.stdin.take().expect("piped");
+        let stdout = BufReader::new(child.stdout.take().expect("piped"));
+        let mut client = McpClient {
+            child,
+            stdin,
+            stdout,
+            next: 0,
+        };
+        client.request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "fake-acp-agent", "version": "0"}}),
+        )?;
+        client.notify("notifications/initialized")?;
+        Ok(client)
+    }
+
+    fn notify(&mut self, method: &str) -> Result<(), String> {
+        writeln!(
+            self.stdin,
+            "{}",
+            json!({"jsonrpc": "2.0", "method": method})
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.next += 1;
+        let id = self.next;
+        let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(self.stdin, "{request}").map_err(|e| e.to_string())?;
+        loop {
+            let mut line = String::new();
+            if self
+                .stdout
+                .read_line(&mut line)
+                .map_err(|e| e.to_string())?
+                == 0
+            {
+                return Err("the server closed its output".into());
+            }
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                return Err(format!("the server wrote a non-JSON line: {line:?}"));
+            };
+            if message["id"] != json!(id) {
+                continue; // a notification or a request of its own
+            }
+            if let Some(error) = message.get("error") {
+                return Err(format!("JSON-RPC error {error}"));
+            }
+            return Ok(message["result"].clone());
+        }
+    }
+
+    /// `(is_error, text)` of one tool call.
+    fn call(&mut self, tool: &str, arguments: Value) -> Result<(bool, String), String> {
+        let result = self.request("tools/call", json!({"name": tool, "arguments": arguments}))?;
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        Ok((result["isError"] == true, text.to_owned()))
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Carry out every `MCP` line of `text` and describe the results.
+fn mcp(server: &Value, text: &str) -> String {
+    if server.is_null() {
+        return "mcp: no server\n".into();
+    }
+    let mut client = match McpClient::start(server) {
+        Ok(client) => client,
+        Err(error) => return format!("mcp: {error}\n"),
+    };
+    let mut out = String::new();
+    for line in text.lines().filter_map(|l| l.strip_prefix("MCP ")) {
+        let (tool, rest) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
+        let outcome = match tool {
+            "tools" => client.request("tools/list", json!({})).map(|result| {
+                let names: Vec<&str> = result["tools"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t["name"].as_str())
+                    .collect();
+                (false, names.join(","))
+            }),
+            "wait" => wait(&mut client, rest.trim()),
+            "started" => started(&mut client, rest.trim()),
+            _ => match serde_json::from_str::<Value>(if rest.trim().is_empty() {
+                "{}"
+            } else {
+                rest
+            }) {
+                Ok(arguments) => client.call(tool, arguments),
+                Err(error) => Err(format!("bad arguments: {error}")),
+            },
+        };
+        match outcome {
+            Ok((false, text)) => out.push_str(&format!("mcp {tool}: {text}\n")),
+            Ok((true, text)) => out.push_str(&format!("mcp {tool} error: {text}\n")),
+            Err(error) => out.push_str(&format!("mcp {tool} failed: {error}\n")),
+        }
+    }
+    out
+}
+
+/// Poll `inspect` until `branch` is not running, for up to a minute.
+fn wait(client: &mut McpClient, branch: &str) -> Result<(bool, String), String> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (error, text) = client.call("inspect", json!({"branch": branch}))?;
+        if error {
+            return Ok((true, text));
+        }
+        let status: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let state = status["status"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if state != "running" || Instant::now() >= deadline {
+            return Ok((false, state));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Run every `SH` line of `text` and describe the results.
+fn shell(text: &str) -> String {
+    let mut out = String::new();
+    for command in text.lines().filter_map(|l| l.strip_prefix("SH ")) {
+        match Command::new("sh")
+            .args(["-c", command])
+            .stdin(Stdio::null())
+            .output()
+        {
+            Ok(done) => {
+                out.push_str(&format!("sh: {}\n", done.status.code().unwrap_or(-1)));
+                out.push_str(&String::from_utf8_lossy(&done.stdout));
+                out.push_str(&String::from_utf8_lossy(&done.stderr));
+            }
+            Err(error) => out.push_str(&format!("sh: failed: {error}\n")),
+        }
+    }
+    out
+}
+
+/// Poll `events` until `branch`'s prompt is recorded, for up to a minute.
+fn started(client: &mut McpClient, branch: &str) -> Result<(bool, String), String> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let arguments = json!({"branch": branch, "cursor": 0, "limit": 200});
+        let (error, text) = client.call("events", arguments)?;
+        if error {
+            return Ok((true, text));
+        }
+        let page: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let prompted = page["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|event| event["activity"].get("prompt").is_some());
+        if prompted || Instant::now() >= deadline {
+            return Ok((false, prompted.to_string()));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

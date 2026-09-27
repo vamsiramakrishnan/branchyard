@@ -43,6 +43,8 @@ pub fn branch(info: &BranchInfo) -> Value {
         "profile": info.profile,
         "session": info.session,
         "parent": info.parent,
+        "children": info.children,
+        "depth": info.depth,
         "base": info.base,
         "candidate": info.candidate.as_ref().map(candidate),
         "status": status(&info.status),
@@ -166,6 +168,18 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
         Activity::Snapshot(c) => json!({ "activity": "snapshot", "candidate": candidate(c) }),
         Activity::Status(s) => json!({ "activity": "status", "status": status(s) }),
         Activity::Warning(message) => json!({ "activity": "warning", "message": message }),
+        Activity::Delegation {
+            tool,
+            branch,
+            outcome,
+            refused,
+        } => json!({
+            "activity": "delegation",
+            "tool": tool,
+            "branch": branch,
+            "outcome": outcome,
+            "refused": refused,
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value
@@ -195,6 +209,8 @@ mod tests {
             profile: "codex-app-server".into(),
             session: Some("s".into()),
             parent: None,
+            children: vec!["kid".into()],
+            depth: 0,
             base: "base".into(),
             candidate: Some(CandidateInfo {
                 commit: "c".into(),
@@ -213,6 +229,8 @@ mod tests {
         assert_eq!(value["parent"], Value::Null);
         assert_eq!(value["cost_usd"], Value::Null);
         assert_eq!(value["worktree"], "/w");
+        assert_eq!(value["children"], json!(["kid"]));
+        assert_eq!(value["depth"], 0);
     }
 
     #[test]
