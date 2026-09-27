@@ -509,6 +509,18 @@ fn fingerprint(text: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// A request that failed before it was registered, returned as the
+/// operation its idempotency key already names, if one does. A retry that
+/// passed the first replay check while its original attempt was still being
+/// admitted can fail on a name that attempt has since taken; the key, not
+/// the refusal, decides the answer.
+fn replay_or(app: &App, idem: Option<&Idempotency>, error: ApiError) -> Result<Response, ApiError> {
+    match idem.map(|i| app.registry.replay(i)).transpose()?.flatten() {
+        Some(op) => Ok(operation_response(op, true)),
+        None => Err(error),
+    }
+}
+
 fn idempotency(
     headers: &HeaderMap,
     caller: &Caller,
@@ -721,12 +733,15 @@ async fn post_task(
             prompt.clone(),
             harnesses.clone(),
         );
-        blocking(move || {
+        match blocking(move || {
             let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
             yard.task(prompt).options(options).planned_names(&ids)
         })
         .await?
-        .map_err(|e| error::sdk(&e))?
+        {
+            Ok(planned) => planned,
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+        }
     };
     let cursor = sync_feed(&repo.feed).await?;
     let yard = repo.yard.clone();
@@ -898,9 +913,10 @@ async fn post_fork(
     };
     let planned = {
         let (yard, options, prompt) = (repo.yard.clone(), options.clone(), request.prompt.clone());
-        blocking(move || yard.task(prompt).options(options).planned_names(&[]))
-            .await?
-            .map_err(|e| error::sdk(&e))?
+        match blocking(move || yard.task(prompt).options(options).planned_names(&[])).await? {
+            Ok(planned) => planned,
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+        }
     };
     let cursor = sync_feed(&repo.feed).await?;
     let (prompt, fresh) = (request.prompt.clone(), request.fresh_session);
@@ -977,9 +993,10 @@ async fn post_reincarnate(
             options.clone(),
             source.info().prompt.clone(),
         );
-        blocking(move || yard.task(prompt).options(options).planned_names(&[]))
-            .await?
-            .map_err(|e| error::sdk(&e))?
+        match blocking(move || yard.task(prompt).options(options).planned_names(&[])).await? {
+            Ok(planned) => planned,
+            Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+        }
     };
     let cursor = sync_feed(&repo.feed).await?;
     let work = job(repo.feed.clone(), move || {
@@ -1170,9 +1187,10 @@ async fn post_spawn(
         (Some(name), _) => Some(name.clone()),
         (None, Some(seat)) => {
             let (yard, stem) = (repo.yard.clone(), format!("{parent}-{seat}"));
-            let names = blocking(move || yard.task(stem).planned_names(&[]))
-                .await?
-                .map_err(|e| error::sdk(&e))?;
+            let names = match blocking(move || yard.task(stem).planned_names(&[])).await? {
+                Ok(planned) => planned,
+                Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+            };
             names.into_iter().next()
         }
         (None, None) => None,
@@ -1181,9 +1199,10 @@ async fn post_spawn(
         Some(name) => vec![name.clone()],
         None => {
             let (yard, prompt) = (repo.yard.clone(), request.prompt.clone());
-            blocking(move || yard.task(prompt).planned_names(&[]))
-                .await?
-                .map_err(|e| error::sdk(&e))?
+            match blocking(move || yard.task(prompt).planned_names(&[])).await? {
+                Ok(planned) => planned,
+                Err(e) => return replay_or(&app, idem.as_ref(), error::sdk(&e)),
+            }
         }
     };
     let options = app.options(
