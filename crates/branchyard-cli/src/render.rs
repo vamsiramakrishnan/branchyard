@@ -9,6 +9,7 @@ use branchyard::{
     TurnOutcome, Usage,
 };
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::args::shell_quote;
 
@@ -67,14 +68,37 @@ const BRANCH_TONES: [Tone; 5] = [
     Tone::Blue,
 ];
 
-/// Shorten `text` to `max` characters, marking the cut with an ellipsis.
+/// How many terminal columns `text` takes: two for a wide (East Asian)
+/// character, none for a combining mark, one otherwise.
+pub fn width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// Shorten `text` to `max` terminal columns, marking the cut with an
+/// ellipsis. A wide character that would straddle the limit is dropped
+/// whole.
 pub fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if width(text) <= max {
         return text.to_owned();
     }
-    let mut short: String = text.chars().take(max.saturating_sub(1)).collect();
+    let room = max.saturating_sub(1);
+    let mut short = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        used += w;
+        short.push(c);
+    }
     short.push('…');
     short
+}
+
+/// `text` followed by spaces up to `columns` terminal columns.
+fn pad_right(text: &str, columns: usize) -> String {
+    format!("{text}{}", " ".repeat(columns.saturating_sub(width(text))))
 }
 
 /// A tool invocation's input as one short line: the field a person would
@@ -420,7 +444,7 @@ impl Renderer {
         for branch in branches {
             let next = BRANCH_TONES[self.tones.len() % BRANCH_TONES.len()];
             self.tones.entry(branch.clone()).or_insert(next);
-            self.width = self.width.max(branch.chars().count());
+            self.width = self.width.max(width(branch));
         }
     }
 
@@ -485,8 +509,8 @@ impl Renderer {
         }
         let next = BRANCH_TONES[self.tones.len() % BRANCH_TONES.len()];
         let tone = *self.tones.entry(branch.to_owned()).or_insert(next);
-        self.width = self.width.max(branch.chars().count());
-        let label = format!("{branch:<width$} │", width = self.width);
+        self.width = self.width.max(width(branch));
+        let label = format!("{} │", pad_right(branch, self.width));
         format!("{} ", self.style.paint(tone, &label))
     }
 }
@@ -537,7 +561,7 @@ pub fn table(columns: &[Column], rows: &[Vec<Cell>], style: Style) -> String {
         .map(|(i, column)| {
             cells
                 .iter()
-                .map(|row| row[i].0.chars().count())
+                .map(|row| width(&row[i].0))
                 .chain([column.header.len()])
                 .max()
                 .unwrap_or(0)
@@ -551,7 +575,7 @@ pub fn table(columns: &[Column], rows: &[Vec<Cell>], style: Style) -> String {
     for row in std::iter::once(&header).chain(&cells) {
         let mut line = String::new();
         for (i, ((text, tone), column)) in row.iter().zip(columns).enumerate() {
-            let pad = " ".repeat(widths[i] - text.chars().count());
+            let pad = " ".repeat(widths[i].saturating_sub(width(text)));
             let painted = match tone {
                 Some(tone) => style.paint(*tone, text),
                 None => text.clone(),
@@ -1138,6 +1162,36 @@ pub fn log_text(events: &[RecordedEvent], style: Style) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widths_count_terminal_columns() {
+        assert_eq!(width("abc"), 3);
+        assert_eq!(width("日本語"), 6);
+        assert_eq!(width("e\u{301}"), 1);
+        assert_eq!(truncate("日本語のテキスト", 7), "日本語…");
+        assert_eq!(width(&truncate("日本語のテキスト", 8)), 7);
+        assert_eq!(truncate("abcdef", 4), "abc…");
+        assert_eq!(truncate("abc", 3), "abc");
+        let columns = [
+            Column {
+                header: "NAME",
+                max: 20,
+                right: false,
+            },
+            Column {
+                header: "N",
+                max: 5,
+                right: true,
+            },
+        ];
+        let rows = vec![
+            vec![Cell::plain("日本"), Cell::plain("1")],
+            vec![Cell::plain("abcdef"), Cell::plain("22")],
+        ];
+        let text = table(&columns, &rows, Style::PLAIN);
+        let ends: Vec<usize> = text.lines().map(width).collect();
+        assert_eq!(ends, [10, 10, 10], "{text}");
+    }
     use branchyard::{NativeSession, PermissionKey, PermissionRequest};
     use serde_json::json;
     use std::path::PathBuf;

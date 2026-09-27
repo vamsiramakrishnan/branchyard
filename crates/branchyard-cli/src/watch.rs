@@ -144,7 +144,7 @@ const COLUMNS: [Column; 6] = [
 const MIN_ACTIVITY: usize = 12;
 
 fn pad(text: &str, width: usize, right: bool) -> String {
-    let fill = " ".repeat(width.saturating_sub(text.chars().count()));
+    let fill = " ".repeat(width.saturating_sub(render::width(text)));
     match right {
         true => format!("{fill}{text}"),
         false => format!("{text}{fill}"),
@@ -195,7 +195,7 @@ pub fn rows(
         .map(|(i, column)| {
             cells
                 .iter()
-                .map(|(fixed, _, _)| fixed[i].chars().count())
+                .map(|(fixed, _, _)| render::width(&fixed[i]))
                 .chain([column.header.len()])
                 .max()
                 .unwrap_or(0)
@@ -216,7 +216,7 @@ pub fn rows(
                 break;
             }
             let padded = render::truncate(&padded, room);
-            visible += sep.len() + padded.chars().count();
+            visible += sep.len() + render::width(&padded);
             out.push_str(sep);
             match (i, tone) {
                 (2, Some(tone)) => out.push_str(&style.paint(tone, &padded)),
