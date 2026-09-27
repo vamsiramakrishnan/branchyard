@@ -34,6 +34,9 @@ jobs:
       - name: Verify schema/server.config.json is generated and fresh
         run: cargo test -p branchyard-server --locked --offline --features schema
       - run: cargo clippy -p branchyard-server --all-targets --locked --offline --features schema -- -D warnings
+      - name: Verify schema/rig.json is generated and fresh
+        run: cargo test -p branchyard-cli --locked --offline --features schema rig
+      - run: cargo clippy -p branchyard-cli --all-targets --locked --offline --features schema -- -D warnings
       - run: python tests/test_distribution.py
       - run: python tests/test_schema_validation.py
   postgres:

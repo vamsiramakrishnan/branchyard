@@ -16,6 +16,9 @@ path = "src/main.rs"
 microsandbox = ["branchyard/microsandbox"]
 # `by serve --database postgres://...`; see docs/server.md.
 postgres = ["branchyard-server/postgres"]
+# Derive schemars::JsonSchema on the rig spec's types and check that
+# schema/rig.json is what they generate; see docs/rigs.md.
+schema = ["dep:schemars"]
 
 [dependencies]
 branchyard = { path = "../branchyard" }
@@ -24,9 +27,10 @@ branchyard-server = { path = "../branchyard-server" }
 branchyard-mcp = { path = "../branchyard-mcp" }
 serde = "1"
 serde_json = "1"
-# `by rig` spec files. Already in Cargo.lock (through proc-macro-crate);
-# only its parser is used.
-toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+# `by rig` spec files: parsed, then deserialized with its serde support
+# (which keeps each value's span, so errors cite line and column).
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "serde"] }
+schemars = { version = "1", optional = true }
 
 [dev-dependencies]
 branchyard-bridge = { path = "../branchyard-bridge" }

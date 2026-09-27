@@ -59,7 +59,19 @@ by rig run examples/rigs/feature.toml "Add a --json flag to the export command"
 
 ## The spec
 
-TOML, read strictly: an unknown field, a field Branchyard cannot honor, and a value of the wrong type or range are errors that name the field and its line, such as `line 12: seats.reviewer.budget.max_usd: must be a positive number, not -1`.
+TOML, read strictly: an unknown field, a field Branchyard cannot honor, and a value of the wrong type or range are errors that name the field and its line, such as `line 12: seats.reviewer.budget.max_usd: must be a positive number, not -1`. An element of an array is named by its index, as in ``seats.lead.delegates_to[1]: must be a string, not integer `3` ``; `--json` errors also carry the column.
+
+The parser deserializes the file into serde types that deny unknown fields (`rig.rs`'s `Raw*` types, through `toml_edit`'s serde support, which keeps every value's position), then checks the values, the seat tree and the budgets in code. `rig::validate(text)` does both and plans the spec without reading any file (startup files are listed as skipped), for callers that hold the text, such as `by init`.
+
+### Schema and editor completion
+
+[`schema/rig.json`](../schema/rig.json) is a JSON Schema for the spec, generated from the same types: fields, their types, the accepted values of `policy.default`, `effort`, `start` and `restore_policy`, and name patterns. It checks shape, not the tree or the budgets; `by rig check` is the full check. To get completion and inline errors in an editor with a TOML language server that reads JSON Schema ([Taplo](https://taplo.tamasfe.dev/), and the VS Code "Even Better TOML" extension built on it), put a directive on the spec's first line, as the examples do:
+
+```toml
+#:schema ../../schema/rig.json
+```
+
+The path is relative to the spec (a URL works too). Regenerate the schema after changing the types with `BY_UPDATE_SCHEMA=1 cargo test -p branchyard-cli --features schema rig_json`; CI fails when it is stale, and `tests/test_schema_validation.py` validates `examples/rigs/*.toml` against it.
 
 | Field | Meaning |
 |---|---|
@@ -137,7 +149,7 @@ A branch in a rig spawns only by seat, and only the seats its own seat delegates
 
 ## Output
 
-`by rig check --json` prints the plan: `{rig, description, root: {seat, name, harness, profile, budget, policy, check, isolated, provision, delegation}, seats, unapproved_tools, skipped_files}`. `by rig run --json` prints `{rig, root: BranchInfo, descendants: [BranchInfo]}` once every seat it spawned has finished, the same locally and from a server; a refused spec prints `{"error": {"kind": "invalid_rig", "message", "field", "line"}}` and exits 1.
+`by rig check --json` prints the plan: `{rig, description, root: {seat, name, harness, profile, budget, policy, check, isolated, provision, delegation}, seats, unapproved_tools, skipped_files}`. `by rig run --json` prints `{rig, root: BranchInfo, descendants: [BranchInfo]}` once every seat it spawned has finished, the same locally and from a server; a refused spec prints `{"error": {"kind": "invalid_rig", "message", "field", "line", "column"}}` and exits 1.
 
 ## What is refused, and why
 
