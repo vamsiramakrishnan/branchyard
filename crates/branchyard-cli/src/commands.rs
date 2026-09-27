@@ -7,9 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use branchyard::{
-    Branch, BranchInfo, BranchStatus, Budget, Policy, TaskBuilder, TaskOptions, Yard,
-};
+use branchyard::{Branch, BranchInfo, BranchStatus, Budget, Policy, TaskOptions, Yard};
 
 use crate::args::{self, shell_quote, TaskArgs};
 use crate::console::{self, Choice, Console};
@@ -116,49 +114,23 @@ impl Live {
         Live { console, policy }
     }
 
-    fn budget(task: &TaskArgs) -> Budget {
-        Budget {
-            max_usd: task.budget_usd,
-            max_turns: task.max_turns,
-            max_duration: None,
-        }
-    }
-
-    /// Options for `send` and `fork`, which take `TaskOptions` directly.
     fn options(&self, task: &TaskArgs) -> TaskOptions {
         let console = self.console.clone();
         TaskOptions {
             harness: task.harness.clone(),
             name: task.name.clone(),
             base: task.base.clone(),
-            budget: Live::budget(task),
+            budget: Budget {
+                max_usd: task.budget_usd,
+                max_turns: task.max_turns,
+                max_duration: task.max_duration,
+            },
             policy: self.policy.clone(),
             check: task.check.clone(),
             observer: Some(Arc::new(move |event| console.event(event))),
+            isolated: task.isolated,
+            command: task.command.clone(),
         }
-    }
-
-    /// The same options through the builder, whose fields are private.
-    fn builder(&self, yard: &Yard, prompt: &str, task: &TaskArgs) -> TaskBuilder {
-        let console = self.console.clone();
-        let mut builder = yard
-            .task(prompt)
-            .budget(Live::budget(task))
-            .policy(self.policy.clone())
-            .on_event(move |event| console.event(event));
-        if let Some(harness) = &task.harness {
-            builder = builder.harness(harness);
-        }
-        if let Some(name) = &task.name {
-            builder = builder.name(name);
-        }
-        if let Some(base) = &task.base {
-            builder = builder.base(base);
-        }
-        if let Some(check) = &task.check {
-            builder = builder.check(check.clone());
-        }
-        builder
     }
 
     /// Print the closing summary for one branch.
@@ -185,7 +157,7 @@ fn branch_outcome(info: &BranchInfo) -> Outcome {
 pub fn run(env: &Env, prompt: &str, task: &TaskArgs) -> Outcome {
     let yard = open()?;
     let live = Live::start(env, task, false);
-    let result = live.builder(&yard, prompt, task).run();
+    let result = yard.task(prompt).options(live.options(task)).run();
     live.finish(env, result)
 }
 
@@ -193,7 +165,12 @@ pub fn fan(env: &Env, prompt: &str, harnesses: &[String], task: &TaskArgs) -> Ou
     let yard = open()?;
     let live = Live::start(env, task, true);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
-    let result = live.builder(&yard, prompt, task).run_on(&ids);
+    let builder = yard.task(prompt).options(live.options(task));
+    // Knowing the names up front lines the prefixes up from the first line.
+    if let Ok(names) = builder.planned_names(&ids) {
+        live.console.reserve(&names);
+    }
+    let result = builder.run_on(&ids);
     live.console.finish();
     let branches = result?;
     let infos: Vec<&BranchInfo> = branches.iter().map(Branch::info).collect();

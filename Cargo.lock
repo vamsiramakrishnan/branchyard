@@ -135,6 +135,10 @@ name = "branchyard"
 version = "0.0.1"
 dependencies = [
  "branchyard-harness",
+ "branchyard-runtime",
+ "branchyard-workspace",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -142,7 +146,6 @@ name = "branchyard-cli"
 version = "0.0.1"
 dependencies = [
  "branchyard",
- "branchyard-harness",
  "serde_json",
 ]
 

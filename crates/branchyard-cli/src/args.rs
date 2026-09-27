@@ -4,6 +4,7 @@
 //! and flags once in [`COMMANDS`]; parsing and help text both read from it.
 
 use std::fmt;
+use std::time::Duration;
 
 /// How tool permission requests are answered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -27,7 +28,12 @@ pub struct TaskArgs {
     pub check: Option<Vec<String>>,
     pub budget_usd: Option<f64>,
     pub max_turns: Option<u32>,
+    /// From `--max-minutes`.
+    pub max_duration: Option<Duration>,
     pub permissions: Permissions,
+    pub isolated: bool,
+    /// Executable and fixed arguments replacing the profile's.
+    pub command: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -161,6 +167,21 @@ const MAX_TURNS: Flag = Flag {
     value: Some("N"),
     help: "Stop after N turns",
 };
+const MAX_MINUTES: Flag = Flag {
+    long: "max-minutes",
+    value: Some("N"),
+    help: "Interrupt the turn after N minutes",
+};
+const ISOLATED: Flag = Flag {
+    long: "isolated",
+    value: None,
+    help: "Scrubbed environment and a private HOME; the harness is then usually not logged in",
+};
+const COMMAND: Flag = Flag {
+    long: "command",
+    value: Some("\"PATH ARGS\""),
+    help: "Launch this instead of the profile's executable, for development and testing",
+};
 const YES: Flag = Flag {
     long: "yes",
     value: None,
@@ -192,7 +213,19 @@ pub static COMMANDS: &[Spec] = &[
         name: "run",
         positionals: &["prompt"],
         summary: "Run a task on a new branch",
-        flags: &[HARNESS, NAME, BASE, CHECK, BUDGET_USD, MAX_TURNS, YES, ASK],
+        flags: &[
+            HARNESS,
+            NAME,
+            BASE,
+            CHECK,
+            BUDGET_USD,
+            MAX_TURNS,
+            MAX_MINUTES,
+            YES,
+            ASK,
+            ISOLATED,
+            COMMAND,
+        ],
     },
     Spec {
         name: "fan",
@@ -205,21 +238,35 @@ pub static COMMANDS: &[Spec] = &[
             CHECK,
             BUDGET_USD,
             MAX_TURNS,
+            MAX_MINUTES,
             YES,
             ASK,
+            ISOLATED,
+            COMMAND,
         ],
     },
     Spec {
         name: "send",
         positionals: &["branch", "prompt"],
         summary: "Continue a branch's session with another prompt",
-        flags: &[CHECK, BUDGET_USD, MAX_TURNS, YES, ASK],
+        flags: &[CHECK, BUDGET_USD, MAX_TURNS, MAX_MINUTES, YES, ASK, COMMAND],
     },
     Spec {
         name: "fork",
         positionals: &["branch", "prompt"],
         summary: "Start a new branch from a branch's candidate and conversation",
-        flags: &[NAME, FRESH_SESSION, CHECK, BUDGET_USD, MAX_TURNS, YES, ASK],
+        flags: &[
+            NAME,
+            FRESH_SESSION,
+            CHECK,
+            BUDGET_USD,
+            MAX_TURNS,
+            MAX_MINUTES,
+            YES,
+            ASK,
+            ISOLATED,
+            COMMAND,
+        ],
     },
     Spec {
         name: "ls",
@@ -494,6 +541,34 @@ impl Matches {
                 }
             },
         };
+        let max_duration = match self.value("max-minutes") {
+            None => None,
+            Some(text) => match text
+                .parse::<f64>()
+                .ok()
+                .filter(|m| m.is_finite() && *m > 0.0)
+            {
+                Some(minutes) => Some(
+                    Duration::try_from_secs_f64(minutes * 60.0)
+                        .map_err(|_| self.error(format!("--max-minutes {text} is too large")))?,
+                ),
+                None => {
+                    return Err(self.error(format!(
+                        "--max-minutes needs a positive number of minutes, not '{text}'"
+                    )))
+                }
+            },
+        };
+        let command = match self.value("command") {
+            None => None,
+            Some(line) => {
+                let argv = split_words(line).map_err(|e| self.error(format!("--command: {e}")))?;
+                if argv.is_empty() {
+                    return Err(self.error("--command needs an executable"));
+                }
+                Some(argv)
+            }
+        };
         // `fan` reads `--harness` as a list; it is not one harness.
         let harness = match self.spec.name {
             "fan" => None,
@@ -506,7 +581,10 @@ impl Matches {
             check,
             budget_usd,
             max_turns,
+            max_duration,
             permissions,
+            isolated: self.switch("isolated"),
+            command,
         })
     }
 }
@@ -650,7 +728,8 @@ mod tests {
     fn run_takes_every_task_option() {
         let command = parse_str(
             "run 'fix the flaky test' --harness codex --name flaky --base main \
-             --check 'cargo test -p core' --budget-usd 2.5 --max-turns 3 --yes",
+             --check 'cargo test -p core' --budget-usd 2.5 --max-turns 3 --yes \
+             --max-minutes 1.5 --isolated --command '/opt/codex/bin/codex --flag'",
         )
         .unwrap();
         assert_eq!(
@@ -669,7 +748,10 @@ mod tests {
                     ]),
                     budget_usd: Some(2.5),
                     max_turns: Some(3),
+                    max_duration: Some(Duration::from_secs(90)),
                     permissions: Permissions::Yes,
+                    isolated: true,
+                    command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
                 },
             }
         );
@@ -837,6 +919,10 @@ mod tests {
         assert!(err("run go --budget-usd NaN").contains("positive number"));
         assert!(err("run go --max-turns 0").contains("positive whole number"));
         assert!(err("run go --max-turns 1.5").contains("positive whole number"));
+        assert!(err("run go --max-minutes 0").contains("positive number of minutes"));
+        assert!(err("run go --max-minutes 1e300").contains("too large"));
+        assert_eq!(err("run go --command ''"), "--command needs an executable");
+        assert_eq!(err("send b go --isolated"), "unknown option --isolated");
         assert_eq!(err("run go --check ''"), "--check needs a command");
         assert_eq!(
             err("run go --check '\"cargo'"),
