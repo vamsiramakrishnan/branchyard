@@ -360,6 +360,30 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     /// Forget a step whose effect failed without effect, so it can run
     /// again.
     fn abandon_step(&self, fence: &Fence, turn: u64, step: &str) -> Result<(), Error>;
+    /// [`Backend::begin_step`], and, when this call records the intent,
+    /// mark the inbox messages `deliver` delivered in the same transaction
+    /// (as [`Backend::mark_delivered`] does), stamped with the step's start
+    /// time: a turn's prompt and the messages it carries become durable
+    /// together, or neither does.
+    fn begin_step_delivering(
+        &self,
+        fence: &Fence,
+        turn: u64,
+        step: &str,
+        intent: &Value,
+        deliver: &[u64],
+    ) -> Result<Begun, Error>;
+    /// [`Backend::abandon_step`], and return to pending, in the same
+    /// transaction, those of `deliver` that the step's
+    /// [`Backend::begin_step_delivering`] marked delivered (not ones a
+    /// steered input or another path delivered).
+    fn abandon_step_delivering(
+        &self,
+        fence: &Fence,
+        turn: u64,
+        step: &str,
+        deliver: &[u64],
+    ) -> Result<(), Error>;
     /// The steps of one turn of the branch's current incarnation.
     fn steps(&self, name: &str, turn: u64) -> Result<Vec<StepRow>, Error>;
 

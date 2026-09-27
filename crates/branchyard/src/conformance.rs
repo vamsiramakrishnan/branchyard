@@ -763,6 +763,90 @@ pub(crate) fn races(s: Opened) {
     }
 }
 
+/// A turn's `submit` step and the inbox messages its prompt carries become
+/// durable together: journaled with them marked delivered in one
+/// transaction, nothing when fenced, and undone together, leaving what
+/// another path delivered alone.
+pub(crate) fn delivery(s: Opened) {
+    let store = &s.backend;
+    let send = |to: &str| {
+        store
+            .send_message(&crate::Message {
+                id: 0,
+                from: "kid".into(),
+                to: to.into(),
+                kind: crate::MessageKind::Report,
+                text: "done".into(),
+                in_reply_to: None,
+                at_ms: 0,
+                delivered: false,
+            })
+            .unwrap()
+            .id
+    };
+    let delivered = |id: u64| store.message(id).unwrap().unwrap().delivered;
+    assert!(store.reserve("b", &owner("a")).unwrap());
+    let fence = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+    let (one, two, other) = (send("b"), send("b"), send("b"));
+    // `other` was delivered by another path first.
+    store.mark_delivered(&[other]).unwrap();
+    // Delivery is told apart by its millisecond stamp.
+    std::thread::sleep(Duration::from_millis(5));
+    let intent = serde_json::json!({"prompt": "p", "messages": [one, two, other]});
+
+    // Fenced: neither the step nor the delivery.
+    let stale = Fence {
+        generation: fence.generation + 1,
+        ..fence.clone()
+    };
+    assert!(matches!(
+        store.begin_step_delivering(&stale, 1, "submit", &intent, &[one, two, other]),
+        Err(Error::Fenced(_))
+    ));
+    assert!(!delivered(one) && !delivered(two));
+    assert!(store.steps("b", 1).unwrap().is_empty());
+
+    assert_eq!(
+        store
+            .begin_step_delivering(&fence, 1, "submit", &intent, &[one, two, other])
+            .unwrap(),
+        Begun::Fresh
+    );
+    assert!(delivered(one) && delivered(two));
+    // Already journaled: nothing is marked again.
+    let three = send("b");
+    assert_eq!(
+        store
+            .begin_step_delivering(&fence, 1, "submit", &intent, &[three])
+            .unwrap(),
+        Begun::Pending(intent.clone())
+    );
+    assert!(!delivered(three));
+
+    store
+        .abandon_step_delivering(&fence, 1, "submit", &[one, two, other])
+        .unwrap();
+    assert!(!delivered(one) && !delivered(two));
+    assert!(
+        delivered(other),
+        "delivered by another path, it stays delivered"
+    );
+    assert!(store.steps("b", 1).unwrap().is_empty());
+
+    // A finished step is not forgotten, nor are its messages returned.
+    store
+        .begin_step_delivering(&fence, 1, "submit", &intent, &[one])
+        .unwrap();
+    store
+        .finish_step(&fence, 1, "submit", &serde_json::json!({"turn": 1}))
+        .unwrap();
+    store
+        .abandon_step_delivering(&fence, 1, "submit", &[one])
+        .unwrap();
+    assert!(delivered(one));
+    assert_eq!(store.steps("b", 1).unwrap().len(), 1);
+}
+
 /// Artifacts and scratch areas: [`crate::storage::StorageBackend`]. Grants
 /// (ancestor, descendant, sibling refused until shared) decided on
 /// incarnations, a parent bound at creation and kept after its removal, a
@@ -1069,7 +1153,7 @@ pub(crate) fn upgrade(
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
-            concurrent_appends, races, storage, messages);
+            concurrent_appends, races, storage, messages, delivery);
     };
     ($open:expr; $($check:ident),*) => {
         $(

@@ -92,6 +92,29 @@ fn recovered(events: &[RecordedEvent]) -> Vec<(String, Vec<u32>)> {
         .collect()
 }
 
+/// Leave a report pending for `to` directly in the store, as a child's
+/// `by report` would, before `to`'s engine starts; its id.
+fn pending_report(f: &Fixture, to: &str) -> i64 {
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.execute(
+        "INSERT INTO messages (from_branch, to_branch, kind, text, at_ms) \
+         VALUES ('kid', ?1, 'report', 'tests pass', 1)",
+        [to],
+    )
+    .unwrap();
+    db.last_insert_rowid()
+}
+
+fn delivered(f: &Fixture, id: i64) -> bool {
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.query_row(
+        "SELECT delivered_ms IS NOT NULL FROM messages WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
 fn prompts(events: &[RecordedEvent]) -> usize {
     events
         .iter()
@@ -102,6 +125,9 @@ fn prompts(events: &[RecordedEvent]) -> usize {
 #[test]
 fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     let f = Fixture::new();
+    // Opens the store, so the message can be written before the child
+    // starts; the child's turn start prepends it to the prompt.
+    let report = pending_report(&f, "crashy");
     let mut child = start_child(&f, "ORPHAN", &[]);
     let mut pids = Vec::new();
     wait_until("the harness to report its processes", || {
@@ -160,6 +186,17 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
         "the prompt reached the harness once"
     );
     assert_eq!(prompts(&log), 1);
+    // The report went out with the journaled prompt: it counts delivered
+    // and is not given again.
+    assert!(log.iter().any(|e| matches!(
+        &e.activity,
+        Activity::Prompt(prompt) if prompt.contains("tests pass") && prompt.ends_with("ORPHAN")
+    )));
+    assert!(delivered(&f, report));
+    assert!(log.iter().any(|e| matches!(
+        &e.activity,
+        Activity::MessagesDelivered { ids, .. } if ids == &[report as u64]
+    )));
 
     // A second recovery finds nothing, and the branch continues its
     // session with a new turn.
@@ -176,6 +213,7 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
 #[test]
 fn a_crash_before_the_prompt_was_submitted_says_the_turn_never_ran() {
     let f = Fixture::new();
+    let report = pending_report(&f, "crashy");
     let mut child = start_child(&f, "WRITE never.txt=1", &[("FAKE_ACP_SILENT", "1")]);
     let db = f.root.join(".branchyard/state.db");
     wait_until("the harness to start", || {
@@ -202,6 +240,10 @@ fn a_crash_before_the_prompt_was_submitted_says_the_turn_never_ran() {
     );
     assert_eq!(prompts(&log), 0);
     assert!(!branch.info().worktree.join("never.txt").exists());
+    assert!(
+        !delivered(&f, report),
+        "a turn that never ran delivers nothing"
+    );
 }
 
 #[test]

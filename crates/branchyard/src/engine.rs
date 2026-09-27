@@ -623,30 +623,22 @@ fn run(
         match event {
             Event::Ready if matches!(phase, Phase::Opening) => {
                 // Pending inbox messages are prepended here, at the last
-                // point before the prompt may reach the harness, and
-                // acknowledged (marked delivered) in the same call: a crash
-                // before this point leaves them pending, and one after
-                // never delivers them again (see `crate::inbox`).
-                let (submitted, delivered) = crate::inbox::deliver_at_turn_start(
-                    &store,
-                    &record.info.name,
-                    fence.turn,
-                    turn.prompt,
-                )?;
-                if !delivered.is_empty() {
+                // point before the prompt may reach the harness. Journaled
+                // first, and the messages it carries acknowledged (marked
+                // delivered) in the same transaction: from here the prompt
+                // may have reached the harness, and recovery must never
+                // submit it or its messages again; a failure before leaves
+                // them pending (see `crate::inbox`).
+                let submission =
+                    crate::inbox::begin_submit(&store, fence, &record.info.name, turn.prompt)?;
+                if !submission.delivered.is_empty() {
                     recorder.record(Activity::MessagesDelivered {
-                        ids: delivered,
+                        ids: submission.delivered.clone(),
                         via: DeliveredVia::TurnStart,
                     })?;
                 }
-                recorder.record(Activity::Prompt(submitted.clone()))?;
-                // Journaled first: from here the prompt may have reached the
-                // harness, and recovery must never submit it again.
-                let intent = json!({ "prompt": submitted });
-                store
-                    .backend()
-                    .begin_step(fence, fence.turn, STEP_SUBMIT, &intent)?;
-                match session.submit(&submitted) {
+                recorder.record(Activity::Prompt(submission.prompt.clone()))?;
+                match session.submit(&submission.prompt) {
                     Ok(n) => {
                         driven.submitted = true;
                         store.backend().finish_step(
@@ -656,6 +648,19 @@ fn run(
                             &json!({ "turn": n }),
                         )?;
                         phase = Phase::Running(n);
+                    }
+                    // Refused with nothing written: the prompt never
+                    // reached the harness, so its messages are pending
+                    // again for the next turn.
+                    Err(error @ RuntimeError::Rejected(_)) => {
+                        crate::inbox::abandon_submit(&store, fence, &submission)?;
+                        if !submission.delivered.is_empty() {
+                            recorder.record(Activity::Warning(format!(
+                                "the harness refused the prompt; messages {:?} are pending again",
+                                submission.delivered
+                            )))?;
+                        }
+                        break fail(confirmed, format!("submit failed: {error}"));
                     }
                     Err(error) => break fail(confirmed, format!("submit failed: {error}")),
                 }

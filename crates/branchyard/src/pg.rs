@@ -986,6 +986,17 @@ impl Backend for Postgres {
         step: &str,
         intent: &Value,
     ) -> Result<Begun, Error> {
+        self.begin_step_delivering(fence, turn, step, intent, &[])
+    }
+
+    fn begin_step_delivering(
+        &self,
+        fence: &Fence,
+        turn: u64,
+        step: &str,
+        intent: &Value,
+        deliver: &[u64],
+    ) -> Result<Begun, Error> {
         self.tx(true, |tx| {
             self.check(tx, fence)?;
             let row = tx
@@ -1000,6 +1011,7 @@ impl Backend for Postgres {
                 Some((_, Some(outcome))) => Ok(Begun::Done(decode(step, &outcome)?)),
                 Some((intent, None)) => Ok(Begun::Pending(decode(step, &intent)?)),
                 None => {
+                    let now = int(now_ms());
                     tx.execute(
                         "INSERT INTO by_steps (incarnation, turn, step, branch, generation, \
                          intent, started_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -1010,10 +1022,18 @@ impl Backend for Postgres {
                             &fence.branch,
                             &int(fence.generation),
                             &encode(step, intent)?,
-                            &int(now_ms()),
+                            &now,
                         ],
                     )
                     .map_err(db("step"))?;
+                    for id in deliver {
+                        tx.execute(
+                            "UPDATE by_messages SET delivered_ms = $3 \
+                             WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
+                            &[&self.repo, &int(*id), &now],
+                        )
+                        .map_err(db("message"))?;
+                    }
                     Ok(Begun::Fresh)
                 }
             }
@@ -1055,8 +1075,28 @@ impl Backend for Postgres {
     }
 
     fn abandon_step(&self, fence: &Fence, turn: u64, step: &str) -> Result<(), Error> {
+        self.abandon_step_delivering(fence, turn, step, &[])
+    }
+
+    fn abandon_step_delivering(
+        &self,
+        fence: &Fence,
+        turn: u64,
+        step: &str,
+        deliver: &[u64],
+    ) -> Result<(), Error> {
         self.tx(true, |tx| {
             self.check(tx, fence)?;
+            for id in deliver {
+                tx.execute(
+                    "UPDATE by_messages SET delivered_ms = NULL WHERE repo = $1 AND id = $2 \
+                     AND delivered_steer IS NULL AND delivered_ms = (SELECT started_ms \
+                     FROM by_steps WHERE incarnation = $3 AND turn = $4 AND step = $5 \
+                     AND outcome IS NULL)",
+                    &[&self.repo, &int(*id), &fence.incarnation, &int(turn), &step],
+                )
+                .map_err(db("message"))?;
+            }
             tx.execute(
                 "DELETE FROM by_steps WHERE incarnation = $1 AND turn = $2 AND step = $3 \
                  AND outcome IS NULL",

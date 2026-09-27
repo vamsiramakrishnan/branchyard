@@ -1079,6 +1079,17 @@ impl Backend for Sqlite {
         step: &str,
         intent: &Value,
     ) -> Result<Begun, Error> {
+        self.begin_step_delivering(fence, turn, step, intent, &[])
+    }
+
+    fn begin_step_delivering(
+        &self,
+        fence: &Fence,
+        turn: u64,
+        step: &str,
+        intent: &Value,
+        deliver: &[u64],
+    ) -> Result<Begun, Error> {
         self.tx(true, |tx| {
             check(tx, fence)?;
             let row: Option<(String, Option<String>)> = tx
@@ -1094,6 +1105,7 @@ impl Backend for Sqlite {
                 Some((_, Some(outcome))) => Ok(Begun::Done(decode(step, &outcome)?)),
                 Some((intent, None)) => Ok(Begun::Pending(decode(step, &intent)?)),
                 None => {
+                    let now = int(now_ms());
                     tx.execute(
                         "INSERT INTO steps (incarnation, turn, step, branch, generation, intent, \
                          started_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1104,10 +1116,18 @@ impl Backend for Sqlite {
                             fence.branch,
                             int(fence.generation),
                             encode(step, intent)?,
-                            int(now_ms()),
+                            now,
                         ],
                     )
                     .map_err(|e| db("step", e))?;
+                    for id in deliver {
+                        tx.execute(
+                            "UPDATE messages SET delivered_ms = ?2 \
+                             WHERE id = ?1 AND delivered_ms IS NULL",
+                            params![int(*id), now],
+                        )
+                        .map_err(|e| db("message", e))?;
+                    }
                     Ok(Begun::Fresh)
                 }
             }
@@ -1148,8 +1168,28 @@ impl Backend for Sqlite {
     }
 
     fn abandon_step(&self, fence: &Fence, turn: u64, step: &str) -> Result<(), Error> {
+        self.abandon_step_delivering(fence, turn, step, &[])
+    }
+
+    fn abandon_step_delivering(
+        &self,
+        fence: &Fence,
+        turn: u64,
+        step: &str,
+        deliver: &[u64],
+    ) -> Result<(), Error> {
         self.tx(true, |tx| {
             check(tx, fence)?;
+            for id in deliver {
+                tx.execute(
+                    "UPDATE messages SET delivered_ms = NULL WHERE id = ?1 \
+                     AND delivered_steer IS NULL AND delivered_ms = (SELECT started_ms \
+                     FROM steps WHERE incarnation = ?2 AND turn = ?3 AND step = ?4 \
+                     AND outcome IS NULL)",
+                    params![int(*id), fence.incarnation, int(turn), step],
+                )
+                .map_err(|e| db("message", e))?;
+            }
             tx.execute(
                 "DELETE FROM steps WHERE incarnation = ?1 AND turn = ?2 AND step = ?3 \
                  AND outcome IS NULL",

@@ -29,7 +29,10 @@
 //! - **Turn start**: otherwise, a branch's pending messages are given to it
 //!   at the start of its next turn, prepended to the prompt as one
 //!   delimited, size-bounded block; whatever does not fit stays pending,
-//!   with a note of how many messages are still queued. A message whose
+//!   with a note of how many messages are still queued. They are marked
+//!   delivered in the transaction that journals the turn's `submit` step
+//!   ([`begin_submit`]), so they count delivered exactly when the prompt
+//!   counts submitted. A message whose
 //!   steered input is still queued for the turn that is starting is left
 //!   to it, and marking a message delivered here unlinks it from any
 //!   steered input, which the engine then refuses unwritten: never both.
@@ -56,7 +59,7 @@ pub(crate) const CLOSE_TAG: &str = "</branchyard-inbox>";
 /// running. Every [`Yard`] starts with [`SteerDelivery`]; replace it with
 /// [`crate::Yard::set_delivery_hook`], or clear it with
 /// [`crate::Yard::clear_delivery_hook`] so that every message waits for the
-/// branch's next turn to start ([`deliver_at_turn_start`]).
+/// branch's next turn to start ([`begin_submit`]).
 pub trait DeliveryHook: Send + Sync {
     /// Try to deliver `message` to `branch`'s current turn right now, from
     /// `yard`. `true` acknowledges it: it will not be delivered again, at a
@@ -185,7 +188,7 @@ fn escalates_to(store: &Store, from: &str, to: &str) -> Result<bool, Error> {
 /// sent, try to deliver it into `to`'s turn if one is already running.
 /// Acknowledges (marks delivered) what the hook accepts; anything it does
 /// not accept, or no hook being set, leaves the message pending for
-/// [`deliver_at_turn_start`]. Errors from the hook or the store are not
+/// [`begin_submit`]. Errors from the hook or the store are not
 /// fatal to sending the message, so they are swallowed here. For
 /// [`SteerDelivery`] the engine has already marked it, so this is a no-op.
 pub(crate) fn try_deliver_now(yard: &Yard, store: &Store, to: &str, message: &Message) {
@@ -254,13 +257,11 @@ pub(crate) fn combine(prompt: &str, waiting: &[Message]) -> (String, Vec<u64>) {
     (format!("{block}\n\n{prompt}"), included)
 }
 
-/// Deliver `branch`'s pending messages into the text engine call `turn`
-/// is about to submit: acknowledge (mark delivered) exactly the ones
-/// included in the combined prompt, so a crash before submission leaves
-/// them pending and one after never delivers them again. Messages steered
-/// input queued for this same turn carries are left to it. Returns the
-/// combined prompt and the ids delivered.
-pub(crate) fn deliver_at_turn_start(
+/// `branch`'s pending messages combined into the prompt the engine call
+/// `turn` is about to submit, and the ids of those it includes. Messages
+/// steered input queued for this same turn carries are left to it. Marks
+/// nothing: [`begin_submit`] acknowledges them with the submit's intent.
+pub(crate) fn compose_turn_start(
     store: &Store,
     branch: &str,
     turn: u64,
@@ -272,11 +273,61 @@ pub(crate) fn deliver_at_turn_start(
             waiting.push(message);
         }
     }
-    let (combined, included) = combine(prompt, &waiting);
-    if !included.is_empty() {
-        store.backend().mark_delivered(&included)?;
+    Ok(combine(prompt, &waiting))
+}
+
+/// A turn's prompt as submitted: the task with its pending messages
+/// prepended, and the ids of the messages it carries.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Submission {
+    pub prompt: String,
+    pub delivered: Vec<u64>,
+}
+
+/// Deliver `branch`'s pending messages into the fenced turn's prompt:
+/// journal its `submit` step, whose intent holds the combined prompt and
+/// the message ids, and acknowledge (mark delivered) exactly those messages
+/// in the same store transaction. Any failure before that commit leaves
+/// them pending; once it commits they count delivered, as the prompt counts
+/// submitted, so recovery never gives either again.
+pub(crate) fn begin_submit(
+    store: &Store,
+    fence: &crate::state::Fence,
+    branch: &str,
+    prompt: &str,
+) -> Result<Submission, Error> {
+    let (prompt, delivered) = compose_turn_start(store, branch, fence.turn, prompt)?;
+    let intent = serde_json::json!({ "prompt": prompt, "messages": delivered });
+    let begun = store.backend().begin_step_delivering(
+        fence,
+        fence.turn,
+        crate::engine::STEP_SUBMIT,
+        &intent,
+        &delivered,
+    )?;
+    if !matches!(begun, crate::state::Begun::Fresh) {
+        return Err(Error::State(format!(
+            "{branch}'s turn {} already journaled its submit; it is never submitted twice",
+            fence.turn
+        )));
     }
-    Ok((combined, included))
+    Ok(Submission { prompt, delivered })
+}
+
+/// Undo [`begin_submit`] when the harness refused the prompt with nothing
+/// written: forget the `submit` step and return its messages to pending, in
+/// one transaction.
+pub(crate) fn abandon_submit(
+    store: &Store,
+    fence: &crate::state::Fence,
+    submission: &Submission,
+) -> Result<(), Error> {
+    store.backend().abandon_step_delivering(
+        fence,
+        fence.turn,
+        crate::engine::STEP_SUBMIT,
+        &submission.delivered,
+    )
 }
 
 /// Block up to `wait` for an answer to question `id`, recording the wait
@@ -308,6 +359,114 @@ pub(crate) fn waiting_for_answer(store: &Store, branch: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{Acquired, Fence};
+
+    struct Temp(std::path::PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A store with branch `parent` running a turn, and one message pending
+    /// for it.
+    fn running(name: &str) -> (Temp, Store, Fence, u64) {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "branchyard-inbox-unit-{name}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let store = Store::open(&dir).unwrap();
+        let record: crate::state::Record = serde_json::from_value(serde_json::json!({
+            "info": {
+                "name": "parent", "git_branch": "by/parent", "worktree": "/w",
+                "prompt": "p", "harness": "h", "profile": "p", "session": null,
+                "parent": null, "base": "b", "candidate": null,
+                "status": {"state": "running"}, "turns": 0, "cost_usd": null,
+                "created_at": 0
+            },
+            "created_ms": 0, "check": null, "command": null, "home": null,
+            "cost_baseline": null
+        }))
+        .unwrap();
+        assert!(store.reserve("parent").unwrap());
+        let fence = match store
+            .backend()
+            .acquire(&record, store.owner(), Duration::from_secs(30))
+            .unwrap()
+        {
+            Acquired::Granted(fence) => fence,
+            Acquired::Held(row) => panic!("held by {row:?}"),
+        };
+        let sent = store
+            .backend()
+            .send_message(&message(0, MessageKind::Question, "rename it?"))
+            .unwrap();
+        (Temp(dir), store, fence, sent.id)
+    }
+
+    fn delivered(store: &Store, id: u64) -> bool {
+        store.backend().message(id).unwrap().unwrap().delivered
+    }
+
+    /// Review finding: messages were marked delivered before the `submit`
+    /// step was journaled, so a failure in between lost them.
+    #[test]
+    fn a_failure_before_the_submit_is_journaled_leaves_messages_pending() {
+        let (_t, store, fence, id) = running("fail");
+        // The turn loses its lease: journaling the submit is refused.
+        store.backend().finish(&fence, None, None).unwrap();
+        assert!(matches!(
+            begin_submit(&store, &fence, "parent", "go"),
+            Err(Error::Fenced(_))
+        ));
+        assert!(!delivered(&store, id), "the message was lost");
+        assert!(store
+            .backend()
+            .steps("parent", fence.turn)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A crash right after the submit was journaled: the step names the
+    /// prompt and its messages, and they count delivered, so recovery
+    /// neither submits the prompt again nor gives them again.
+    #[test]
+    fn a_journaled_submit_counts_its_messages_delivered() {
+        let (_t, store, fence, id) = running("journaled");
+        let submission = begin_submit(&store, &fence, "parent", "go").unwrap();
+        assert_eq!(submission.delivered, [id]);
+        assert!(submission.prompt.ends_with("go"));
+        let steps = store.backend().steps("parent", fence.turn).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step, crate::engine::STEP_SUBMIT);
+        assert_eq!(steps[0].intent["prompt"], submission.prompt.as_str());
+        assert_eq!(steps[0].intent["messages"], serde_json::json!([id]));
+        assert!(delivered(&store, id));
+        // The next turn start has nothing left to give.
+        let (_, again) = compose_turn_start(&store, "parent", fence.turn, "next").unwrap();
+        assert!(again.is_empty());
+    }
+
+    /// A prompt the harness refused with nothing written: the step is
+    /// forgotten and its messages are pending again, but a message another
+    /// path delivered meanwhile is not.
+    #[test]
+    fn an_abandoned_submit_returns_its_messages_to_pending() {
+        let (_t, store, fence, id) = running("abandoned");
+        let submission = begin_submit(&store, &fence, "parent", "go").unwrap();
+        assert!(delivered(&store, id));
+        abandon_submit(&store, &fence, &submission).unwrap();
+        assert!(!delivered(&store, id));
+        assert!(store
+            .backend()
+            .steps("parent", fence.turn)
+            .unwrap()
+            .is_empty());
+        let (_, again) = compose_turn_start(&store, "parent", fence.turn, "go").unwrap();
+        assert_eq!(again, [id]);
+    }
 
     fn message(id: u64, kind: MessageKind, text: &str) -> Message {
         Message {

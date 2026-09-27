@@ -31,7 +31,7 @@ fn spawn(prompt: &str, name: &str) -> Spawn {
 /// Wait until `branch`'s own first turn has recorded its `Activity::Prompt`
 /// (past delivery at that turn's start), so a message sent to it afterwards
 /// is never raced into that same turn's prompt instead of staying pending
-/// for a later one, as `deliver_at_turn_start` would otherwise be free to
+/// for a later one, as `begin_submit` would otherwise be free to
 /// do if the turn's handshake with its harness is still in flight.
 fn wait_for_own_prompt(f: &Fixture, branch: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
