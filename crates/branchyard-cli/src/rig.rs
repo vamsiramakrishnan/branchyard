@@ -2347,7 +2347,11 @@ escalates_to = ["lead"]
 
     #[test]
     fn startup_files_become_instructions_in_order() {
-        let dir = std::env::temp_dir().join(format!("by-rig-unit-{}", std::process::id()));
+        let temp = tempfile::Builder::new()
+            .prefix("by-rig-unit-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
         std::fs::create_dir_all(dir.join("g")).unwrap();
         std::fs::write(dir.join("g/all.md"), "ALL\n").unwrap();
         std::fs::write(dir.join("g/pod.md"), "POD\n").unwrap();
@@ -2378,7 +2382,6 @@ escalates_to = ["lead"]
         std::fs::remove_file(dir.join("g/own.md")).unwrap();
         let error = load(&dir.join("rig.toml")).unwrap_err();
         assert_eq!(error.field, "seats.w.startup.files[0]");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `schema/rig.json` is what the `Raw*` types generate. Rewrite it with

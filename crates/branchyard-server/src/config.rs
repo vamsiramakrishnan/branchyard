@@ -1060,9 +1060,11 @@ mod tests {
 
     #[test]
     fn files_resolve_relative_paths_and_reject_unknown_keys() {
-        let dir = std::env::temp_dir().join(format!("branchyard-config-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("branchyard-config-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
         fs::write(dir.join("t.token"), "0123456789abcdef\n").unwrap();
         let path = dir.join("server.json");
         fs::write(
@@ -1091,6 +1093,5 @@ mod tests {
         );
         fs::write(&path, r#"{"listen": "127.0.0.1:0", "lisen": 1}"#).unwrap();
         assert!(load_file(&path).unwrap_err().contains("lisen"));
-        let _ = fs::remove_dir_all(dir);
     }
 }

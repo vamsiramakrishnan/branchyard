@@ -37,3 +37,4 @@ schemars = { version = "1", optional = true }
 [dev-dependencies]
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+tempfile = "3.27.0"

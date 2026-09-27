@@ -18,9 +18,11 @@ fn deploy_config_example_matches_the_configuration_schema() {
     let text = fs::read_to_string(root.join("deploy/config.example.json"))
         .expect("deploy/config.example.json is checked in");
 
-    let dir = std::env::temp_dir().join(format!("branchyard-deploy-config-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("branchyard-deploy-config-")
+        .tempdir()
+        .unwrap();
+    let dir = temp.path();
     fs::write(dir.join("token.txt"), "0123456789abcdef\n").unwrap();
     let patched = text.replace(
         "/run/secrets/branchyard_token",
@@ -38,6 +40,4 @@ fn deploy_config_example_matches_the_configuration_schema() {
         [("app".to_owned(), Path::new("/repos/app").to_owned())]
     );
     assert_eq!(partial.data_dir, Some(Path::new("/data").to_owned()));
-
-    let _ = fs::remove_dir_all(&dir);
 }

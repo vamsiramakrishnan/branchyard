@@ -588,6 +588,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -618,6 +619,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tempfile",
  "toml_edit",
 ]
 
@@ -661,6 +663,7 @@ dependencies = [
  "branchyard-client",
  "serde",
  "serde_json",
+ "tempfile",
  "toml_edit",
  "tracing",
  "tracing-subscriber",
@@ -741,6 +744,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tower",

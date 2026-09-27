@@ -45,3 +45,4 @@ schemars = { version = "1", optional = true }
 
 [dev-dependencies]
 blake3 = "1"
+tempfile = "3.27.0"

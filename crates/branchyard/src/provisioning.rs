@@ -343,9 +343,11 @@ mod tests {
 
     #[test]
     fn secrets_resolve_from_variables_and_files_without_trailing_newlines() {
-        let dir = std::env::temp_dir().join(format!("by-secret-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("key");
+        let dir = tempfile::Builder::new()
+            .prefix("by-secret-")
+            .tempdir()
+            .unwrap();
+        let file = dir.path().join("key");
         std::fs::write(&file, "from-a-file\r\n").unwrap();
         std::env::set_var("BY_TEST_SECRET_VALUE", "from-a-variable\n");
         let resolved = resolve(&[
@@ -360,7 +362,6 @@ mod tests {
         std::fs::write(&file, "\n").unwrap();
         let empty = resolve(&[SecretSource::parse(&format!("B=@{}", file.display())).unwrap()]);
         assert!(empty.unwrap_err().contains("empty"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

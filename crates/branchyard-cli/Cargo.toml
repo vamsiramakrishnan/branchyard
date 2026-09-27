@@ -38,3 +38,4 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 [dev-dependencies]
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
+tempfile = "3.27.0"

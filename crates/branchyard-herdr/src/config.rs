@@ -185,8 +185,11 @@ mod tests {
 
     #[test]
     fn flags_beat_the_environment_which_beats_the_file() {
-        let dir = std::env::temp_dir().join(format!("by-herdr-config-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("by-herdr-config-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
         std::fs::write(
             dir.join("config.env"),
             "BRANCHYARD_REMOTE=http://file\nBRANCHYARD_REPO=file\nBRANCHYARD_TOKEN_FILE=/file\n",
@@ -206,6 +209,5 @@ mod tests {
         assert_eq!(config.token_file().unwrap(), "/file");
         assert_eq!(config.plugin_id(), "branchyard");
         assert_eq!(config.debounce(), Duration::from_millis(250));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
