@@ -96,7 +96,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     let steps = store.backend().steps(&row.branch, row.turn)?;
     let step = |name: &str| steps.iter().find(|s| s.step == name);
     let sandbox = step(placement::STEP_SANDBOX)
-        .and_then(|s| placement::recover(&record, &s.intent))
+        .and_then(|s| placement::recover(yard, &record, &s.intent))
         .map(|done| format!("; {done}"))
         .unwrap_or_default();
     let ended = step(STEP_TURN_END).and_then(|s| {

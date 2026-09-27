@@ -107,7 +107,7 @@ The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-
 - **Continuing a turn.** A recovered turn is never resumed or resubmitted, and its partial work is only what the snapshot captured.
 - **Recovery across hosts.** An engine on another host is recovered only once its lease expires (30 seconds without a heartbeat), and its processes there are not killed.
 - **Processes that leave their group** (a daemon calling `setsid`), and a harness started in the instant between its spawn and the `start` step's outcome, which recovery does not know about.
-- **Sandboxed harnesses.** For a Microsandbox branch the provider's process ID is recorded but not reconciled; the sandbox is not destroyed by recovery. A Substrate turn's actor is deleted, but what its harness changed there is not brought back, and the host's transfer staging directory is left in the temp directory.
+- **Sandboxed harnesses.** For a Microsandbox branch the provider's process ID is recorded but not reconciled; the sandbox is not destroyed by recovery. A Substrate turn's actor and its transfer staging directory are deleted, but what its harness changed there is not brought back.
 - **The last event appends before an operating-system crash** (see the store).
 - **A hung owner.** An engine that stops renewing for 30 seconds while still alive, such as a stopped process, is taken over; its later writes are fenced, but its harness may already have been killed by recovery.
 - **Stale reservations.** A name reserved by an engine that died before creating the branch stays taken.

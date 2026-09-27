@@ -259,6 +259,7 @@ fn recovery_deletes_the_actor_of_an_engine_that_died() {
     };
     let actor = fake.actor_names().pop().expect("the turn's actor");
     let bridge = fake.bridge_pid(&actor).expect("its bridge");
+    assert!(f.root.join(".branchyard/transfer").join(&actor).is_dir());
 
     child.kill().unwrap();
     child.wait().unwrap();
@@ -289,4 +290,8 @@ fn recovery_deletes_the_actor_of_an_engine_that_died() {
     );
     assert!(fake.actor_names().is_empty());
     wait_gone(bridge);
+    assert!(
+        !f.root.join(".branchyard/transfer").join(&actor).exists(),
+        "the dead engine's transfer staging was left behind"
+    );
 }

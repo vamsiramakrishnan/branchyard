@@ -119,7 +119,7 @@ An actor cannot mount the worktree, so each turn copies it ([transfer.rs](../cra
 
 **Out**, after the harness exits or is killed: git in the actor snapshots its working files the same way on top of its `HEAD` and bundles that one commit against the base. The host fetches it with `transfer.fsckObjects`, checks that the worktree still holds exactly what was sent (otherwise the result is not applied and the turn warns), and applies the difference between the two snapshots to the worktree's files with a two-tree `read-tree -m -u`: additions, changes, deletions, modes and symbolic links. The host's index, refs and branch are untouched, so the engine's existing snapshot, diff and merge path records the candidate exactly as for a local harness. The home comes back with `GetTree` into a new directory that replaces the private home.
 
-Only commits and files cross. The bundles carry objects reachable from the two snapshots; the actor's repository is new, so no host configuration, hook, remote or credential is in it. On the host both steps run in a staging repository whose object store falls back to the host repository's (git alternates), so the host's refs and object store are never written; it is deleted afterwards. Ignored files cross in neither direction, a file the harness writes outside the workdir never comes back, and a symbolic link comes back as a link. Commits the harness made in the actor are flattened into the working-tree difference; their messages are lost. The actor needs `git`.
+Only commits and files cross. The bundles carry objects reachable from the two snapshots; the actor's repository is new, so no host configuration, hook, remote or credential is in it. On the host both steps run in a staging repository whose object store falls back to the host repository's (git alternates), so the host's refs and object store are never written. The engine keeps it at `.branchyard/transfer/<actor>` and deletes it when the turn ends, or recovery does. Ignored files cross in neither direction, a file the harness writes outside the workdir never comes back, and a symbolic link comes back as a link. Commits the harness made in the actor are flattened into the working-tree difference; their messages are lost. The actor needs `git`.
 
 ## In the engine and the CLI
 
@@ -138,7 +138,7 @@ by run "Fix the flaky parser test" --provider substrate \
 2. Copies the worktree and the private home in, and runs the harness in the workdir with `HOME` and the `--pass-env` variables on top of the image's environment.
 3. When the turn ends, copies both back and deletes the actor. A failure to bring the result back is a warning on the turn; the actor is deleted regardless.
 
-Delegation is refused to a sandboxed harness, as for Microsandbox. If the engine dies mid-turn, the bridge tears the harness down when its connection closes, and `Yard::recover` deletes the actor named by the `sandbox` step (with only the `Control` API; the key is not needed) and says so in the `recovered` event. What the harness changed in that actor is lost: recovery does not bring it back.
+Delegation is refused to a sandboxed harness, as for Microsandbox. If the engine dies mid-turn, the bridge tears the harness down when its connection closes, and `Yard::recover` deletes the actor named by the `sandbox` step (with only the `Control` API; the key is not needed) and the turn's staging directory, and says so in the `recovered` event. What the harness changed in that actor is lost: recovery does not bring it back.
 
 ## Testing
 
@@ -160,7 +160,7 @@ The ignored tests in [`tests/cluster.rs`](../crates/branchyard-substrate/tests/c
 4. **No quiescence handshake.** Checkpoints are crash-consistent. A harness must reach a quiet point (no in-flight tool call) before `stop`. The adapter enforces only that the actor is stopped.
 5. **Fencing covers delete only.** Suspend, resume and revert take a name without a UID precondition. `inspect` detects replacement, but a check followed by an action can still race.
 6. **Attempt state lives in the actor.** A process in the actor with write access to the state file could reset it and revive its own ended attempts; it still cannot mint a credential or accept one issued for another actor. The guest clock decides expiry.
-7. **Work lost on engine death.** Recovery deletes the actor without bringing its files back, and the host's staging directory under the temp directory is left behind.
+7. **Work lost on engine death.** Recovery deletes the actor and the turn's staging directory without bringing the actor's files back.
 8. **Kubernetes.** Substrate requires a cluster. It stays optional; Kubernetes is not on Branchyard's default per-spawn path.
 9. **Fork is upstream work.** Substrate lists actor forking from a state root on its roadmap. Revisit `branch` when it lands.
 

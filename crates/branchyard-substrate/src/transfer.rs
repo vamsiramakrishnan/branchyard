@@ -144,14 +144,17 @@ struct Stage {
 }
 
 impl Stage {
-    fn new(worktree: &Path) -> Result<Stage, Error> {
+    fn new(worktree: &Path, dir: Option<&Path>) -> Result<Stage, Error> {
         let common = host(
             worktree,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             &[],
         )?;
         let objects = PathBuf::from(common.trim()).join("objects");
-        let dir = std::env::temp_dir().join(unique("branchyard-transfer"));
+        let dir = match dir {
+            Some(dir) => dir.to_path_buf(),
+            None => std::env::temp_dir().join(unique("branchyard-transfer")),
+        };
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir)?;
         let stage = Stage { dir, objects };
@@ -321,15 +324,27 @@ fn path_str(path: &Path) -> Result<&str, Error> {
 }
 
 /// Recreate the host `worktree` at `guest_dir` in the actor, which must not
-/// hold a repository yet.
+/// hold a repository yet. The staging repository is a new directory under
+/// the system's temporary directory; see [`push_staged`] to choose it.
 pub fn push(endpoint: &Endpoint, worktree: &Path, guest_dir: &Path) -> Result<Pushed, Error> {
+    push_staged(endpoint, worktree, guest_dir, None)
+}
+
+/// [`push`], staging in `stage` (replaced if it exists), so that whoever
+/// recovers from a crash knows what to delete.
+pub fn push_staged(
+    endpoint: &Endpoint,
+    worktree: &Path,
+    guest_dir: &Path,
+    stage: Option<&Path>,
+) -> Result<Pushed, Error> {
     if !guest_dir.is_absolute() {
         return Err(Error::Guest(format!(
             "{} is not an absolute path",
             guest_dir.display()
         )));
     }
-    let stage = Stage::new(worktree)?;
+    let stage = Stage::new(worktree, stage)?;
     let base = host(worktree, &["rev-parse", "--verify", "HEAD^{commit}"], &[])?
         .trim()
         .to_owned();

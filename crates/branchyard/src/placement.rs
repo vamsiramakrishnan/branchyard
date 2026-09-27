@@ -286,7 +286,8 @@ impl Placement {
             Err(error) => return fail(&mut actor, error.to_string()),
         };
         let workdir = PathBuf::from(options.workdir());
-        match transfer::push(&endpoint, &record.info.worktree, &workdir) {
+        let stage = staging(yard, &name);
+        match transfer::push_staged(&endpoint, &record.info.worktree, &workdir, Some(&stage)) {
             Ok(pushed) => actor.pushed = Some(pushed),
             Err(error) => {
                 return fail(
@@ -456,13 +457,22 @@ fn substrate(options: &SubstrateOptions) -> Result<SubstrateProvider, String> {
     substrate_provider(options, true)
 }
 
-/// Delete the actor a stopped engine's turn journaled, if it still exists.
-/// Returns what recovery should report, if anything.
-pub(crate) fn recover(record: &Record, intent: &Value) -> Option<String> {
+/// Where a turn's transfer to `actor` is staged, so recovery can delete it.
+fn staging(yard: &Yard, actor: &str) -> PathBuf {
+    yard.store().dir().join("transfer").join(actor)
+}
+
+/// Delete the actor a stopped engine's turn journaled, if it still exists,
+/// and its transfer's staging directory. Returns what recovery should
+/// report, if anything.
+pub(crate) fn recover(yard: &Yard, record: &Record, intent: &Value) -> Option<String> {
     let Some(Provider::Substrate(options)) = &record.provider else {
         return None;
     };
     let actor = intent.get("actor")?.as_str()?;
+    if !actor.is_empty() && !actor.contains(['/', '.']) {
+        let _ = std::fs::remove_dir_all(staging(yard, actor));
+    }
     // Deleting needs only the Control API, not the bridge key.
     let deleted = substrate_provider(options, false).and_then(|provider| {
         let existed = provider.handle(actor).map_err(|e| e.to_string())?.is_some();
