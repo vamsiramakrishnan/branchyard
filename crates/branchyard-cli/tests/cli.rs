@@ -584,14 +584,23 @@ fn a_harness_steers_its_running_children_with_by_and_python() {
 fn send_steer_reaches_a_turn_another_process_runs() {
     let repo = Repo::new();
     let agent = fake_agent().display().to_string();
-    let mut running = repo
-        .command(env!("CARGO_BIN_EXE_by"))
-        .args(["run", "AWAIT_STEER", "--name", "live", "--yes"])
-        .args(["--harness", "gemini-cli", "--command", &agent])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    /// Kills the turn's process if the test fails before it ends.
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut running = Running(
+        repo.command(env!("CARGO_BIN_EXE_by"))
+            .args(["run", "AWAIT_STEER", "--name", "live", "--yes"])
+            .args(["--harness", "gemini-cli", "--command", &agent])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let waiting = || {
         let log = repo.by(&["log", "live", "--json"]);
@@ -611,7 +620,7 @@ fn send_steer_reaches_a_turn_another_process_runs() {
         "{}",
         stdout(&out)
     );
-    assert!(running.wait().unwrap().success());
+    assert!(running.0.wait().unwrap().success());
     assert!(reply(&repo, "live").contains("steered: try the other file"));
     let log = stdout(&repo.by(&["log", "live"]));
     assert!(

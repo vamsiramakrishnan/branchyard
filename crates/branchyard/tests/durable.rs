@@ -725,6 +725,16 @@ fn a_harness_started_just_before_its_engine_stopped_is_found_by_its_marker() {
     });
 }
 
+/// A child engine process, killed if a test fails before it exits.
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn steered(events: &[RecordedEvent]) -> Vec<(u64, String, String)> {
     events
         .iter()
@@ -741,7 +751,7 @@ fn steered(events: &[RecordedEvent]) -> Vec<(u64, String, String)> {
 #[test]
 fn input_steered_from_another_process_reaches_the_running_turn() {
     let f = Fixture::new();
-    let mut child = start_child(&f, "AWAIT_STEER", &[]);
+    let mut child = Reaped(start_child(&f, "AWAIT_STEER", &[]));
     wait_until("the harness to wait for steering", || {
         text(&events(&f.yard, "crashy")).contains("waiting for steering")
     });
@@ -759,7 +769,7 @@ fn input_steered_from_another_process_reaches_the_running_turn() {
         matches!(settled.state, SteerState::Delivered | SteerState::Accepted),
         "{settled:?}"
     );
-    assert!(child.wait().unwrap().success());
+    assert!(child.0.wait().unwrap().success());
 
     let branch = other.branch("crashy").unwrap();
     assert_eq!(branch.info().status, BranchStatus::NoChanges);
@@ -797,7 +807,7 @@ fn input_steered_from_another_process_reaches_the_running_turn() {
 #[test]
 fn steering_an_agent_without_the_extension_is_refused_not_an_interrupt() {
     let f = Fixture::new();
-    let mut child = start_child(&f, "HANG", &[("FAKE_ACP_NO_STEER", "1")]);
+    let mut child = Reaped(start_child(&f, "HANG", &[("FAKE_ACP_NO_STEER", "1")]));
     wait_until("the prompt", || prompts(&events(&f.yard, "crashy")) == 1);
     let steer = f.yard.steer_as("crashy", "hello", "a test").unwrap();
     let settled = f
@@ -814,7 +824,7 @@ fn steering_an_agent_without_the_extension_is_refused_not_an_interrupt() {
         BranchStatus::Running
     );
     assert_eq!(f.yard.cancel_as("crashy", "the test").unwrap(), ["crashy"]);
-    assert!(child.wait().unwrap().success());
+    assert!(child.0.wait().unwrap().success());
     let log = events(&f.yard, "crashy");
     assert!(steered(&log).is_empty());
     assert!(log.iter().any(|e| matches!(&e.activity,
