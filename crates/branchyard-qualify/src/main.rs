@@ -170,20 +170,20 @@ fn saw(session: &Session, predicate: impl Fn(&Event) -> bool) -> bool {
 /// Close stdin and wait for the harness to exit, then tear down its process
 /// group. Returns the session cost and the descendants that outlived the
 /// harness, if any.
-fn close(session: Session) -> Result<(f64, Option<String>), String> {
+fn close(session: Session) -> Result<(Option<f64>, Option<String>), String> {
     let grace = Duration::from_secs(30);
     let closed = session.close(grace).map_err(|e| e.to_string())?;
     if closed.forced {
         return Err(format!("timed out after {grace:?}"));
     }
     let survivors = (!closed.survivors.is_empty()).then(|| closed.survivors.join(", "));
-    Ok((closed.cost_usd.unwrap_or(0.0), survivors))
+    Ok((closed.cost_usd, survivors))
 }
 
 /// Kill the harness mid-session. Returns the events the driver produced as
 /// the connection closed and the session cost.
-fn kill(session: Session) -> Result<(Vec<Event>, f64), String> {
-    let before = session.cost_usd().unwrap_or(0.0);
+fn kill(session: Session) -> Result<(Vec<Event>, Option<f64>), String> {
+    let before = session.cost_usd();
     let events = session.kill().map_err(|e| e.to_string())?;
     let cost = events
         .iter()
@@ -191,7 +191,7 @@ fn kill(session: Session) -> Result<(Vec<Event>, f64), String> {
             Event::UsageObserved { usage, .. } if usage.cumulative => usage.cost_usd,
             _ => None,
         })
-        .fold(before, f64::max);
+        .fold(before, |acc, cost| Some(acc.map_or(cost, |a| a.max(cost))));
     Ok((events, cost))
 }
 
@@ -207,6 +207,9 @@ struct Run<'a> {
     env: Environment,
     results: Vec<Outcome>,
     spent_usd: f64,
+    /// Whether any harness reported a cost. Without one, spend is unknown
+    /// and the cap cannot apply.
+    cost_observed: bool,
 }
 
 impl Run<'_> {
@@ -229,6 +232,26 @@ impl Run<'_> {
 
     fn over_budget(&self) -> bool {
         self.spent_usd > self.config.max_cost_usd
+    }
+
+    /// Whether spend so far, including the live session's running total,
+    /// exceeds the cap. Checked before every scenario that calls a model.
+    fn over_budget_with(&self, live: &Session) -> bool {
+        self.spent_usd + live.cost_usd().unwrap_or(0.0) > self.config.max_cost_usd
+    }
+
+    /// Add a session's cost increment over `baseline`, noting whether any
+    /// cost was reported at all.
+    fn add_cost(&mut self, cost: Option<f64>, baseline: f64) {
+        if let Some(cost) = cost {
+            self.cost_observed = true;
+            self.spent_usd += (cost - baseline).max(0.0);
+        }
+    }
+
+    fn skip_over_budget(&mut self, name: &'static str, started: Instant) {
+        let detail = format!("skipped: spent ${:.2} over the cap", self.spent_usd);
+        self.record(name, started, Err(detail));
     }
 
     fn cwd(&self) -> PathBuf {
@@ -289,6 +312,7 @@ fn main() {
         env,
         results: Vec::new(),
         spent_usd: 0.0,
+        cost_observed: false,
     };
     let started = Instant::now();
     scenarios(&mut run);
@@ -326,106 +350,123 @@ fn scenarios(run: &mut Run) {
     run.record("fresh_turn", t, result);
 
     let t = Instant::now();
-    let marker = run.cwd().join("deny-marker.txt");
-    let result = (|| {
-        let before = main.events().len();
-        let prompt = "Use your shell/Bash tool to run exactly this command: echo qualified > deny-marker.txt \
+    if run.over_budget_with(&main) {
+        run.skip_over_budget("permission_denied", t);
+    } else {
+        let marker = run.cwd().join("deny-marker.txt");
+        let result = (|| {
+            let before = main.events().len();
+            let prompt = "Use your shell/Bash tool to run exactly this command: echo qualified > deny-marker.txt \
                       If you cannot, reply with the word DENIED and do not try another way.";
-        let (_, outcome, _) = turn(&mut main, prompt, Policy::Deny, turn_timeout)?;
-        let requests = main.events()[before..]
-            .iter()
-            .filter(|e| matches!(e, Event::PermissionRequested { .. }))
-            .count();
-        check(requests > 0, || {
-            "no permission request reached the driver".into()
-        })?;
-        check(!marker.exists(), || "the denied command ran anyway".into())?;
-        check(matches!(outcome, TurnOutcome::Completed), || {
-            format!("outcome {outcome:?}")
-        })?;
-        Ok(format!(
-            "{requests} request(s) denied; marker absent; turn {outcome:?}"
-        ))
-    })();
-    run.record("permission_denied", t, result);
+            let (_, outcome, _) = turn(&mut main, prompt, Policy::Deny, turn_timeout)?;
+            let requests = main.events()[before..]
+                .iter()
+                .filter(|e| matches!(e, Event::PermissionRequested { .. }))
+                .count();
+            check(requests > 0, || {
+                "no permission request reached the driver".into()
+            })?;
+            check(!marker.exists(), || "the denied command ran anyway".into())?;
+            check(matches!(outcome, TurnOutcome::Completed), || {
+                format!("outcome {outcome:?}")
+            })?;
+            Ok(format!(
+                "{requests} request(s) denied; marker absent; turn {outcome:?}"
+            ))
+        })();
+        run.record("permission_denied", t, result);
+    }
 
     let t = Instant::now();
-    let marker = run.cwd().join("allow-marker.txt");
-    let result = (|| {
-        let prompt = "Use your shell/Bash tool to run exactly this command: echo qualified > allow-marker.txt \
+    if run.over_budget_with(&main) {
+        run.skip_over_budget("permission_allowed", t);
+    } else {
+        let marker = run.cwd().join("allow-marker.txt");
+        let result = (|| {
+            let prompt = "Use your shell/Bash tool to run exactly this command: echo qualified > allow-marker.txt \
                       Then reply with the word DONE.";
-        let (_, outcome, _) = turn(&mut main, prompt, Policy::Allow, turn_timeout)?;
-        check(outcome == TurnOutcome::Completed, || {
-            format!("outcome {outcome:?}")
-        })?;
-        let content = fs::read_to_string(&marker)
-            .map_err(|_| "the allowed command did not run".to_string())?;
-        check(content.trim() == "qualified", || {
-            format!("marker holds {content:?}")
-        })?;
-        Ok("request allowed; command ran".into())
-    })();
-    run.record("permission_allowed", t, result);
+            let (_, outcome, _) = turn(&mut main, prompt, Policy::Allow, turn_timeout)?;
+            check(outcome == TurnOutcome::Completed, || {
+                format!("outcome {outcome:?}")
+            })?;
+            let content = fs::read_to_string(&marker)
+                .map_err(|_| "the allowed command did not run".to_string())?;
+            check(content.trim() == "qualified", || {
+                format!("marker holds {content:?}")
+            })?;
+            Ok("request allowed; command ran".into())
+        })();
+        run.record("permission_allowed", t, result);
+    }
 
     let t = Instant::now();
-    let marker = run.cwd().join("hold-marker.txt");
-    let result = (|| {
-        let turn = submit(
+    if run.over_budget_with(&main) {
+        run.skip_over_budget("interrupt_during_permission", t);
+    } else {
+        let marker = run.cwd().join("hold-marker.txt");
+        let result = (|| {
+            let turn = submit(
             &mut main,
             "Use your shell/Bash tool to run exactly this command: echo held > hold-marker.txt Then reply DONE.",
         )?;
-        pump(&mut main, turn_timeout, Policy::Hold, |e| {
-            matches!(e, Event::PermissionRequested { .. })
-        })?;
-        interrupt(
-            &mut main,
-            turn,
-            Policy::Hold,
-            capabilities.turn_acknowledgment,
-        )
-        .and_then(|detail| {
-            check(!marker.exists(), || "the unanswered command ran".into())?;
-            let withdrawn = saw(&main, |e| matches!(e, Event::PermissionWithdrawn { .. }));
-            Ok(format!(
-                "{detail}; pending request withdrawn by harness: {withdrawn}"
-            ))
-        })
-    })();
-    run.record("interrupt_during_permission", t, result);
+            pump(&mut main, turn_timeout, Policy::Hold, |e| {
+                matches!(e, Event::PermissionRequested { .. })
+            })?;
+            interrupt(
+                &mut main,
+                turn,
+                Policy::Hold,
+                capabilities.turn_acknowledgment,
+            )
+            .and_then(|detail| {
+                check(!marker.exists(), || "the unanswered command ran".into())?;
+                let withdrawn = saw(&main, |e| matches!(e, Event::PermissionWithdrawn { .. }));
+                Ok(format!(
+                    "{detail}; pending request withdrawn by harness: {withdrawn}"
+                ))
+            })
+        })();
+        run.record("interrupt_during_permission", t, result);
+    }
 
     let t = Instant::now();
-    let result = (|| {
-        let turn = submit(
+    if run.over_budget_with(&main) {
+        run.skip_over_budget("interrupt_during_tool", t);
+    } else {
+        let result = (|| {
+            let turn = submit(
             &mut main,
             "Use your shell/Bash tool to run exactly this command in the foreground, not in the background: \
              python3 -c \"import time; time.sleep(45)\" Then reply DONE.",
         )?;
-        pump(&mut main, turn_timeout, Policy::Allow, |e| {
-            matches!(e, Event::PermissionRequested { .. })
-        })?;
-        // Let the command start before interrupting it.
-        if let Ok(ended) = pump(
-            &mut main,
-            Duration::from_secs(4),
-            Policy::Allow,
-            |e| matches!(e, Event::TurnEnded { turn: t, .. } if *t == turn),
-        ) {
-            return Err(format!("the turn ended before the interrupt: {ended:?}"));
-        }
-        interrupt(
-            &mut main,
-            turn,
-            Policy::Allow,
-            capabilities.turn_acknowledgment,
-        )
-    })();
-    run.record("interrupt_during_tool", t, result);
+            pump(&mut main, turn_timeout, Policy::Allow, |e| {
+                matches!(e, Event::PermissionRequested { .. })
+            })?;
+            // Let the command start before interrupting it.
+            if let Ok(ended) = pump(
+                &mut main,
+                Duration::from_secs(4),
+                Policy::Allow,
+                |e| matches!(e, Event::TurnEnded { turn: t, .. } if *t == turn),
+            ) {
+                return Err(format!("the turn ended before the interrupt: {ended:?}"));
+            }
+            interrupt(
+                &mut main,
+                turn,
+                Policy::Allow,
+                capabilities.turn_acknowledgment,
+            )
+        })();
+        run.record("interrupt_during_tool", t, result);
+    }
 
     let t = Instant::now();
     let parent = session_started(&main).map(|(s, _)| s);
     let mut parent_cost = 0.0;
     let result = close(main).map(|(cost, survivors)| {
-        run.spent_usd += cost;
+        run.add_cost(cost, 0.0);
+        let cost = cost.unwrap_or(0.0);
         parent_cost = cost;
         match survivors {
             None => format!("closed cleanly; no descendants outlived the harness; session cost ${cost:.4}"),
@@ -476,7 +517,8 @@ fn scenarios(run: &mut Run) {
             let (cost, _) = close(session)?;
             // A resumed or forked session reports totals that include its
             // parent's cost; count only what this session added.
-            run.spent_usd += (cost - parent_cost).max(0.0);
+            run.add_cost(cost, parent_cost);
+            let cost = cost.unwrap_or(0.0);
             check(outcome == TurnOutcome::Completed, || {
                 format!("outcome {outcome:?}")
             })?;
@@ -520,7 +562,7 @@ fn scenarios(run: &mut Run) {
             )
         })?;
         let (events, cost) = kill(session)?;
-        run.spent_usd += cost;
+        run.add_cost(cost, 0.0);
         check(
             events
                 .iter()
@@ -604,10 +646,10 @@ fn report(run: &Run, elapsed: Duration) {
         "host": host(),
         "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
         "seconds": elapsed.as_secs_f64().round(),
-        "harness_estimated_cost_usd": if run.config.profile.driver().capabilities().usage {
+        "harness_estimated_cost_usd": if run.cost_observed {
             json!((run.spent_usd * 10000.0).round() / 10000.0)
         } else {
-            json!("not reported by this protocol; the cost cap did not apply")
+            json!("not reported by the harness; the cost cap did not apply")
         },
         "scenarios": run.results.iter().map(|r| json!({
             "name": r.name,

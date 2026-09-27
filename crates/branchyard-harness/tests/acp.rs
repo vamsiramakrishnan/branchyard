@@ -378,3 +378,17 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
     );
     assert!(frames[0]["params"].get("_meta").is_none());
 }
+
+#[test]
+fn updates_for_another_session_are_violations() {
+    let mut driver = ready();
+    driver.submit("Say hello.").unwrap();
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "other",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "stale"}}}}),
+    );
+    assert!(
+        matches!(&events[..], [Event::ProtocolViolation { detail }] if detail.contains("other"))
+    );
+}

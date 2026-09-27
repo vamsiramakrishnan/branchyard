@@ -486,7 +486,7 @@ impl Session {
         self.stdin.take();
         let deadline = Deadline::after(grace);
         let mut forced = false;
-        while !self.transport_closed {
+        loop {
             if self.child.try_wait().map_err(io_error("wait"))?.is_some() {
                 break;
             }
@@ -496,7 +496,14 @@ impl Session {
                 let _ = self.child.kill();
                 break;
             }
-            self.receive_line(remaining.min(Duration::from_millis(50)))?;
+            let slice = remaining.min(Duration::from_millis(50));
+            // Stdout closing is not the harness exiting: keep enforcing the
+            // grace period until the process itself is gone.
+            if self.transport_closed {
+                std::thread::sleep(slice);
+            } else {
+                self.receive_line(slice)?;
+            }
         }
         self.child.wait().map_err(io_error("wait"))?;
         let survivors = self.teardown();

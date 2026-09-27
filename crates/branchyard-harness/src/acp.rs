@@ -209,6 +209,23 @@ impl Acp {
                 });
             }
         };
+        // Updates must belong to the open session; while loading, that is
+        // the session being resumed.
+        let expected = self
+            .session
+            .clone()
+            .or_else(|| match self.open.as_ref().map(|o| &o.mode) {
+                Some(SessionMode::Resume(session)) => Some(session.clone()),
+                _ => None,
+            });
+        let actual = notification.session_id.to_string();
+        if let Some(expected) = expected {
+            if actual != expected.as_str() {
+                return Output::event(Event::ProtocolViolation {
+                    detail: format!("session/update for session {actual}, not {expected}"),
+                });
+            }
+        }
         // History replayed by session/load belongs to earlier turns.
         let Some(turn) = self.turns.active.filter(|_| !self.loading) else {
             return Output::default();
