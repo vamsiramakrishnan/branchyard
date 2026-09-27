@@ -138,6 +138,8 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
         Command::Children { branch, json } => commands::children(env, target, branch, json),
         Command::Rig(args) => commands::rig(env, target, &args),
+        Command::Artifact(args) => commands::artifact(target, &args),
+        Command::Scratch(args) => commands::scratch(target, &args),
         Command::Help { .. } | Command::Version | Command::Serve { .. } | Command::Mcp { .. } => {
             unreachable!("handled before choosing a target")
         }

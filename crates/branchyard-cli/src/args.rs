@@ -128,6 +128,31 @@ pub struct RigArgs {
     pub json: bool,
 }
 
+/// `by artifact publish|list|get|share ...`; see `docs/storage.md`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArtifactArgs {
+    pub action: String,
+    /// `publish`'s file, or `get`/`share`'s id.
+    pub arg: Option<String>,
+    pub name: Option<String>,
+    pub media_type: Option<String>,
+    pub labels: Vec<(String, String)>,
+    pub out: Option<String>,
+    pub to: Option<String>,
+    pub branch: Option<String>,
+    pub json: bool,
+}
+
+/// `by scratch create|list|lock|unlock|share ...`; see `docs/storage.md`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScratchArgs {
+    pub action: String,
+    pub name: Option<String>,
+    pub to: Option<String>,
+    pub branch: Option<String>,
+    pub json: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Run {
@@ -218,6 +243,8 @@ pub enum Command {
         json: bool,
     },
     Rig(RigArgs),
+    Artifact(ArtifactArgs),
+    Scratch(ScratchArgs),
     /// General help, or one command's.
     Help {
         topic: Option<&'static Spec>,
@@ -583,6 +610,31 @@ const KEEP_CREDENTIALS: Flag = Flag {
     value: None,
     help: "Keep the credential files provisioning wrote in a home a fork still uses",
 };
+const ACT_AS: Flag = Flag {
+    long: "branch",
+    value: Some("NAME"),
+    help: "Act as this branch (outside a harness; inside one, it is the harness's own)",
+};
+const ARTIFACT_LABEL: Flag = Flag {
+    long: "label",
+    value: Some("KEY=VALUE"),
+    help: "A label on the published artifact; repeatable",
+};
+const ARTIFACT_OUT: Flag = Flag {
+    long: "out",
+    value: Some("PATH"),
+    help: "Where to write the artifact's bytes",
+};
+const ARTIFACT_TO: Flag = Flag {
+    long: "to",
+    value: Some("BRANCH"),
+    help: "The branch to share with",
+};
+const MEDIA_TYPE: Flag = Flag {
+    long: "media-type",
+    value: Some("TYPE"),
+    help: "The artifact's media type (default: application/octet-stream)",
+};
 const INTO: Flag = Flag {
     long: "into",
     value: Some("TARGET"),
@@ -626,7 +678,7 @@ const TELEMETRY: Flag = Flag {
 };
 
 /// Flags that may be given more than once.
-const REPEATABLE: &[&str] = &["secret", "mcp"];
+const REPEATABLE: &[&str] = &["secret", "mcp", "label"];
 
 pub static COMMANDS: &[Spec] = &[
     Spec {
@@ -902,6 +954,26 @@ pub static COMMANDS: &[Spec] = &[
         flags: &[NAME, BASE, COMMAND, ALLOW_UNAPPROVED_TOOLS, JSON],
     },
     Spec {
+        name: "artifact",
+        positionals: &["publish|list|get|share", "arg?"],
+        summary: "Publish, list, read or share an immutable artifact (see docs/storage.md)",
+        flags: &[
+            NAME,
+            MEDIA_TYPE,
+            ARTIFACT_LABEL,
+            ARTIFACT_OUT,
+            ARTIFACT_TO,
+            ACT_AS,
+            JSON,
+        ],
+    },
+    Spec {
+        name: "scratch",
+        positionals: &["create|list|lock|unlock|share", "name?"],
+        summary: "Create, list, lock, unlock or share a scratch area (see docs/storage.md)",
+        flags: &[ARTIFACT_TO, ACT_AS, JSON],
+    },
+    Spec {
         name: "mcp",
         positionals: &[],
         summary: "Serve a branch's delegation tools over MCP on stdio (started by the engine)",
@@ -1098,6 +1170,74 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 base: m.value("base").map(str::to_owned),
                 command,
                 unapproved_tools: m.switch("allow-unapproved-tools"),
+                json: m.switch("json"),
+            })
+        }
+        "artifact" => {
+            let action = next();
+            let arg = optional.next();
+            let labels = m
+                .values("label")
+                .iter()
+                .map(|kv| match kv.split_once('=') {
+                    Some((k, v)) => Ok((k.to_owned(), v.to_owned())),
+                    None => Err(m.error(format!("--label needs KEY=VALUE, not '{kv}'"))),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            match action.as_str() {
+                "publish" | "list" | "get" | "share" => {}
+                other => {
+                    return Err(m.error(format!(
+                        "unknown artifact action '{other}'; use publish, list, get or share"
+                    )))
+                }
+            }
+            if action == "publish" && arg.is_none() {
+                return Err(m.error("artifact publish needs a file"));
+            }
+            if (action == "get" || action == "share") && arg.is_none() {
+                return Err(m.error(format!("artifact {action} needs an id")));
+            }
+            if action == "get" && m.value("out").is_none() {
+                return Err(m.error("artifact get needs --out PATH"));
+            }
+            if action == "share" && m.value("to").is_none() {
+                return Err(m.error("artifact share needs --to BRANCH"));
+            }
+            Command::Artifact(ArtifactArgs {
+                action,
+                arg,
+                name: m.value("name").map(str::to_owned),
+                media_type: m.value("media-type").map(str::to_owned),
+                labels,
+                out: m.value("out").map(str::to_owned),
+                to: m.value("to").map(str::to_owned),
+                branch: m.value("branch").map(str::to_owned),
+                json: m.switch("json"),
+            })
+        }
+        "scratch" => {
+            let action = next();
+            let name = optional.next();
+            match action.as_str() {
+                "create" | "list" | "lock" | "unlock" | "share" => {}
+                other => {
+                    return Err(m.error(format!(
+                        "unknown scratch action '{other}'; use create, list, lock, unlock or share"
+                    )))
+                }
+            }
+            if action != "list" && name.is_none() {
+                return Err(m.error(format!("scratch {action} needs a name")));
+            }
+            if action == "share" && m.value("to").is_none() {
+                return Err(m.error("scratch share needs --to BRANCH"));
+            }
+            Command::Scratch(ScratchArgs {
+                action,
+                name,
+                to: m.value("to").map(str::to_owned),
+                branch: m.value("branch").map(str::to_owned),
                 json: m.switch("json"),
             })
         }

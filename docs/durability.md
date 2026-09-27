@@ -170,7 +170,7 @@ As any other user, drop `runuser -u nobody --`. The CI job `postgres` in [`check
 
 | Where | What |
 |---|---|
-| [`state.rs`](../crates/branchyard/src/state.rs), [`sqlite.rs`](../crates/branchyard/src/sqlite.rs), [`pg.rs`](../crates/branchyard/src/pg.rs) | The store, the `Backend` trait, leases and heartbeat, the SQLite backend and the import, the PostgreSQL backend |
+| [`state.rs`](../crates/branchyard/src/state.rs), [`sqlite.rs`](../crates/branchyard/src/sqlite.rs), [`pg.rs`](../crates/branchyard/src/pg.rs) | The store, the `Backend` trait, leases and heartbeat, the SQLite backend and the import, the PostgreSQL backend. The same two backends also implement `StorageBackend`, a separate trait for artifact and scratch-area metadata on the same connection; see [storage](storage.md), which does not otherwise touch branch lifecycle. |
 | [`conformance.rs`](../crates/branchyard/src/conformance.rs) | One suite, run against both backends: fencing, expiry, steps and processes, cancels, records and children, events and the feed, concurrent appends, and races for a name, a lease and a takeover |
 | [`tests/postgres.rs`](../crates/branchyard/tests/postgres.rs), the server's [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs) | A task through merge, waits across yards, two yards and a cancel, a killed engine recovered, and a server's branches and operations across a restart, all on PostgreSQL |
 | [`engine.rs`](../crates/branchyard/src/engine.rs), [`run.rs`](../crates/branchyard/src/run.rs), [`ops.rs`](../crates/branchyard/src/ops.rs) | Journaled steps of a turn, of branch creation, merge and removal |

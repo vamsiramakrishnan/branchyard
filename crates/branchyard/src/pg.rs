@@ -37,7 +37,11 @@ use crate::state::{
     now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
     ReservationRow, StepRow,
 };
-use crate::{Error, RecordedEvent};
+use crate::storage::{
+    ArtifactRef, ArtifactRow, LockOutcome, NewArtifact, ScratchArea, ScratchLock, ScratchRow,
+    StorageBackend,
+};
+use crate::{BranchStatus, Error, RecordedEvent};
 
 const SCHEMA: i64 = 1;
 /// How long a write keeps retrying serialization failures.
@@ -128,6 +132,48 @@ CREATE TABLE IF NOT EXISTS by_events (
     activity TEXT NOT NULL,
     PRIMARY KEY (repo, id),
     UNIQUE (incarnation, seq)
+);
+CREATE TABLE IF NOT EXISTS by_artifacts (
+    seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    repo TEXT NOT NULL,
+    id TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    size BIGINT NOT NULL,
+    name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    publisher TEXT NOT NULL,
+    ancestry TEXT NOT NULL,
+    turn BIGINT NOT NULL,
+    created_ms BIGINT NOT NULL,
+    labels TEXT NOT NULL,
+    UNIQUE (repo, id)
+);
+CREATE TABLE IF NOT EXISTS by_artifact_shares (
+    repo TEXT NOT NULL,
+    id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    PRIMARY KEY (repo, id, branch)
+);
+CREATE TABLE IF NOT EXISTS by_scratch_areas (
+    repo TEXT NOT NULL,
+    name TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    ancestry TEXT NOT NULL,
+    created_ms BIGINT NOT NULL,
+    PRIMARY KEY (repo, name)
+);
+CREATE TABLE IF NOT EXISTS by_scratch_shares (
+    repo TEXT NOT NULL,
+    name TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    PRIMARY KEY (repo, name, branch)
+);
+CREATE TABLE IF NOT EXISTS by_scratch_locks (
+    repo TEXT NOT NULL,
+    name TEXT NOT NULL,
+    holder TEXT NOT NULL,
+    acquired_ms BIGINT NOT NULL,
+    PRIMARY KEY (repo, name)
 );
 ";
 
@@ -1150,5 +1196,335 @@ impl Backend for Postgres {
             )
         })
         .map(|r| uint(r.get(0)))
+    }
+}
+
+fn artifact_row_from(row: &Row) -> Result<ArtifactRow, Error> {
+    let ancestry: String = row.get(6);
+    let labels: String = row.get(9);
+    Ok(ArtifactRow {
+        artifact: ArtifactRef {
+            id: row.get(0),
+            digest: row.get(1),
+            size: uint(row.get(2)),
+            name: row.get(3),
+            media_type: row.get(4),
+            publisher_branch: row.get(5),
+            turn: uint(row.get(7)),
+            created_at: uint(row.get::<_, i64>(8)) / 1000,
+            labels: decode("artifact labels", &labels)?,
+        },
+        ancestry: decode("artifact ancestry", &ancestry)?,
+    })
+}
+
+const ARTIFACT_COLUMNS: &str =
+    "id, digest, size, name, media_type, publisher, ancestry, turn, created_ms, labels";
+
+fn scratch_row_from(row: &Row) -> Result<ScratchRow, Error> {
+    let ancestry: String = row.get(2);
+    Ok(ScratchRow {
+        area: ScratchArea {
+            name: row.get(0),
+            owner_branch: row.get(1),
+            created_at: uint(row.get::<_, i64>(3)) / 1000,
+        },
+        ancestry: decode("scratch ancestry", &ancestry)?,
+    })
+}
+
+impl Postgres {
+    fn is_running(&self, tx: &mut Transaction<'_>, name: &str) -> R<bool> {
+        match self.stored_record(tx, name)? {
+            Some(record) => Ok(record.info.status == BranchStatus::Running),
+            None => Ok(false),
+        }
+    }
+}
+
+impl StorageBackend for Postgres {
+    fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {
+        self.tx(true, |tx| {
+            let now = int(now_ms());
+            let ancestry = encode("ancestry", &new.ancestry)?;
+            let labels = encode("labels", &new.labels)?;
+            let seq: i64 = tx
+                .query_one(
+                    "INSERT INTO by_artifacts (repo, id, digest, size, name, media_type, \
+                     publisher, ancestry, turn, created_ms, labels) \
+                     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING seq",
+                    &[
+                        &self.repo,
+                        &new.digest,
+                        &int(new.size),
+                        &new.name,
+                        &new.media_type,
+                        &new.publisher_branch,
+                        &ancestry,
+                        &int(new.turn),
+                        &now,
+                        &labels,
+                    ],
+                )
+                .map_err(db("artifact"))?
+                .get(0);
+            let id = format!("art{seq}");
+            tx.execute(
+                "UPDATE by_artifacts SET id = $1 WHERE repo = $2 AND seq = $3",
+                &[&id, &self.repo, &seq],
+            )
+            .map_err(db("artifact"))?;
+            Ok(ArtifactRow {
+                artifact: ArtifactRef {
+                    id,
+                    digest: new.digest.clone(),
+                    size: new.size,
+                    name: new.name.clone(),
+                    media_type: new.media_type.clone(),
+                    publisher_branch: new.publisher_branch.clone(),
+                    turn: new.turn,
+                    created_at: uint(now) / 1000,
+                    labels: new.labels.clone(),
+                },
+                ancestry: new.ancestry.clone(),
+            })
+        })
+    }
+
+    fn artifact(&self, id: &str) -> Result<Option<ArtifactRow>, Error> {
+        self.query(|c| {
+            c.query_opt(
+                &format!("SELECT {ARTIFACT_COLUMNS} FROM by_artifacts WHERE repo = $1 AND id = $2"),
+                &[&self.repo, &id],
+            )
+        })?
+        .map(|r| artifact_row_from(&r))
+        .transpose()
+    }
+
+    fn artifacts(&self) -> Result<Vec<ArtifactRow>, Error> {
+        let rows = self.query(|c| {
+            c.query(
+                &format!(
+                    "SELECT {ARTIFACT_COLUMNS} FROM by_artifacts WHERE repo = $1 ORDER BY seq"
+                ),
+                &[&self.repo],
+            )
+        })?;
+        rows.iter().map(artifact_row_from).collect()
+    }
+
+    fn artifact_shares(&self, id: &str) -> Result<Vec<String>, Error> {
+        let rows = self.query(|c| {
+            c.query(
+                "SELECT branch FROM by_artifact_shares WHERE repo = $1 AND id = $2",
+                &[&self.repo, &id],
+            )
+        })?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    fn share_artifact(&self, id: &str, branch: &str) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let exists = tx
+                .query_opt(
+                    "SELECT 1 FROM by_artifacts WHERE repo = $1 AND id = $2",
+                    &[&self.repo, &id],
+                )
+                .map_err(db("artifact"))?
+                .is_some();
+            if exists {
+                tx.execute(
+                    "INSERT INTO by_artifact_shares (repo, id, branch) VALUES ($1, $2, $3) \
+                     ON CONFLICT DO NOTHING",
+                    &[&self.repo, &id, &branch],
+                )
+                .map_err(db("artifact share"))?;
+            }
+            Ok(exists)
+        })
+    }
+
+    fn delete_artifact(&self, id: &str) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                "DELETE FROM by_artifacts WHERE repo = $1 AND id = $2",
+                &[&self.repo, &id],
+            )
+            .map_err(db("artifact"))?;
+            tx.execute(
+                "DELETE FROM by_artifact_shares WHERE repo = $1 AND id = $2",
+                &[&self.repo, &id],
+            )
+            .map_err(db("artifact share"))?;
+            Ok(())
+        })
+    }
+
+    fn digest_refcount(&self, digest: &str) -> Result<u64, Error> {
+        let row = self.query(|c| {
+            c.query_one(
+                "SELECT COUNT(*) FROM by_artifacts WHERE repo = $1 AND digest = $2",
+                &[&self.repo, &digest],
+            )
+        })?;
+        Ok(uint(row.get::<_, i64>(0)))
+    }
+
+    fn create_scratch(&self, name: &str, owner: &str, ancestry: &[String]) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let ancestry = encode("ancestry", &ancestry)?;
+            let inserted = tx
+                .execute(
+                    "INSERT INTO by_scratch_areas (repo, name, owner, ancestry, created_ms) \
+                     VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                    &[&self.repo, &name, &owner, &ancestry, &int(now_ms())],
+                )
+                .map_err(db("scratch"))?;
+            Ok(inserted == 1)
+        })
+    }
+
+    fn scratch(&self, name: &str) -> Result<Option<ScratchRow>, Error> {
+        self.query(|c| {
+            c.query_opt(
+                "SELECT name, owner, ancestry, created_ms FROM by_scratch_areas \
+                 WHERE repo = $1 AND name = $2",
+                &[&self.repo, &name],
+            )
+        })?
+        .map(|r| scratch_row_from(&r))
+        .transpose()
+    }
+
+    fn scratch_list(&self) -> Result<Vec<ScratchRow>, Error> {
+        let rows = self.query(|c| {
+            c.query(
+                "SELECT name, owner, ancestry, created_ms FROM by_scratch_areas \
+                 WHERE repo = $1 ORDER BY created_ms",
+                &[&self.repo],
+            )
+        })?;
+        rows.iter().map(scratch_row_from).collect()
+    }
+
+    fn scratch_shares(&self, name: &str) -> Result<Vec<String>, Error> {
+        let rows = self.query(|c| {
+            c.query(
+                "SELECT branch FROM by_scratch_shares WHERE repo = $1 AND name = $2",
+                &[&self.repo, &name],
+            )
+        })?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    fn share_scratch(&self, name: &str, branch: &str) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let exists = tx
+                .query_opt(
+                    "SELECT 1 FROM by_scratch_areas WHERE repo = $1 AND name = $2",
+                    &[&self.repo, &name],
+                )
+                .map_err(db("scratch"))?
+                .is_some();
+            if exists {
+                tx.execute(
+                    "INSERT INTO by_scratch_shares (repo, name, branch) VALUES ($1, $2, $3) \
+                     ON CONFLICT DO NOTHING",
+                    &[&self.repo, &name, &branch],
+                )
+                .map_err(db("scratch share"))?;
+            }
+            Ok(exists)
+        })
+    }
+
+    fn delete_scratch(&self, name: &str) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            for table in ["by_scratch_areas", "by_scratch_shares", "by_scratch_locks"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE repo = $1 AND name = $2"),
+                    &[&self.repo, &name],
+                )
+                .map_err(db("scratch"))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn scratch_lock(&self, name: &str, branch: &str) -> Result<Option<LockOutcome>, Error> {
+        self.tx(true, |tx| {
+            let known = tx
+                .query_opt(
+                    "SELECT 1 FROM by_scratch_areas WHERE repo = $1 AND name = $2",
+                    &[&self.repo, &name],
+                )
+                .map_err(db("scratch"))?
+                .is_some();
+            if !known {
+                return Ok(None);
+            }
+            let current = tx
+                .query_opt(
+                    "SELECT holder, acquired_ms FROM by_scratch_locks \
+                     WHERE repo = $1 AND name = $2",
+                    &[&self.repo, &name],
+                )
+                .map_err(db("scratch lock"))?
+                .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1)));
+            let grant = |tx: &mut Transaction<'_>| -> R<LockOutcome> {
+                let now = int(now_ms());
+                tx.execute(
+                    "INSERT INTO by_scratch_locks (repo, name, holder, acquired_ms) \
+                     VALUES ($1, $2, $3, $4) ON CONFLICT (repo, name) \
+                     DO UPDATE SET holder = excluded.holder, acquired_ms = excluded.acquired_ms",
+                    &[&self.repo, &name, &branch, &now],
+                )
+                .map_err(db("scratch lock"))?;
+                Ok(LockOutcome::Granted(ScratchLock {
+                    name: name.to_owned(),
+                    holder_branch: branch.to_owned(),
+                    acquired_at: uint(now) / 1000,
+                }))
+            };
+            match current {
+                None => Ok(Some(grant(tx)?)),
+                Some((holder, _)) if holder == branch => Ok(Some(grant(tx)?)),
+                Some((holder, _)) if !self.is_running(tx, &holder)? => Ok(Some(grant(tx)?)),
+                Some((holder, acquired_ms)) => Ok(Some(LockOutcome::Held(ScratchLock {
+                    name: name.to_owned(),
+                    holder_branch: holder,
+                    acquired_at: uint(acquired_ms) / 1000,
+                }))),
+            }
+        })
+    }
+
+    fn scratch_unlock(&self, name: &str, branch: &str) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "DELETE FROM by_scratch_locks WHERE repo = $1 AND name = $2 AND holder = $3",
+                    &[&self.repo, &name, &branch],
+                )
+                .map_err(db("scratch lock"))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn scratch_lock_state(&self, name: &str) -> Result<Option<ScratchLock>, Error> {
+        self.query(|c| {
+            c.query_opt(
+                "SELECT holder, acquired_ms FROM by_scratch_locks WHERE repo = $1 AND name = $2",
+                &[&self.repo, &name],
+            )
+        })
+        .map(|opt| {
+            opt.map(|r| ScratchLock {
+                name: name.to_owned(),
+                holder_branch: r.get(0),
+                acquired_at: uint(r.get::<_, i64>(1)) / 1000,
+            })
+        })
     }
 }

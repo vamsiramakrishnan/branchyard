@@ -536,6 +536,93 @@ impl Delegate {
         }
     }
 
+    /// Publish `path` as a new immutable artifact of this branch; see
+    /// `docs/storage.md`.
+    pub fn publish_artifact(
+        &self,
+        path: &Path,
+        name: Option<String>,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::ArtifactRef, Error> {
+        match &self.via {
+            Via::Local(local) => local.publish_artifact(path, name, None, labels),
+            Via::Remote(_) => self.typed(
+                "publish_artifact",
+                json!({"path": path, "name": name, "labels": labels}),
+            ),
+        }
+    }
+
+    /// Every artifact this branch may read.
+    pub fn artifacts(&self) -> Result<Vec<crate::ArtifactRef>, Error> {
+        match &self.via {
+            Via::Local(local) => local.list_artifacts(),
+            Via::Remote(_) => self.typed("list_artifacts", json!({})),
+        }
+    }
+
+    /// Copy artifact `id`'s bytes to `out` for this branch.
+    pub fn read_artifact(&self, id: &str, out: &Path) -> Result<crate::ArtifactRef, Error> {
+        match &self.via {
+            Via::Local(local) => local.get_artifact(id, out),
+            Via::Remote(_) => self.typed("get_artifact", json!({"id": id, "out": out})),
+        }
+    }
+
+    /// Share artifact `id` with branch `to`.
+    pub fn share_artifact(&self, id: &str, to: &str) -> Result<(), Error> {
+        match &self.via {
+            Via::Local(local) => local.share_artifact(id, to),
+            Via::Remote(_) => self
+                .typed::<Value>("share_artifact", json!({"id": id, "to": to}))
+                .map(|_| ()),
+        }
+    }
+
+    /// Create scratch area `name`, owned by this branch.
+    pub fn create_scratch(&self, name: &str) -> Result<crate::ScratchArea, Error> {
+        match &self.via {
+            Via::Local(local) => local.create_scratch(name),
+            Via::Remote(_) => self.typed("create_scratch", json!({"name": name})),
+        }
+    }
+
+    /// Every scratch area this branch may reach.
+    pub fn scratch_areas(&self) -> Result<Vec<crate::ScratchArea>, Error> {
+        match &self.via {
+            Via::Local(local) => local.list_scratch(),
+            Via::Remote(_) => self.typed("list_scratch", json!({})),
+        }
+    }
+
+    /// Share scratch area `name` with branch `to`.
+    pub fn share_scratch(&self, name: &str, to: &str) -> Result<(), Error> {
+        match &self.via {
+            Via::Local(local) => local.share_scratch(name, to),
+            Via::Remote(_) => self
+                .typed::<Value>("share_scratch", json!({"name": name, "to": to}))
+                .map(|_| ()),
+        }
+    }
+
+    /// Acquire scratch area `name`'s writer lock for this branch.
+    pub fn lock_scratch(&self, name: &str) -> Result<crate::ScratchLock, Error> {
+        match &self.via {
+            Via::Local(local) => local.lock_scratch(name),
+            Via::Remote(_) => self.typed("lock_scratch", json!({"name": name})),
+        }
+    }
+
+    /// Release scratch area `name`'s lock if this branch holds it.
+    pub fn unlock_scratch(&self, name: &str) -> Result<(), Error> {
+        match &self.via {
+            Via::Local(local) => local.unlock_scratch(name),
+            Via::Remote(_) => self
+                .typed::<Value>("unlock_scratch", json!({"name": name}))
+                .map(|_| ()),
+        }
+    }
+
     /// Inspect `branch` until it is not running a turn, for up to
     /// `timeout`. Fails with [`Error::Running`] if it still is.
     ///
@@ -1352,6 +1439,62 @@ impl Local {
             descendants: descendants(&self.store(), &self.branch)?,
         })
     }
+
+    /// A relative path from a tool call, resolved against this branch's own
+    /// worktree: the harness's working directory, whether the call reaches
+    /// this process directly or through the broker from another.
+    fn in_worktree(&self, path: &Path) -> Result<std::path::PathBuf, Error> {
+        match path.is_absolute() {
+            true => Ok(path.to_owned()),
+            false => Ok(self.store().read(&self.branch)?.info.worktree.join(path)),
+        }
+    }
+
+    /// Publish `path` as a new artifact of this branch; see
+    /// `docs/storage.md`.
+    fn publish_artifact(
+        &self,
+        path: &Path,
+        name: Option<String>,
+        media_type: Option<String>,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::ArtifactRef, Error> {
+        let path = self.in_worktree(path)?;
+        crate::storage::publish(&self.yard, &self.branch, &path, name, media_type, labels)
+    }
+
+    fn list_artifacts(&self) -> Result<Vec<crate::ArtifactRef>, Error> {
+        crate::storage::list(&self.yard, &self.branch)
+    }
+
+    fn get_artifact(&self, id: &str, out: &Path) -> Result<crate::ArtifactRef, Error> {
+        let out = self.in_worktree(out)?;
+        crate::storage::get(&self.yard, &self.branch, id, &out)
+    }
+
+    fn share_artifact(&self, id: &str, to: &str) -> Result<(), Error> {
+        crate::storage::share_artifact(&self.yard, &self.branch, id, to)
+    }
+
+    fn create_scratch(&self, name: &str) -> Result<crate::ScratchArea, Error> {
+        crate::storage::create_scratch(&self.yard, &self.branch, name)
+    }
+
+    fn list_scratch(&self) -> Result<Vec<crate::ScratchArea>, Error> {
+        crate::storage::authorized_scratch(&self.yard, &self.branch)
+    }
+
+    fn share_scratch(&self, name: &str, to: &str) -> Result<(), Error> {
+        crate::storage::share_scratch(&self.yard, &self.branch, name, to)
+    }
+
+    fn lock_scratch(&self, name: &str) -> Result<crate::ScratchLock, Error> {
+        crate::storage::lock_scratch(&self.yard, &self.branch, name)
+    }
+
+    fn unlock_scratch(&self, name: &str) -> Result<(), Error> {
+        crate::storage::unlock_scratch(&self.yard, &self.branch, name)
+    }
 }
 
 /// Names for messages: `a, b` or `none`.
@@ -1499,6 +1642,43 @@ struct SendArgs {
 #[serde(deny_unknown_fields)]
 struct NoArgs {}
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishArtifactArgs {
+    path: String,
+    name: Option<String>,
+    media_type: Option<String>,
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetArtifactArgs {
+    id: String,
+    out: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareArgs {
+    id: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NameArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareScratchArgs {
+    name: String,
+    to: String,
+}
+
 fn parse<T: DeserializeOwned>(tool: &str, arguments: Value) -> Result<T, Error> {
     let arguments = match arguments {
         Value::Null => json!({}),
@@ -1562,6 +1742,50 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "children" => {
             let _: NoArgs = parse(tool, arguments)?;
             to_json(&local.children()?)
+        }
+        "publish_artifact" => {
+            let args: PublishArtifactArgs = parse(tool, arguments)?;
+            to_json(&local.publish_artifact(
+                Path::new(&args.path),
+                args.name,
+                args.media_type,
+                args.labels,
+            )?)
+        }
+        "list_artifacts" => {
+            let _: NoArgs = parse(tool, arguments)?;
+            to_json(&local.list_artifacts()?)
+        }
+        "get_artifact" => {
+            let args: GetArtifactArgs = parse(tool, arguments)?;
+            to_json(&local.get_artifact(&args.id, Path::new(&args.out))?)
+        }
+        "share_artifact" => {
+            let args: ShareArgs = parse(tool, arguments)?;
+            local.share_artifact(&args.id, &args.to)?;
+            Ok(Value::Bool(true))
+        }
+        "create_scratch" => {
+            let args: NameArgs = parse(tool, arguments)?;
+            to_json(&local.create_scratch(&args.name)?)
+        }
+        "list_scratch" => {
+            let _: NoArgs = parse(tool, arguments)?;
+            to_json(&local.list_scratch()?)
+        }
+        "share_scratch" => {
+            let args: ShareScratchArgs = parse(tool, arguments)?;
+            local.share_scratch(&args.name, &args.to)?;
+            Ok(Value::Bool(true))
+        }
+        "lock_scratch" => {
+            let args: NameArgs = parse(tool, arguments)?;
+            to_json(&local.lock_scratch(&args.name)?)
+        }
+        "unlock_scratch" => {
+            let args: NameArgs = parse(tool, arguments)?;
+            local.unlock_scratch(&args.name)?;
+            Ok(Value::Bool(true))
         }
         other => Err(Error::Denied(format!("no delegation tool named {other}"))),
     }

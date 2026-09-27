@@ -11,7 +11,7 @@ There is one set of operations and one authority model. Four surfaces reach them
 | The Rust SDK, `branchyard::Delegate` | You write the meta-harness in Rust, in or out of a harness. |
 | Branchyard's MCP server (`by mcp`) | The harness cannot run commands, or its shell cannot reach the repository, but it can call MCP tools. |
 
-Each surface calls the same operations in the engine that runs the harness's turn, so they give the same answers and refusals.
+Each surface calls the same operations in the engine that runs the harness's turn, so they give the same answers and refusals. The same four surfaces also reach [artifacts and scratch areas](storage.md) (`by artifact`, `by scratch`, `branchyard.publish`/`create_scratch`, `Delegate::publish_artifact`, the MCP `publish_artifact`/`create_scratch` tools and their siblings): shared storage a branch's descendants and ancestors can read without a merge, tested the same way.
 
 ## Turning it on
 

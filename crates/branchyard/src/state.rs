@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::delegation::Grant;
+use crate::storage::StorageBackend;
 use crate::{proc, BranchInfo, Error, Provider, RecordedEvent};
 
 pub(crate) const DIR: &str = ".branchyard";
@@ -374,6 +375,10 @@ fn signal_for(path: &Path) -> Arc<Signal> {
 pub(crate) struct Store {
     dir: PathBuf,
     backend: Arc<dyn Backend>,
+    /// Artifact and scratch-area metadata: the same backend as `backend`,
+    /// coerced to a second trait object so that feature does not enlarge
+    /// [`Backend`]. See [`crate::storage`].
+    storage: Arc<dyn StorageBackend>,
     owner: Arc<Owner>,
     signal: Arc<Signal>,
 }
@@ -393,11 +398,12 @@ impl Store {
         let worktrees = dir.join("worktrees");
         std::fs::create_dir_all(&worktrees)
             .map_err(|e| Error::State(format!("create {}: {e}", worktrees.display())))?;
-        let backend = crate::sqlite::Sqlite::open(&dir)?;
+        let backend = Arc::new(crate::sqlite::Sqlite::open(&dir)?);
         let signal = signal_for(backend.path());
         Ok(Store {
             dir,
-            backend: Arc::new(backend),
+            backend: backend.clone(),
+            storage: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -412,11 +418,12 @@ impl Store {
         let worktrees = dir.join("worktrees");
         std::fs::create_dir_all(&worktrees)
             .map_err(|e| Error::State(format!("create {}: {e}", worktrees.display())))?;
-        let backend = crate::pg::Postgres::open(url, scope)?;
+        let backend = Arc::new(crate::pg::Postgres::open(url, scope)?);
         let signal = signal_for(&dir.join(format!("postgres/{scope}")));
         Ok(Store {
             dir,
-            backend: Arc::new(backend),
+            backend: backend.clone(),
+            storage: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -433,6 +440,11 @@ impl Store {
 
     pub fn backend(&self) -> &dyn Backend {
         self.backend.as_ref()
+    }
+
+    /// Artifact and scratch-area metadata; see [`crate::storage`].
+    pub fn storage(&self) -> &dyn StorageBackend {
+        self.storage.as_ref()
     }
 
     pub fn worktree(&self, name: &str) -> PathBuf {

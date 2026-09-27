@@ -15,6 +15,7 @@ microsandbox = ["branchyard-microsandbox/microsandbox"]
 postgres = ["dep:postgres", "dep:tokio"]
 
 [dependencies]
+blake3 = "1"
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-harness = { path = "../branchyard-harness" }
 branchyard-microsandbox = { path = "../branchyard-microsandbox" }

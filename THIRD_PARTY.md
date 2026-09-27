@@ -20,6 +20,8 @@ The Substrate adapter's and the bridge's Cargo dependencies (Tonic, Prost, rustl
 
 The optional `postgres` feature of `branchyard`, `branchyard-server` and `branchyard-cli` depends on `postgres` and `tokio-postgres` (MIT OR Apache-2.0) and their transitive crates from crates.io, resolved from `Cargo.lock` and not vendored.
 
+`branchyard` depends directly on `blake3` (CC0-1.0 OR Apache-2.0) from crates.io for artifact content-addressing (`docs/storage.md`); it was already a transitive dependency of `branchyard-microsandbox`'s image tooling, so this adds no new entry to `Cargo.lock`'s dependency graph beyond the direct edge.
+
 `crates/branchyard-harness` depends on `agent-client-protocol-schema` (Apache-2.0) and `serde_json` (MIT OR Apache-2.0) from crates.io. Its test fixtures are redacted transcripts recorded from Claude Code 2.1.283, codex-cli 0.157.1 and claude-agent-acp 0.81.2; they contain protocol frames and harness output, not harness source. Frame shapes also follow the Agent SDK's published TypeScript types and Codex's generated JSON Schema, neither of which is vendored.
 
 Warp licenses its UI framework crates under MIT and the rest of its repository under AGPL v3. The selected harness helpers belong to the latter category. The retained MIT license text does not grant an MIT license to these helpers. See [Warp's licensing statement](https://github.com/warpdotdev/warp/tree/2f0db5c5edd8134f0e858aebbc0ecd0db2f91d38#licensing).

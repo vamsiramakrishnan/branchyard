@@ -40,6 +40,9 @@ __all__ = [
     "Merged",
     "Cancelled",
     "Children",
+    "ArtifactRef",
+    "ScratchArea",
+    "ScratchLock",
     "spawn",
     "inspect",
     "events",
@@ -48,6 +51,15 @@ __all__ = [
     "cancel",
     "children",
     "wait",
+    "publish",
+    "list_artifacts",
+    "get_artifact",
+    "share_artifact",
+    "create_scratch",
+    "list_scratch",
+    "share_scratch",
+    "lock_scratch",
+    "unlock_scratch",
 ]
 
 
@@ -146,6 +158,35 @@ class Cancelled:
 class Children:
     branch: str
     descendants: List[Dict[str, Any]]
+
+
+@dataclasses.dataclass
+class ArtifactRef:
+    """An immutable published artifact's provenance; see `docs/storage.md`."""
+
+    id: str
+    digest: str
+    size: int
+    name: str
+    media_type: str
+    publisher_branch: str
+    turn: int
+    created_at: int
+    labels: Dict[str, str]
+
+
+@dataclasses.dataclass
+class ScratchArea:
+    name: str
+    owner_branch: str
+    created_at: int
+
+
+@dataclasses.dataclass
+class ScratchLock:
+    name: str
+    holder_branch: str
+    acquired_at: int
 
 
 def _by() -> str:
@@ -266,3 +307,59 @@ def wait(branch: str, timeout: Optional[float] = None, poll: float = 1.0) -> Ins
         if deadline is not None and time.monotonic() >= deadline:
             raise RunningError("running", f"{branch} is still running after {timeout}s")
         time.sleep(poll)
+
+
+def publish(path: str, name: Optional[str] = None,
+            labels: Optional[Dict[str, str]] = None) -> ArtifactRef:
+    """Publish the file at `path` as a new immutable artifact of your
+    branch, content-addressed by its blake3 digest. Ancestors and
+    descendants of your branch can read it; a sibling needs share_artifact.
+    """
+    args = ["artifact", "publish", path]
+    if name is not None:
+        args += ["--name", name]
+    for key, value in (labels or {}).items():
+        args += ["--label", f"{key}={value}"]
+    return _make(ArtifactRef, _run(args))
+
+
+def list_artifacts() -> List[ArtifactRef]:
+    """Every artifact you may read."""
+    return [_make(ArtifactRef, item) for item in _run(["artifact", "list"])]
+
+
+def get_artifact(artifact_id: str, out: str) -> ArtifactRef:
+    """Copy an artifact's bytes to `out`, checked against its digest."""
+    return _make(ArtifactRef, _run(["artifact", "get", artifact_id, "--out", out]))
+
+
+def share_artifact(artifact_id: str, to: str) -> None:
+    """Share an artifact you may read with branch `to`."""
+    _run(["artifact", "share", artifact_id, "--to", to])
+
+
+def create_scratch(name: str) -> ScratchArea:
+    """Create scratch area `name`, owned by your branch, visible to your
+    ancestors and descendants at BRANCHYARD_SCRATCH_<NAME>.
+    """
+    return _make(ScratchArea, _run(["scratch", "create", name]))
+
+
+def list_scratch() -> List[ScratchArea]:
+    """Every scratch area you may reach."""
+    return [_make(ScratchArea, item) for item in _run(["scratch", "list"])]
+
+
+def share_scratch(name: str, to: str) -> None:
+    """Share scratch area `name` with branch `to`."""
+    _run(["scratch", "share", name, "--to", to])
+
+
+def lock_scratch(name: str) -> ScratchLock:
+    """Acquire scratch area `name`'s writer lock for your branch."""
+    return _make(ScratchLock, _run(["scratch", "lock", name]))
+
+
+def unlock_scratch(name: str) -> None:
+    """Release scratch area `name`'s lock if your branch holds it."""
+    _run(["scratch", "unlock", name])

@@ -57,7 +57,7 @@ fn a_harness_spawns_a_child_and_integrates_it_into_its_own_branch() {
         .unwrap();
     let said = reply(&f, "root");
     assert!(
-        said.contains("mcp tools: spawn,inspect,events,send,propose_integration,cancel,children"),
+        said.contains(&format!("mcp tools: {}", branchyard_mcp::TOOLS.join(","))),
         "{said}"
     );
     let spawned = result(&said, "spawn");
@@ -327,4 +327,44 @@ fn a_harness_in_a_rig_spawns_by_seat_over_mcp() {
     assert_eq!(spawned["name"], "root-worker");
     assert_eq!(spawned["seat"], "worker");
     assert_eq!(reply(&f, "root-worker"), "instructed=true");
+}
+
+#[test]
+fn artifacts_and_scratch_areas_are_reachable_over_mcp() {
+    let f = Fixture::new();
+    let prompt = [
+        r#"MCP publish_artifact {"path": "a.txt", "name": "payload.txt"}"#,
+        r#"MCP create_scratch {"name": "shared-cache"}"#,
+        r#"MCP spawn {"prompt": "MCP list_artifacts\nMCP list_scratch\nMCP lock_scratch {\"name\": \"shared-cache\"}", "name": "kid", "max_depth": 1}"#,
+        "MCP wait kid",
+    ]
+    .join("\n");
+    f.yard
+        .task(prompt)
+        .options(f.delegating(Envelope::depth(2)))
+        .name("root")
+        .run()
+        .unwrap();
+    let said = reply(&f, "root");
+    let published = result(&said, "publish_artifact");
+    assert_eq!(published["name"], "payload.txt");
+    assert!(!published["digest"].as_str().unwrap().is_empty());
+    let area = result(&said, "create_scratch");
+    assert_eq!(area["name"], "shared-cache");
+
+    // The child, a descendant of root, reads what root published and
+    // created without any explicit share.
+    let kid_said = reply(&f, "kid");
+    let listed = result(&kid_said, "list_artifacts");
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["payload.txt"]);
+    let scratch = result(&kid_said, "list_scratch");
+    assert_eq!(scratch[0]["name"], "shared-cache");
+    let lock = result(&kid_said, "lock_scratch");
+    assert_eq!(lock["holder_branch"], "kid");
 }
