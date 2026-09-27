@@ -3,9 +3,12 @@
 //! runs the `branchyard` engine in-process.
 //!
 //! This is local mode behind an API. It changes where the engine is
-//! reached, not how harnesses run: they are local processes of the
-//! server's operating-system user, with no isolation beyond it, whoever
-//! submits the work. See `docs/server.md`.
+//! reached, not how harnesses run: by default they are local processes of
+//! the server's operating-system user, with no isolation beyond it,
+//! whoever submits the work. The operator can allow requests to name the
+//! Microsandbox or Substrate provider, to give harnesses delegation, and to
+//! run profiles with unapproved tools; each is refused otherwise. See
+//! `docs/server.md` and `docs/surfaces.md`.
 //!
 //! What it guarantees:
 //!
@@ -41,9 +44,10 @@
 //!   them choose executables.
 //! - Resuming a turn after a crash: a recovered turn is interrupted, never
 //!   continued or resubmitted.
-//! - Multiple servers per data directory, or PostgreSQL. Operations persist
-//!   through the [`store::OperationStore`] trait to SQLite in the data
-//!   directory; the PostgreSQL mapping is in `docs/durability.md`.
+//! - Multiple servers per data directory or database schema. Operations
+//!   persist through the [`store::OperationStore`] trait to SQLite in the
+//!   data directory, or with the `postgres` feature and `database`, to
+//!   PostgreSQL alongside the branch state (`docs/durability.md`).
 
 pub mod api;
 pub mod auth;

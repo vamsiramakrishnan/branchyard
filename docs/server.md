@@ -2,7 +2,7 @@
 
 `branchyard-server` (also `by serve`) serves one or more repositories, each under a name, over an authenticated HTTP JSON API with Server-Sent Events. It runs the local-mode engine in-process: the same tasks, branches, event logs, budgets, policies and validated merges as `by`, reached over the network. `by --remote URL` runs every `by` command against it, and [`branchyard-client`](../crates/branchyard-client/src/lib.rs) is the typed Rust client.
 
-> **Status.** Tested hermetically over real HTTP on loopback against a fake ACP agent (49 new tests across the server, client and CLI). Not yet run against a real harness through the server, not load-tested, and not deployed. The provider is still the local process provider: **no isolation** (see [Security](#security)).
+> **Status.** Tested hermetically over real HTTP on loopback against a fake ACP agent, and on PostgreSQL 16 for the database store. Not yet run against a real harness through the server, not load-tested, and not deployed. The default provider is the local process provider: **no isolation** (see [Security](#security)). The server's operator can allow the Microsandbox and Substrate providers, delegation and unapproved tools; [surfaces](surfaces.md) lists what works on which surface.
 
 ## Running it
 
@@ -27,6 +27,11 @@ Flags (`by serve --help` or `branchyard-server --help`):
 | `--insecure-bind` | Allow plain HTTP on a non-loopback address; prints a loud warning |
 | `--harness-command H=CMD` | Launch harness `H` as `CMD` (split on spaces) when a request names no command |
 | `--allow-client-commands` | Accept a request's own `command` (see [Security](#security)) |
+| `--allow-provider P,...` | Accept requests naming these providers besides `local`: `microsandbox`, `substrate` (repeatable). Default: local only |
+| `--allow-delegation` | Accept delegation envelopes, `allow_delegation` and the spawn endpoint: harnesses get the delegation tools with this server's `by` |
+| `--by-path PATH` | The `by` a delegating harness gets. Default: this executable when it is `by` (as under `by serve`), else `by` beside it, else on `PATH` |
+| `--allow-unapproved-tools` | Accept `unapproved_tools`: profiles whose tools bypass the request's policy (Antigravity, Pi, Amp) |
+| `--database URL` | Keep branch state and operations in PostgreSQL (`postgres://user@host/db`) instead of SQLite. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
 | `--max-running N` | Operations running at once; more wait queued. Default 8 |
 | `--shutdown-grace SECS` | At shutdown, how long running operations may finish. Default 60 |
 | `--quiet` | Do not log requests |
@@ -47,11 +52,16 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "max_running": 8,
   "shutdown_grace_seconds": 60,
   "harness_commands": { "codex": ["/opt/codex/bin/codex"] },
-  "allow_client_commands": false
+  "allow_client_commands": false,
+  "allow_providers": ["substrate"],
+  "allow_delegation": false,
+  "by_path": "/usr/local/bin/by",
+  "allow_unapproved_tools": false,
+  "database": "postgres://branchyard@db.internal/branchyard"
 }
 ```
 
-The server refuses to start with no repository, no token, a token shorter than 16 characters, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens, is readable by other users.
+The server refuses to start with no repository, no token, a token shorter than 16 characters, an unknown provider name, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
 
 SIGINT or SIGTERM starts a graceful shutdown: no new connections or operations (`503 shutting_down`), event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`. A second signal stops waiting at once.
 
@@ -80,6 +90,11 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `DELETE /v1/repos/{repo}/branches/{b}` | Remove worktree and record | `{"removed": "b"}` |
 | `GET /v1/repos/{repo}/branches/{b}/diff` | Candidate diff against the base | `{"diff": "..."}` |
 | `GET /v1/repos/{repo}/branches/{b}/events?cursor=N` | Recorded events after the first `N` (default 0); a branch's events are numbered from 1 | `{"events": [RecordedEvent], "cursor": M}`; pass `M` next |
+| `POST /v1/repos/{repo}/branches/{b}/spawn` | A child of `b`, as `by spawn --parent b` makes one; needs `--allow-delegation` | `202` operation |
+| `POST /v1/repos/{repo}/branches/{b}/integrate` | Merge delegated child `b` into the branch that delegated it, as `by integrate b` | `202` operation |
+| `GET /v1/repos/{repo}/branches/{b}/inspection` | `b` as a delegating parent sees it, as `by inspect b --json` | `Inspection` |
+| `GET /v1/repos/{repo}/branches/{b}/event-page?cursor=N&limit=M` | Up to `M` (default 50, at most 200) events after the first `N`, or the most recent without a cursor, as `by events b --json` | `EventPage` |
+| `GET /v1/repos/{repo}/branches/{b}/children` | Every branch `b` delegated to, directly or below, as `by children b --json` | `Children` |
 | `GET /v1/repos/{repo}/events/stream?cursor=N` | SSE of activity across branches after feed position `N`; without a cursor, from now | `text/event-stream` |
 | `GET /v1/operations/{id}` | An operation's status and result | operation |
 
@@ -97,13 +112,24 @@ POST /v1/repos/app/tasks
   "policy": { "mode": "deny", "rules": [{ "tool": "Read", "allow": true }, { "tool": "mcp__*", "allow": false }] },
   "check": ["cargo", "test"],
   "isolated": false,
-  "command": ["/opt/claude/bin/claude"]
+  "command": ["/opt/claude/bin/claude"],
+  "provider": { "kind": "substrate", "endpoint": "http://ate:8080", "router": "http://ate:8081/{atespace}/{actor}/",
+                "template": "by-bridge", "key": "/etc/branchyard/bridge.key", "pass_env": ["ANTHROPIC_API_KEY"] },
+  "delegation": { "max_depth": 1, "max_children": 4, "harnesses": [] },
+  "allow_delegation": true,
+  "unapproved_tools": false
 }
 ```
 
 Only `prompt` is required. Give `harness` for one branch or `harnesses` for one branch each (`<name>-<harness>`), not both. `policy.mode` is `allow` or `deny` (the default); rules apply first, in order. There is no remote `ask`: the server has no terminal to ask on. `budget.max_seconds` applies per call, like the SDK's `max_duration`. `command` is refused (`403 command_not_allowed`) unless the server allows client commands; without it, the server uses its `harness_commands` entry for the harness, else the profile's executable on its `PATH`. One task runs one command, so harnesses with different configured commands must be separate tasks.
 
-`send` takes `prompt`, `budget`, `policy`, `check` and `command`; the branch keeps its harness, recorded command and environment. `fork` takes `prompt`, `name`, `fresh_session`, `harness`, `budget`, `policy`, `check`, `isolated` and `command`. `merge` takes an optional `target`, defaulting to the branch checked out in the served repository.
+`provider` is [`branchyard::Provider`](../crates/branchyard/src/lib.rs)'s serde form, tagged by `kind`: `local`, `microsandbox` or `substrate`, with [the provider's options](providers.md). Anything but `local` is refused (`403 provider_not_allowed`) unless the operator allowed that provider. Everything in it is about the server: `pass_env` names are read from **the server's environment** at each turn, a Substrate `key` must be an absolute path to a file on the server (`400` otherwise), and a Microsandbox provider needs a server built with the `microsandbox` feature on a host with KVM.
+
+`delegation` is an [`Envelope`](delegation.md#the-envelope), `{max_depth, max_children, harnesses}`, all three required; with it the harness gets the delegation tools, through the server's `by`, for each of its turns. `allow_delegation` adds the rule that allows the harness's shell commands running that `by` with a delegation subcommand, after the policy's own rules, like `by --allow-delegation`. Either is refused (`403 delegation_not_allowed`) unless the server allows delegation. `unapproved_tools` runs a profile whose driver cannot route tool approvals, like `by --allow-unapproved-tools`, and is refused (`403 unapproved_tools_not_allowed`) unless the server allows it.
+
+`send` takes `prompt`, `budget`, `policy`, `check`, `command`, `delegation`, `allow_delegation` and `unapproved_tools`; the branch keeps its harness, provider, recorded command, environment and envelope. A server that does not allow delegation refuses to send to a branch that was given an envelope, since its harness would get the tools. `fork` takes `prompt`, `name`, `fresh_session`, `harness`, `budget`, `policy`, `check`, `isolated`, `command`, `provider`, `delegation`, `allow_delegation` and `unapproved_tools`; without a provider it keeps its parent's. `merge` takes an optional `target`, defaulting to the branch checked out in the served repository.
+
+`spawn` takes `prompt`, `harness`, `name`, `base`, `budget`, `policy`, `check`, `max_depth`, `deny` and `unapproved_tools`, the flags of `by spawn`. It acts with the server's authority as a person, as `by spawn --parent` does locally: the parent's envelope bounds the child exactly as it bounds a local spawn, and a parent without delegation cannot spawn. The operation runs the child's first turn, waits for the parent's subtree on this server as the local command does, and its result holds the child's `inspection`. `integrate` takes `{}` and refuses (`403 denied`) a branch no other branch delegated; its result holds `merged`. The inspection, event page and children reads act with the same authority and need no opt-in.
 
 `cancel` takes an empty object, `{}`. It is not an operation: it records a durable cancel request for the branch's running turn and each running turn delegated below it, and answers `200` with the branches that were running (an empty list when none was, and for a repeat). The engine running each turn, in the server or in another process on the repository such as a local `by run`, observes the request within 100 ms, interrupts the harness, and ends the branch `interrupted`; the operation that ran the turn then succeeds with that status. The branch's log records `cancelled by <token name> through the server`. It ignores branch locks, since the branches it is for are the ones an operation holds, and needs no idempotency key.
 
@@ -116,7 +142,7 @@ Task, send, fork and merge are long operations. The server validates the request
   "branches": ["flaky"], "cursor": 41, "created_at_ms": 1790000000000 }
 ```
 
-`state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` (`{"branches": [BranchInfo]}`, plus `{"merged": {"branch", "target", "previous", "commit"}}` for a merge) or `error` (`{"code", "message", "detail"}`). A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
+`kind` is `task`, `send`, `fork`, `merge`, `spawn` or `integrate`. `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
 
 `branches` are the names planned at acceptance. `cursor` is the feed position at acceptance and `end_cursor` the position once the operation's activity was ingested: to watch one operation, stream from `cursor` until the operation finishes and the stream reaches `end_cursor`, keeping entries for its branches. That is what `by --remote … run` does.
 
@@ -155,6 +181,9 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `unsupported_media_type` | 415 | `POST` body not declared as JSON |
 | `body_too_large` | 413 | Body over `max_body_bytes`; `detail.limit` |
 | `command_not_allowed` | 403 | A request `command` on a server that does not allow them |
+| `provider_not_allowed` | 403 | A provider the server's operator did not allow; `detail.provider` |
+| `delegation_not_allowed` | 403 | A delegation envelope, `allow_delegation`, a spawn, or a send to a branch with an envelope, on a server that does not allow delegation |
+| `unapproved_tools_not_allowed` | 403 | `unapproved_tools` on a server that does not allow them |
 | `idempotency_key_reused` | 422 | Same key, different request; `detail.operation` |
 | `branch_busy` | 409 | Another operation holds the branch; `detail.holder` |
 | `cursor_out_of_range` | 400 | Stream cursor past the feed's end; `detail.head` |
@@ -164,6 +193,8 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `internal`, `git_error`, `io_error`, `state_error`, `harness_error`, `not_a_repository` | 500 | Server-side failure |
 | `branch_exists`, `no_candidate`, `target_moved`, `conflict`, `dirty_target`, `already_merged`, `running`, `fenced` | 409 | SDK refusals; `target_moved` has `detail.expected`/`actual`, `conflict` has `detail.files`. `running`: another engine, such as a local `by`, runs a turn on the branch. `fenced`: the engine lost the branch's lease to another |
 | `invalid_name`, `unknown_harness` | 400 | SDK refusals |
+| `denied` | 403 | The envelope or authority refused a delegation operation, as `by --json` reports `denied` |
+| `remote_error` | 502 | An error the engine running a delegating turn returned through its broker; `detail.kind` is its kind |
 | `harness_unavailable`, `unsupported`, `check_failed`, `check_timed_out`, `check_not_started`, `invalid_candidate` | 422 | SDK refusals; check failures have `detail.output_tail` |
 
 ## Remote mode in `by`
@@ -176,7 +207,9 @@ by fan "..." --harness claude-code,codex --yes
 by ls; by diff flaky; by merge flaky; by watch; by cancel flaky
 ```
 
-Global options go before the command: `--remote URL`, `--token-file FILE`, `--repo NAME` (needed when the server serves several), `--ca-file FILE` (extra trust for `https`). Each has an environment variable: `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO`, `BRANCHYARD_CA_FILE`. Output is the local output: the CLI renders the same SDK values with the same code, and a test compares each command's output, `watch` aside, local against remote. Differences: `--ask` is refused (pass `--yes`, or leave requests denied); without `--yes` requests are denied; worktree paths are the server's; `by harnesses` shows the server's `PATH`. Interrupting `by run` stops watching, not the work; `by cancel` stops the work.
+Global options go before the command: `--remote URL`, `--token-file FILE`, `--repo NAME` (needed when the server serves several), `--ca-file FILE` (extra trust for `https`). Each has an environment variable: `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO`, `BRANCHYARD_CA_FILE`. Output is the local output: the CLI renders the same SDK values with the same code, and tests compare each command's output, `watch` aside, local against remote, including the `--json` output of `spawn`, `inspect`, `events`, `children`, `integrate` and `send`.
+
+Every command runs remotely, with the same flags: `--provider` and its options, `--delegate`, `--allow-delegation` and `--allow-unapproved-tools` are sent in the request, and the server refuses what its operator did not allow. `spawn` needs `--parent`, as outside a harness locally, and the child runs on the server. Differences: `--ask` is refused (pass `--yes`, or leave requests denied); without `--yes` requests are denied; worktree paths, `--substrate-key` (which must be absolute) and `--pass-env` values are the server's; `by harnesses` shows the server's `PATH`. With `--json`, a server error prints `{"error": {"kind", "message"}}` with the kind local `by` reports (the server's `git_error` is `git`, and so on), and a server that cannot be reached is `unavailable`. Interrupting `by run` stops watching, not the work; `by cancel` stops the work. `by run --delegate` follows the activity of the children the branch spawns, and prints the `delegated` table once they have finished on the server.
 
 ## Deployment notes
 
@@ -185,27 +218,43 @@ Global options go before the command: `--remote URL`, `--token-file FILE`, `--re
 - **Harnesses** run as the server's user, with its `PATH`, `HOME` and harness logins. Install and log in the harnesses as that user, or set `harness_commands`.
 - **Limits.** Request bodies are bounded (`max_body_bytes`, default 1 MiB), request heads must arrive within 30 seconds, at most 256 requests are handled at once (more wait), and at most `max_running` operations run at once (more queue). There is no per-request deadline beyond those, and no rate limiting per token.
 - **Health.** `GET /healthz` needs no token. Each request is logged to stderr as `request-id method path status duration`, never with headers or bodies.
-- **Backups.** Branch state and event logs are each repository's `.branchyard/state.db`, with worktrees under `.branchyard/worktrees/`; server state is `DATA-DIR/state.db` (operations, idempotency keys). Both are SQLite databases in write-ahead-log mode: back them up with `sqlite3 FILE ".backup COPY"` or while the server is stopped, not by copying the file alone. Both grow without bound for now. An `operations.jsonl` from an earlier version is imported on first start and renamed `operations.jsonl.imported`; `DATA-DIR/feeds/` is no longer used.
+- **Backups.** Branch state and event logs are each repository's `.branchyard/state.db`, with worktrees under `.branchyard/worktrees/`; server state is `DATA-DIR/state.db` (operations, idempotency keys). Both are SQLite databases in write-ahead-log mode: back them up with `sqlite3 FILE ".backup COPY"` or while the server is stopped, not by copying the file alone. With `--database`, both are in PostgreSQL instead: back it up with `pg_dump` of the schema. Either way they grow without bound for now. An `operations.jsonl` from an earlier version is imported on first start and renamed `operations.jsonl.imported`; `DATA-DIR/feeds/` is no longer used.
+- **Providers and delegation.** Allow a provider only once its cluster, image or runtime is set up for this server (see [providers](providers.md)); the credentials a turn gets are the server's `pass_env` variables. Delegation runs children on the server's threads and gives harnesses the server's `by`, which must be the same version as the server.
 
 ## What is durable
 
 | State | Where | Survives a restart |
 |---|---|---|
-| Branches, candidates, event logs, the activity feed | Each repository's `.branchyard/state.db`, written by the engine in transactions | Yes |
-| Operations and idempotency keys | `DATA-DIR/state.db`, committed with `synchronous=FULL` before `202` and at each state change | Yes; unfinished ones become `interrupted` |
-| Cancel requests, `max_duration` deadlines, turn leases, journaled steps, harness process identities | Each repository's `.branchyard/state.db` | Yes |
+| Branches, candidates, event logs, the activity feed | Each repository's `.branchyard/state.db`, or the database with `--database`, written by the engine in transactions | Yes |
+| Operations and idempotency keys | `DATA-DIR/state.db` committed with `synchronous=FULL`, or the database's `by_operations` table committed with `synchronous_commit = on`, before `202` and at each state change | Yes; unfinished ones become `interrupted` |
+| Cancel requests, `max_duration` deadlines, turn leases, journaled steps, harness process identities | Each repository's `.branchyard/state.db`, or the database | Yes |
 | Branch locks | Memory | No; they end with the operations |
 | A turn in progress | The server process and its harness child | No: it is recovered, not continued |
 
 If the server dies mid-turn, the operation becomes `interrupted` at the next start, and opening the repository recovers the branch: the engine kills the harness's process group if its pid and start time still match, ends the branch `interrupted` with a `recovered` event that says whether the prompt had been submitted, and never submits it again. The server also recovers every 30 seconds, which covers a local `by run` on a served repository that was killed. [Durability](durability.md) describes the leases, the journal and the recovery rules, and what is not guaranteed.
 
-Not durable yet:
+## PostgreSQL
 
-- **PostgreSQL.** The design's store is PostgreSQL with PGMQ (see [design §8](design.md#8-durable-execution-using-existing-queues)): accepted operations and their commands committed in one transaction, delivered through a queue with reconciliation. The engine's `Backend` trait and the registry's `OperationStore` trait in [`store.rs`](../crates/branchyard-server/src/store.rs) (`load`, and a `save` that must be durable before returning) are the seams; [durability](durability.md#postgresql) maps each operation onto PostgreSQL. Multiple replicas need that store, with branch locks moved into the database as well.
+Build with the `postgres` feature (`cargo install --locked --path crates/branchyard-cli --features postgres`, or `-p branchyard-server --features postgres`), then:
+
+```sh
+by serve --database 'postgres://branchyard@db.internal/branchyard' --repo app=/srv/app
+```
+
+Each served repository's branch records, event log and feed, leases, journaled steps, harness processes and cancels are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations` table. Tables are created when missing, in the connection's `search_path` schema, so one schema per server: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token.
+
+What it is not yet:
+
+- **Several servers on one schema.** Each registry recovers the other's unfinished operations as interrupted, branch locks are in each server's memory, and nothing delivers accepted operations through a queue: design §8's PGMQ is not built. One server per schema.
+- **Shared with local `by`.** A local `by` on a served repository opens its SQLite `state.db` and sees none of the server's branches; use `by --remote`. Nothing is imported from an existing `state.db` when a repository moves to the database.
+- **TLS to the database.** Connections are plain; keep the database on a trusted network or a Unix socket.
+- **Waits** poll every 100 ms, as SQLite's do across processes; nothing listens for `NOTIFY`.
 
 ## Security
 
-- **No isolation, even remotely.** The server runs harnesses with the local process provider: as the server's operating-system user, with its environment, home and credentials. A remote caller with a token and `--yes` (policy `allow`) can make a harness do anything that user can. Serving a repository is granting its token holders that user's authority. Run the server as a dedicated, unprivileged user on a machine you are willing to hand over; qualified sandbox providers (design §4, M2) are what change this.
+- **No isolation by default, even remotely.** Unless a request names an allowed sandbox provider, the server runs harnesses with the local process provider: as the server's operating-system user, with its environment, home and credentials. A remote caller with a token and `--yes` (policy `allow`) can make a harness do anything that user can. Serving a repository is granting its token holders that user's authority. Run the server as a dedicated, unprivileged user on a machine you are willing to hand over. `--allow-provider` does not restrict callers to that provider; they may still ask for `local`. Neither sandbox provider is qualified yet (design §4, M2).
+- **Allowed providers use the server's credentials.** A token holder chooses which of the server's variables a sandboxed turn gets through `pass_env`, and which Substrate endpoint, router and key path it uses.
+- **Delegation** gives the server's harnesses the delegation tools, bounded by the envelope. As in local mode, a harness running as the server's user can read other branches' tokens in `.branchyard/`; the envelope stops honest mistakes, not a hostile harness, until harnesses run in sandboxes. `--allow-unapproved-tools` lets token holders run profiles whose tools the request's policy never sees.
 - **`allow_client_commands`** additionally lets any token holder choose the executable the server launches. Leave it off outside tests; configure `harness_commands` instead.
 - **Tokens are all-powerful and equal.** No scopes, no per-repository access, no expiry or rotation beyond editing the configuration and restarting. Treat each as the server user's password.
 - **Plain HTTP** exposes tokens, prompts and code to anyone on the path. The server refuses it off loopback unless told `--insecure-bind`.
@@ -216,6 +265,6 @@ Not durable yet:
 
 | Crate | Contents |
 |---|---|
-| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its store, the activity feed, routes, TLS and shutdown |
+| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown. Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs) |
 | [`branchyard-client`](../crates/branchyard-client/src/lib.rs) | Wire types, a blocking HTTP/1.1 client over rustls, an SSE parser, and a reconnecting event stream |
 | [`branchyard-cli`](../crates/branchyard-cli/src/main.rs) | `by serve`, remote mode and `by watch` |

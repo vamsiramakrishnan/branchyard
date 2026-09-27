@@ -2,7 +2,7 @@
 
 Branchyard's engine keeps its state in one durable store and runs every branch operation as journaled steps under a fenced lease. A process that dies mid-turn leaves a record that the next engine to open the repository can reconcile: it kills what the dead engine left running, says truthfully what happened to the turn, and never runs the model turn again.
 
-> **Status.** Implemented in local mode and the server, and tested hermetically against a fake ACP agent: a real engine process killed with SIGKILL mid-turn and recovered, two yards on one repository, a superseded lease, replayed steps, cancellation through the SDK, `by`, HTTP and `by --remote`, cursor reads, and the import of earlier state. Not yet run with a real harness, on macOS, across hosts, or under load. The PostgreSQL mapping below is a design, not code.
+> **Status.** Implemented in local mode and the server, and tested hermetically against a fake ACP agent: a real engine process killed with SIGKILL mid-turn and recovered, two yards on one repository, a superseded lease, replayed steps, cancellation through the SDK, `by`, HTTP and `by --remote`, cursor reads, and the import of earlier state. The PostgreSQL store passes the same conformance suite as SQLite, and the engine and server tests that run on it, against PostgreSQL 16. Not yet run with a real harness, on macOS, across hosts, or under load.
 
 ## The model
 
@@ -15,7 +15,7 @@ The approach follows Temporal and DBOS, with one deliberate difference.
 
 ## The store
 
-`Store` ([`state.rs`](../crates/branchyard/src/state.rs)) is the engine's only access to durable state. It forwards to a `Backend` trait, the one abstraction: branch records, the event log, journaled steps, leases, harness process identities and cancel requests. Local mode uses [`sqlite.rs`](../crates/branchyard/src/sqlite.rs): SQLite through `rusqlite` 0.39 with the bundled library, at `.branchyard/state.db`, in write-ahead-log mode.
+`Store` ([`state.rs`](../crates/branchyard/src/state.rs)) is the engine's only access to durable state. It forwards to a `Backend` trait, the one abstraction: branch records, the event log, journaled steps, leases, harness process identities and cancel requests. Local mode uses [`sqlite.rs`](../crates/branchyard/src/sqlite.rs): SQLite through `rusqlite` 0.39 with the bundled library, at `.branchyard/state.db`, in write-ahead-log mode. A server started with `--database` uses [`pg.rs`](../crates/branchyard/src/pg.rs) instead (see [PostgreSQL](#postgresql)).
 
 Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it guards commit together, and writers in other processes wait (up to 30 seconds) rather than fail. Records, leases, steps, processes and cancels commit with `synchronous=FULL`. Event appends commit with `synchronous=NORMAL`: they survive a process crash, but an operating-system crash or power loss can lose the last appends before it; the next `FULL` commit makes every earlier append durable too.
 
@@ -116,29 +116,49 @@ The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-
 
 ## PostgreSQL
 
-The server's store is meant to be PostgreSQL (design §7–§8, §11). The `Backend` trait and the server's `OperationStore` are the seams; nothing above them changes. The mapping:
+[`pg.rs`](../crates/branchyard/src/pg.rs) implements the same `Backend` on PostgreSQL, behind the cargo feature `postgres` (the `postgres` 0.19 crate, the synchronous client over `tokio-postgres`). `Yard::open_postgres(path, url, scope)` opens a repository with it, and `by serve --database URL` opens every served repository that way, with its served name as the scope; the server's `OperationStore` is the `by_operations` table in the same database ([`store.rs`](../crates/branchyard-server/src/store.rs)). Nothing above the two traits changed.
 
-| Local SQLite | PostgreSQL |
+| SQLite | PostgreSQL |
 |---|---|
-| `BEGIN IMMEDIATE` with the fence check inside | `BEGIN`; `SELECT … FROM leases WHERE branch = $1 FOR UPDATE`; compare incarnation and generation; write; `COMMIT` |
-| `branches.incarnation` autoincrement | `bigint GENERATED ALWAYS AS IDENTITY`; `name` unique among live rows, scoped by repository and tenant |
-| `acquire` (insert or bump the lease and write the record) | `INSERT … ON CONFLICT (branch) DO UPDATE … WHERE leases.owner IS NULL RETURNING generation`, in the same transaction as the record |
-| `take_over` | `UPDATE leases SET generation = generation + 1, owner = $2 … WHERE branch = $1 AND generation = $observed AND owner IS NOT NULL`; one row updated wins |
-| Lease expiry, heartbeat | `expires_at timestamptz` compared with the database's `now()`, not the engine's clock |
-| `steps`, `processes`, `cancels` | Same tables; `jsonb` for intents and outcomes; `INSERT … ON CONFLICT DO NOTHING` for the first cancel |
-| `events.id` feed positions in commit order | A sequence is *not* commit-ordered across concurrent transactions. Assign positions from a per-repository counter row locked in the appending transaction (`UPDATE feed_heads SET head = head + 1 … RETURNING head`), or read the feed only up to the oldest in-flight transaction's position |
-| In-process wakeups, 100 ms polling across processes | `NOTIFY` after commit as a hint, with bounded polling as the recovery path (design §8) |
-| `synchronous=FULL` / `NORMAL` | `synchronous_commit = on` for records, leases, steps; `off` is acceptable only for events, with the same caveat |
-| Startup and periodic recovery | A reconciler that selects stale leases (`expires_at < now()`) with `FOR UPDATE SKIP LOCKED` |
-| Operation registry | An `operations` table in the same database, written with the accepted command in one transaction and delivered through PGMQ, as design §8 describes |
+| `BEGIN IMMEDIATE`: writers serialize; the fence check and the write commit together | `SERIALIZABLE` transactions, retried from the start on a serialization failure or deadlock for up to 30 seconds; the fence check reads the lease in the writing transaction |
+| One database per repository | One database, or schema, for many: every table carries the repository's scope. Tables are created when missing in the connection's `search_path` schema, under an advisory lock, and the schema version is checked |
+| `branches.incarnation` autoincrement, `name` unique | `bigint GENERATED ALWAYS AS IDENTITY`, `(repo, name)` unique |
+| `acquire`, `take_over`, `renew`, `finish` | The same statements; `take_over` updates only the observed generation, so one engine wins |
+| `events.id` autoincrement is the feed position | A per-repository counter row (`by_feed_heads`) incremented in the appending transaction. Appends to one repository serialize on it, so positions are assigned in commit order: a reader that sees position *N* sees every position before it. A plain sequence would not guarantee that |
+| `synchronous=FULL`; `NORMAL` for event appends | `synchronous_commit = on`; `off` for event appends, with the same caveat |
+| JSON as text | JSON as text, so it reads back exactly as written |
+| In-process wakeups; 100 ms polling across processes | The same: waits poll every 100 ms. Nothing listens for `NOTIFY` |
+| Lease expiry from the engines' clocks | The same; engines on several hosts need synchronized clocks |
+| Startup and periodic recovery | The same recovery code, over the database's leases |
 
-Process identity then comes from the node that runs the harness, which reports its observed allocations on reconnect (design §11); the server rejects stale generations from it.
+The client blocks; a call made on a Tokio runtime's thread, such as the server's, runs on a thread of its own. The connection is reopened when it closes. Connections have no TLS.
+
+Not built: delivering accepted operations through PGMQ in the same transaction (design §8), branch locks in the database, several servers on one schema, a reconciler that claims stale leases with `FOR UPDATE SKIP LOCKED`, and importing an existing `state.db`.
+
+### Running its tests
+
+The PostgreSQL tests run when `BY_TEST_POSTGRES_URL` names a database in which they may create tables and schemas; without it they print that they were skipped. PostgreSQL's `initdb` refuses to run as root, so on a machine where you are root, run the cluster as an unprivileged user:
+
+```sh
+D=/tmp/branchyard-pg; mkdir -p $D && chown nobody:nogroup $D
+runuser -u nobody -- /usr/lib/postgresql/16/bin/initdb -D $D/data -U postgres --auth=trust
+runuser -u nobody -- /usr/lib/postgresql/16/bin/pg_ctl -D $D/data -l $D/log -w start \
+  -o "-p 54329 -k $D -c listen_addresses=127.0.0.1"
+export BY_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:54329/postgres
+F=branchyard/postgres,branchyard-server/postgres,branchyard-cli/postgres
+cargo test -p branchyard -p branchyard-server -p branchyard-cli --locked --offline --features $F
+runuser -u nobody -- /usr/lib/postgresql/16/bin/pg_ctl -D $D/data stop   # afterwards
+```
+
+As any other user, drop `runuser -u nobody --`. The CI job `postgres` in [`check.yml`](../.github/workflows/check.yml) runs the same tests against a `postgres:16` service container.
 
 ## Code and tests
 
 | Where | What |
 |---|---|
-| [`state.rs`](../crates/branchyard/src/state.rs), [`sqlite.rs`](../crates/branchyard/src/sqlite.rs) | The store, the `Backend` trait, leases and heartbeat, the SQLite backend and the import |
+| [`state.rs`](../crates/branchyard/src/state.rs), [`sqlite.rs`](../crates/branchyard/src/sqlite.rs), [`pg.rs`](../crates/branchyard/src/pg.rs) | The store, the `Backend` trait, leases and heartbeat, the SQLite backend and the import, the PostgreSQL backend |
+| [`conformance.rs`](../crates/branchyard/src/conformance.rs) | One suite, run against both backends: fencing, expiry, steps and processes, cancels, records and children, events and the feed, concurrent appends, and races for a name, a lease and a takeover |
+| [`tests/postgres.rs`](../crates/branchyard/tests/postgres.rs), the server's [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs) | A task through merge, waits across yards, two yards and a cancel, a killed engine recovered, and a server's branches and operations across a restart, all on PostgreSQL |
 | [`engine.rs`](../crates/branchyard/src/engine.rs), [`run.rs`](../crates/branchyard/src/run.rs), [`ops.rs`](../crates/branchyard/src/ops.rs) | Journaled steps of a turn, of branch creation, merge and removal |
 | [`recover.rs`](../crates/branchyard/src/recover.rs), [`proc.rs`](../crates/branchyard/src/proc.rs) | Recovery and process identity |
 | [`tests/durable.rs`](../crates/branchyard/tests/durable.rs) | A killed engine recovered (orphaned harness and its child killed, prompt received once, session continued), a crash before submit, two yards, a superseded lease, a replayed snapshot, a merge cut short, cursors and waits, the import |
