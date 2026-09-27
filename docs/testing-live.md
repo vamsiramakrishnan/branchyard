@@ -192,6 +192,27 @@ The Substrate provider has run only against the in-process fake. On a machine wi
 
 **Record:** in [validation](validation.md), with the harness versions; correct [provisioning](provisioning.md) for every path or variable a harness does not read, and mark the harness's provisioning unverified until it does.
 
+## 8. Herdr plugin (no model calls)
+
+The [Herdr plugin](../plugins/herdr/README.md) has run only against a fake `herdr`. With Herdr 0.9.1 or newer installed and a `by serve` running (section 4; the fake ACP agent is enough, `--allow-client-commands` and `--command path/to/fake-acp-agent`):
+
+```sh
+cargo build --release --locked -p branchyard-herdr -p branchyard-cli
+herdr plugin link "$PWD/plugins/herdr"
+printf 'BRANCHYARD_REMOTE=%s\nBRANCHYARD_TOKEN_FILE=%s\n' "$BRANCHYARD_REMOTE" "$BRANCHYARD_TOKEN_FILE" \
+  > "$(herdr plugin config-dir branchyard)/config.env"
+herdr                                          # then, from another terminal:
+herdr plugin action invoke branchyard.start
+```
+
+- `herdr plugin list` shows the plugin with no warnings; `herdr plugin action list --plugin branchyard` lists `start`, `merge`, `cancel` and `send`.
+- `by run "WRITE a.txt=1" --name a --yes` and `by run HANG --name h --yes`: one tab each, named `by: <branch>`, not focused, showing `by log --follow`; the sidebar shows `h` working and `a` idle with `ready to merge` (`herdr pane get <pane>` shows the agent and status).
+- Focus `h`'s tab and invoke `branchyard.cancel`: a notification, then `h` idle with `interrupted`. Focus `a` and invoke `branchyard.merge`: `merged into main`. `branchyard.send` opens a popup; a prompt typed there runs `by send`.
+- Restart `by serve` on the same port: the bridge prints `reconnecting after cursor N` and a new branch still gets a tab. Close a branch's tab and send to the branch: a new tab opens. Close the bridge's tab and start it again: no new tabs.
+- A local `by run "PERMISSION WRITE p.txt=1" --ask` in the served repository, left unanswered: its tab shows `blocked` within a second.
+
+**Record:** in [the plugin's README](../plugins/herdr/README.md) and [validation](validation.md), with the Herdr version; fix any call Herdr refuses.
+
 ## Cleaning up
 
 `by rm <branch>` for each branch, `by ls` empty, no `by/…` worktrees left (`git worktree list`), no stray harness processes, and the spending recorded.
