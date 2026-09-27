@@ -31,8 +31,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::{watch, Notify};
 
-use crate::auth::Tokens;
-use crate::config::Config;
+use crate::auth::Credentials;
+use crate::config::{Config, Principal, TenantPolicy};
 use crate::error::{self, ApiError};
 use crate::feed::Feed;
 use crate::ops::{Finished, Job, NewOperation, Registry};
@@ -46,7 +46,7 @@ const STREAM_BATCH: usize = 256;
 pub struct App {
     pub repos: BTreeMap<String, RepoState>,
     pub registry: Arc<Registry>,
-    pub tokens: Tokens,
+    pub credentials: Credentials,
     pub config: Config,
     pub shutdown: watch::Receiver<bool>,
     /// Idempotency cache for the storage routes (artifacts, scratch
@@ -66,9 +66,53 @@ pub struct RepoState {
 
 pub(crate) type Shared = Arc<App>;
 
-/// The authenticated caller: its token's configured name.
+/// The authenticated caller: the principal its bearer token verified as.
+/// Requests never carry a `tenant_id`; every caller's tenant comes only
+/// from here. See `docs/server.md#identity-and-scopes`.
 #[derive(Clone)]
-pub struct Caller(pub String);
+pub struct Caller(pub Principal);
+
+impl Caller {
+    /// The subject name recorded for idempotency, audit and the operation
+    /// registry's `busy` messages.
+    pub fn name(&self) -> &str {
+        &self.0.name
+    }
+
+    pub fn tenant(&self) -> &str {
+        &self.0.tenant
+    }
+}
+
+fn scope_required(scope: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "scope_required",
+        format!("this request needs the {scope} scope"),
+    )
+    .detail(serde_json::json!({ "scope": scope }))
+}
+
+fn usd_quota_exceeded(limit: &str, tenant: &str, max: f64, spent: f64) -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "quota_exceeded",
+        format!(
+            "tenant {tenant} is at its {limit} quota (${spent:.4} of ${max:.4}); ask the \
+             operator to raise it"
+        ),
+    )
+    .detail(serde_json::json!({ "tenant": tenant, "limit": limit, "max": max, "spent": spent }))
+}
+
+fn repo_not_allowed(repo: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "repo_not_allowed",
+        format!("this principal may not act on repository {repo}"),
+    )
+    .detail(serde_json::json!({ "repo": repo }))
+}
 
 impl App {
     pub(crate) fn repo(&self, name: &str) -> Result<&RepoState, ApiError> {
@@ -79,6 +123,146 @@ impl App {
                 format!("no repository named {name}"),
             )
         })
+    }
+
+    /// `repo` with `caller` authorized to use it with `scope`: the caller
+    /// holds the scope, and its tenant and any repository allowlist of its
+    /// own both admit `repo`. See `docs/server.md#quotas` for the tenant
+    /// model this enforces (repositories belong to tenants).
+    pub(crate) fn authorized_repo(
+        &self,
+        caller: &Caller,
+        name: &str,
+        scope: &str,
+    ) -> Result<&RepoState, ApiError> {
+        let repo = self.repo(name)?;
+        if !caller.0.allows(scope) {
+            return Err(scope_required(scope));
+        }
+        let policy = self.config.tenant_policy(caller.tenant());
+        if !caller.0.repo_allowed(&policy, name) {
+            return Err(repo_not_allowed(name));
+        }
+        Ok(repo)
+    }
+
+    /// This caller's tenant policy.
+    pub(crate) fn tenant_policy(&self, caller: &Caller) -> TenantPolicy {
+        self.config.tenant_policy(caller.tenant())
+    }
+
+    /// Repositories `caller`'s tenant (and, if narrower, the caller itself)
+    /// may see.
+    pub(crate) fn visible_repos<'a>(
+        &'a self,
+        caller: &'a Caller,
+    ) -> impl Iterator<Item = &'a RepoState> {
+        let policy = self.config.tenant_policy(caller.tenant());
+        self.repos
+            .values()
+            .filter(move |r| caller.0.repo_allowed(&policy, &r.name))
+    }
+
+    /// Every repository `tenant` owns, regardless of any one principal's
+    /// own narrower allowlist: quotas are per tenant, over everything it
+    /// can reach.
+    pub(crate) fn tenant_repos<'a>(
+        &'a self,
+        tenant: &'a str,
+    ) -> impl Iterator<Item = &'a RepoState> + 'a {
+        let policy = self.config.tenant_policy(tenant);
+        self.repos
+            .values()
+            .filter(move |r| policy.allows_repo(&r.name))
+    }
+
+    /// `max_branches`, `max_cost_usd` and `max_artifact_bytes`, checked
+    /// live against durable state before a branch-creating operation
+    /// (task, fork, reincarnate, spawn) or an artifact publish is
+    /// admitted. Best-effort, unlike `max_running`: this is not taken
+    /// under the operation registry's lock, so two requests racing past
+    /// the same near-limit tenant can both be admitted; it is exact once
+    /// they settle, and, being read from durable branch and artifact
+    /// state rather than an in-memory counter, needs no recovery of its
+    /// own after a restart. See `docs/server.md#quotas`.
+    async fn check_admission_quotas(
+        self: &Arc<Self>,
+        caller: &Caller,
+        policy: &TenantPolicy,
+    ) -> Result<(), ApiError> {
+        if policy.max_branches.is_none()
+            && policy.max_cost_usd.is_none()
+            && policy.max_artifact_bytes.is_none()
+        {
+            return Ok(());
+        }
+        let yards: Vec<Yard> = self
+            .tenant_repos(caller.tenant())
+            .map(|r| r.yard.clone())
+            .collect();
+        let (branches, cost, artifact_bytes) = blocking(move || {
+            let mut branches = 0usize;
+            let mut cost = 0.0f64;
+            let mut artifact_bytes = 0u64;
+            // Deduplicated by digest: `Yard::artifacts` is reader-scoped
+            // (what a branch may read, including ancestors' and shared
+            // ones), so the same artifact appears once per branch that can
+            // reach it; a tenant's total counts its bytes once.
+            let mut seen_digests = std::collections::HashSet::new();
+            for yard in &yards {
+                let infos = yard.branches()?;
+                branches += infos.len();
+                cost += infos.iter().filter_map(|b| b.cost_usd).sum::<f64>();
+                for info in &infos {
+                    for artifact in yard.artifacts(&info.name)? {
+                        if seen_digests.insert(artifact.digest.clone()) {
+                            artifact_bytes += artifact.size;
+                        }
+                    }
+                }
+            }
+            Ok::<_, branchyard::Error>((branches, cost, artifact_bytes))
+        })
+        .await?
+        .map_err(|e| error::sdk(&e))?;
+        if let Some(max) = policy.max_branches {
+            if branches >= max {
+                return Err(crate::ops::quota_exceeded(
+                    "max_branches",
+                    caller.tenant(),
+                    max,
+                    branches,
+                ));
+            }
+        }
+        if let Some(max) = policy.max_cost_usd {
+            if cost >= max {
+                return Err(usd_quota_exceeded(
+                    "max_cost_usd",
+                    caller.tenant(),
+                    max,
+                    cost,
+                ));
+            }
+        }
+        if let Some(max) = policy.max_artifact_bytes {
+            if artifact_bytes >= max {
+                return Err(ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "quota_exceeded",
+                    format!(
+                        "tenant {} is at its max_artifact_bytes quota ({artifact_bytes} of \
+                         {max}); ask the operator to raise it",
+                        caller.tenant()
+                    ),
+                )
+                .detail(serde_json::json!({
+                    "tenant": caller.tenant(), "limit": "max_artifact_bytes", "max": max,
+                    "reserved": artifact_bytes
+                })));
+            }
+        }
+        Ok(())
     }
 
     /// The command for a new branch: the request's own when allowed, else
@@ -438,9 +622,9 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    match app.tokens.verify(header) {
-        Some(name) => {
-            let caller = Caller(name.to_owned());
+    match app.credentials.verify(header) {
+        Some(principal) => {
+            let caller = Caller(principal.clone());
             request.extensions_mut().insert(caller);
             next.run(request).await
         }
@@ -538,7 +722,7 @@ fn idempotency(
             ApiError::bad_request("Idempotency-Key must be 1 to 255 visible ASCII characters")
         })?;
     Ok(Some(Idempotency {
-        caller: caller.0.clone(),
+        caller: caller.name().to_owned(),
         key: key.to_owned(),
         fingerprint: fingerprint(&format!("{route}\n{canonical}")),
     }))
@@ -621,11 +805,14 @@ fn finished(branches: Vec<Branch>) -> Result<OperationResult, branchyard::Error>
     })
 }
 
-async fn repos(State(app): State<Shared>) -> Json<RepoList> {
+/// Every repository the caller's tenant (and its own allowlist, if
+/// narrower) may see. A single-token caller in the unconfigured default
+/// tenant sees every served repository, unchanged from before tenants
+/// existed.
+async fn repos(State(app): State<Shared>, Extension(caller): Extension<Caller>) -> Json<RepoList> {
     Json(RepoList {
         repos: app
-            .repos
-            .values()
+            .visible_repos(&caller)
             .map(|r| RepoEntry {
                 name: r.name.clone(),
                 root: r.yard.root().display().to_string(),
@@ -634,10 +821,15 @@ async fn repos(State(app): State<Shared>) -> Json<RepoList> {
     })
 }
 
-async fn harnesses(State(app): State<Shared>) -> Result<Json<HarnessList>, ApiError> {
+async fn harnesses(
+    State(app): State<Shared>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Json<HarnessList>, ApiError> {
+    if !caller.0.allows("read") {
+        return Err(scope_required("read"));
+    }
     let yard = app
-        .repos
-        .values()
+        .visible_repos(&caller)
         .next()
         .map(|r| r.yard.clone())
         .ok_or_else(|| ApiError::internal("no repositories"))?;
@@ -645,17 +837,23 @@ async fn harnesses(State(app): State<Shared>) -> Result<Json<HarnessList>, ApiEr
     Ok(Json(HarnessList { harnesses: list }))
 }
 
+/// An operation only its own tenant may read: another tenant's, like an
+/// unknown ID, is `404`, so a principal cannot tell the two apart.
 async fn operation(
     State(app): State<Shared>,
     Path(id): Path<String>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<Operation>, ApiError> {
-    app.registry.get(&id).map(Json).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "unknown_operation",
-            format!("no operation {id}"),
-        )
-    })
+    app.registry
+        .get_for_tenant(&id, caller.tenant())
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "unknown_operation",
+                format!("no operation {id}"),
+            )
+        })
 }
 
 async fn post_task(
@@ -665,7 +863,7 @@ async fn post_task(
     headers: HeaderMap,
     JsonBody(request, canonical): JsonBody<TaskRequest>,
 ) -> Result<Response, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
     let route = format!("POST /v1/repos/{}/tasks", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
     if let Some(op) = idem
@@ -684,6 +882,8 @@ async fn post_task(
             "give harness for one branch or harnesses for several, not both",
         ));
     }
+    let policy = app.tenant_policy(&caller);
+    app.check_admission_quotas(&caller, &policy).await?;
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let provider = app.provider(request.provider.clone())?;
     app.opt_ins(
@@ -763,6 +963,8 @@ async fn post_task(
         branches: planned,
         cursor,
         idempotency: idem,
+        tenant: caller.tenant().to_owned(),
+        max_running_for_tenant: policy.max_running,
     };
     let (op, replayed) = app.registry.submit(new, work)?;
     Ok(operation_response(op, replayed))
@@ -783,7 +985,8 @@ async fn post_send(
     headers: HeaderMap,
     JsonBody(request, canonical): JsonBody<SendRequest>,
 ) -> Result<Response, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let policy = app.tenant_policy(&caller);
     let route = format!("POST /v1/repos/{}/branches/{branch}/send", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
     if let Some(op) = idem
@@ -855,6 +1058,8 @@ async fn post_send(
         cursor,
         locks: vec![branch],
         idempotency: idem,
+        tenant: caller.tenant().to_owned(),
+        max_running_for_tenant: policy.max_running,
     };
     let (op, replayed) = app.registry.submit(new, work)?;
     Ok(operation_response(op, replayed))
@@ -867,7 +1072,8 @@ async fn post_fork(
     headers: HeaderMap,
     JsonBody(request, canonical): JsonBody<ForkRequest>,
 ) -> Result<Response, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let policy = app.tenant_policy(&caller);
     let route = format!("POST /v1/repos/{}/branches/{branch}/fork", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
     if let Some(op) = idem
@@ -881,6 +1087,7 @@ async fn post_fork(
     if request.prompt.trim().is_empty() {
         return Err(ApiError::bad_request("prompt is empty"));
     }
+    app.check_admission_quotas(&caller, &policy).await?;
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let provider = app.provider(request.provider.clone())?;
     app.opt_ins(
@@ -933,6 +1140,8 @@ async fn post_fork(
         branches: planned,
         cursor,
         idempotency: idem,
+        tenant: caller.tenant().to_owned(),
+        max_running_for_tenant: policy.max_running,
     };
     let (op, replayed) = app.registry.submit(new, work)?;
     Ok(operation_response(op, replayed))
@@ -945,7 +1154,8 @@ async fn post_reincarnate(
     headers: HeaderMap,
     JsonBody(request, canonical): JsonBody<ReincarnateRequest>,
 ) -> Result<Response, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let policy = app.tenant_policy(&caller);
     let route = format!("POST /v1/repos/{}/branches/{branch}/reincarnate", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
     if let Some(op) = idem
@@ -956,6 +1166,7 @@ async fn post_reincarnate(
     {
         return Ok(operation_response(op, true));
     }
+    app.check_admission_quotas(&caller, &policy).await?;
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let provider = app.provider(request.provider.clone())?;
     app.opt_ins(
@@ -1012,6 +1223,8 @@ async fn post_reincarnate(
         branches: planned,
         cursor,
         idempotency: idem,
+        tenant: caller.tenant().to_owned(),
+        max_running_for_tenant: policy.max_running,
     };
     let (op, replayed) = app.registry.submit(new, work)?;
     Ok(operation_response(op, replayed))
@@ -1050,7 +1263,7 @@ async fn post_merge(
     headers: HeaderMap,
     JsonBody(request, canonical): JsonBody<MergeRequest>,
 ) -> Result<Response, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "merge")?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/merge", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
     if let Some(op) = idem
@@ -1092,6 +1305,8 @@ async fn post_merge(
         cursor,
         locks: vec![branch],
         idempotency: idem,
+        tenant: caller.tenant().to_owned(),
+        max_running_for_tenant: None,
     };
     let (op, replayed) = app.registry.submit(new, work)?;
     Ok(operation_response(op, replayed))
@@ -1108,8 +1323,8 @@ async fn post_cancel(
     Extension(caller): Extension<Caller>,
     JsonBody(CancelRequest {}, _): JsonBody<CancelRequest>,
 ) -> Result<Json<CancelResult>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
-    let by = format!("{} through the server", caller.0);
+    let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
+    let by = format!("{} through the server", caller.name());
     let cancelled = blocking(move || yard.cancel_as(&branch, &by))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -1133,8 +1348,8 @@ async fn post_steer(
     Extension(caller): Extension<Caller>,
     JsonBody(SteerRequest { text }, _): JsonBody<SteerRequest>,
 ) -> Result<Json<branchyard::Steer>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
-    let by = format!("{} through the server", caller.0);
+    let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
+    let by = format!("{} through the server", caller.name());
     let steer = blocking(move || {
         let steer = yard.steer_as(&branch, &text, &by)?;
         yard.wait_steer(&branch, steer.id, STEER_WAIT)
@@ -1155,7 +1370,8 @@ async fn post_spawn(
     headers: HeaderMap,
     JsonBody(request, canonical): JsonBody<SpawnRequest>,
 ) -> Result<Response, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let policy = app.tenant_policy(&caller);
     let route = format!("POST /v1/repos/{}/branches/{parent}/spawn", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
     if let Some(op) = idem
@@ -1178,6 +1394,7 @@ async fn post_spawn(
             "a child needs a prompt".into(),
         )));
     }
+    app.check_admission_quotas(&caller, &policy).await?;
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let source = existing(&repo.yard, &parent).await?;
     // A seat's child is named `<parent>-<seat>` by default, as the engine
@@ -1255,6 +1472,8 @@ async fn post_spawn(
         branches: planned,
         cursor,
         idempotency: idem,
+        tenant: caller.tenant().to_owned(),
+        max_running_for_tenant: policy.max_running,
     };
     let (op, replayed) = app.registry.submit(new, work)?;
     Ok(operation_response(op, replayed))
@@ -1285,7 +1504,7 @@ async fn post_integrate(
     headers: HeaderMap,
     JsonBody(IntegrateRequest {}, canonical): JsonBody<IntegrateRequest>,
 ) -> Result<Response, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "merge")?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/integrate", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
     if let Some(op) = idem
@@ -1327,20 +1546,26 @@ async fn post_integrate(
         cursor,
         locks: vec![branch, parent],
         idempotency: idem,
+        tenant: caller.tenant().to_owned(),
+        max_running_for_tenant: None,
     };
     let (op, replayed) = app.registry.submit(new, work)?;
     Ok(operation_response(op, replayed))
 }
 
 /// Act as `branch` with the server's authority, as `by inspect`, `by events`
-/// and `by children` do outside a harness.
+/// and `by children` do outside a harness. `scope` is the caller's
+/// required scope for this action; `repo` must be within its tenant (and,
+/// if narrower, its own allowlist).
 async fn as_person<T: Send + 'static>(
     app: &App,
+    caller: &Caller,
     repo: &str,
     branch: String,
+    scope: &str,
     work: impl FnOnce(branchyard::Delegate, &str) -> Result<T, branchyard::Error> + Send + 'static,
 ) -> Result<T, ApiError> {
-    let yard = app.repo(repo)?.yard.clone();
+    let yard = app.authorized_repo(caller, repo, scope)?.yard.clone();
     blocking(move || {
         let delegate = yard.branch(&branch)?.delegate(TaskOptions::default())?;
         work(delegate, &branch)
@@ -1352,8 +1577,9 @@ async fn as_person<T: Send + 'static>(
 async fn inspection(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<branchyard::Inspection>, ApiError> {
-    as_person(&app, &repo, branch, |d, b| d.inspect(b))
+    as_person(&app, &caller, &repo, branch, "read", |d, b| d.inspect(b))
         .await
         .map(Json)
 }
@@ -1374,20 +1600,24 @@ fn query_number(query: Option<&str>, name: &str) -> Result<Option<usize>, ApiErr
 async fn event_page(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
 ) -> Result<Json<branchyard::EventPage>, ApiError> {
     let cursor = query_number(query.as_deref(), "cursor")?;
     let limit = query_number(query.as_deref(), "limit")?.unwrap_or(50);
-    as_person(&app, &repo, branch, move |d, b| d.events(b, cursor, limit))
-        .await
-        .map(Json)
+    as_person(&app, &caller, &repo, branch, "read", move |d, b| {
+        d.events(b, cursor, limit)
+    })
+    .await
+    .map(Json)
 }
 
 async fn children(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<branchyard::Children>, ApiError> {
-    as_person(&app, &repo, branch, |d, _| d.children())
+    as_person(&app, &caller, &repo, branch, "read", |d, _| d.children())
         .await
         .map(Json)
 }
@@ -1395,8 +1625,9 @@ async fn children(
 async fn inbox(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<branchyard::Inbox>, ApiError> {
-    as_person(&app, &repo, branch, |d, _| d.inbox())
+    as_person(&app, &caller, &repo, branch, "read", |d, _| d.inbox())
         .await
         .map(Json)
 }
@@ -1408,6 +1639,7 @@ const MAX_ASK_WAIT: Duration = Duration::from_secs(120);
 async fn post_ask(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(request, _): JsonBody<branchyard_client::api::AskRequest>,
 ) -> Result<Json<branchyard::Asked>, ApiError> {
     if request.text.trim().is_empty() {
@@ -1417,46 +1649,55 @@ async fn post_ask(
         .wait_seconds
         .filter(|s| s.is_finite() && *s > 0.0)
         .map(|s| Duration::from_secs_f64(s).min(MAX_ASK_WAIT));
-    as_person(&app, &repo, branch, move |d, _| d.ask(&request.text, wait))
-        .await
-        .map(Json)
+    as_person(&app, &caller, &repo, branch, "run", move |d, _| {
+        d.ask(&request.text, wait)
+    })
+    .await
+    .map(Json)
 }
 
 async fn post_report(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(request, _): JsonBody<branchyard_client::api::TextRequest>,
 ) -> Result<Json<branchyard::Message>, ApiError> {
     if request.text.trim().is_empty() {
         return Err(ApiError::bad_request("text is empty"));
     }
-    as_person(&app, &repo, branch, move |d, _| d.report(&request.text))
-        .await
-        .map(Json)
+    as_person(&app, &caller, &repo, branch, "run", move |d, _| {
+        d.report(&request.text)
+    })
+    .await
+    .map(Json)
 }
 
 async fn post_escalate(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(request, _): JsonBody<branchyard_client::api::TextRequest>,
 ) -> Result<Json<branchyard::Message>, ApiError> {
     if request.text.trim().is_empty() {
         return Err(ApiError::bad_request("text is empty"));
     }
-    as_person(&app, &repo, branch, move |d, _| d.escalate(&request.text))
-        .await
-        .map(Json)
+    as_person(&app, &caller, &repo, branch, "run", move |d, _| {
+        d.escalate(&request.text)
+    })
+    .await
+    .map(Json)
 }
 
 async fn post_answer(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(request, _): JsonBody<branchyard_client::api::AnswerRequest>,
 ) -> Result<Json<branchyard::Message>, ApiError> {
     if request.text.trim().is_empty() {
         return Err(ApiError::bad_request("text is empty"));
     }
-    as_person(&app, &repo, branch, move |d, _| {
+    as_person(&app, &caller, &repo, branch, "run", move |d, _| {
         d.answer(request.message_id, &request.text)
     })
     .await
@@ -1466,8 +1707,9 @@ async fn post_answer(
 async fn branches(
     State(app): State<Shared>,
     Path(repo): Path<String>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<BranchList>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
     let branches = blocking(move || yard.branches())
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -1477,16 +1719,18 @@ async fn branches(
 async fn branch(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<branchyard::BranchInfo>, ApiError> {
-    let yard = &app.repo(&repo)?.yard;
+    let yard = &app.authorized_repo(&caller, &repo, "read")?.yard;
     Ok(Json(existing(yard, &branch).await?.info().clone()))
 }
 
 async fn diff(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<Diff>, ApiError> {
-    let target = existing(&app.repo(&repo)?.yard, &branch).await?;
+    let target = existing(&app.authorized_repo(&caller, &repo, "read")?.yard, &branch).await?;
     let diff = blocking(move || target.diff())
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -1496,10 +1740,11 @@ async fn diff(
 async fn events(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
 ) -> Result<Json<BranchEvents>, ApiError> {
     let cursor = cursor_param(query.as_deref())?.unwrap_or(0);
-    let target = existing(&app.repo(&repo)?.yard, &branch).await?;
+    let target = existing(&app.authorized_repo(&caller, &repo, "read")?.yard, &branch).await?;
     let page = blocking(move || {
         let mut events = Vec::new();
         let mut next = cursor;
@@ -1523,8 +1768,9 @@ async fn events(
 async fn delete_branch(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<Removed>, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "admin")?.clone();
     let hold = app.registry.hold(&repo.name, &branch, "a removal")?;
     let name = branch.clone();
     blocking(move || {
@@ -1586,10 +1832,11 @@ async fn next_entry(mut s: Streaming) -> Option<(Result<SseEvent, Infallible>, S
 async fn stream_events(
     State(app): State<Shared>,
     Path(repo): Path<String>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    let repo = app.repo(&repo)?;
+    let repo = app.authorized_repo(&caller, &repo, "read")?;
     let last_event_id = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())

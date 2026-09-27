@@ -12,6 +12,11 @@ by serve                      # serves this repository as its directory name on 
 # branchyard-server: created a token in .branchyard/server/token; clients pass --token-file with it
 
 by --remote http://127.0.0.1:8421 --token-file .branchyard/server/token ls
+
+branchyard-server token new --tenant acme --scopes read,run --repo app
+# branchyard-server: token (printed once; give it to the client, never store it): <token>
+# {"token_sha256": "…", "tenant": "acme", "name": "token-…", "scopes": ["read","run"], "repos": ["app"]}
+# paste that object into the configuration's "credentials" array
 ```
 
 Flags (`by serve --help` or `branchyard-server --help`):
@@ -47,8 +52,18 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "repos": { "app": "/srv/app", "docs": "/srv/docs" },
   "tokens": [
     { "name": "ci", "token_file": "/etc/branchyard/ci.token" },
-    { "name": "alice", "token": "at-least-16-characters" }
+    { "name": "alice", "token": "at-least-16-characters" },
+    { "name": "acme-ci", "token_file": "/etc/branchyard/acme-ci.token",
+      "tenant": "acme", "scopes": ["read", "run"], "repos": ["app"] }
   ],
+  "credentials": [
+    { "token_sha256": "…64 lowercase hex characters, from `branchyard-server token new`…",
+      "tenant": "acme", "name": "acme-readonly", "scopes": ["read"] }
+  ],
+  "tenants": {
+    "acme": { "repos": ["app"], "max_running": 4, "max_branches": 20,
+              "max_cost_usd": 50.0, "max_artifact_bytes": 1073741824 }
+  },
   "tls": { "cert": "/etc/branchyard/cert.pem", "key": "/etc/branchyard/key.pem" },
   "max_body_bytes": 1048576,
   "max_artifact_bytes": 268435456,
@@ -65,15 +80,39 @@ Configuration file (relative paths resolve against the file's directory; unknown
 }
 ```
 
-The server refuses to start with no repository, no token, a token shorter than 16 characters, an unknown provider name, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
+The server refuses to start with no repository, no token or credential, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
 
 SIGINT or SIGTERM starts a graceful shutdown: no new connections or operations (`503 shutting_down`), event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`. A second signal stops waiting at once.
 
-## Authentication
+## Identity and scopes
 
-Every route except `GET /healthz` needs `Authorization: Bearer <token>`, including unknown routes, so routes cannot be probed anonymously. Tokens come from the configuration or token files. The presented token is compared with every configured token in time that depends only on lengths, and neither tokens nor headers are ever logged. A missing or wrong token gets `401 unauthorized` with `WWW-Authenticate: Bearer`.
+Every route except `GET /healthz` needs `Authorization: Bearer <token>`, including unknown routes, so routes cannot be probed anonymously. The presented token is **hashed (SHA-256) and compared against every configured credential's hash** in time that depends only on lengths; the verifier holds hashes, never a plaintext token, and neither tokens nor headers are ever logged. A missing or wrong token gets `401 unauthorized` with `WWW-Authenticate: Bearer`.
 
-The token's configured `name` is the caller's identity for idempotency scoping. There is no per-token authorization: every token can do everything on every served repository.
+**A request's identity comes only from its verified credential, never from anything the request itself says** — there is no `tenant_id` field anywhere in the wire protocol. Each configured credential names a **principal**: a `tenant`, a subject `name` (the caller's identity for idempotency scoping and audit), a set of **scopes**, and, optionally, its own repository allowlist narrower than its tenant's. Two ways to configure one:
+
+- **`tokens`** (unchanged from before tenants existed): `{"name", "token"|"token_file"}`, plus optional `tenant`, `scopes` and `repos`. A `tokens` entry that gives none of those three becomes a principal in the unconfigured `default` tenant with every scope and every repository — **exactly what a single-token server did before this existed**, so old configurations keep working unchanged.
+- **`credentials`**: `{"token_sha256", "tenant", "name"?, "scopes"?, "repos"?}` — the token's SHA-256 directly, so the plaintext never has to enter the configuration at all. `branchyard-server token new [--tenant T] [--scopes S,...] [--repo R,...]` (also `by serve token new`) generates a fresh token, prints it once (give it to the client, never store it), and prints the `credentials` object to paste in. There is no hot rotation or revocation API: replacing or removing a hash and restarting is how a token is rotated or revoked, the same restart a `tokens` change already needed.
+
+Scopes: `read` (every `GET`, including the event stream), `run` (submitting a task, send, fork, reincarnate or spawn, and acting on a running turn: cancel, steer, ask, report, escalate, answer), `merge` (merge, integrate), `admin` (removing a branch). Every endpoint checks the caller's scope and returns `403 scope_required` (`detail.scope`) when it is missing.
+
+**Repositories belong to tenants.** A tenant's `repos` (in `tenants`) is the simplest sound model for isolation: it is the tenant's repository allowlist, and a principal's own `repos`, if given, only narrows it further (the intersection). `GET /v1/repos` lists only what the caller's tenant (and its own allowlist) can see; acting on any other repository is `403 repo_not_allowed` (`detail.repo`). `GET /v1/operations/{id}` refuses another tenant's operation with `404 unknown_operation`, indistinguishable from an ID that never existed, so a principal cannot even tell that another tenant's operation exists. This is the whole isolation model: there is no per-branch or per-operation ownership beyond the repository it is in, since a tenant that cannot reach a repository cannot reach anything inside it either. (Operations record the submitting principal's tenant for this check; branches and feed entries do not carry a principal field of their own in this release — an out-of-scope decision documented here rather than left implicit — since the repository-ownership boundary above already makes them unreachable across tenants without it.)
+
+## Quotas
+
+A tenant's `tenants.<name>` entry sets its resource ceilings, all optional (unconfigured means unlimited):
+
+| Field | Enforces | Checked | Refusal |
+|---|---|---|---|
+| `max_running` | Turns running or queued at once across this tenant's operations | Atomically, under the operation registry's lock, at admission | `429 quota_exceeded` (`detail.limit = "max_running"`) |
+| `max_branches` | Branches open (not yet removed) across this tenant's repositories | Live, against durable branch state, before a task/fork/reincarnate/spawn is admitted | `429 quota_exceeded` (`"max_branches"`) |
+| `max_cost_usd` | Total `cost_usd` recorded across this tenant's currently-open branches (lifetime, not a rolling window — see below) | Same as `max_branches` | `429 quota_exceeded` (`"max_cost_usd"`) |
+| `max_artifact_bytes` | Total artifact bytes reachable across this tenant's repositories | Same as `max_branches` | `429 quota_exceeded` (`"max_artifact_bytes"`) |
+
+`max_running` is reserved **atomically**: it is checked and counted in the same registry lock that assigns an operation's ID, so two requests racing past a tenant at its limit cannot both be admitted (`ops::tests::a_tenants_max_running_quota_is_reserved_atomically_and_released`). It needs no separate durable bookkeeping: every operation the registry loads that was left `queued` or `running` when the server stopped is marked `interrupted` at the next start (existing behavior, `docs/server.md#what-is-durable`), which frees the tenant's slot the instant the process restarts — there is no separate quota state to get stuck or need its own recovery.
+
+The other three are checked **live** against data the engine already keeps durably — a tenant's open branches, their `cost_usd`, and their reachable artifacts — rather than a separate counter, so they too are exact across a restart with nothing extra to persist. This makes them best-effort rather than atomic: they are not taken under the registry's lock, so (unlike `max_running`) two requests racing past the same near-limit tenant in the same instant can occasionally both be admitted; the check is exact once they settle. `max_cost_usd` is lifetime spend across a tenant's currently-open branches, not a rolling time window — the engine does not otherwise keep a timestamped cost ledger, and adding one only for a windowed quota was judged not worth the added durable state for this release.
+
+Removing a branch (`DELETE .../branches/{b}`, needing `admin`) frees its `max_branches` and `max_artifact_bytes` reservation immediately, since both are computed live.
 
 ## API reference
 
@@ -232,7 +271,10 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 |---|---|---|
 | `unauthorized` | 401 | Missing or wrong bearer token |
 | `not_found`, `method_not_allowed` | 404, 405 | No such route or method |
-| `unknown_repo`, `unknown_branch`, `unknown_operation` | 404 | No such thing |
+| `unknown_repo`, `unknown_branch`, `unknown_operation` | 404 | No such thing, or another tenant's (indistinguishable from unknown) |
+| `scope_required` | 403 | The caller's principal lacks a scope this endpoint needs; `detail.scope` |
+| `repo_not_allowed` | 403 | The repository is outside the caller's tenant, or its own narrower allowlist; `detail.repo` |
+| `quota_exceeded` | 429 | A tenant quota (`docs/server.md#quotas`) is at its configured limit; `detail.tenant`, `detail.limit`, `detail.max`, and `detail.reserved` or `detail.spent` |
 | `invalid_request` | 400 | Malformed JSON, unknown field, empty prompt, bad budget, bad cursor |
 | `unsupported_media_type` | 415 | `POST` body not declared as JSON |
 | `body_too_large` | 413 | Body over `max_body_bytes`, or an artifact upload over `max_artifact_bytes`; `detail.limit` |
@@ -320,7 +362,7 @@ What it is not yet:
 - **Allowed providers use the server's credentials.** A token holder chooses which of the server's variables a sandboxed turn gets through `pass_env`, and which Substrate endpoint, router and key path it uses.
 - **Delegation** gives the server's harnesses the delegation tools, bounded by the envelope. As in local mode, a harness running as the server's user can read other branches' tokens in `.branchyard/`; the envelope stops honest mistakes, not a hostile harness, until harnesses run in sandboxes. `--allow-unapproved-tools` lets token holders run profiles whose tools the request's policy never sees.
 - **`allow_client_commands`** additionally lets any token holder choose the executable the server launches. Leave it off outside tests; configure `harness_commands` instead.
-- **Tokens are all-powerful and equal.** No scopes, no per-repository access, no expiry or rotation beyond editing the configuration and restarting. Treat each as the server user's password.
+- **Scopes and tenants bound what a credential can reach (`read`/`run`/`merge`/`admin`, a tenant's repositories, quotas), but not what it does within reach.** A `run`-scoped credential on an allowed repository can still make a harness do anything the server's operating-system user can, exactly as before: scopes are not sandboxing. There is still no expiry beyond a `credentials` hash the operator removes, and no hot rotation or revocation API — replacing a hash (or a `tokens` entry) and restarting is how a token is rotated or revoked.
 - **Plain HTTP** exposes tokens, prompts and code to anyone on the path. The server refuses it off loopback unless told `--insecure-bind`.
 - **Information exposure.** Responses include server paths (worktrees, repository roots) and the server's harness availability.
 - **Policy is per request.** A `deny` default is safe; rules match tool names only, as in the SDK.

@@ -52,6 +52,14 @@ pub struct NewOperation {
     /// Branches of `repo` to lock until the operation finishes.
     pub locks: Vec<String>,
     pub idempotency: Option<Idempotency>,
+    /// The submitting principal's tenant, for isolation (`GET
+    /// /v1/operations/{id}` refuses another tenant's) and the
+    /// `max_running` quota below.
+    pub tenant: String,
+    /// This tenant's `max_running` ceiling, checked atomically against
+    /// every non-terminal operation of the same tenant, queued or running.
+    /// `None` when unconfigured (unlimited).
+    pub max_running_for_tenant: Option<usize>,
 }
 
 pub struct Registry {
@@ -94,6 +102,12 @@ impl Registry {
         let mut ops = HashMap::new();
         let mut keys = HashMap::new();
         for mut stored in store.load()? {
+            if stored.tenant.is_empty() {
+                // A record from before tenants existed: it was submitted
+                // under a single-token principal, which is always in
+                // `DEFAULT_TENANT`.
+                stored.tenant = crate::config::DEFAULT_TENANT.to_owned();
+            }
             if !stored.operation.state.is_terminal() {
                 stored.operation.state = OperationState::Interrupted;
                 stored.operation.error = Some(interrupted(STOPPED));
@@ -132,6 +146,16 @@ impl Registry {
         self.lock().ops.get(id).map(|s| s.operation.clone())
     }
 
+    /// `id`'s operation, only when it belongs to `tenant`: an operation of
+    /// another tenant reads as absent, exactly like an unknown ID, so a
+    /// principal cannot distinguish another tenant's operation from one
+    /// that never existed.
+    pub fn get_for_tenant(&self, id: &str, tenant: &str) -> Option<Operation> {
+        let state = self.lock();
+        let stored = state.ops.get(id)?;
+        (stored.tenant == tenant).then(|| stored.operation.clone())
+    }
+
     /// The operation an earlier request with this key created, if any.
     pub fn replay(&self, idem: &Idempotency) -> Result<Option<Operation>, ApiError> {
         replay(&self.lock(), idem)
@@ -158,6 +182,16 @@ impl Registry {
                 return Err(busy(branch, holder));
             }
         }
+        if let Some(max) = new.max_running_for_tenant {
+            let reserved = state
+                .ops
+                .values()
+                .filter(|s| s.tenant == new.tenant && !s.operation.state.is_terminal())
+                .count();
+            if reserved >= max {
+                return Err(quota_exceeded("max_running", &new.tenant, max, reserved));
+            }
+        }
         let id = format!("op_{}", &branchyard_client::new_key()[..24]);
         let stored = StoredOperation {
             operation: Operation {
@@ -175,6 +209,7 @@ impl Registry {
             },
             idempotency: new.idempotency,
             locks: new.locks,
+            tenant: new.tenant,
         };
         self.store
             .save(&stored)
@@ -407,6 +442,22 @@ fn busy(branch: &str, holder: &str) -> ApiError {
     .detail(serde_json::json!({ "branch": branch, "holder": holder }))
 }
 
+/// `429 quota_exceeded`, for any of the quotas in
+/// `docs/server.md#quotas`.
+pub(crate) fn quota_exceeded(limit: &str, tenant: &str, max: usize, reserved: usize) -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "quota_exceeded",
+        format!(
+            "tenant {tenant} is at its {limit} quota ({reserved} of {max}); wait for one to \
+             finish, or ask the operator to raise it"
+        ),
+    )
+    .detail(
+        serde_json::json!({ "tenant": tenant, "limit": limit, "max": max, "reserved": reserved }),
+    )
+}
+
 /// A branch held by [`Registry::hold`], released on drop.
 pub struct Hold {
     registry: Arc<Registry>,
@@ -438,6 +489,8 @@ mod tests {
                 key: key.into(),
                 fingerprint: "f".into(),
             }),
+            tenant: "default".into(),
+            max_running_for_tenant: None,
         }
     }
 
@@ -506,6 +559,53 @@ mod tests {
         assert!(registry.submit(new(None, &["b"]), Box::new(done)).is_err());
         drop(hold);
         assert!(registry.submit(new(None, &["b"]), Box::new(done)).is_ok());
+    }
+
+    #[test]
+    fn a_tenants_max_running_quota_is_reserved_atomically_and_released() {
+        let registry = Registry::open(Box::new(MemoryStore::default()), 4).unwrap();
+        let (release, wait) = mpsc::channel::<()>();
+        let mut first = new(None, &["a"]);
+        first.max_running_for_tenant = Some(1);
+        let (op, _) = registry
+            .submit(
+                first,
+                Box::new(move || {
+                    wait.recv().unwrap();
+                    done()
+                }),
+            )
+            .unwrap();
+        let mut second = new(None, &["b"]);
+        second.max_running_for_tenant = Some(1);
+        let error = registry.submit(second, Box::new(done)).unwrap_err();
+        assert_eq!(error.body.code, "quota_exceeded");
+        // A different tenant is unaffected.
+        let mut other = new(None, &["c"]);
+        other.tenant = "other".into();
+        other.max_running_for_tenant = Some(1);
+        assert!(registry.submit(other, Box::new(done)).is_ok());
+        release.send(()).unwrap();
+        assert!(registry.wait_idle(Duration::from_secs(5)));
+        assert_eq!(
+            registry.get(&op.id).unwrap().state,
+            OperationState::Succeeded
+        );
+        // Released: the tenant can submit again.
+        let mut third = new(None, &["d"]);
+        third.max_running_for_tenant = Some(1);
+        assert!(registry.submit(third, Box::new(done)).is_ok());
+    }
+
+    #[test]
+    fn get_for_tenant_hides_another_tenants_operation() {
+        let registry = Registry::open(Box::new(MemoryStore::default()), 1).unwrap();
+        let mut new_op = new(None, &[]);
+        new_op.tenant = "acme".into();
+        let (op, _) = registry.submit(new_op, Box::new(done)).unwrap();
+        assert!(registry.get_for_tenant(&op.id, "acme").is_some());
+        assert!(registry.get_for_tenant(&op.id, "other").is_none());
+        assert!(registry.get_for_tenant("op_bogus", "acme").is_none());
     }
 
     #[test]

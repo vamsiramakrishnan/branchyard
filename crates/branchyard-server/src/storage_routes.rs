@@ -279,7 +279,7 @@ async fn publish(
     Extension(caller): Extension<Caller>,
     request: axum::extract::Request,
 ) -> Result<Response, ApiError> {
-    let repo = app.repo(&repo)?.clone();
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
     let query = request.uri().query().unwrap_or("").to_owned();
     let idem_key = idem_key(request.headers())?;
     let limit = app.config.max_artifact_bytes as usize;
@@ -291,7 +291,7 @@ async fn publish(
         .as_ref()
         .map(|_| fingerprint_bytes(&route, &query, &body));
     if let (Some(key), Some(fp)) = (&idem_key, &fingerprint) {
-        if let Some((status, value)) = app.storage_idem.get(&caller.0, key, fp)? {
+        if let Some((status, value)) = app.storage_idem.get(caller.name(), key, fp)? {
             return Ok(replayed(status, value));
         }
     }
@@ -308,7 +308,7 @@ async fn publish(
     .map_err(|e| error::sdk(&e))?;
     if let (Some(key), Some(fp)) = (&idem_key, &fingerprint) {
         app.storage_idem
-            .put(&caller.0, key, fp, StatusCode::CREATED, &artifact);
+            .put(caller.name(), key, fp, StatusCode::CREATED, &artifact);
     }
     Ok((StatusCode::CREATED, Json(artifact)).into_response())
 }
@@ -332,8 +332,9 @@ fn read_via_temp(
 async fn list_artifacts(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<ArtifactList>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
     let artifacts = blocking(move || yard.artifacts(&branch))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -348,8 +349,9 @@ async fn list_artifacts(
 async fn artifact_meta(
     State(app): State<Shared>,
     Path((repo, branch, id)): Path<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<ArtifactRef>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
     let artifact = blocking(move || read_via_temp(&yard, &branch, &id).map(|(a, _)| a))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -359,8 +361,9 @@ async fn artifact_meta(
 async fn artifact_content(
     State(app): State<Shared>,
     Path((repo, branch, id)): Path<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Response, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
     let (artifact, bytes) = blocking(move || read_via_temp(&yard, &branch, &id))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -379,9 +382,10 @@ async fn artifact_content(
 async fn share_artifact(
     State(app): State<Shared>,
     Path((repo, branch, id)): Path<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(ShareRequest { to }, _): JsonBody<ShareRequest>,
 ) -> Result<Json<Ack>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
     blocking(move || yard.share_artifact(&branch, &id, &to))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -391,9 +395,10 @@ async fn share_artifact(
 async fn create_scratch(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(CreateScratchRequest { name }, _): JsonBody<CreateScratchRequest>,
 ) -> Result<Json<ScratchArea>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
     let area = blocking(move || yard.create_scratch(&branch, &name))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -403,8 +408,9 @@ async fn create_scratch(
 async fn list_scratch(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
 ) -> Result<Json<ScratchList>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
     let areas = blocking(move || yard.scratch_areas(&branch))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -414,9 +420,10 @@ async fn list_scratch(
 async fn share_scratch(
     State(app): State<Shared>,
     Path((repo, branch, name)): Path<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(ShareRequest { to }, _): JsonBody<ShareRequest>,
 ) -> Result<Json<Ack>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
     blocking(move || yard.share_scratch(&branch, &name, &to))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -429,9 +436,10 @@ async fn share_scratch(
 async fn lock_scratch(
     State(app): State<Shared>,
     Path((repo, branch, name)): Path<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(Empty {}, _): JsonBody<Empty>,
 ) -> Result<Json<ScratchLock>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
     let lock = blocking(move || yard.lock_scratch(&branch, &name))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -441,9 +449,10 @@ async fn lock_scratch(
 async fn unlock_scratch(
     State(app): State<Shared>,
     Path((repo, branch, name)): Path<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
     JsonBody(Empty {}, _): JsonBody<Empty>,
 ) -> Result<Json<Ack>, ApiError> {
-    let yard = app.repo(&repo)?.yard.clone();
+    let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
     blocking(move || yard.unlock_scratch(&branch, &name))
         .await?
         .map_err(|e| error::sdk(&e))?;

@@ -110,6 +110,23 @@ impl Fixture {
         }
     }
 
+    /// A second repository under this fixture's directory, with one commit
+    /// on `main`, for tests of more than one served repository (such as
+    /// per-tenant repository ownership). Not served unless added to a
+    /// `Config`'s `repos`.
+    pub fn extra_repo(&self, name: &str) -> PathBuf {
+        let root = self.dir.join(name);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "user.email", "test@localhost"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "initial"]);
+        root
+    }
+
     /// A configuration serving the repository as `app` on an ephemeral
     /// loopback port, with the fake agent as `gemini-cli`.
     pub fn config(&self) -> Config {

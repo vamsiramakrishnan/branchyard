@@ -33,6 +33,13 @@ pub struct StoredOperation {
     /// Branch names no other operation may change while this one runs.
     #[serde(default)]
     pub locks: Vec<String>,
+    /// The tenant of the principal that submitted this operation. Absent
+    /// (default) on a record from before tenants existed, which reads as
+    /// [`crate::config::DEFAULT_TENANT`] everywhere this is used: not part
+    /// of the wire `Operation`, since it is for the server's own isolation
+    /// and quota bookkeeping, not something a caller needs echoed back.
+    #[serde(default)]
+    pub tenant: String,
 }
 
 /// Durable operation records.
@@ -517,6 +524,7 @@ mod tests {
             },
             idempotency: None,
             locks: Vec::new(),
+            tenant: String::new(),
         }
     }
 

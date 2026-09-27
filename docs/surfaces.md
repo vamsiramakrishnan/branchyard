@@ -143,6 +143,17 @@ Every result a surface returns is the SDK's serde form: `BranchInfo`, `RecordedE
 | `DeliveryHook`, `Yard::set_delivery_hook`/`clear_delivery_hook`, `SteerDelivery` | none | every `Yard` steers a message into its recipient's running turn by default ([delegation](delegation.md#delivery)) |
 | Stall detection | children and permission answers excluded | a turn blocked in `ask --wait` is excluded too ([lifecycle](lifecycle.md#stall-detection)) |
 
+## Added with tenants
+
+A server-only addition: identity, scopes and quotas are meaningful only where more than one credential can reach the same process, so there is no SDK, local-CLI or delegation-surface counterpart.
+
+| Surface | Before | Now |
+|---|---|---|
+| `tokens` entries, `credentials`, `tenants` in the JSON config; `principal`, `tenant`, `scopes`/`repos` fields | one flat list of equal, all-powerful bearer tokens | each credential names a principal: a tenant, a subject, scopes (`read`/`run`/`merge`/`admin`) and an optional repository allowlist ([server](server.md#identity-and-scopes)). A `tokens` entry that gives none of these is unchanged: every scope, every repository, the `default` tenant |
+| `branchyard-server token new` / `by serve token new` | none | generates a token and its hashed `credentials` entry; the plaintext is never stored |
+| `403 scope_required`, `403 repo_not_allowed`, `429 quota_exceeded` | not distinct from `denied`/`unauthorized` | every endpoint checks the caller's scope and repository allowlist; quotas (`max_running`, `max_branches`, `max_cost_usd`, `max_artifact_bytes`) are enforced per tenant ([server](server.md#quotas)) |
+| `GET /v1/operations/{id}` on another tenant's operation | reachable by any token | `404 unknown_operation`, indistinguishable from an ID that never existed |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |

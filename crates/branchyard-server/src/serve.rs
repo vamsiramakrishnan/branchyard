@@ -17,7 +17,7 @@ use tokio::sync::{watch, Notify};
 use tokio_rustls::TlsAcceptor;
 
 use crate::api::{self, App, RepoState};
-use crate::auth::Tokens;
+use crate::auth::Credentials;
 use crate::config::{Config, TlsFiles};
 use crate::feed::Feed;
 use crate::ops::Registry;
@@ -194,7 +194,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let app = Arc::new(App {
         repos,
         registry: registry.clone(),
-        tokens: Tokens::new(config.tokens.clone()),
+        credentials: Credentials::new(config.all_credentials()),
         config,
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),

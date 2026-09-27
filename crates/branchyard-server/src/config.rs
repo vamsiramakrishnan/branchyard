@@ -21,6 +21,11 @@
 //!   "database": "postgres://branchyard@db/branchyard"
 //! }
 //! ```
+//!
+//! A `tokens` entry may add `tenant`, `scopes` and `repos` to scope its
+//! principal; `credentials` names one by a token hash directly; `tenants`
+//! sets each tenant's resource ceilings and repositories. See
+//! `docs/server.md#identity-and-scopes` and `docs/server.md#quotas`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -29,9 +34,146 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8421";
+
+/// The default tenant a bearer token belongs to when nothing says
+/// otherwise: single-token deployments from before tenants existed, and a
+/// `tokens` entry that does not name one.
+pub const DEFAULT_TENANT: &str = "default";
+
+/// Scopes a principal can hold. `read` covers every `GET`; `run` covers
+/// starting, sending to, forking, reincarnating, spawning, cancelling and
+/// steering a branch; `merge` covers merging and integrating; `admin`
+/// covers removing a branch. See `docs/server.md#identity-and-scopes`.
+pub const SCOPES: &[&str] = &["read", "run", "merge", "admin"];
+
+pub fn check_scope_name(name: &str) -> Result<(), String> {
+    match SCOPES.contains(&name) {
+        true => Ok(()),
+        false => Err(format!(
+            "{name:?} is not a scope; use one of {}",
+            SCOPES.join(", ")
+        )),
+    }
+}
+
+fn check_principal(principal: &Principal) -> Result<(), String> {
+    if principal.name.is_empty() || principal.name.len() > 128 {
+        return Err(format!(
+            "principal {:?} is not a usable subject name",
+            principal.name
+        ));
+    }
+    if principal.tenant.is_empty() || principal.tenant.len() > 128 {
+        return Err(format!(
+            "principal {}: tenant {:?} is not a usable tenant name",
+            principal.name, principal.tenant
+        ));
+    }
+    for scope in &principal.scopes {
+        check_scope_name(scope).map_err(|e| format!("principal {}: {e}", principal.name))?;
+    }
+    Ok(())
+}
+
+/// The SHA-256 of `bytes`, lowercase hex.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Who a verified bearer token acts as: a tenant, a subject name, the
+/// scopes it holds, and, optionally, a narrower repository allowlist than
+/// its tenant's. Requests never carry a `tenant_id`; a principal's tenant
+/// comes only from the credential that authenticated it. See
+/// `docs/server.md#identity-and-scopes`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Principal {
+    /// The subject this credential names, such as an operator or a CI
+    /// system; distinct from the tenant. Used for idempotency scoping and
+    /// audit, and appears in `Debug` and logs (never the token itself).
+    pub name: String,
+    pub tenant: String,
+    #[serde(default)]
+    pub scopes: BTreeSet<String>,
+    /// `None` allows every repository its tenant allows.
+    #[serde(default)]
+    pub repos: Option<BTreeSet<String>>,
+}
+
+impl Principal {
+    /// Every scope, every repository, in [`DEFAULT_TENANT`]: what a
+    /// `tokens` entry becomes when it names no tenant or scopes of its own,
+    /// keeping single-token configurations working unchanged.
+    pub fn default_for(name: &str) -> Principal {
+        Principal {
+            name: name.to_owned(),
+            tenant: DEFAULT_TENANT.to_owned(),
+            scopes: SCOPES.iter().map(|s| s.to_string()).collect(),
+            repos: None,
+        }
+    }
+
+    pub fn allows(&self, scope: &str) -> bool {
+        self.scopes.contains(scope)
+    }
+
+    /// Whether this principal may act on `repo`, given its tenant's policy:
+    /// the tenant must allow it, and, if this principal has its own
+    /// allowlist, that must too.
+    pub fn repo_allowed(&self, tenant: &TenantPolicy, repo: &str) -> bool {
+        tenant.allows_repo(repo) && self.repos.as_ref().is_none_or(|r| r.contains(repo))
+    }
+}
+
+/// A tenant's resource ceilings and the repositories it owns. Quotas are
+/// `None` when not configured, meaning unlimited; see
+/// `docs/server.md#quotas`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TenantPolicy {
+    /// Repositories this tenant owns. `None` (the default) means every
+    /// repository this server serves: the same reach a single-token
+    /// deployment always had.
+    #[serde(default)]
+    pub repos: Option<BTreeSet<String>>,
+    /// Turns running at once across this tenant's operations.
+    #[serde(default)]
+    pub max_running: Option<usize>,
+    /// Branches this tenant may have open across its repositories.
+    #[serde(default)]
+    pub max_branches: Option<usize>,
+    /// Total spend, in USD, this tenant may reserve across every branch it
+    /// currently has open (their recorded `cost_usd`, summed): lifetime,
+    /// not a rolling window, since that is the only spend this server
+    /// already tracks durably. See `docs/server.md#quotas`.
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
+    /// Total artifact bytes this tenant may have published across its
+    /// repositories.
+    #[serde(default)]
+    pub max_artifact_bytes: Option<u64>,
+}
+
+impl TenantPolicy {
+    pub fn allows_repo(&self, repo: &str) -> bool {
+        self.repos.as_ref().is_none_or(|r| r.contains(repo))
+    }
+}
+
+/// A credential naming its principal directly by a token hash, for the
+/// hash-only configuration path (`branchyard-server token new`); see
+/// `docs/server.md#identity-and-scopes`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credential {
+    /// SHA-256 of a bearer token, lowercase hex. The plaintext token never
+    /// enters the configuration.
+    pub token_sha256: String,
+    pub principal: Principal,
+}
 
 /// Default [`Config::max_artifact_bytes`]: sane for occasional build
 /// outputs and logs, raised by the operator for larger ones.
@@ -131,6 +273,18 @@ pub struct Config {
     /// Name and path of each served repository.
     pub repos: Vec<(String, PathBuf)>,
     pub tokens: Vec<Token>,
+    /// A `tokens` entry's principal (tenant, scopes, repository
+    /// allowlist), keyed by its `name`. An entry missing here gets
+    /// [`Principal::default_for`]: every scope, every repository, in
+    /// [`DEFAULT_TENANT`] — unchanged single-token behavior.
+    pub principals: BTreeMap<String, Principal>,
+    /// Credentials naming their principal by a token hash directly,
+    /// alongside `tokens`.
+    pub credentials: Vec<Credential>,
+    /// Each tenant's resource ceilings and repositories, keyed by tenant
+    /// name. A tenant a principal names but that has no entry here has no
+    /// configured limits (unlimited) and, by default, every repository.
+    pub tenants: BTreeMap<String, TenantPolicy>,
     pub tls: Option<TlsFiles>,
     /// Serve plain HTTP on a non-loopback address. Only from the flag.
     pub insecure_bind: bool,
@@ -186,6 +340,9 @@ impl Config {
             data_dir,
             repos: Vec::new(),
             tokens: Vec::new(),
+            principals: BTreeMap::new(),
+            credentials: Vec::new(),
+            tenants: BTreeMap::new(),
             tls: None,
             insecure_bind: false,
             max_body_bytes: 1024 * 1024,
@@ -207,6 +364,39 @@ impl Config {
         }
     }
 
+    /// A `tokens` entry's principal: its own from `principals` if given,
+    /// else [`Principal::default_for`] (every scope, every repository, in
+    /// [`DEFAULT_TENANT`]) — what makes a single-token deployment keep
+    /// working unchanged.
+    pub fn principal_for(&self, token_name: &str) -> Principal {
+        self.principals
+            .get(token_name)
+            .cloned()
+            .unwrap_or_else(|| Principal::default_for(token_name))
+    }
+
+    /// A tenant's policy, or the unlimited default when it is not
+    /// configured.
+    pub fn tenant_policy(&self, tenant: &str) -> TenantPolicy {
+        self.tenants.get(tenant).cloned().unwrap_or_default()
+    }
+
+    /// Every credential this server accepts: `tokens` (hashed here, so the
+    /// verifier never holds a plaintext secret) with their principal, plus
+    /// `credentials` directly.
+    pub fn all_credentials(&self) -> Vec<Credential> {
+        let mut all: Vec<Credential> = self
+            .tokens
+            .iter()
+            .map(|t| Credential {
+                token_sha256: sha256_hex(t.secret.as_bytes()),
+                principal: self.principal_for(&t.name),
+            })
+            .collect();
+        all.extend(self.credentials.iter().cloned());
+        all
+    }
+
     /// Refuse what cannot work, and a plain-HTTP bind beyond loopback
     /// unless explicitly allowed. Returns a warning to print loudly when
     /// serving insecurely.
@@ -214,8 +404,8 @@ impl Config {
         if self.repos.is_empty() {
             return Err("no repositories to serve".into());
         }
-        if self.tokens.is_empty() {
-            return Err("no tokens configured; every request needs one".into());
+        if self.tokens.is_empty() && self.credentials.is_empty() {
+            return Err("no tokens or credentials configured; every request needs one".into());
         }
         for (name, _) in &self.repos {
             check_repo_name(name)?;
@@ -231,6 +421,36 @@ impl Config {
                     "token {} is shorter than 16 characters",
                     token.name
                 ));
+            }
+        }
+        for (name, principal) in &self.principals {
+            if !self.tokens.iter().any(|t| &t.name == name) {
+                return Err(format!(
+                    "principals.{name} names no token; principals apply only to tokens entries"
+                ));
+            }
+            check_principal(principal)?;
+        }
+        let mut hashes = BTreeSet::new();
+        for credential in &self.credentials {
+            let hash = &credential.token_sha256;
+            if hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            {
+                return Err(format!(
+                    "credential {hash:?} is not a 64-character lowercase hex SHA-256"
+                ));
+            }
+            if !hashes.insert(hash.clone()) {
+                return Err(format!("credential {hash} is configured twice"));
+            }
+            check_principal(&credential.principal)?;
+        }
+        for name in self.tenants.keys() {
+            if name.is_empty() || name.len() > 128 {
+                return Err(format!("tenant {name:?} is not a usable tenant name"));
             }
         }
         for provider in &self.allow_providers {
@@ -350,6 +570,10 @@ struct FileConfig {
     repos: BTreeMap<String, PathBuf>,
     #[serde(default)]
     tokens: Vec<FileToken>,
+    #[serde(default)]
+    credentials: Vec<FileCredential>,
+    #[serde(default)]
+    tenants: BTreeMap<String, FileTenantPolicy>,
     tls: Option<FileTls>,
     max_body_bytes: Option<usize>,
     max_artifact_bytes: Option<u64>,
@@ -393,6 +617,37 @@ struct FileToken {
     name: String,
     token: Option<String>,
     token_file: Option<PathBuf>,
+    /// This principal's tenant; defaults to [`DEFAULT_TENANT`] when this
+    /// entry gives no tenant, scopes or repos of its own.
+    tenant: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    repos: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileCredential {
+    token_sha256: String,
+    tenant: String,
+    /// Defaults to `token_sha256`'s first 12 characters when omitted.
+    name: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    repos: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileTenantPolicy {
+    #[serde(default)]
+    repos: Option<Vec<String>>,
+    max_running: Option<usize>,
+    max_branches: Option<usize>,
+    max_cost_usd: Option<f64>,
+    max_artifact_bytes: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -409,6 +664,9 @@ pub struct Partial {
     pub data_dir: Option<PathBuf>,
     pub repos: Vec<(String, PathBuf)>,
     pub tokens: Vec<Token>,
+    pub principals: BTreeMap<String, Principal>,
+    pub credentials: Vec<Credential>,
+    pub tenants: BTreeMap<String, TenantPolicy>,
     pub tls: Option<TlsFiles>,
     pub max_body_bytes: Option<usize>,
     pub max_artifact_bytes: Option<u64>,
@@ -468,14 +726,15 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
     let resolve = |p: PathBuf| if p.is_absolute() { p } else { dir.join(p) };
     let mut warnings = Vec::new();
     let mut tokens = Vec::new();
+    let mut principals = BTreeMap::new();
     let mut inline = false;
     for token in file.tokens {
-        let secret = match (token.token, token.token_file) {
-            (Some(secret), None) => {
+        let secret = match (&token.token, &token.token_file) {
+            (Some(_), None) => {
                 inline = true;
-                secret
+                token.token.unwrap()
             }
-            (None, Some(file)) => read_token_file(&resolve(file), &mut warnings)?,
+            (None, Some(file)) => read_token_file(&resolve(file.clone()), &mut warnings)?,
             _ => {
                 return Err(format!(
                     "config {}: token {} needs exactly one of token and token_file",
@@ -484,11 +743,57 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
                 ))
             }
         };
+        if token.tenant.is_some() || !token.scopes.is_empty() || token.repos.is_some() {
+            let principal = Principal {
+                name: token.name.clone(),
+                tenant: token.tenant.unwrap_or_else(|| DEFAULT_TENANT.to_owned()),
+                scopes: match token.scopes.is_empty() {
+                    true => SCOPES.iter().map(|s| s.to_string()).collect(),
+                    false => token.scopes.into_iter().collect(),
+                },
+                repos: token.repos.map(|r| r.into_iter().collect()),
+            };
+            principals.insert(token.name.clone(), principal);
+        }
         tokens.push(Token {
             name: token.name,
             secret,
         });
     }
+    let mut credentials = Vec::new();
+    for credential in file.credentials {
+        let name = credential
+            .name
+            .unwrap_or_else(|| credential.token_sha256.chars().take(12).collect());
+        credentials.push(Credential {
+            token_sha256: credential.token_sha256,
+            principal: Principal {
+                name,
+                tenant: credential.tenant,
+                scopes: match credential.scopes.is_empty() {
+                    true => SCOPES.iter().map(|s| s.to_string()).collect(),
+                    false => credential.scopes.into_iter().collect(),
+                },
+                repos: credential.repos.map(|r| r.into_iter().collect()),
+            },
+        });
+    }
+    let tenants = file
+        .tenants
+        .into_iter()
+        .map(|(name, p)| {
+            (
+                name,
+                TenantPolicy {
+                    repos: p.repos.map(|r| r.into_iter().collect()),
+                    max_running: p.max_running,
+                    max_branches: p.max_branches,
+                    max_cost_usd: p.max_cost_usd,
+                    max_artifact_bytes: p.max_artifact_bytes,
+                },
+            )
+        })
+        .collect();
     let password = file.database.as_deref().is_some_and(|url| {
         url.split_once("://")
             .and_then(|(_, rest)| rest.split_once('@'))
@@ -517,6 +822,9 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             .map(|(name, p)| (name, resolve(p)))
             .collect(),
         tokens,
+        principals,
+        credentials,
+        tenants,
         tls: file.tls.map(|t| TlsFiles {
             cert: resolve(t.cert),
             key: resolve(t.key),
