@@ -613,6 +613,7 @@ dependencies = [
 name = "branchyard-client"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "branchyard",
  "httparse",
  "rustls",
@@ -703,6 +704,7 @@ name = "branchyard-server"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "blake3",
  "branchyard",
  "branchyard-client",
  "futures-util",

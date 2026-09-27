@@ -79,20 +79,23 @@ A harness in a rig fills a seat with `by spawn --seat`, `branchyard.spawn(seat=.
 
 ## Artifacts and scratch areas
 
-See [storage](storage.md). Reads follow the delegation tree: a branch reads what it or its ancestors or descendants published or own; a sibling needs an explicit share. Not yet reached by `by --remote` or the server's HTTP API; local mode and delegation (`by`, Python, `Delegate`, MCP, inside or outside a harness with `--branch`) are built.
+See [storage](storage.md). Reads follow the delegation tree: a branch reads what it or its ancestors or descendants published or own; a sibling needs an explicit share. Every surface reaches them now: local mode, delegation (`by`, Python, `Delegate`, MCP, inside or outside a harness with `--branch`), `by --remote` (always `--branch`, since there is no harness to delegate as), the server's HTTP API and `branchyard-client`.
 
-| Operation | SDK | by | delegation |
-|---|---|---|---|
-| Publish a file as an artifact | `Yard::publish_artifact`, `Branch::publish` | `artifact publish FILE [--name] [--label K=V]` | `publish_artifact` |
-| List readable artifacts | `Yard::artifacts`, `Branch::artifacts` | `artifact list` | `list_artifacts` |
-| Read an artifact's bytes | `Yard::read_artifact`, `Branch::read_artifact` | `artifact get ID --out PATH` | `get_artifact` |
-| Share an artifact with another branch | `Yard::share_artifact` | `artifact share ID --to BRANCH` | `share_artifact` |
-| Create a scratch area | `Yard::create_scratch` | `scratch create NAME` | `create_scratch` |
-| List reachable scratch areas | `Yard::scratch_areas` | `scratch list` | `list_scratch` |
-| Share a scratch area | `Yard::share_scratch` | `scratch share NAME --to BRANCH` | `share_scratch` |
-| Acquire a scratch area's writer lock | `Yard::lock_scratch` | `scratch lock NAME` | `lock_scratch` |
-| Release a scratch area's writer lock | `Yard::unlock_scratch` | `scratch unlock NAME` | `unlock_scratch` |
-| A turn's authorized scratch areas | n/a: set automatically | `BRANCHYARD_SCRATCH_<NAME>` (local), a mount (Microsandbox); none (Substrate) | same |
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Publish a file as an artifact | `Yard::publish_artifact`, `Branch::publish` | `artifact publish FILE [--name] [--label K=V]` | yes, `--branch` required | `POST …/artifacts` | `Repo::publish_artifact` | `publish_artifact` |
+| List readable artifacts | `Yard::artifacts`, `Branch::artifacts` | `artifact list` | yes | `GET …/artifacts` | `Repo::artifacts` | `list_artifacts` |
+| Read an artifact's bytes | `Yard::read_artifact`, `Branch::read_artifact` | `artifact get ID --out PATH` | yes | `GET …/artifacts/{id}` (metadata), `.../content` (bytes) | `Repo::read_artifact` | `get_artifact` |
+| Share an artifact with another branch | `Yard::share_artifact` | `artifact share ID --to BRANCH` | yes | `POST …/artifacts/{id}/share` | `Repo::share_artifact` | `share_artifact` |
+| Create a scratch area | `Yard::create_scratch` | `scratch create NAME` | yes | `POST …/scratch` | `Repo::create_scratch` | `create_scratch` |
+| List reachable scratch areas | `Yard::scratch_areas` | `scratch list` | yes | `GET …/scratch` | `Repo::scratch_areas` | `list_scratch` |
+| Share a scratch area | `Yard::share_scratch` | `scratch share NAME --to BRANCH` | yes | `POST …/scratch/{name}/share` | `Repo::share_scratch` | `share_scratch` |
+| Acquire a scratch area's writer lock | `Yard::lock_scratch` | `scratch lock NAME` | yes | `POST …/scratch/{name}/lock` | `Repo::lock_scratch` | `lock_scratch` |
+| Release a scratch area's writer lock | `Yard::unlock_scratch` | `scratch unlock NAME` | yes | `POST …/scratch/{name}/unlock` | `Repo::unlock_scratch` | `unlock_scratch` |
+| A scratch area's lock state | `Yard::scratch_lock_state` | n/a | n/a | `GET /v1/repos/{repo}/scratch/{name}/lock` | `Repo::scratch_lock_state` | n/a |
+| A turn's authorized scratch areas | n/a: set automatically | `BRANCHYARD_SCRATCH_<NAME>` (local), a mount (Microsandbox); none (Substrate) | n/a: the server has no turn's environment to expose to a remote caller | n/a | n/a | same |
+
+A remote caller reaches the scratch area's directory only through `lock`/`unlock` and whatever harnesses the server runs; there is no route that reads or writes its files directly (see `docs/storage.md`).
 
 ## Storage
 
@@ -100,7 +103,7 @@ See [storage](storage.md). Reads follow the delegation tree: a branch reads what
 |---|---|---|---|
 | SQLite, `.branchyard/state.db` | `Yard::open` | yes | the default, with `DATA-DIR/state.db` for operations |
 | PostgreSQL | `Yard::open_postgres`, `postgres` feature | no: local `by` opens `state.db` | `--database`, `postgres` feature |
-| Artifact bytes | `.branchyard/artifacts/` | same | the server's data directory (planned; not yet served remotely) |
+| Artifact bytes | `.branchyard/artifacts/` | same | each served repository's own `.branchyard/artifacts/`; served remotely (see [storage](storage.md#remote-mode)) |
 
 ## Output types
 
@@ -151,3 +154,4 @@ Every result a surface returns is the SDK's serde form: `BranchInfo`, `RecordedE
 | Unapproved tools on the server | refused | `--allow-unapproved-tools` |
 | PostgreSQL | design only | `Yard::open_postgres`, `by serve --database` |
 | `HarnessInfo` | not `Serialize`; copied field by field | serde |
+| `by --remote artifact`/`scratch`, the server's HTTP API, `branchyard-client` for storage | refused: "does not yet reach a server over --remote" | server endpoints, the same JSON as local; `--max-artifact-bytes` |
