@@ -9,8 +9,9 @@ Every statement about an upstream project cites a path in its repository at the 
 | Scion | GoogleCloudPlatform/scion | `d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338` | 2026-09-27 |
 | OpenRig | mvschwarz/openrig | `c9be421b9c8522075006f9cee3c0b2ba00d52a22` | 2026-09-26 |
 | Herdr | herdrdev/herdr | `fff6c820aa45f4eabb9b2e0456326dc74cca5a25` | 2026-09-27 |
+| Warp | warpdotdev/warp | `5af88f49f84e70025f9c19e13f6b9ae64b624627` | 2026-09-25 |
 
-Warp is out of scope: its harness helpers are AGPL-3.0 and are not absorbed ([vendoring](vendoring.md#warp-preserve-the-license-boundary)).
+Warp's application code, where all its agent code lives (`app/`), is AGPL-3.0; only its UI framework crates are MIT. Warp is surveyed for ideas only: nothing from it is ported, and Branchyard files contain none of its code ([vendoring](vendoring.md#warp-preserve-the-license-boundary)).
 
 ## Summary
 
@@ -19,9 +20,10 @@ Warp is out of scope: its harness helpers are AGPL-3.0 and are not absorbed ([ve
 | Scion | Agents in containers, locally or through a Hub on Kubernetes or Cloud Run | An interactive TUI in tmux, prompts as keystrokes, state from harness hooks | Bypassed at launch | Grown at runtime by agents through the CLI | Manual, or a pull request | Apache-2.0 |
 | OpenRig | A local daemon with tmux seats | An interactive TUI in tmux, prompts pasted, state from activity hooks; Pi through RPC | A launch posture per seat | Declared in YAML, then grown or shrunk by command | By convention between agents | Apache-2.0 |
 | Herdr | A terminal multiplexer with a background server | The terminal itself; state from screen manifests or lifecycle hooks | Not answered; `blocked` is shown | Panes and tabs created by people, scripts or agents | Not found | Apache-2.0 |
+| Warp | A terminal app driving harnesses locally, or tasks on Warp's hosted service | A pseudo-terminal per harness, reading structured transcripts alongside it | Bypassed at launch for every harness it drives | A parent/child conversation tree for its own agent | Not found; a pull-request link is recorded | AGPL-3.0 (app), MIT (UI crates) |
 | Branchyard | An SDK engine, locally or behind an HTTP server, with sandbox providers | Structured protocols: stream-json, App Server, RPC, ACP | Answered per invocation by policy | Grown at runtime inside a delegation envelope | Validated merge on the exact target revision | Apache-2.0 |
 
-Branchyard is the only one of the four that drives harnesses through their machine protocols, answers each tool permission, holds a cost budget, and merges only a checked candidate. The other three are further along as products: people use them daily, and each has a richer interface, more harness coverage, and operational features Branchyard lacks.
+Branchyard is the only one of the five that drives harnesses through their machine protocols, answers each tool permission, holds a cost budget, and merges only a checked candidate. The other four are further along as products: people use them daily, and each has a richer interface, more harness coverage, and operational features Branchyard lacks.
 
 ## Scion
 
@@ -98,6 +100,44 @@ Branchyard is the only one of the four that drives harnesses through their machi
 - State for Claude Code and Codex still comes from the screen (`docs/next/website/src/content/docs/agents.mdx:10`); Codex may stay `unknown` after a response (`agents.mdx:59`). Branchyard reads turn boundaries from the protocol.
 - Permissions are not answered, only shown as `blocked`; a person or script sends keys (`agent-automation.mdx`, "Choose the control surface").
 - Isolation, budgets, durable task state and merging: not found. Worktrees exist as a layout operation (`socket-api.mdx:104`).
+
+## Warp
+
+Warp (`warpdotdev/warp`, AGPL-3.0 application, MIT UI crates) is a GPU-rendered terminal with an agent subsystem under `app/src/ai/`. It runs harnesses two ways. Locally, it drives Claude Code, Codex and Gemini CLI as child processes in a pseudo-terminal it owns (`app/src/ai/agent_sdk/driver/terminal.rs`), reading their structured transcripts alongside (`driver/harness/claude_transcript.rs`, `codex_transcript.rs`). Remotely, "ambient agents" run on Warp's hosted service and the app polls them (`app/src/ai/ambient_agents/task.rs:155`, `ExecutionLocation`). `agent_sdk` is an internal name for the driver layer, not a published SDK.
+
+It launches every third-party harness with approvals bypassed: `claude … --dangerously-skip-permissions` (`driver/harness/claude_code.rs:222`), `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust` (`driver/harness/codex.rs:204`, `:209`), and `gemini --yolo` (`driver/harness/gemini.rs:107`). Its typed allow/ask/deny engine with reasons (`app/src/ai/blocklist/permissions.rs:31`, `:66`) governs Warp's own built-in agent, not these harnesses.
+
+| Dimension | Warp |
+|---|---|
+| Harnesses | Claude Code, Codex, Gemini CLI (`driver/harness/{claude_code,codex,gemini}.rs`), besides Warp's own agent |
+| Driven by | A pseudo-terminal per harness, with transcript parsing where the harness writes one |
+| Approvals | Bypassed at launch for all three (above) |
+| Provisioning | Warp's own MCP server and skill directories written into the harness (`driver/mcp_startup.rs`, `driver/harness/skill_dirs_publish.rs`), and Claude Code's API-key approval (`driver/harness/claude_code.rs:804`) |
+| Resume | A per-harness `ResumePayload` fetched from Warp's server-stored transcript (`driver/harness/mod.rs:108`); a periodic workspace checkpoint at safe boundaries (`driver/checkpoint_coordinator.rs`) |
+| Fork | Not found |
+| **Mid-task messages** | A durable lead-to-child mailbox for Claude Code, delivered as a hook's `additionalContext` at the next hook boundary, with staged, surfaced and acknowledged stages, a local and a server cursor, and a size budget with a "more messages queued" note (`driver/harness/claude_code/parent_bridge.rs:1-9`, `:437`, `:587`). Not found for Codex or Gemini |
+| Delegation | A parent/child conversation tree for Warp's own agent (`app/src/ai/blocklist/orchestration_topology.rs`, `child_agent_launch.rs:29`); no scoped authority for a child |
+| Isolation | Local harnesses run as the desktop user; Codex's launch checks for an isolation platform (`driver/harness/codex.rs:642`); remote isolation is on Warp's service and not in this repository |
+| Durability | Cursor-based consumption of the server's agent event stream (`app/src/ai/agent_events/driver.rs`) |
+| Merging | Not found; a finished run records a pull-request link (`app/src/ai/artifacts/mod.rs`) |
+| Budgets | Credits and cost tracked per task (`ambient_agents/task.rs:459`, `:467`); no limit found |
+| Artifacts | A closed set of run deliverables: plan, pull request, external reference, screenshot, file (`app/src/ai/artifacts/mod.rs:31`) |
+| Triggers | Linear, Slack, GitHub and GitLab webhooks, schedules and others start remote tasks (`ambient_agents/task.rs:41`) |
+| APIs | None public |
+
+### Where Warp is ahead of Branchyard
+
+- A working mid-task mailbox into a running Claude Code session, which Branchyard is building now.
+- A bounded shutdown ladder (`/exit`, a follow-up Enter, then a kill) and a kill that proves the process group belongs to the harness and is not the driver's own (`driver/harness/exit_escalation.rs`, `process_control.rs:39`).
+- A polished human interface, typed run deliverables, and many ways to start a run.
+
+### Where Branchyard is ahead of Warp
+
+- Every tool permission of every driven harness is answered by policy; Warp bypasses them.
+- Delegation carries scoped, attenuated authority; Warp's tree is for display and continuity.
+- Cost budgets are enforced across a subtree; Warp tracks cost only.
+- Candidates are merged only after checks on the exact target; Warp records a link.
+- It is an open, portable contract; Warp's remote execution, events and delegation depend on its own service.
 
 ## Feature matrix
 
@@ -256,6 +296,21 @@ OpenRig already treats Herdr as a terminal provider (`README.md`, "Terminal UI a
 - **Send is a popup.** Plugin actions take no input, so `send` opens a `popup` entrypoint that reads the prompt and runs `by send`.
 - **Server only.** A local repository is followed through `by serve` on loopback rather than by reading its store directly.
 
+### Warp
+
+Ideas only; nothing is ported, because Warp's application is AGPL-3.0.
+
+| Item | Type | Effort | Depends on | Notes |
+|---|---|---|---|---|
+| A durable mailbox delivered at the next boundary, with acknowledgment, a cursor and a size budget | idea | In the inbox work | Branchyard's inbox and steer | For a harness with no live input, deliver at its next hook or turn boundary; say so in the delivery semantics |
+| Prove a process group before killing it | idea | 0.5 day | None | Branchyard already matches pid and start time; add a check that the group is not the engine's own |
+| Named reasons for policy decisions | idea | 0.5 day | None | Branchyard records the rule that decided; a reason vocabulary would make audits easier |
+| A closed set of run deliverables for display | idea | 1–2 days | Artifacts | Keep it separate from scratch areas |
+| Remote tasks started by external triggers | idea | Later | Webhooks | Low priority |
+| Warp's hosted service, terminal UI, notifications and billing | don't | — | — | Not a reusable contract; a terminal emulator is excluded ([design §3](design.md#explicit-exclusions)) |
+
+`vendor/warp-agpl` stays as it is: five files, at `2f0db5c5edd8134f0e858aebbc0ecd0db2f91d38`, substantively unchanged at the surveyed commit. The mailbox and the permission engine are left out of it: they are designs to reimplement, not source to keep.
+
 ## Surprises
 
 - Scion fixed the Claude model-alias mismatch that Branchyard documents as a known upstream incompatibility; the upstream suite passes at `d9b9e6a`.
@@ -263,3 +318,5 @@ OpenRig already treats Herdr as a terminal provider (`README.md`, "Terminal UI a
 - Herdr is not purely a screen scraper: hooks are the status authority for six agents and report session IDs for twelve. Claude Code and Codex state still comes from the screen.
 - Herdr fetches detection manifests from herdr.dev at runtime by default. Anything Branchyard takes from those manifests must stay pinned.
 - Scion, like OpenRig, drives every harness as a TUI in tmux, and bypasses approvals for Claude Code, Codex and Grok. None of the three answers individual tool permissions.
+- Warp, like Scion, launches every third-party harness with approvals bypassed; its permission engine governs only its own agent.
+- Warp's most relevant mechanism for Branchyard, a mailbox into a running Claude Code session, is not in the vendored files; it exists because Claude Code's protocol has no live input, so Warp delivers at a hook boundary.

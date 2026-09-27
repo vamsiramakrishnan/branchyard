@@ -12,7 +12,7 @@ The table below summarizes [the comparison](comparison.md), which cites each ups
 | Scion | Teams of agents in containers, locally or through a Hub on Kubernetes or Cloud Run; provisioning, identity, messaging, chat bridges | Per-invocation approvals (it launches harnesses with permission bypass), cost budgets, validated merging |
 | OpenRig | Declarative rigs of seats, startup delivery, honest restore, runtime grow and shrink, queues and workflows | Per-invocation approvals (its policies set a launch posture), budgets, sandboxing, merging |
 | Herdr | Watching and driving many terminal agents; hooks for some agents, screen manifests for the rest; resume after restart | Structured control of Claude Code and Codex, approvals, budgets, isolation, merging |
-| Warp | A polished terminal experience around agents | An embeddable, headless, permissively licensed contract |
+| Warp | A terminal app driving harnesses in a pseudo-terminal, with a mailbox into a running Claude Code session and hosted remote tasks ([comparison](comparison.md#warp)) | Per-invocation permissions (it bypasses them), delegation authority, budgets, validated merges, an open contract |
 | **Branchyard** | The contract: typed harness events, permission answers, budgets, and branch/merge semantics | Virtualization, terminals, model loops, team conventions |
 
 Substrate is a backend, not a rival: `branchyard-substrate` already maps its actors onto Branchyard's provider contract. Scion's harness provisioning is being ported; OpenRig's declarative rigs and Herdr's terminal view are the next candidates, as an idea and as a client respectively ([absorption plan](comparison.md#absorption-plan)).
