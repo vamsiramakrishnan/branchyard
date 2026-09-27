@@ -63,13 +63,27 @@
 //!   The engine reports that failure as the branch's status; it never
 //!   substitutes a fresh session.
 //! - Cost limits for harnesses that report no cumulative cost estimate.
+//!
+//! # Delegation
+//!
+//! With [`TaskOptions::delegation`], a harness can spawn, inspect, message,
+//! integrate and cancel child branches within an [`Envelope`], through `by`
+//! in its shell, the Python module, or Branchyard's MCP tools; SDK code does
+//! the same through a [`Delegate`]. Children run on threads of the process
+//! that runs their parent; a process must call [`Branch::wait_subtree`]
+//! before it exits, or it abandons them. `docs/delegation.md` describes the
+//! surfaces, the envelope and the authority model, which in local mode
+//! stops honest mistakes, not a hostile harness.
 
+mod broker;
+mod delegation;
 mod engine;
 mod git;
 mod harness;
 mod names;
 mod ops;
 mod policy;
+mod projection;
 mod record;
 mod run;
 mod state;
@@ -83,6 +97,11 @@ pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
 };
 use branchyard_workspace::Repository;
+pub use delegation::{
+    Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inspection, Sent, Spawn,
+    Spawned,
+};
+pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 use serde::{Deserialize, Serialize};
 
 /// A repository with Branchyard state. Cheap to clone; clones share state.
@@ -90,6 +109,9 @@ use serde::{Deserialize, Serialize};
 pub struct Yard {
     root: PathBuf,
     repo: Repository,
+    /// Delegation contexts, running children and the broker, shared by
+    /// clones.
+    hub: Arc<projection::Hub>,
 }
 
 impl Yard {
@@ -152,6 +174,15 @@ impl Yard {
         harness::list()
     }
 
+    /// Act as the branch whose running turn was issued `token`. The token
+    /// is the authority and names the branch: it is issued when a
+    /// delegating turn starts and revoked when it ends. Works in the
+    /// process that runs the turn and, through its broker, in any other.
+    /// Fails with [`Error::Denied`] for any other token.
+    pub fn as_branch(&self, token: &str) -> Result<Delegate, Error> {
+        delegation::as_branch(self, token)
+    }
+
     fn store(&self) -> state::Store {
         state::Store::new(&self.root)
     }
@@ -188,6 +219,23 @@ pub struct TaskOptions {
     /// driver still appends its protocol arguments. Stored with the branch
     /// for later sends and forks.
     pub command: Option<Vec<String>>,
+    /// Let the harness create and coordinate child branches within this
+    /// envelope, through Branchyard's MCP tools. Stored with the branch; a
+    /// send without one keeps the branch's. A delegated child's envelope
+    /// is fixed by its parent and not changed here.
+    pub delegation: Option<Envelope>,
+    /// The `by` executable a delegating harness gets: its directory goes
+    /// first on the harness's `PATH`, its path in [`ENV_BY`], and `by mcp`
+    /// is the harness's MCP server. Defaults to the running executable when
+    /// it is `by`, else `by` beside it, else on `PATH`. Without one, the
+    /// harness gets only the MCP server and the Python module cannot work.
+    /// Children use their parent's.
+    pub delegation_cli: Option<PathBuf>,
+    /// The command that starts Branchyard's MCP server, when it is not
+    /// `by mcp`: for example `["/opt/branchyard/bin/branchyard-mcp"]`. The
+    /// engine appends `--root <root> --branch <name>` and passes the token
+    /// in [`ENV_TOKEN`]. Children use their parent's.
+    pub delegation_server: Option<Vec<String>>,
 }
 
 /// Receives every activity as it is recorded, from any branch's thread.
@@ -253,6 +301,13 @@ impl TaskBuilder {
         S: Into<String>,
     {
         self.options.command = Some(argv.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Let the harness delegate within `envelope`; see
+    /// [`TaskOptions::delegation`].
+    pub fn delegate(mut self, envelope: Envelope) -> Self {
+        self.options.delegation = Some(envelope);
         self
     }
 
@@ -335,6 +390,37 @@ impl Branch {
     pub fn events(&self) -> Result<Vec<RecordedEvent>, Error> {
         record::read(&self.yard.store(), &self.info.name)
     }
+
+    /// Act as this branch with your own authority: the same operations its
+    /// harness gets, bounded by the envelope it was given, with no token.
+    /// A branch without delegation can still inspect itself but cannot
+    /// spawn. `options` supplies the policy, observer and tools for its
+    /// children's turns; their limits come from the envelope and from
+    /// `options.budget`, which bounds this branch.
+    pub fn delegate(&self, options: TaskOptions) -> Result<Delegate, Error> {
+        delegation::trusted(&self.yard, &self.info.name, options)
+    }
+
+    /// Every branch this one delegated to, directly or through its
+    /// children, oldest first.
+    pub fn descendants(&self) -> Result<Vec<BranchInfo>, Error> {
+        delegation::descendants(&self.yard.store(), &self.info.name)
+    }
+
+    /// Ask this branch's running turn, and every running turn delegated
+    /// below it, to stop; each ends `interrupted`. Works on turns running in
+    /// any process on this host. Returns the branches that were running.
+    pub fn cancel(&self) -> Result<Vec<String>, Error> {
+        delegation::cancel_tree(&self.yard.store(), &self.info.name, "the SDK caller")
+    }
+
+    /// Wait until no descendant of this branch is running a turn on a
+    /// thread of this process, then return the descendants' records.
+    /// Descendants running in another process are not waited for; their
+    /// status says so.
+    pub fn wait_subtree(&self) -> Result<Vec<BranchInfo>, Error> {
+        delegation::wait_subtree(&self.yard, &self.info.name)
+    }
 }
 
 /// A branch's durable record.
@@ -349,8 +435,16 @@ pub struct BranchInfo {
     pub profile: String,
     /// Native harness session, once known.
     pub session: Option<String>,
-    /// Branch this one was forked from.
+    /// Branch this one was forked from, or that delegated it.
     pub parent: Option<String>,
+    /// Branches this one delegated to, oldest first. Forks are not
+    /// children.
+    #[serde(default)]
+    pub children: Vec<String>,
+    /// Delegation depth: 0 for a branch you started, one more than its
+    /// parent's for a delegated child.
+    #[serde(default)]
+    pub depth: u32,
     /// The commit the branch started from.
     pub base: String,
     pub candidate: Option<CandidateInfo>,
@@ -446,6 +540,20 @@ enum Fallback {
 pub struct Rule {
     pub tool: String,
     pub allow: bool,
+    /// When set, the rule also requires the request to be a shell command
+    /// that runs exactly this `by` (or `by` by name) with a delegation
+    /// subcommand; see [`Policy::allow_delegation_commands`].
+    pub delegation_by: Option<PathBuf>,
+}
+
+impl Rule {
+    pub(crate) fn deny(tool: impl Into<String>) -> Rule {
+        Rule {
+            tool: tool.into(),
+            allow: false,
+            delegation_by: None,
+        }
+    }
 }
 
 impl Default for Policy {
@@ -484,14 +592,33 @@ impl Policy {
         self.rules.push(Rule {
             tool: tool.into(),
             allow: true,
+            delegation_by: None,
         });
         self
     }
 
     pub fn deny(mut self, tool: impl Into<String>) -> Self {
+        self.rules.push(Rule::deny(tool));
+        self
+    }
+
+    /// Allow exactly the harness's shell commands that run `by` with a
+    /// delegation subcommand (`spawn`, `inspect`, `events`, `send`,
+    /// `integrate`, `cancel`, `children`), and nothing else. The command
+    /// must be a single simple command: plain or quoted words, no
+    /// variables, substitutions, globs, redirections, pipes or command
+    /// lists. Its program must be `by_path` itself or `by` by name, which
+    /// a delegating harness finds first on its `PATH`. One `sh -c` or
+    /// `bash -lc` wrapper, as Codex reports commands, is looked through.
+    ///
+    /// Opt-in, and ordered like any rule: an earlier deny rule, such as one
+    /// a delegating parent imposed, still wins. The subcommands act within
+    /// the branch's envelope, so allowing them grants no other authority.
+    pub fn allow_delegation_commands(mut self, by_path: impl Into<PathBuf>) -> Self {
         self.rules.push(Rule {
-            tool: tool.into(),
-            allow: false,
+            tool: "*".into(),
+            allow: true,
+            delegation_by: Some(by_path.into()),
         });
         self
     }
@@ -552,6 +679,18 @@ pub enum Activity {
     /// Something the engine noticed, such as descendants that outlived the
     /// harness.
     Warning(String),
+    /// A delegation operation this branch asked for, recorded on the
+    /// asking branch whether it was carried out or refused.
+    Delegation {
+        /// The tool: `spawn`, `send`, `propose_integration` or `cancel`.
+        tool: String,
+        /// The branch it acted on; for a refused spawn, the requested name
+        /// or empty.
+        branch: String,
+        /// What happened, or why it was refused.
+        outcome: String,
+        refused: bool,
+    },
 }
 
 /// Activity from a named branch.
@@ -569,7 +708,7 @@ pub struct RecordedEvent {
     pub activity: Activity,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Merged {
     pub branch: String,
     pub target: String,
@@ -637,6 +776,16 @@ pub enum Error {
     },
     /// The recorded candidate is not a valid commit descending from its base.
     InvalidCandidate(String),
+    /// Refused by a delegation envelope or authority check.
+    Denied(String),
+    /// The branch is running a turn, and the operation needs it idle.
+    Running(String),
+    /// An error the engine running a delegating turn returned through its
+    /// broker, with the [`Error::kind`] it had there.
+    Remote {
+        kind: String,
+        message: String,
+    },
     Git(String),
     Harness(String),
     Io(std::io::Error),
@@ -687,10 +836,46 @@ impl fmt::Display for Error {
                 write!(f, "the candidate is already contained in {target}")
             }
             Error::InvalidCandidate(message) => write!(f, "invalid candidate: {message}"),
+            Error::Denied(why) => write!(f, "denied: {why}"),
+            Error::Running(name) => write!(f, "branch {name} is running a turn"),
+            Error::Remote { message, .. } => f.write_str(message),
             Error::Git(message) => write!(f, "git: {message}"),
             Error::Harness(message) => write!(f, "harness: {message}"),
             Error::Io(error) => write!(f, "{error}"),
             Error::State(message) => write!(f, "state: {message}"),
+        }
+    }
+}
+
+impl Error {
+    /// A stable name for the error's variant, as `by --json` and the broker
+    /// report it: `denied`, `running`, `unknown_branch`, `no_candidate`,
+    /// `conflict`, `check_failed`, `target_moved`, `unsupported`, and so on.
+    pub fn kind(&self) -> &str {
+        match self {
+            Error::NotARepository(_) => "not_a_repository",
+            Error::UnknownBranch(_) => "unknown_branch",
+            Error::BranchExists(_) => "branch_exists",
+            Error::InvalidName { .. } => "invalid_name",
+            Error::UnknownHarness(_) => "unknown_harness",
+            Error::HarnessUnavailable { .. } => "harness_unavailable",
+            Error::Unsupported(_) => "unsupported",
+            Error::NoCandidate(_) => "no_candidate",
+            Error::TargetMoved { .. } => "target_moved",
+            Error::Conflict { .. } => "conflict",
+            Error::CheckFailed { .. } => "check_failed",
+            Error::CheckTimedOut { .. } => "check_timed_out",
+            Error::CheckNotStarted(_) => "check_not_started",
+            Error::DirtyTarget(_) => "dirty_target",
+            Error::AlreadyMerged { .. } => "already_merged",
+            Error::InvalidCandidate(_) => "invalid_candidate",
+            Error::Denied(_) => "denied",
+            Error::Running(_) => "running",
+            Error::Remote { kind, .. } => kind,
+            Error::Git(_) => "git",
+            Error::Harness(_) => "harness",
+            Error::Io(_) => "io",
+            Error::State(_) => "state",
         }
     }
 }

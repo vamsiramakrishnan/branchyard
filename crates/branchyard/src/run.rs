@@ -9,6 +9,7 @@ use branchyard_harness::profiles::{self, Profile};
 use branchyard_harness::SessionMode;
 use branchyard_workspace::Commit;
 
+use crate::delegation::Grant;
 use crate::engine::{self, Turn};
 use crate::state::{now_ms, Record};
 use crate::{
@@ -31,19 +32,19 @@ pub(crate) fn planned_names(
 }
 
 /// A resolved profile and the command that will launch it.
-struct Launch {
-    profile: &'static Profile,
-    command: Vec<String>,
+pub(crate) struct Launch {
+    pub profile: &'static Profile,
+    pub command: Vec<String>,
 }
 
-fn launch(id: Option<&str>, command: Option<&[String]>) -> Result<Launch, Error> {
+pub(crate) fn launch(id: Option<&str>, command: Option<&[String]>) -> Result<Launch, Error> {
     let profile = harness::select(id)?;
     let command = harness::command(profile, command);
     harness::check_available(id.unwrap_or(profile.harness), &command)?;
     Ok(Launch { profile, command })
 }
 
-fn resolve_base(yard: &Yard, rev: Option<&str>) -> Result<String, Error> {
+pub(crate) fn resolve_base(yard: &Yard, rev: Option<&str>) -> Result<String, Error> {
     let rev = rev.unwrap_or("HEAD");
     yard.repo
         .resolve(rev)
@@ -52,21 +53,23 @@ fn resolve_base(yard: &Yard, rev: Option<&str>) -> Result<String, Error> {
 }
 
 /// What a new branch starts from.
-struct NewBranch<'a> {
-    name: &'a str,
-    prompt: &'a str,
-    profile: &'static Profile,
-    base: String,
-    parent: Option<String>,
-    check: Option<Vec<String>>,
-    command: Option<Vec<String>>,
-    home: Option<PathBuf>,
-    cost_baseline: Option<f64>,
+pub(crate) struct NewBranch<'a> {
+    pub name: &'a str,
+    pub prompt: &'a str,
+    pub profile: &'static Profile,
+    pub base: String,
+    pub parent: Option<String>,
+    pub check: Option<Vec<String>>,
+    pub command: Option<Vec<String>>,
+    pub home: Option<PathBuf>,
+    pub cost_baseline: Option<f64>,
+    pub grant: Option<Grant>,
+    pub depth: u32,
 }
 
 /// Write the record for a reserved name and create its worktree. A
 /// worktree that cannot be created leaves the branch `Failed`.
-fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
+pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
     let store = yard.store();
     let branch = names::validate(new.name)?;
     let created_ms = now_ms();
@@ -80,6 +83,8 @@ fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
             profile: new.profile.id.to_owned(),
             session: None,
             parent: new.parent,
+            children: Vec::new(),
+            depth: new.depth,
             base: new.base.clone(),
             candidate: None,
             status: BranchStatus::Running,
@@ -92,6 +97,7 @@ fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
         command: new.command,
         home: new.home,
         cost_baseline: new.cost_baseline,
+        grant: new.grant,
     };
     let created = {
         let _lock = git::lock();
@@ -113,12 +119,23 @@ fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
     Ok(record)
 }
 
-fn isolated_home(yard: &Yard, options: &TaskOptions, name: &str) -> Option<PathBuf> {
+pub(crate) fn isolated_home(yard: &Yard, options: &TaskOptions, name: &str) -> Option<PathBuf> {
     options.isolated.then(|| yard.store().home(name))
+}
+
+/// The grant for a branch the caller starts: the envelope, with nothing
+/// imposed by a parent. Checks that the MCP server can be found first.
+fn root_grant(options: &TaskOptions) -> Result<Option<Grant>, Error> {
+    let Some(envelope) = &options.delegation else {
+        return Ok(None);
+    };
+    crate::projection::tools(options)?;
+    Ok(Some(Grant::root(envelope.clone())))
 }
 
 pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Branch, Error> {
     let launch = launch(options.harness.as_deref(), options.command.as_deref())?;
+    let grant = root_grant(options)?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let name = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
@@ -134,6 +151,8 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             command: options.command.clone(),
             home: isolated_home(yard, options, &name),
             cost_baseline: None,
+            grant,
+            depth: 0,
         },
     );
     let record = record.inspect_err(|_| store.release(&name))?;
@@ -162,6 +181,7 @@ pub(crate) fn run_on(
         .iter()
         .map(|id| launch(Some(id), options.command.as_deref()))
         .collect::<Result<Vec<_>, _>>()?;
+    let grant = root_grant(options)?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let reserved = names::reserve(
@@ -185,6 +205,8 @@ pub(crate) fn run_on(
                 command: options.command.clone(),
                 home: isolated_home(yard, options, name),
                 cost_baseline: None,
+                grant: grant.clone(),
+                depth: 0,
             },
         );
         match record {
@@ -228,8 +250,40 @@ pub(crate) fn send(
     prompt: &str,
     options: &TaskOptions,
 ) -> Result<Branch, Error> {
+    let prepared = prepare_send(yard, name, options, false)?;
+    engine::execute(Turn {
+        yard,
+        record: prepared.record,
+        profile: prepared.profile,
+        command: prepared.command,
+        mode: prepared.mode,
+        prompt,
+        options,
+        fork_source: None,
+    })
+}
+
+/// A send checked and recorded as running, ready to execute.
+pub(crate) struct Prepared {
+    pub record: Record,
+    pub profile: &'static Profile,
+    pub command: Vec<String>,
+    pub mode: SessionMode,
+}
+
+/// Check that `name` can continue its session and mark it running.
+/// `idle` refuses a branch whose status says it is running a turn.
+pub(crate) fn prepare_send(
+    yard: &Yard,
+    name: &str,
+    options: &TaskOptions,
+    idle: bool,
+) -> Result<Prepared, Error> {
     let store = yard.store();
     let mut record = store.read(name)?;
+    if idle && record.info.status == BranchStatus::Running {
+        return Err(Error::Running(name.to_owned()));
+    }
     let profile = profiles::by_id(&record.info.profile)
         .ok_or_else(|| Error::UnknownHarness(record.info.profile.clone()))?;
     if let Some(id) = &options.harness {
@@ -266,17 +320,26 @@ pub(crate) fn send(
     if options.check.is_some() {
         record.check = options.check.clone();
     }
+    // A delegated child keeps the envelope its parent gave it.
+    if let (Some(envelope), 0) = (&options.delegation, record.info.depth) {
+        crate::projection::tools(options)?;
+        record.grant = Some(match record.grant.take() {
+            Some(grant) => Grant {
+                envelope: envelope.clone(),
+                ..grant
+            },
+            None => Grant::root(envelope.clone()),
+        });
+    }
     record.info.status = BranchStatus::Running;
+    // A cancel meant for an earlier turn must not stop this one.
+    store.clear_cancel(name);
     store.write(&record)?;
-    engine::execute(Turn {
-        yard,
+    Ok(Prepared {
         record,
         profile,
         command,
         mode: SessionMode::Resume(session),
-        prompt,
-        options,
-        fork_source: None,
     })
 }
 
@@ -335,6 +398,7 @@ pub(crate) fn fork(
         options.harness.as_deref().unwrap_or(profile.harness),
         &launch_command,
     )?;
+    let grant = root_grant(options)?;
     let reserved =
         names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
     // A forked session lives in the parent's home when it ran isolated.
@@ -359,6 +423,8 @@ pub(crate) fn fork(
             command,
             home,
             cost_baseline,
+            grant,
+            depth: 0,
         },
     )
     .inspect_err(|_| store.release(&reserved))?;

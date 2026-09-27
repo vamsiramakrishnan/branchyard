@@ -234,6 +234,21 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             style.paint(tone, &format!("status: {text}"))
         }
         Activity::Warning(message) => style.paint(Tone::Yellow, &format!("warning: {message}")),
+        Activity::Delegation {
+            tool,
+            branch,
+            outcome,
+            refused,
+        } => {
+            let tone = if *refused { Tone::Red } else { Tone::Cyan };
+            let target = if branch.is_empty() {
+                String::new()
+            } else {
+                format!(" {branch}")
+            };
+            let verb = if *refused { "refused" } else { "delegated" };
+            style.paint(tone, &format!("{verb}: {tool}{target}: {outcome}"))
+        }
     })
 }
 
@@ -711,7 +726,7 @@ pub fn next_commands(info: &BranchInfo) -> Vec<String> {
     }
 }
 
-fn key_values(pairs: &[(&str, String)], style: Style) -> String {
+pub(crate) fn key_values(pairs: &[(&str, String)], style: Style) -> String {
     let width = pairs.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
     let mut out = String::new();
     for (key, value) in pairs {
@@ -755,6 +770,52 @@ pub fn summary(info: &BranchInfo, style: Style) -> String {
     let next = next_commands(info);
     if !next.is_empty() {
         pairs.push(("next", next.join("\n")));
+    }
+    key_values(&pairs, style)
+}
+
+/// `by inspect`.
+pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
+    let (status, tone) = status_text(&i.status);
+    let money = |v: Option<f64>| v.map_or("unknown".into(), usd);
+    let mut pairs = vec![
+        ("branch", i.name.clone()),
+        ("status", style.paint(tone, &status)),
+        ("harness", format!("{} ({})", i.harness, i.profile)),
+        ("parent", i.parent.clone().unwrap_or_else(|| "none".into())),
+        (
+            "children",
+            match i.children.is_empty() {
+                true => "none".into(),
+                false => i.children.join(", "),
+            },
+        ),
+        ("candidate", candidate_text(i.candidate.as_ref())),
+        ("turns", i.turns.to_string()),
+        ("cost", money(i.cost_usd)),
+        ("subtree cost", usd(i.subtree_cost_usd)),
+    ];
+    if let Some(max) = i.max_usd {
+        pairs.push((
+            "budget",
+            format!("{} of {} left", money(i.remaining_usd), usd(max)),
+        ));
+    }
+    if let Some(envelope) = &i.envelope {
+        let harnesses = match envelope.harnesses.is_empty() {
+            true => "its own".to_owned(),
+            false => envelope.harnesses.join(", "),
+        };
+        pairs.push((
+            "envelope",
+            format!(
+                "depth {}, {} children, harnesses: {harnesses}",
+                envelope.max_depth, envelope.max_children
+            ),
+        ));
+    }
+    if !i.last_message.is_empty() {
+        pairs.push(("last message", i.last_message.trim_end().to_owned()));
     }
     key_values(&pairs, style)
 }
@@ -874,6 +935,8 @@ mod tests {
             profile: "claude-code-stream-json".into(),
             session: None,
             parent: parent.map(str::to_owned),
+            children: Vec::new(),
+            depth: 0,
             base: "0123456789abcdef".into(),
             candidate: None,
             status: BranchStatus::Ready,
@@ -1112,6 +1175,24 @@ mod tests {
                 "warning: processes outlived the harness",
             ),
             (Activity::Harness(Event::Ready), "harness ready"),
+            (
+                Activity::Delegation {
+                    tool: "spawn".into(),
+                    branch: "kid".into(),
+                    outcome: "started".into(),
+                    refused: false,
+                },
+                "delegated: spawn kid: started",
+            ),
+            (
+                Activity::Delegation {
+                    tool: "spawn".into(),
+                    branch: String::new(),
+                    outcome: "denied: over budget".into(),
+                    refused: true,
+                },
+                "refused: spawn: denied: over budget",
+            ),
         ];
         for (activity, expected) in cases {
             assert_eq!(activity_line(&activity, PLAIN).as_deref(), Some(expected));

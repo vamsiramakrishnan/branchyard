@@ -7,9 +7,13 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use branchyard::{Branch, BranchInfo, BranchStatus, Budget, Policy, TaskOptions, Yard};
+use branchyard::{
+    Branch, BranchInfo, BranchStatus, Budget, Delegate, Envelope, Policy, Spawn, TaskOptions, Yard,
+    ENV_BRANCH, ENV_TOKEN,
+};
+use serde::Serialize;
 
-use crate::args::{self, shell_quote, TaskArgs};
+use crate::args::{self, shell_quote, SpawnArgs, TaskArgs};
 use crate::console::{self, Choice, Console};
 use crate::json;
 use crate::render::{self, Renderer, Style, Tone};
@@ -81,8 +85,17 @@ pub fn print(text: &str) -> Outcome {
     Ok(())
 }
 
+/// The yard: the harness's repository when `by` runs inside a harness,
+/// whose working directory is its branch's worktree, else the current one.
 fn open() -> Result<Yard, Failure> {
-    Ok(Yard::open(".")?)
+    Ok(open_yard()?)
+}
+
+fn open_yard() -> Result<Yard, branchyard::Error> {
+    match std::env::var_os(branchyard::ENV_ROOT).filter(|v| !v.is_empty()) {
+        Some(root) => Yard::open(root),
+        None => Yard::open("."),
+    }
 }
 
 fn now() -> u64 {
@@ -100,9 +113,18 @@ struct Live {
 
 impl Live {
     fn start(env: &Env, task: &TaskArgs, prefixed: bool) -> Live {
+        Live::start_to(env, task, prefixed, false)
+    }
+
+    /// With `json`, activity goes to stderr so stdout holds only the result.
+    fn start_to(env: &Env, task: &TaskArgs, prefixed: bool, json: bool) -> Live {
+        let out: Box<dyn Write + Send> = match json {
+            true => Box::new(io::stderr()),
+            false => Box::new(io::stdout()),
+        };
         let console = Arc::new(Console::new(
             Renderer::new(env.style(), prefixed),
-            Box::new(io::stdout()),
+            out,
             Box::new(console::terminal_prompt),
         ));
         let choice = console::choose(task.permissions, env.stdin_tty, env.stderr_tty);
@@ -116,6 +138,11 @@ impl Live {
 
     fn options(&self, task: &TaskArgs) -> TaskOptions {
         let console = self.console.clone();
+        let exe = std::env::current_exe().ok();
+        let policy = match (&exe, task.allow_delegation) {
+            (Some(by), true) => self.policy.clone().allow_delegation_commands(by),
+            _ => self.policy.clone(),
+        };
         TaskOptions {
             harness: task.harness.clone(),
             name: task.name.clone(),
@@ -125,24 +152,77 @@ impl Live {
                 max_turns: task.max_turns,
                 max_duration: task.max_duration,
             },
-            policy: self.policy.clone(),
+            policy,
             check: task.check.clone(),
             observer: Some(Arc::new(move |event| console.event(event))),
             isolated: task.isolated,
             command: task.command.clone(),
+            delegation: task.delegate.map(Envelope::depth),
+            delegation_cli: exe,
+            delegation_server: None,
         }
     }
 
-    /// Print the closing summary for one branch.
+    /// Print the closing summary for one branch, once every branch it
+    /// delegated to on this process has finished.
     fn finish(self, env: &Env, result: Result<Branch, branchyard::Error>) -> Outcome {
+        let branch = match result {
+            Ok(branch) => branch,
+            Err(error) => {
+                self.console.finish();
+                return Err(error.into());
+            }
+        };
+        let descendants = wait_for_descendants(&[&branch]);
         self.console.finish();
-        let branch = result?;
         print(&format!(
             "\n{}",
             render::summary(branch.info(), env.style())
         ))?;
+        if let Some(descendants) = descendants? {
+            let infos: Vec<&BranchInfo> = descendants.iter().collect();
+            print(&format!(
+                "\ndelegated\n{}",
+                render::comparison_table(&infos, env.style())
+            ))?;
+        }
         branch_outcome(branch.info())
     }
+}
+
+/// Wait for every branch these delegated to and still run on this process,
+/// saying which, and return them; `None` if there were none.
+fn wait_for_descendants(branches: &[&Branch]) -> Result<Option<Vec<BranchInfo>>, Failure> {
+    let mut all = Vec::new();
+    for branch in branches {
+        let running: Vec<String> = branch
+            .descendants()?
+            .into_iter()
+            .filter(|info| info.status == BranchStatus::Running)
+            .map(|info| info.name)
+            .collect();
+        if !running.is_empty() {
+            eprintln!(
+                "by: waiting for {} delegated branch{} still running: {}",
+                running.len(),
+                if running.len() == 1 { "" } else { "es" },
+                running.join(", ")
+            );
+        }
+        all.extend(branch.wait_subtree()?);
+    }
+    let unfinished: Vec<&str> = all
+        .iter()
+        .filter(|info| info.status == BranchStatus::Running)
+        .map(|info| info.name.as_str())
+        .collect();
+    if !unfinished.is_empty() {
+        eprintln!(
+            "by: still running in another process: {}",
+            unfinished.join(", ")
+        );
+    }
+    Ok((!all.is_empty()).then_some(all))
 }
 
 /// A branch that failed is an error for scripts; one that stopped at a
@@ -156,7 +236,7 @@ fn branch_outcome(info: &BranchInfo) -> Outcome {
 
 pub fn run(env: &Env, prompt: &str, task: &TaskArgs) -> Outcome {
     let yard = open()?;
-    let live = Live::start(env, task, false);
+    let live = Live::start(env, task, task.delegate.is_some());
     let result = yard.task(prompt).options(live.options(task)).run();
     live.finish(env, result)
 }
@@ -171,9 +251,21 @@ pub fn fan(env: &Env, prompt: &str, harnesses: &[String], task: &TaskArgs) -> Ou
         live.console.reserve(&names);
     }
     let result = builder.run_on(&ids);
+    let branches = match result {
+        Ok(branches) => branches,
+        Err(error) => {
+            live.console.finish();
+            return Err(error.into());
+        }
+    };
+    let descendants = wait_for_descendants(&branches.iter().collect::<Vec<_>>());
     live.console.finish();
-    let branches = result?;
-    let infos: Vec<&BranchInfo> = branches.iter().map(Branch::info).collect();
+    let descendants = descendants?.unwrap_or_default();
+    let infos: Vec<&BranchInfo> = branches
+        .iter()
+        .map(Branch::info)
+        .chain(descendants.iter())
+        .collect();
     let style = env.style();
     let mut text = format!("\n{}", render::comparison_table(&infos, style));
     let ready: Vec<&str> = infos
@@ -198,9 +290,40 @@ pub fn fan(env: &Env, prompt: &str, harnesses: &[String], task: &TaskArgs) -> Ou
     Ok(())
 }
 
-pub fn send(env: &Env, branch: &str, prompt: &str, task: &TaskArgs) -> Outcome {
+pub fn send(env: &Env, branch: &str, prompt: &str, task: &TaskArgs, json: bool) -> Outcome {
+    if let Some(delegate) = harness_delegate(json)? {
+        if *task != TaskArgs::default() {
+            return fail(
+                json,
+                &branchyard::Error::Denied(
+                    "inside a harness, send takes only --json; the child keeps its own limits"
+                        .into(),
+                ),
+            );
+        }
+        return emit(json, delegate.send(branch, prompt), |sent| {
+            format!("sent to {}; its turn is running\n", sent.name)
+        });
+    }
     let branch = open()?.branch(branch)?;
-    let live = Live::start(env, task, false);
+    if json {
+        let live = Live::start_to(env, task, true, true);
+        let result = branch.send(prompt, live.options(task));
+        live.console.finish();
+        let branch = match result {
+            Ok(branch) => branch,
+            Err(error) => return fail(true, &error),
+        };
+        let descendants = wait_for_descendants(&[&branch]);
+        descendants?;
+        let sent = branchyard::Sent {
+            name: branch.info().name.clone(),
+            status: branch.info().status.clone(),
+        };
+        return print(&format!("{}\n", to_json(&sent)));
+    }
+    let delegating = task.delegate.is_some() || !branch.info().children.is_empty();
+    let live = Live::start(env, task, delegating);
     let result = branch.send(prompt, live.options(task));
     live.finish(env, result)
 }
@@ -213,7 +336,7 @@ pub fn fork(
     task: &TaskArgs,
 ) -> Outcome {
     let branch = open()?.branch(branch)?;
-    let live = Live::start(env, task, false);
+    let live = Live::start(env, task, task.delegate.is_some());
     let result = branch.fork(prompt, fresh_session, live.options(task));
     live.finish(env, result)
 }
@@ -356,6 +479,239 @@ fn current_branch(root: &Path) -> Result<String, Failure> {
 pub fn rm(branch: &str) -> Outcome {
     open()?.remove(branch)?;
     print(&format!("removed {branch}\n"))
+}
+
+/// Serve a branch's delegation tools on stdio; see `branchyard-mcp`.
+pub fn mcp(args: &[String]) -> Outcome {
+    branchyard_mcp::main_with_args(args).map_err(|e| Failure::Message(e.to_string()))
+}
+
+/// The delegate for this harness's branch when `by` runs inside a
+/// delegating harness; `None` outside one.
+fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
+    if set(ENV_TOKEN) {
+        return match Delegate::from_env() {
+            Ok(delegate) => Ok(Some(delegate)),
+            Err(error) => fail(json, &error).map(|()| None),
+        };
+    }
+    if set(ENV_BRANCH) {
+        let error = branchyard::Error::Denied(format!(
+            "{ENV_BRANCH} is set but {ENV_TOKEN} is not: this harness was not given \
+             delegation, and by will not act with your authority inside it"
+        ));
+        return fail(json, &error).map(|()| None);
+    }
+    Ok(None)
+}
+
+fn to_json<T: Serialize>(value: &T) -> String {
+    serde_json::to_string_pretty(value).expect("results serialize")
+}
+
+/// Report `error`: `{"error": {"kind", "message"}}` on stdout with
+/// `--json`, else on stderr; exit 1 either way.
+fn fail(json: bool, error: &branchyard::Error) -> Outcome {
+    if json {
+        let value =
+            serde_json::json!({"error": {"kind": error.kind(), "message": error.to_string()}});
+        print(&format!("{}\n", to_json(&value)))?;
+        return Err(Failure::Reported);
+    }
+    eprintln!("by: {error}");
+    Err(Failure::Reported)
+}
+
+/// Print a result as JSON or as text.
+fn emit<T: Serialize>(
+    json: bool,
+    result: Result<T, branchyard::Error>,
+    text: impl Fn(&T) -> String,
+) -> Outcome {
+    match result {
+        Ok(value) if json => print(&format!("{}\n", to_json(&value))),
+        Ok(value) => print(&text(&value)),
+        Err(error) => fail(json, &error),
+    }
+}
+
+/// Outside a harness: act as `branch` with your own authority.
+fn as_user(branch: &str, options: TaskOptions) -> Result<Delegate, branchyard::Error> {
+    open_yard()?.branch(branch)?.delegate(options)
+}
+
+fn required_outside(branch: Option<String>, command: &str) -> Result<String, branchyard::Error> {
+    branch.ok_or_else(|| {
+        branchyard::Error::Denied(format!("outside a harness, by {command} needs a branch"))
+    })
+}
+
+pub fn spawn(env: &Env, prompt: &str, args: &SpawnArgs) -> Outcome {
+    let json = args.json;
+    let task = &args.task;
+    let request = Spawn {
+        prompt: prompt.to_owned(),
+        harness: task.harness.clone(),
+        name: task.name.clone(),
+        base: task.base.clone(),
+        budget: Budget {
+            max_usd: task.budget_usd,
+            max_turns: task.max_turns,
+            max_duration: task.max_duration,
+        },
+        check: task.check.clone(),
+        max_depth: args.max_depth,
+        deny: args.deny.clone(),
+        ..Spawn::default()
+    };
+    if let Some(delegate) = harness_delegate(json)? {
+        if args.parent.is_some() || task.permissions != args::Permissions::Unset {
+            let error = branchyard::Error::Denied(
+                "inside a harness, the parent is the harness's own branch and the child \
+                 inherits its policy; drop --parent, --yes and --ask"
+                    .into(),
+            );
+            return fail(json, &error);
+        }
+        let spawned = match delegate.spawn(request) {
+            Ok(spawned) => spawned,
+            Err(error) => return fail(json, &error),
+        };
+        if !args.wait {
+            return emit(json, Ok(spawned), |s| {
+                format!(
+                    "spawned {} on {} from {}\n",
+                    s.name,
+                    s.profile,
+                    short(&s.base)
+                )
+            });
+        }
+        let done = delegate.wait(&spawned.name, std::time::Duration::MAX);
+        return emit(json, done, |i| render::inspection(i, env.style()));
+    }
+    // Outside a harness the child runs on this process's threads, so the
+    // command waits for it.
+    let parent = match required_outside(args.parent.clone(), "spawn --parent") {
+        Ok(parent) => parent,
+        Err(error) => return fail(json, &error),
+    };
+    let live = Live::start_to(env, task, true, json);
+    let result = (|| {
+        // One yard, so the wait sees the child's thread.
+        let parent = open_yard()?.branch(&parent)?;
+        let delegate = parent.delegate(live.options(task))?;
+        let spawned = delegate.spawn(request)?;
+        parent.wait_subtree()?;
+        delegate.inspect(&spawned.name)
+    })();
+    live.console.finish();
+    emit(json, result, |i| render::inspection(i, env.style()))
+}
+
+pub fn inspect(env: &Env, branch: Option<String>, json: bool) -> Outcome {
+    let result = match harness_delegate(json)? {
+        Some(delegate) => {
+            let branch = branch.unwrap_or_else(|| delegate.branch().to_owned());
+            delegate.inspect(&branch)
+        }
+        None => required_outside(branch, "inspect")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.inspect(&b)),
+    };
+    emit(json, result, |i| render::inspection(i, env.style()))
+}
+
+pub fn events(
+    env: &Env,
+    branch: Option<String>,
+    cursor: Option<usize>,
+    limit: Option<usize>,
+    json: bool,
+) -> Outcome {
+    let limit = limit.unwrap_or(50);
+    let result = match harness_delegate(json)? {
+        Some(delegate) => {
+            let branch = branch.unwrap_or_else(|| delegate.branch().to_owned());
+            delegate.events(&branch, cursor, limit)
+        }
+        None => required_outside(branch, "events")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.events(&b, cursor, limit)),
+    };
+    emit(json, result, |page| {
+        format!(
+            "{}next cursor: {} of {}\n",
+            render::log_text(&page.events, env.style()),
+            page.next_cursor,
+            page.total
+        )
+    })
+}
+
+pub fn integrate(branch: &str, json: bool) -> Outcome {
+    let result = match harness_delegate(json)? {
+        Some(delegate) => delegate.integrate(branch),
+        // A person integrates a child into the parent that delegated it.
+        None => (|| {
+            let yard = open_yard()?;
+            let info = yard.branch(branch)?.info().clone();
+            let parent = info
+                .parent
+                .filter(|p| {
+                    yard.branch(p)
+                        .is_ok_and(|p| p.info().children.iter().any(|c| c == branch))
+                })
+                .ok_or_else(|| {
+                    branchyard::Error::Denied(format!(
+                        "{branch} was not delegated by another branch; merge it with by merge"
+                    ))
+                })?;
+            as_user(&parent, TaskOptions::default())?.integrate(branch)
+        })(),
+    };
+    emit(json, result, |m| {
+        format!(
+            "merged {} into {} ({}..{})\n",
+            m.branch,
+            m.target,
+            short(&m.previous),
+            short(&m.commit)
+        )
+    })
+}
+
+pub fn cancel(branch: &str, json: bool) -> Outcome {
+    let result = match harness_delegate(json)? {
+        Some(delegate) => delegate.cancel(branch),
+        None => open_yard()
+            .and_then(|yard| yard.branch(branch)?.cancel())
+            .map(|cancelled| branchyard::Cancelled { cancelled }),
+    };
+    emit(json, result, |c| match c.cancelled.is_empty() {
+        true => "nothing was running\n".into(),
+        false => format!("asked {} to stop\n", c.cancelled.join(", ")),
+    })
+}
+
+pub fn children(env: &Env, branch: Option<String>, json: bool) -> Outcome {
+    let result = match harness_delegate(json)? {
+        Some(delegate) => match branch {
+            Some(other) if other != delegate.branch() => Err(branchyard::Error::Denied(
+                "inside a harness, by children lists your own branch's descendants".into(),
+            )),
+            _ => delegate.children(),
+        },
+        None => required_outside(branch, "children")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.children()),
+    };
+    emit(json, result, |c| match c.descendants.is_empty() {
+        true => format!("{} has no children\n", c.branch),
+        false => render::branch_table(&c.descendants, now(), env.style()),
+    })
+}
+
+fn short(commit: &str) -> &str {
+    commit.get(..10).unwrap_or(commit)
 }
 
 pub fn harnesses(env: &Env, as_json: bool) -> Outcome {

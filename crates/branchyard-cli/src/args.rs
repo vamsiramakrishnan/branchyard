@@ -34,6 +34,24 @@ pub struct TaskArgs {
     pub isolated: bool,
     /// Executable and fixed arguments replacing the profile's.
     pub command: Option<Vec<String>>,
+    /// From `--delegate[=DEPTH]`: levels of children the harness may create.
+    pub delegate: Option<u32>,
+    /// `--allow-delegation`: auto-allow the harness's own `by` delegation
+    /// commands.
+    pub allow_delegation: bool,
+}
+
+/// Options of `by spawn`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpawnArgs {
+    /// Harness, name, base, check, limits and permissions for the child.
+    pub task: TaskArgs,
+    /// The delegating branch, outside a harness.
+    pub parent: Option<String>,
+    pub wait: bool,
+    pub max_depth: Option<u32>,
+    pub deny: Vec<String>,
+    pub json: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,6 +69,7 @@ pub enum Command {
         branch: String,
         prompt: String,
         task: TaskArgs,
+        json: bool,
     },
     Fork {
         branch: String,
@@ -82,6 +101,36 @@ pub enum Command {
     Harnesses {
         json: bool,
     },
+    /// `by mcp`: the arguments for Branchyard's MCP server.
+    Mcp {
+        args: Vec<String>,
+    },
+    Spawn {
+        prompt: String,
+        spawn: SpawnArgs,
+    },
+    Inspect {
+        branch: Option<String>,
+        json: bool,
+    },
+    Events {
+        branch: Option<String>,
+        cursor: Option<usize>,
+        limit: Option<usize>,
+        json: bool,
+    },
+    Integrate {
+        branch: String,
+        json: bool,
+    },
+    Cancel {
+        branch: String,
+        json: bool,
+    },
+    Children {
+        branch: Option<String>,
+        json: bool,
+    },
     /// General help, or one command's.
     Help {
         topic: Option<&'static Spec>,
@@ -106,7 +155,8 @@ impl fmt::Display for UsageError {
 #[derive(Debug, PartialEq)]
 pub struct Flag {
     pub long: &'static str,
-    /// Value placeholder; `None` for a switch.
+    /// Value placeholder; `None` for a switch. A placeholder in brackets,
+    /// such as `[=DEPTH]`, is an optional value given only as `--flag=value`.
     pub value: Option<&'static str>,
     pub help: &'static str,
 }
@@ -123,7 +173,10 @@ impl Spec {
     pub fn usage(&self) -> String {
         let mut usage = format!("by {}", self.name);
         for positional in self.positionals {
-            usage.push_str(&format!(" <{positional}>"));
+            match positional.strip_suffix('?') {
+                Some(optional) => usage.push_str(&format!(" [<{optional}>]")),
+                None => usage.push_str(&format!(" <{positional}>")),
+            }
         }
         if !self.flags.is_empty() {
             usage.push_str(" [options]");
@@ -202,6 +255,56 @@ const JSON: Flag = Flag {
     value: None,
     help: "Print JSON",
 };
+const DELEGATE: Flag = Flag {
+    long: "delegate",
+    value: Some("[=DEPTH]"),
+    help: "Let the harness create child branches through Branchyard's MCP tools, DEPTH levels deep (default 1)",
+};
+const ROOT: Flag = Flag {
+    long: "root",
+    value: Some("DIR"),
+    help: "Repository root",
+};
+const BRANCH: Flag = Flag {
+    long: "branch",
+    value: Some("NAME"),
+    help: "The branch whose turn this server serves",
+};
+const ALLOW_DELEGATION: Flag = Flag {
+    long: "allow-delegation",
+    value: None,
+    help: "Allow the harness's own `by spawn|inspect|events|send|integrate|cancel|children` commands without asking; nothing else",
+};
+const PARENT: Flag = Flag {
+    long: "parent",
+    value: Some("BRANCH"),
+    help: "The delegating branch (outside a harness; inside one, it is the harness's own)",
+};
+const WAIT: Flag = Flag {
+    long: "wait",
+    value: None,
+    help: "Wait for the child's turn to end and show it (outside a harness, spawn always waits)",
+};
+const MAX_DEPTH: Flag = Flag {
+    long: "max-depth",
+    value: Some("N"),
+    help: "Levels the child may delegate below itself (default: one fewer than the parent)",
+};
+const DENY: Flag = Flag {
+    long: "deny",
+    value: Some("TOOL,TOOL,..."),
+    help: "Tools the child is denied outright; a trailing * matches a prefix",
+};
+const CURSOR: Flag = Flag {
+    long: "cursor",
+    value: Some("N"),
+    help: "Start at event N (default: the most recent)",
+};
+const LIMIT: Flag = Flag {
+    long: "limit",
+    value: Some("N"),
+    help: "At most N events (default 50, at most 200)",
+};
 const INTO: Flag = Flag {
     long: "into",
     value: Some("TARGET"),
@@ -225,6 +328,8 @@ pub static COMMANDS: &[Spec] = &[
             ASK,
             ISOLATED,
             COMMAND,
+            DELEGATE,
+            ALLOW_DELEGATION,
         ],
     },
     Spec {
@@ -243,13 +348,26 @@ pub static COMMANDS: &[Spec] = &[
             ASK,
             ISOLATED,
             COMMAND,
+            DELEGATE,
+            ALLOW_DELEGATION,
         ],
     },
     Spec {
         name: "send",
         positionals: &["branch", "prompt"],
         summary: "Continue a branch's session with another prompt",
-        flags: &[CHECK, BUDGET_USD, MAX_TURNS, MAX_MINUTES, YES, ASK, COMMAND],
+        flags: &[
+            CHECK,
+            BUDGET_USD,
+            MAX_TURNS,
+            MAX_MINUTES,
+            YES,
+            ASK,
+            COMMAND,
+            DELEGATE,
+            ALLOW_DELEGATION,
+            JSON,
+        ],
     },
     Spec {
         name: "fork",
@@ -266,6 +384,8 @@ pub static COMMANDS: &[Spec] = &[
             ASK,
             ISOLATED,
             COMMAND,
+            DELEGATE,
+            ALLOW_DELEGATION,
         ],
     },
     Spec {
@@ -311,6 +431,63 @@ pub static COMMANDS: &[Spec] = &[
         flags: &[JSON],
     },
     Spec {
+        name: "spawn",
+        positionals: &["prompt"],
+        summary: "Delegate to a new child branch of this branch",
+        flags: &[
+            PARENT,
+            HARNESS,
+            NAME,
+            BASE,
+            CHECK,
+            BUDGET_USD,
+            MAX_TURNS,
+            MAX_MINUTES,
+            MAX_DEPTH,
+            DENY,
+            WAIT,
+            YES,
+            ASK,
+            JSON,
+        ],
+    },
+    Spec {
+        name: "inspect",
+        positionals: &["branch?"],
+        summary: "Show a branch's status, candidate, cost, budget and last message",
+        flags: &[JSON],
+    },
+    Spec {
+        name: "events",
+        positionals: &["branch?"],
+        summary: "Show a branch's recorded events from a cursor",
+        flags: &[CURSOR, LIMIT, JSON],
+    },
+    Spec {
+        name: "integrate",
+        positionals: &["branch"],
+        summary: "Merge a delegated child into its parent's branch after its check passes",
+        flags: &[JSON],
+    },
+    Spec {
+        name: "cancel",
+        positionals: &["branch"],
+        summary: "Stop a branch's running turn and every turn delegated below it",
+        flags: &[JSON],
+    },
+    Spec {
+        name: "children",
+        positionals: &["branch?"],
+        summary: "List the branches a branch delegated to",
+        flags: &[JSON],
+    },
+    Spec {
+        name: "mcp",
+        positionals: &[],
+        summary: "Serve a branch's delegation tools over MCP on stdio (started by the engine)",
+        flags: &[ROOT, BRANCH],
+    },
+    Spec {
         name: "help",
         positionals: &[],
         summary: "Show help for by or one command",
@@ -341,6 +518,12 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         return Ok(Command::Help { topic: Some(spec) });
     }
     let mut positionals = m.positionals.iter().cloned();
+    let mut optional = positionals.clone().skip(
+        spec.positionals
+            .iter()
+            .filter(|p| !p.ends_with('?'))
+            .count(),
+    );
     let mut next = || positionals.next().expect("arity checked in Matches::parse");
     Ok(match spec.name {
         "run" => Command::Run {
@@ -361,6 +544,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             branch: next(),
             prompt: next(),
             task: m.task()?,
+            json: m.switch("json"),
         },
         "fork" => Command::Fork {
             branch: next(),
@@ -388,6 +572,54 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "harnesses" => Command::Harnesses {
             json: m.switch("json"),
         },
+        "spawn" => Command::Spawn {
+            prompt: next(),
+            spawn: SpawnArgs {
+                task: m.task()?,
+                parent: m.value("parent").map(str::to_owned),
+                wait: m.switch("wait"),
+                max_depth: m.number("max-depth")?,
+                deny: match m.value("deny") {
+                    Some(list) => {
+                        harness_list(list).map_err(|e| m.error(e.replace("--harness", "--deny")))?
+                    }
+                    None => Vec::new(),
+                },
+                json: m.switch("json"),
+            },
+        },
+        "inspect" => Command::Inspect {
+            branch: optional.next(),
+            json: m.switch("json"),
+        },
+        "events" => Command::Events {
+            branch: optional.next(),
+            cursor: m.number("cursor")?,
+            limit: m.number("limit")?,
+            json: m.switch("json"),
+        },
+        "integrate" => Command::Integrate {
+            branch: next(),
+            json: m.switch("json"),
+        },
+        "cancel" => Command::Cancel {
+            branch: next(),
+            json: m.switch("json"),
+        },
+        "children" => Command::Children {
+            branch: optional.next(),
+            json: m.switch("json"),
+        },
+        "mcp" => {
+            let mut args = Vec::new();
+            for flag in ["root", "branch"] {
+                let value = m
+                    .value(flag)
+                    .ok_or_else(|| m.error(format!("--{flag} is required")))?;
+                args.extend([format!("--{flag}"), value.to_owned()]);
+            }
+            Command::Mcp { args }
+        }
         other => unreachable!("command {other} has a spec but no parser"),
     })
 }
@@ -452,6 +684,7 @@ impl Matches {
                         (None, None) => None,
                         (None, Some(_)) => return Err(m.error(format!("--{name} takes no value"))),
                         (Some(_), Some(value)) => Some(value),
+                        (Some(placeholder), None) if placeholder.starts_with('[') => None,
                         (Some(placeholder), None) => {
                             Some(args.next().cloned().ok_or_else(|| {
                                 m.error(format!("--{name} needs a value {placeholder}"))
@@ -470,7 +703,10 @@ impl Matches {
             return Ok(m);
         }
         let expected = spec.positionals;
-        if let Some(missing) = expected.get(m.positionals.len()) {
+        if let Some(missing) = expected
+            .get(m.positionals.len())
+            .filter(|p| !p.ends_with('?'))
+        {
             return Err(m.error(format!("missing <{missing}>")));
         }
         if let Some(extra) = m.positionals.get(expected.len()) {
@@ -500,6 +736,17 @@ impl Matches {
 
     fn switch(&self, name: &str) -> bool {
         self.flags.iter().any(|(flag, _)| *flag == name)
+    }
+
+    /// A whole number given to `--name`, if it was given.
+    fn number<T: std::str::FromStr>(&self, name: &str) -> Result<Option<T>, UsageError> {
+        match self.value(name) {
+            None => Ok(None),
+            Some(text) => text
+                .parse()
+                .map(Some)
+                .map_err(|_| self.error(format!("--{name} needs a whole number, not '{text}'"))),
+        }
     }
 
     fn task(&self) -> Result<TaskArgs, UsageError> {
@@ -569,6 +816,18 @@ impl Matches {
                 Some(argv)
             }
         };
+        let delegate = match (self.switch("delegate"), self.value("delegate")) {
+            (false, _) => None,
+            (true, None) => Some(1),
+            (true, Some(text)) => match text.parse::<u32>() {
+                Ok(depth) if depth > 0 => Some(depth),
+                _ => {
+                    return Err(self.error(format!(
+                        "--delegate=DEPTH needs a positive whole number, not '{text}'"
+                    )))
+                }
+            },
+        };
         // `fan` reads `--harness` as a list; it is not one harness.
         let harness = match self.spec.name {
             "fan" => None,
@@ -585,6 +844,8 @@ impl Matches {
             permissions,
             isolated: self.switch("isolated"),
             command,
+            delegate,
+            allow_delegation: self.switch("allow-delegation"),
         })
     }
 }
@@ -701,6 +962,7 @@ pub fn command_help(spec: &Spec) -> String {
     if !spec.flags.is_empty() {
         text.push_str("\nOptions:\n");
         let label = |flag: &Flag| match flag.value {
+            Some(value) if value.starts_with('[') => format!("--{}{value}", flag.long),
             Some(value) => format!("--{} {value}", flag.long),
             None => format!("--{}", flag.long),
         };
@@ -752,9 +1014,118 @@ mod tests {
                     permissions: Permissions::Yes,
                     isolated: true,
                     command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
+                    delegate: None,
+                    allow_delegation: false,
                 },
             }
         );
+    }
+
+    #[test]
+    fn delegate_takes_an_optional_inline_depth() {
+        let depth = |line: &str| match parse_str(line).unwrap() {
+            Command::Run { task, .. } | Command::Send { task, .. } => task.delegate,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(depth("run go"), None);
+        assert_eq!(depth("run go --delegate"), Some(1));
+        assert_eq!(
+            depth("run --delegate go"),
+            Some(1),
+            "the prompt is not a depth"
+        );
+        assert_eq!(depth("run go --delegate=3"), Some(3));
+        assert_eq!(depth("send b go --delegate=2"), Some(2));
+        assert!(err("run go --delegate=0").contains("positive whole number"));
+        assert!(err("run go --delegate=x").contains("positive whole number"));
+        assert!(command_help(spec("run").unwrap()).contains("--delegate[=DEPTH]"));
+    }
+
+    #[test]
+    fn delegation_commands_parse_with_optional_branches() {
+        let Command::Spawn { prompt, spawn } = parse_str(
+            "spawn 'fix it' --parent root --harness codex --name fix --budget-usd 0.5 \
+             --max-depth 0 --deny Bash,mcp__* --wait --json --yes",
+        )
+        .unwrap() else {
+            panic!("not spawn")
+        };
+        assert_eq!(prompt, "fix it");
+        assert_eq!(spawn.parent.as_deref(), Some("root"));
+        assert_eq!(spawn.task.harness.as_deref(), Some("codex"));
+        assert_eq!(spawn.task.name.as_deref(), Some("fix"));
+        assert_eq!(spawn.task.budget_usd, Some(0.5));
+        assert_eq!(spawn.task.permissions, Permissions::Yes);
+        assert_eq!(spawn.max_depth, Some(0));
+        assert_eq!(spawn.deny, ["Bash", "mcp__*"]);
+        assert!(spawn.wait && spawn.json);
+        assert_eq!(
+            parse_str("inspect").unwrap(),
+            Command::Inspect {
+                branch: None,
+                json: false
+            }
+        );
+        assert_eq!(
+            parse_str("inspect kid --json").unwrap(),
+            Command::Inspect {
+                branch: Some("kid".into()),
+                json: true
+            }
+        );
+        assert_eq!(
+            parse_str("events kid --cursor 7 --limit 3").unwrap(),
+            Command::Events {
+                branch: Some("kid".into()),
+                cursor: Some(7),
+                limit: Some(3),
+                json: false
+            }
+        );
+        assert_eq!(
+            parse_str("children").unwrap(),
+            Command::Children {
+                branch: None,
+                json: false
+            }
+        );
+        assert_eq!(
+            parse_str("integrate kid --json").unwrap(),
+            Command::Integrate {
+                branch: "kid".into(),
+                json: true
+            }
+        );
+        assert_eq!(
+            parse_str("cancel kid").unwrap(),
+            Command::Cancel {
+                branch: "kid".into(),
+                json: false
+            }
+        );
+        assert_eq!(err("integrate"), "missing <branch>");
+        assert_eq!(err("inspect a b"), "unexpected argument 'b'");
+        assert!(err("events --cursor x").contains("whole number"));
+        assert_eq!(
+            spec("inspect").unwrap().usage(),
+            "by inspect [<branch>] [options]"
+        );
+        let Command::Run { task, .. } = parse_str("run go --delegate --allow-delegation").unwrap()
+        else {
+            panic!("not run")
+        };
+        assert!(task.allow_delegation);
+    }
+
+    #[test]
+    fn mcp_needs_a_root_and_a_branch() {
+        assert_eq!(
+            parse_str("mcp --root /r --branch b").unwrap(),
+            Command::Mcp {
+                args: vec!["--root".into(), "/r".into(), "--branch".into(), "b".into()]
+            }
+        );
+        assert_eq!(err("mcp --root /r"), "--branch is required");
     }
 
     #[test]
@@ -802,6 +1173,7 @@ mod tests {
                     permissions: Permissions::Yes,
                     ..TaskArgs::default()
                 },
+                json: false,
             }
         );
         assert_eq!(

@@ -83,6 +83,16 @@ impl Repo {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("NO_COLOR", "1")
             .env("PAGER", "cat");
+        // Never inherit a delegating harness's identity from whoever runs
+        // the tests.
+        for var in [
+            "BRANCHYARD_DELEGATION",
+            "BRANCHYARD_BRANCH",
+            "BRANCHYARD_ROOT",
+            "BRANCHYARD_BY",
+        ] {
+            command.env_remove(var);
+        }
         command
     }
 
@@ -312,4 +322,262 @@ fn errors_exit_nonzero() {
         .unwrap();
     assert_eq!(outside.status.code(), Some(1));
     assert!(stderr(&outside).contains("not inside a git work tree"));
+}
+
+/// The JSON value a `SH ... --json` line printed in a harness's reply,
+/// after the `sh: <status>` line for the `n`th command.
+fn sh_json(reply: &str, n: usize) -> (i32, Value) {
+    let mut parts = reply.split("sh: ").skip(1 + n);
+    let part = parts
+        .next()
+        .unwrap_or_else(|| panic!("no command {n} in {reply}"));
+    let (status, rest) = part.split_once('\n').unwrap();
+    let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+    (status.parse().unwrap(), values.next().unwrap().unwrap())
+}
+
+/// The harness's reply on `branch`'s last turn.
+fn reply(repo: &Repo, branch: &str) -> String {
+    repo.json(&["log", branch, "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event"]["type"] == "message_delta")
+        .map(|e| e["event"]["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_harness_delegates_with_by_in_its_shell() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by inspect --json",
+        "SH by spawn 'WRITE kid.txt=k' --name kid --json",
+        "SH by spawn 'WRITE later.txt=l' --name later --wait --json",
+        "SH by children --json",
+        "SH by inspect main --json",
+        "SH by integrate later --json",
+        "SH by send kid 'say more' --json",
+        "SH by spawn x --parent other",
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, me) = sh_json(&said, 0);
+    assert_eq!((code, me["name"].as_str()), (0, Some("root")));
+    assert_eq!(me["envelope"]["max_depth"], 1);
+    let (code, kid) = sh_json(&said, 1);
+    assert_eq!((code, kid["name"].as_str()), (0, Some("kid")));
+    assert_eq!(kid["status"]["state"], "running");
+    let (code, later) = sh_json(&said, 2);
+    assert_eq!(
+        (code, later["status"]["state"].as_str()),
+        (0, Some("ready"))
+    );
+    let (_, children) = sh_json(&said, 3);
+    let names: Vec<&str> = children["descendants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["kid", "later"]);
+    let (code, refused) = sh_json(&said, 4);
+    assert_eq!(code, 1);
+    assert_eq!(refused["error"]["kind"], "denied");
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not a descendant"));
+    let (code, merged) = sh_json(&said, 5);
+    assert_eq!((code, merged["target"].as_str()), (0, Some("by/root")));
+    let (code, sent) = sh_json(&said, 6);
+    // kid may still be running its first turn; either way the answer says so.
+    assert!(
+        (code == 0 && sent["name"] == "kid") || sent["error"]["kind"] == "running",
+        "{said}"
+    );
+    assert!(said.contains("inside a harness, the parent is"), "{said}");
+
+    // `by run` waited for the whole subtree, and `by ls` shows the tree.
+    let text = stdout(&out);
+    assert!(text.contains("delegated"), "{text}");
+    let ls = stdout(&repo.by(&["ls"]));
+    assert!(ls.contains("└ kid") && ls.contains("└ later"), "{ls}");
+    let list = repo.json(&["ls", "--json"]);
+    for branch in list.as_array().unwrap() {
+        assert_ne!(branch["status"]["state"], "running", "{branch}");
+    }
+    let root = repo.json(&["show", "root", "--json"]);
+    assert_eq!(root["children"], serde_json::json!(["kid", "later"]));
+    assert_eq!(repo.json(&["show", "kid", "--json"])["depth"], 1);
+}
+
+#[test]
+fn a_harness_delegates_with_the_python_module() {
+    let repo = Repo::new();
+    let script = "import branchyard as b; c = b.spawn('WRITE py.txt=p', name='py'); \
+                  print('spawned', c.name, c.status['state']); d = b.wait(c.name, timeout=60, poll=0.05); \
+                  print('finished', d.status['state'], d.candidate['files_changed']); \
+                  print('merged into', b.integrate(c.name).target); \
+                  print('children', [x['name'] for x in b.children().descendants]); \
+                  exec('try:\\n b.inspect(\\'main\\')\\nexcept b.DeniedError as e:\\n print(\\'denied\\', e.kind)')";
+    let prompt = format!("SH python3 -c \"{script}\"");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "sh: 0",
+        "spawned py running",
+        "finished ready 1",
+        "merged into by/root",
+        "children ['py']",
+        "denied denied",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    let root = repo.json(&["show", "root", "--json"]);
+    assert_eq!(root["status"]["state"], "ready");
+    assert_eq!(root["candidate"]["files_changed"], 1);
+}
+
+#[test]
+fn the_same_commands_act_with_your_authority_outside_a_harness() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate=2", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let plain = repo.by_agent(&["run", "say hi", "--name", "plain", "--yes"]);
+    assert!(plain.status.success(), "{}", stderr(&plain));
+
+    // Outside a harness, spawn names its parent and waits for the child.
+    let agent = fake_agent().display().to_string();
+    let spawned = repo.by(&[
+        "spawn",
+        "WRITE kid.txt=k",
+        "--parent",
+        "root",
+        "--name",
+        "kid",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        spawned.status.success(),
+        "{}\n{}",
+        stdout(&spawned),
+        stderr(&spawned)
+    );
+    let kid: Value = serde_json::from_slice(&spawned.stdout).unwrap();
+    assert_eq!(kid["status"]["state"], "ready");
+    assert_eq!(kid["envelope"]["max_depth"], 1);
+    assert_eq!(repo.json(&["inspect", "kid", "--json"])["parent"], "root");
+    let children = repo.json(&["children", "root", "--json"]);
+    assert_eq!(children["descendants"][0]["name"], "kid");
+    let events = repo.json(&["events", "kid", "--cursor", "0", "--limit", "2", "--json"]);
+    assert_eq!(events["next_cursor"], 2);
+    assert_eq!(
+        repo.json(&["cancel", "kid", "--json"]),
+        serde_json::json!({"cancelled": []})
+    );
+    let merged = repo.json(&["integrate", "kid", "--json"]);
+    assert_eq!(merged["target"], "by/root");
+    assert_eq!(repo.git(&["show", "by/root:kid.txt"]), "k\n");
+
+    // The envelope binds you too, and refusals are JSON with --json.
+    let refused = repo.by(&["spawn", "x", "--parent", "plain", "--json"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["kind"], "denied");
+    let text = repo.by(&["integrate", "plain"]);
+    assert!(
+        stderr(&text).contains("not delegated by another branch"),
+        "{}",
+        stderr(&text)
+    );
+    let inspect = stdout(&repo.by(&["inspect", "root"]));
+    assert!(
+        inspect.contains("children") && inspect.contains("kid"),
+        "{inspect}"
+    );
+    let _ = agent;
+}
+
+#[test]
+fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
+    let repo = Repo::new();
+    let prompt = "INSTRUCTED";
+    let out = repo.by_agent(&["run", prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(reply(&repo, "root"), "instructed=true");
+    let root = repo.json(&["show", "root", "--json"]);
+    assert_eq!(root["status"]["state"], "no_changes");
+    assert_eq!(root["candidate"], Value::Null);
+    let worktree = root["worktree"].as_str().unwrap();
+    let status = repo
+        .command("git")
+        .args([
+            "-C",
+            worktree,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&status), "", "the worktree is untouched");
+    let dir = repo.root.join(".branchyard");
+    assert!(dir.join("plugin/skills/delegate/SKILL.md").is_file());
+    assert!(dir.join("plugin/.claude-plugin/plugin.json").is_file());
+    assert!(dir.join("sdk/python/branchyard.py").is_file());
+    assert_eq!(
+        repo.git(&["status", "--porcelain", "--untracked-files=all"]),
+        ""
+    );
+    // Without delegation there is no preamble, and `by mcp` is the server
+    // when there is.
+    let plain = repo.by_agent(&["run", "INSTRUCTED", "--name", "plain", "--yes"]);
+    assert!(plain.status.success());
+    assert_eq!(reply(&repo, "plain"), "instructed=false");
+    let tools = repo.by_agent(&["run", "MCP tools", "--name", "mcp", "--delegate", "--yes"]);
+    assert!(tools.status.success(), "{}", stderr(&tools));
+    assert!(
+        reply(&repo, "mcp")
+            .contains("mcp tools: spawn,inspect,events,send,propose_integration,cancel,children"),
+        "{}",
+        reply(&repo, "mcp")
+    );
+    // Inside a harness that was not given delegation, `by` will not act
+    // with your authority.
+    let by = env!("CARGO_BIN_EXE_by");
+    let bare = repo.by_agent(&[
+        "run",
+        &format!("SH {by} spawn x --parent root --json"),
+        "--name",
+        "bare",
+        "--yes",
+    ]);
+    assert!(bare.status.success());
+    let (code, refused) = sh_json(&reply(&repo, "bare"), 0);
+    assert_eq!(code, 1);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not given delegation"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn by_mcp_needs_a_token() {
+    let repo = Repo::new();
+    let out = repo.by(&["mcp", "--root", "/tmp", "--branch", "b"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("BRANCHYARD_DELEGATION is not set"),
+        "{}",
+        stderr(&out)
+    );
 }
