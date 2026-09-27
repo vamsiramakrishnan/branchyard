@@ -43,11 +43,14 @@ Nothing is written to the branch's worktree. The Python module, the skill and th
 
 ### Projection per harness
 
+The delegation server and skill reach the harness through [provisioning](provisioning.md), the same path as a task's own `--mcp` servers and `--instructions`: Branchyard's server is listed first, and a task's instructions are joined with the skill (a Claude Code plugin then carries neither; the appended system prompt carries both). Each harness's provisioner keeps them on the driver's session channel below.
+
 | Harness | MCP server | Skill | Evidence |
 |---|---|---|---|
 | Claude Code (stream-json) | `--mcp-config '{"mcpServers": {"branchyard": {"type": "stdio", "command", "args", "env"}}}'`, the JSON the Agent SDK passes for its `mcpServers` option | `--plugin-dir .branchyard/plugin`, a plugin holding the skill | Claude Code 2.1.283, no model call: `initialize` lists `branchyard:delegate`; `mcp_status` reports the `by mcp` server connected. `claude --help`: `--mcp-config <configs...>`, `--plugin-dir <path>` |
 | Codex (App Server) | `config: {"mcp_servers": {"branchyard": {command, args, env}}}` on `thread/start`, `thread/resume` and `thread/fork` | `developerInstructions` on the same requests | `codex app-server generate-json-schema` (0.157.1): all three requests carry `config` (open object) and `developerInstructions` (string). Live, no model call: `thread/start` accepted both, and `mcpServerStatus/list` showed `by mcp` connected with its seven tools. Resume and fork were not checked live. |
-| Antigravity, Pi, Amp | Refused | Refused | No verified way to pass either, so a turn asking for delegation fails with the driver's refusal rather than running without the tools |
+| Antigravity | In a private home (`--isolated`): `mcpServers` in `~/.gemini/config/mcp_config.json` (mode 0600, since the server's variables carry the token); otherwise refused | In a private home: a managed block in `~/.gemini/GEMINI.md`; otherwise refused | Scion's Antigravity provisioner; not checked against `agy` |
+| Pi, Amp | Refused | Refused | No verified way to pass either, so a turn asking for delegation fails with the driver's refusal rather than running without the tools |
 | ACP agents | Stdio servers in `mcpServers` on `session/new`, `session/resume` and `session/load` | No instructions field exists, so the first prompt of each session starts with the skill between `<branchyard-instructions>` tags; the recorded prompt is unchanged | Frames deserialize as `agent-client-protocol-schema` 1.9.1 request types; the fake agent reads the servers, starts `branchyard-mcp` and calls it |
 
 The skill is a Claude Code skill, [`plugins/branchyard/skills/delegate/SKILL.md`](../plugins/branchyard/skills/delegate/SKILL.md), with `name` and `description` frontmatter. It teaches when to delegate and how: decompose, pick a harness per subtask, set budgets within the envelope, wait or poll, integrate, cancel, with worked examples for `by` and Python. You can also load the plugin yourself: `claude --plugin-dir plugins/branchyard`.
