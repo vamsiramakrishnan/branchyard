@@ -13,7 +13,7 @@ The first commit captures the architecture and reusable controls. Build the next
 - Scion provisioning tests and an explicit compatibility exclusion for its Claude model-alias mismatch.
 - Architecture, harness interface design, vendoring decisions, and validation records.
 
-The task SDK, database schema, server, node, driver registry, and integration coordinator do not yet exist. Crate names below describe intended modules, not empty crates created to imply progress.
+The database schema, node, driver registry, and integration coordinator do not yet exist; the server (M3, M4 below) is partial. Crate names below describe intended modules, not empty crates created to imply progress.
 
 ## Milestones and acceptance gates
 
@@ -21,9 +21,9 @@ The task SDK, database schema, server, node, driver registry, and integration co
 |---|---|---|---|
 | M1: contracts | Domain identities, capability types, command/event schema, fake provider and fake harness | Foundation | Type-level separation of task/run/attempt/session/workspace; duplicate command and stale revision tests |
 | M2: runtime qualification | Existing Microsandbox SDK/runtime on a Linux KVM host | M1 provider contract | Create, exec with independent pipes, inspect, stop, destroy, private writes, resource/network enforcement; no vendor-cloud credentials |
-| M3: durable commands | PostgreSQL schema, SQLx transactions, PGMQ delivery, operation lookup | M1 | Commit-and-timeout reconciliation; duplicate delivery; crash before acknowledgment; no repeated unknown external effect |
+| M3: durable commands | PostgreSQL schema, SQLx transactions, PGMQ delivery, operation lookup. **Status: partial.** [`branchyard-server`](server.md) records operations and idempotency keys durably before acknowledging them, looks them up by ID, and marks unfinished ones interrupted after a restart, through an `OperationStore` trait backed by a JSON-lines file. No PostgreSQL, SQLx or PGMQ yet, no queue delivery, and no reconciliation of a turn the server lost | M1 | Commit-and-timeout reconciliation; duplicate delivery; crash before acknowledgment; no repeated unknown external effect |
 | M3.5: local mode | `branchyard` SDK engine and `by` CLI over a local process provider, git worktree branches and validated merge | M1 | `by run`, `by fork`, `by merge` work end to end on a local repository; merge refuses a moved target and failing checks; budget and policy stop and answer out-of-policy actions |
-| M4: one remote task | Thin SDK, server, node, one ACP harness, artifacts | M2, M3 | Submit remotely, disconnect client, reconnect from another client, observe same task, cancel, inspect result |
+| M4: one remote task | Thin SDK, server, node, one ACP harness, artifacts. **Status: partial.** Server, thin client ([`branchyard-client`](../crates/branchyard-client/src/lib.rs)), `by --remote` and `by watch`: submit, disconnect, reconnect from another client, observe the same branches and inspect results are tested over HTTP against a fake ACP agent. Missing: cancel (the SDK has none), the node service and any sandbox (harnesses run as the server's user), artifact capture, and a run against a real harness | M2, M3 | Submit remotely, disconnect client, reconnect from another client, observe same task, cancel, inspect result |
 | M5: dynamic delegation | Atomic graph proposals, root budgets, scoped capabilities, dependencies | M4 | Parent creates child which creates grandchild; no predefined graph; invalid delta leaves state and reservations unchanged |
 | M6: prepared workspaces | Environment/source checkpoints, explicit sharing modes, cache-aware placement | M2, M5 | Private writes after fork; revocation before writer reassignment; warm/cold timing breakdown; no secret inheritance |
 | M7: validated integration | Candidate construction, trusted checks, attestation, promotion intent and ref CAS | M5, M6 | Conflicts return for repair; moved target invalidates candidate; recover after Git update before DB completion |
