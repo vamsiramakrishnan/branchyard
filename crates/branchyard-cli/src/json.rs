@@ -170,6 +170,12 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "secrets": secrets,
             "unused_secrets": unused_secrets,
         }),
+        Activity::Steered { id, by, text } => json!({
+            "activity": "steered",
+            "id": id,
+            "by": by,
+            "text": text,
+        }),
         Activity::Recovered { reason, killed } => json!({
             "activity": "recovered",
             "reason": reason,

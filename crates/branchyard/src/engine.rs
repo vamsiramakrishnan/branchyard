@@ -14,12 +14,16 @@
 //! `turn_end` (how the turn ended) and `snapshot` (the candidate). Recovery
 //! reads them to say truthfully what a turn whose engine stopped did; a
 //! submitted prompt is never submitted again.
+//!
+//! Steered input ([`crate::Branch::steer`]) is polled from the store like a
+//! cancel, bound to this turn, and written to the harness while the turn
+//! runs; what became of each is recorded in the store and the event log.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use branchyard_harness::profiles::Profile;
-use branchyard_harness::{Open, SessionMode};
+use branchyard_harness::{Open, Rejected, SessionMode};
 use branchyard_runtime::{RuntimeError, Session};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -31,8 +35,8 @@ use crate::record::Recorder;
 use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
 use crate::{
     git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource, Error,
-    Event, NativeSession, PermissionDecision, PermissionRequest, Policy, TaskOptions, TurnOutcome,
-    Yard,
+    Event, NativeSession, PermissionDecision, PermissionRequest, Policy, SteerState, TaskOptions,
+    TurnOutcome, Yard,
 };
 
 /// How long a harness may take to complete its handshake.
@@ -368,6 +372,7 @@ fn run(
         ..Open::new(turn.mode.clone(), placement.cwd())
     };
     let driver = turn.profile.driver_with(turn.command.clone());
+    let mut steering = Steering::new(turn.profile.id, driver.capabilities().steer);
     // Journaled before the spawn: every process of a local harness carries
     // this marker, so recovery finds them even if this engine stops before
     // the harness's pid is recorded below.
@@ -492,6 +497,7 @@ fn run(
             }
             _ => {}
         }
+        steering.poll(recorder, &mut session, &store, fence, &phase)?;
         match &phase {
             Phase::Opening if late => {
                 kill = true;
@@ -545,6 +551,7 @@ fn run(
             Err(error) => break fail(confirmed, error.to_string()),
         };
         recorder.record(Activity::Harness(event.clone()))?;
+        steering.event(&store, fence, &event)?;
         match event {
             Event::Ready if matches!(phase, Phase::Opening) => {
                 recorder.record(Activity::Prompt(turn.prompt.to_owned()))?;
@@ -661,11 +668,15 @@ fn run(
         // Whatever the harness already sent after the turn ended.
         for _ in 0..DRAIN_MAX {
             match session.next_event(Duration::ZERO) {
-                Ok(Some(event)) => recorder.record(Activity::Harness(event))?,
+                Ok(Some(event)) => {
+                    recorder.record(Activity::Harness(event.clone()))?;
+                    steering.event(&store, fence, &event)?;
+                }
                 _ => break,
             }
         }
     }
+    steering.finish(recorder, &store, fence)?;
     if let Some(id) = session.session_id() {
         driven.session = Some(id.clone());
     }
@@ -710,6 +721,140 @@ fn run(
         recorder.record(Activity::Warning(warning))?;
     }
     Ok(driven)
+}
+
+/// This turn's steered input: polled from the store at most every
+/// [`TICK`], written to the harness while the turn runs, and settled as the
+/// harness answers.
+struct Steering {
+    profile: &'static str,
+    /// Whether the driver can take input mid-turn at all.
+    offered: bool,
+    /// Store IDs of the input written to the driver, in the driver's
+    /// numbering from 1.
+    written: Vec<u64>,
+    next_poll: Instant,
+}
+
+impl Steering {
+    fn new(profile: &'static str, offered: bool) -> Steering {
+        Steering {
+            profile,
+            offered,
+            written: Vec::new(),
+            next_poll: Instant::now(),
+        }
+    }
+
+    fn refuse(
+        recorder: &mut Recorder,
+        store: &Store,
+        fence: &Fence,
+        id: u64,
+        by: &str,
+        reason: String,
+    ) -> Result<(), Error> {
+        recorder.record(Activity::Warning(format!(
+            "steered input {id} from {by} was not delivered: {reason}"
+        )))?;
+        store
+            .backend()
+            .settle_steer(fence, id, &SteerState::Refused { reason })
+    }
+
+    /// Write pending input into a running turn. Before the prompt is
+    /// submitted it waits; while the turn is being stopped it is refused.
+    fn poll(
+        &mut self,
+        recorder: &mut Recorder,
+        session: &mut Session,
+        store: &Store,
+        fence: &Fence,
+        phase: &Phase,
+    ) -> Result<(), Error> {
+        let now = Instant::now();
+        if now < self.next_poll || matches!(phase, Phase::Opening) {
+            return Ok(());
+        }
+        self.next_poll = now + TICK;
+        // A failed read is retried at the next poll, as a cancel's is.
+        let Ok(pending) = store.backend().pending_steers(fence) else {
+            return Ok(());
+        };
+        for row in pending {
+            let refusal = match phase {
+                Phase::Stopping { .. } => Some("the turn is being stopped".to_owned()),
+                _ if !self.offered => Some(format!(
+                    "{} cannot take input during a running turn",
+                    self.profile
+                )),
+                _ => match session.steer(&row.text) {
+                    Ok(()) => {
+                        self.written.push(row.id);
+                        recorder.record(Activity::Steered {
+                            id: row.id,
+                            by: row.by.clone(),
+                            text: row.text.clone(),
+                        })?;
+                        store
+                            .backend()
+                            .settle_steer(fence, row.id, &SteerState::Delivered)?;
+                        None
+                    }
+                    // The harness cannot take it yet; the next poll retries.
+                    Err(RuntimeError::Rejected(Rejected::SteerNotYet)) => break,
+                    Err(RuntimeError::Rejected(rejected)) => Some(rejected.to_string()),
+                    Err(error) => Some(format!("could not write it to the harness: {error}")),
+                },
+            };
+            if let Some(reason) = refusal {
+                Self::refuse(recorder, store, fence, row.id, &row.by, reason)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Settle written input the harness accepted or dropped.
+    fn event(&mut self, store: &Store, fence: &Fence, event: &Event) -> Result<(), Error> {
+        let (steer, state) = match event {
+            Event::SteerAccepted { steer, .. } => (*steer, SteerState::Accepted),
+            Event::SteerRejected { steer, reason, .. } => (
+                *steer,
+                SteerState::Refused {
+                    reason: reason.clone(),
+                },
+            ),
+            _ => return Ok(()),
+        };
+        let index = usize::try_from(steer).ok().and_then(|n| n.checked_sub(1));
+        match index.and_then(|i| self.written.get(i)) {
+            Some(id) => store.backend().settle_steer(fence, *id, &state),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse what the turn never took: it ended first.
+    fn finish(
+        &mut self,
+        recorder: &mut Recorder,
+        store: &Store,
+        fence: &Fence,
+    ) -> Result<(), Error> {
+        let Ok(pending) = store.backend().pending_steers(fence) else {
+            return Ok(());
+        };
+        for row in pending {
+            Self::refuse(
+                recorder,
+                store,
+                fence,
+                row.id,
+                &row.by,
+                "the turn ended before it could be delivered".into(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 fn phase_turn(phase: &Phase) -> Option<u64> {

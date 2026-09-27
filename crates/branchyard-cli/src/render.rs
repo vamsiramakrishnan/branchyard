@@ -293,6 +293,13 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             }
             style.paint(Tone::Dim, &format!("provisioned: {}", parts.join("; ")))
         }
+        Activity::Steered { by, text, .. } => style.paint(
+            Tone::Bold,
+            &format!(
+                "steered by {by}: {}",
+                truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 100)
+            ),
+        ),
         Activity::Recovered { reason, killed } => {
             let killed = match killed.is_empty() {
                 true => String::new(),

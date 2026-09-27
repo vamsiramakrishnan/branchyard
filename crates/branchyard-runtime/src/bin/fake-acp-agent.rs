@@ -41,6 +41,16 @@
 //! - `INSTRUCTED`: replies `instructed=<bool>`, whether a prompt this
 //!   process received began with Branchyard's instructions preamble. The
 //!   preamble is removed before any keyword is looked for.
+//! - `AWAIT_STEER`: replies `waiting for steering`, then waits until a
+//!   `_session/steering` request arrives, answers it `injected`, replies
+//!   `steered: <text>` and ends the turn. Until then it ends only on
+//!   `session/cancel`.
+//!
+//! It advertises the `_session/steering` extension
+//! (`_meta.steering.supported`) as claude-agent-acp does. Steering while a
+//! turn is open answers `injected` and replies `steered: <text>` into it;
+//! with none open, it answers `promptRequired`. With
+//! `FAKE_ACP_NO_STEER=1` it neither advertises nor handles the extension.
 //!
 //! With `FAKE_ACP_SILENT=1` in its environment it never answers
 //! `initialize`, so no prompt is ever submitted to it.
@@ -86,6 +96,8 @@ struct Active {
     permission: Option<u64>,
     /// The prompt, for writes that wait on the permission.
     text: String,
+    /// `AWAIT_STEER`: the first steer ends the turn.
+    awaits_steer: bool,
 }
 
 /// Branchyard's ACP instructions preamble, as the driver writes it.
@@ -139,6 +151,7 @@ fn main() {
     let mut active: Option<Active> = None;
     let mut next_request = 1000;
     let silent = std::env::var_os("FAKE_ACP_SILENT").is_some_and(|v| v == "1");
+    let steering = std::env::var_os("FAKE_ACP_NO_STEER").is_none_or(|v| v != "1");
     let mut stubborn = false;
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -150,13 +163,34 @@ fn main() {
         let params = &message["params"];
         match (message["method"].as_str(), id) {
             (Some("initialize"), Some(_)) if silent => {}
-            (Some("initialize"), Some(id)) => reply(
-                &id,
-                json!({
+            (Some("initialize"), Some(id)) => {
+                let mut result = json!({
                     "protocolVersion": 1,
                     "agentCapabilities": {"loadSession": true, "sessionCapabilities": {"resume": {}}},
-                }),
-            ),
+                });
+                if steering {
+                    result["_meta"] = json!({"steering": {"supported": true}});
+                }
+                reply(&id, result)
+            }
+            (Some("_session/steering"), Some(id)) if steering => {
+                let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
+                match active.take() {
+                    Some(turn) => {
+                        reply(&id, json!({"outcome": "injected"}));
+                        chunk(&session, &format!("steered: {text}"));
+                        if turn.awaits_steer {
+                            reply(&turn.id, json!({"stopReason": "end_turn"}));
+                        } else {
+                            active = Some(turn);
+                        }
+                    }
+                    None => reply(
+                        &id,
+                        json!({"outcome": "promptRequired", "reason": "noRunningTurn"}),
+                    ),
+                }
+            }
             (Some("session/new"), Some(id)) => {
                 servers = params["mcpServers"].clone();
                 reply(&id, json!({"sessionId": session}));
@@ -208,6 +242,17 @@ fn main() {
                         id,
                         permission: None,
                         text: text.to_owned(),
+                        awaits_steer: false,
+                    });
+                    continue;
+                }
+                if text.contains("AWAIT_STEER") {
+                    chunk(&session, "waiting for steering");
+                    active = Some(Active {
+                        id,
+                        permission: None,
+                        text: text.to_owned(),
+                        awaits_steer: true,
                     });
                     continue;
                 }
@@ -321,6 +366,7 @@ fn prompt(
             id,
             permission: None,
             text: text.to_owned(),
+            awaits_steer: false,
         });
     }
     if text.contains("PERMISSION") {
@@ -342,6 +388,7 @@ fn prompt(
             id,
             permission: Some(*next_request),
             text: text.to_owned(),
+            awaits_steer: false,
         });
     }
     write_files(session, text);

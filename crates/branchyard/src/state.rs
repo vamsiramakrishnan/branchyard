@@ -3,7 +3,8 @@
 //!
 //! [`Store`] is what the engine uses. It forwards to a [`Backend`], the one
 //! abstraction for durable state: branch records, the event log, journaled
-//! steps, leases, harness process identities and cancel signals. Local mode
+//! steps, leases, harness process identities, cancel signals and steered
+//! input. Local mode
 //! uses [`crate::sqlite::Sqlite`]; `docs/durability.md` maps the same
 //! operations onto PostgreSQL for the server.
 //!
@@ -31,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::delegation::Grant;
-use crate::{proc, BranchInfo, Error, Provider, RecordedEvent};
+use crate::{proc, BranchInfo, Error, Provider, RecordedEvent, SteerState};
 
 pub(crate) const DIR: &str = ".branchyard";
 
@@ -234,6 +235,43 @@ pub(crate) struct ProcessRow {
     pub host: String,
 }
 
+/// Input queued for a branch's running turn, bound to that turn like a
+/// cancel.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SteerRow {
+    pub id: u64,
+    pub branch: String,
+    /// The engine call ([`Fence::turn`]) it was queued for.
+    pub turn: u64,
+    pub by: String,
+    pub text: String,
+    pub requested_ms: u64,
+    pub state: SteerState,
+}
+
+impl SteerState {
+    /// The stored state name and reason.
+    pub(crate) fn columns(&self) -> (&'static str, Option<&str>) {
+        match self {
+            SteerState::Pending => ("pending", None),
+            SteerState::Delivered => ("delivered", None),
+            SteerState::Accepted => ("accepted", None),
+            SteerState::Refused { reason } => ("refused", Some(reason)),
+        }
+    }
+
+    pub(crate) fn from_columns(state: &str, reason: Option<String>) -> SteerState {
+        match state {
+            "pending" => SteerState::Pending,
+            "delivered" => SteerState::Delivered,
+            "accepted" => SteerState::Accepted,
+            _ => SteerState::Refused {
+                reason: reason.unwrap_or_default(),
+            },
+        }
+    }
+}
+
 /// One event in the repository-wide feed.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FeedRow {
@@ -266,8 +304,8 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     /// Replace the record, keeping the stored `children`.
     fn write(&self, record: &Record, fence: Option<&Fence>) -> Result<(), Error>;
     fn add_child(&self, parent: &str, child: &str) -> Result<(), Error>;
-    /// Delete the branch's record, lease, steps, processes and cancels.
-    /// Its events stay in the feed.
+    /// Delete the branch's record, lease, steps, processes, cancels and
+    /// steered input. Its events stay in the feed.
     fn delete(&self, name: &str) -> Result<(), Error>;
 
     /// Write `record` and take the branch's lease for a new turn, unless a
@@ -326,6 +364,18 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn request_cancel(&self, name: &str, by: &str, subtree: bool) -> Result<bool, Error>;
     /// Who asked to cancel the fenced turn, if anyone did.
     fn cancel_requested(&self, fence: &Fence) -> Result<Option<String>, Error>;
+
+    /// Queue `text` from `by` for the branch's running turn, bound to that
+    /// turn as a cancel is; its ID, or `None` when no turn holds the
+    /// branch's lease.
+    fn request_steer(&self, name: &str, by: &str, text: &str) -> Result<Option<u64>, Error>;
+    /// The fenced turn's steered input still [`SteerState::Pending`],
+    /// oldest first.
+    fn pending_steers(&self, fence: &Fence) -> Result<Vec<SteerRow>, Error>;
+    /// Record what became of the fenced turn's steered input `id`.
+    fn settle_steer(&self, fence: &Fence, id: u64, state: &SteerState) -> Result<(), Error>;
+    /// One steered input of the branch's current incarnation.
+    fn steer(&self, name: &str, id: u64) -> Result<Option<SteerRow>, Error>;
 
     /// Append an event to the branch's log; returns its sequence number in
     /// the branch, counting from 1.
