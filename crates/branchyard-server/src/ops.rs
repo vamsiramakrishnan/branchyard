@@ -11,7 +11,8 @@
 //! Operations run on their own threads, not on a request, so a client that
 //! disconnects changes nothing (invariant 1). An operation still queued or
 //! running when the server stops is recorded as `interrupted`, at shutdown
-//! or at the next start.
+//! or at the next start; the engine recovers its branches when the server
+//! next opens the repository.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -83,7 +84,7 @@ fn interrupted(message: &str) -> ErrorBody {
 }
 
 const STOPPED: &str = "the server stopped before this operation finished; \
-     its branches may still say running";
+     a turn it left running is recovered as interrupted when its repository is next opened";
 const NOT_STARTED: &str = "the server shut down before this operation started";
 
 impl Registry {

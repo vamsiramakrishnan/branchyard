@@ -88,9 +88,8 @@ fn children_run_in_parallel_threads_from_the_parents_current_work() {
     assert!(kid_log
         .iter()
         .any(|e| e.activity == Activity::Warning("cancelled by root".into())));
-    // Nothing is left to cancel, and the cancel marker is gone.
+    // Nothing is left to cancel.
     assert!(delegate.cancel("kid").unwrap().cancelled.is_empty());
-    assert!(!f.root.join(".branchyard/delegation/kid.cancel").exists());
 }
 
 #[test]

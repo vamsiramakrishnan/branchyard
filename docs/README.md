@@ -8,6 +8,7 @@
 | [Delegation](delegation.md) | How does a harness create and coordinate child branches with `by`, Python, Rust or MCP, within what envelope and authority? |
 | [Sandbox providers](providers.md) | What is the provider contract, what does the local provider guarantee, and how do I run harnesses in Microsandbox microVMs and its KVM tests? |
 | [Agent Substrate](substrate.md) | How does Branchyard use Agent Substrate as a sandbox provider, and what does it not provide? |
+| [Durable execution](durability.md) | What survives a crash, how leases, journaled steps, cancellation and recovery work, what is never replayed, and how the store maps onto PostgreSQL? |
 | [Server and remote mode](server.md) | How do I run `by serve`, call its HTTP API, and drive it with `by --remote`? What is durable, and what is not isolated? |
 | [Driver qualification](qualification/README.md) | Which driver profiles passed live protocol qualification, and what did it find? |
 | [Compatibility](compatibility.md) | Which profile drives each harness, with which capabilities, and has it passed live qualification? |

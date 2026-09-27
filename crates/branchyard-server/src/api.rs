@@ -18,9 +18,9 @@ use axum::routing::get;
 use axum::{Extension, Json, Router};
 use branchyard::{BranchEvent, Observer, TaskOptions, Yard};
 use branchyard_client::api::{
-    BranchEvents, BranchList, Diff, ErrorBody, FeedEntry, ForkRequest, HarnessEntry, HarnessList,
-    MergeRequest, MergedInfo, Operation, OperationKind, OperationResult, Removed, RepoEntry,
-    RepoList, SendRequest, TaskRequest,
+    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, FeedEntry, ForkRequest,
+    HarnessEntry, HarnessList, MergeRequest, MergedInfo, Operation, OperationKind, OperationResult,
+    Removed, RepoEntry, RepoList, SendRequest, TaskRequest,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -52,7 +52,7 @@ pub struct RepoState {
     pub name: String,
     pub yard: Yard,
     pub feed: Arc<Feed>,
-    /// Wakes the feed's ingestion when the engine records activity.
+    /// Wakes the feed's poller when the engine records activity.
     pub wake: Arc<Notify>,
 }
 
@@ -135,6 +135,10 @@ pub fn router(app: Shared) -> Router {
         .route(
             "/v1/repos/{repo}/branches/{branch}/merge",
             axum::routing::post(post_merge),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/cancel",
+            axum::routing::post(post_cancel),
         )
         .route("/v1/repos/{repo}/branches/{branch}/diff", get(diff))
         .route("/v1/repos/{repo}/branches/{branch}/events", get(events))
@@ -334,11 +338,11 @@ async fn sync_feed(feed: &Arc<Feed>) -> Result<u64, ApiError> {
     let feed = feed.clone();
     blocking(move || feed.sync())
         .await?
-        .map_err(|e| ApiError::internal(format!("could not read the event logs: {e}")))
+        .map_err(|e| ApiError::internal(format!("could not read the event feed: {e}")))
 }
 
-/// Run `work` as an operation's job: afterwards, ingest its activity so
-/// the operation's end cursor covers all of it.
+/// Run `work` as an operation's job: afterwards, read the feed's head so
+/// the operation's end cursor covers all of its activity.
 fn job(
     feed: Arc<Feed>,
     work: impl FnOnce() -> Result<OperationResult, ErrorBody> + Send + 'static,
@@ -348,7 +352,7 @@ fn job(
         let end_cursor = match feed.sync() {
             Ok(head) => Some(head),
             Err(e) => {
-                eprintln!("branchyard-server: could not ingest activity: {e}");
+                eprintln!("branchyard-server: could not read the event feed: {e}");
                 None
             }
         };
@@ -708,6 +712,25 @@ async fn post_merge(
     Ok(operation_response(op, replayed))
 }
 
+/// Ask the branch's running turn and every running turn below it to stop.
+/// Not an operation and not subject to branch locks: it is quick,
+/// idempotent, and meant for exactly the branches an operation holds. The
+/// request is durable in the repository's store, and the engine running
+/// the turn, here or in another process, observes it.
+async fn post_cancel(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(CancelRequest {}, _): JsonBody<CancelRequest>,
+) -> Result<Json<CancelResult>, ApiError> {
+    let yard = app.repo(&repo)?.yard.clone();
+    let by = format!("{} through the server", caller.0);
+    let cancelled = blocking(move || yard.cancel_as(&branch, &by))
+        .await?
+        .map_err(|e| error::sdk(&e))?;
+    Ok(Json(CancelResult { cancelled }))
+}
+
 async fn branches(
     State(app): State<Shared>,
     Path(repo): Path<String>,
@@ -745,15 +768,24 @@ async fn events(
 ) -> Result<Json<BranchEvents>, ApiError> {
     let cursor = cursor_param(query.as_deref())?.unwrap_or(0);
     let target = existing(&app.repo(&repo)?.yard, &branch).await?;
-    let all = blocking(move || target.events())
-        .await?
-        .map_err(|e| error::sdk(&e))?;
-    let total = all.len() as u64;
-    let events = all.into_iter().skip(cursor as usize).collect();
-    Ok(Json(BranchEvents {
-        events,
-        cursor: total.max(cursor),
-    }))
+    let page = blocking(move || {
+        let mut events = Vec::new();
+        let mut next = cursor;
+        loop {
+            let page = target.events_since(next, STREAM_BATCH)?;
+            if page.events.is_empty() {
+                return Ok::<_, branchyard::Error>(BranchEvents {
+                    events,
+                    cursor: next,
+                });
+            }
+            next = page.next_cursor;
+            events.extend(page.events);
+        }
+    })
+    .await?
+    .map_err(|e| error::sdk(&e))?;
+    Ok(Json(page))
 }
 
 async fn delete_branch(
@@ -764,12 +796,7 @@ async fn delete_branch(
     let hold = app.registry.hold(&repo.name, &branch, "a removal")?;
     let name = branch.clone();
     blocking(move || {
-        // Take in the branch's last activity before its log goes.
-        let _ = repo.feed.sync();
         let removed = repo.yard.remove(&name);
-        if removed.is_ok() {
-            repo.feed.forget(&name);
-        }
         drop(hold);
         removed
     })
@@ -835,7 +862,7 @@ async fn stream_events(
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok());
-    let head = repo.feed.head();
+    let head = sync_feed(&repo.feed).await?;
     let cursor = last_event_id
         .or(cursor_param(query.as_deref())?)
         .unwrap_or(head);

@@ -180,6 +180,11 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "outcome": outcome,
             "refused": refused,
         }),
+        Activity::Recovered { reason, killed } => json!({
+            "activity": "recovered",
+            "reason": reason,
+            "killed": killed,
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value

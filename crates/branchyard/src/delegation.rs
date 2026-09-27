@@ -46,7 +46,7 @@ use crate::engine::{self, Turn};
 use crate::projection::{lock, same_token, ENV_BRANCH, ENV_ROOT, ENV_TOKEN};
 use crate::record::{self, Recorder};
 use crate::run::{self, NewBranch};
-use crate::state::{Record, Store};
+use crate::state::{Lease, Record, Store};
 use crate::{
     git, harness, names, ops, Activity, BranchInfo, BranchStatus, Budget, CandidateInfo, Error,
     Event, Merged, Policy, RecordedEvent, Rule, TaskOptions, Yard,
@@ -673,14 +673,14 @@ pub(crate) fn descendants(store: &Store, name: &str) -> Result<Vec<BranchInfo>, 
 }
 
 /// Ask `name`'s running turn and every running turn below it to stop, on
-/// behalf of `by`.
+/// behalf of `by`: a durable request per running turn, which the engine
+/// running it observes.
 pub(crate) fn cancel_tree(store: &Store, name: &str, by: &str) -> Result<Vec<String>, Error> {
     let mut targets = vec![store.read(name)?.info];
     targets.extend(descendants(store, name)?);
     let mut cancelled = Vec::new();
     for info in targets {
-        if info.status == BranchStatus::Running {
-            store.request_cancel(&info.name, by)?;
+        if store.request_cancel(&info.name, by, true)? {
             cancelled.push(info.name);
         }
     }
@@ -902,10 +902,12 @@ impl Local {
             },
         )
         .inspect_err(|_| store.release(&name))?;
+        let (record, lease) = record;
         store.add_child(&self.branch, &name)?;
         let info = record.info.clone();
         self.start(
             record,
+            lease,
             profile,
             launch,
             SessionMode::Fresh,
@@ -1022,6 +1024,7 @@ impl Local {
     fn start(
         &self,
         record: Record,
+        lease: Lease,
         profile: &'static Profile,
         command: Vec<String>,
         mode: SessionMode,
@@ -1034,16 +1037,19 @@ impl Local {
             .name(format!("by-{name}"))
             .spawn(move || {
                 // The outcome is the branch's status; errors are recorded there.
-                let _ = engine::execute(Turn {
-                    yard: &yard,
-                    record,
-                    profile,
-                    command,
-                    mode,
-                    prompt: &prompt,
-                    options: &options,
-                    fork_source: None,
-                });
+                let _ = engine::execute(
+                    Turn {
+                        yard: &yard,
+                        record,
+                        profile,
+                        command,
+                        mode,
+                        prompt: &prompt,
+                        options: &options,
+                        fork_source: None,
+                    },
+                    lease,
+                );
             });
         match started {
             Ok(handle) => {
@@ -1113,16 +1119,16 @@ impl Local {
         limit: usize,
     ) -> Result<EventPage, Error> {
         self.require_descendant(branch, true)?;
-        let events = record::read(&self.store(), branch)?;
-        let total = events.len();
+        let store = self.store();
+        let total = store.backend().event_count(branch)? as usize;
         let limit = limit.clamp(1, EVENTS_MAX);
         let start = cursor.unwrap_or(total.saturating_sub(limit)).min(total);
-        let page: Vec<RecordedEvent> = events.into_iter().skip(start).take(limit).collect();
+        let page = record::since(&store, branch, start as u64, limit)?;
         Ok(EventPage {
             branch: branch.to_owned(),
-            next_cursor: start + page.len(),
+            next_cursor: start + page.events.len(),
             total,
-            events: page,
+            events: page.events,
         })
     }
 
@@ -1139,6 +1145,7 @@ impl Local {
         let info = prepared.record.info.clone();
         self.start(
             prepared.record,
+            prepared.lease,
             prepared.profile,
             prepared.command,
             prepared.mode,
@@ -1342,8 +1349,7 @@ mod tests {
             std::process::id(),
             N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let store = Store::new(&dir);
-        store.create_dirs().unwrap();
+        let store = Store::open(&dir).unwrap();
         (Temp(dir), store)
     }
 

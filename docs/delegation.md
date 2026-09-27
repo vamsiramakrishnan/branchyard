@@ -151,7 +151,7 @@ In local mode this stops honest mistakes: a harness that confuses branches, reac
 
 Children run on threads of the process that runs their parent's turn, whether that process is `by run` or your own program. A spawn returns once the child's record exists and its thread has started. While any of its turns may delegate, the engine listens on a Unix socket in `.branchyard/delegation/`, or in the temporary directory when that path is too long; `by`, the Python module and the MCP server reach it there. A socket, unlike a loopback port, stays reachable from a sandbox without network that can still see the repository.
 
-`by cancel` asks a running turn to stop through a marker the engine checks every 100 ms; the turn is interrupted like a budget stop, and ends `interrupted`. A turn cancelled before its harness opened has no session to continue.
+`by cancel` records a durable cancel request for the running turn (see [durability](durability.md#cancellation-and-deadlines)), which the engine running it checks every 100 ms, in whichever process that is; the turn is interrupted like a budget stop, and ends `interrupted`. A request is bound to the turn it was asked of and never stops a later one. A turn cancelled before its harness opened has no session to continue.
 
 A child's own spend counts against every ancestor through the reservations. `inspect` reports `subtree_cost_usd`, the reported spend of a branch and its descendants.
 
@@ -163,5 +163,5 @@ A child's own spend counts against every ancestor through the reservations. `ins
 - Resume of a child whose first turn was cancelled before its harness opened a session.
 - Isolation. Local mode runs everything as your user.
 - Delegation from a sandboxed harness. The tools reach the engine over a host socket with the host's `by`, so a turn with `--provider microsandbox` and `--delegate` fails, and a sandboxed branch runs without the tools.
-- Delegation through a server. `by spawn`, `inspect`, `events`, `integrate`, `cancel`, `children` and `send --json` refuse `--remote`, and the server does not offer the tools to its harnesses.
+- Delegation through a server. `by spawn`, `inspect`, `events`, `integrate`, `children` and `send --json` refuse `--remote`, and the server does not offer the tools to its harnesses. `by --remote … cancel` works for a person, with the server's authority, not a branch's.
 - Any real harness delegating end to end. The projections were checked against Claude Code 2.1.283 and codex-cli 0.157.1 without model calls; the full loop was tested against the fake ACP agent only.

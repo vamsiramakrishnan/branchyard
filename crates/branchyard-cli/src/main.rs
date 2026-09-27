@@ -118,6 +118,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Rm { branch } => commands::rm(target, &branch),
         Command::Harnesses { json } => commands::harnesses(env, target, json),
         Command::Watch { interval, once } => watch::run(env, target, interval, once),
+        Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
         ref command if matches!(target, Target::Remote(_)) && delegation(command).is_some() => {
             Err(Failure::Message(format!(
                 "{} acts on a local repository with a branch's delegation authority; \
@@ -134,7 +135,6 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             json,
         } => commands::events(env, branch, cursor, limit, json),
         Command::Integrate { branch, json } => commands::integrate(&branch, json),
-        Command::Cancel { branch, json } => commands::cancel(&branch, json),
         Command::Children { branch, json } => commands::children(env, branch, json),
         Command::Help { .. } | Command::Version | Command::Serve { .. } | Command::Mcp { .. } => {
             unreachable!("handled before choosing a target")
@@ -149,7 +149,6 @@ fn delegation(command: &Command) -> Option<&'static str> {
         Command::Inspect { .. } => "inspect",
         Command::Events { .. } => "events",
         Command::Integrate { .. } => "integrate",
-        Command::Cancel { .. } => "cancel",
         Command::Children { .. } => "children",
         _ => return None,
     })

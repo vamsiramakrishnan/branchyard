@@ -70,8 +70,8 @@ pub struct Config {
     /// Accept a request's own `command`. Off by default: it lets any token
     /// holder choose what the server executes.
     pub allow_client_commands: bool,
-    /// How often the feed polls branch logs for activity from other
-    /// processes.
+    /// How often the feed looks in the repository's store for activity
+    /// recorded by other processes.
     pub poll_interval: Duration,
     /// Log one line per request to stderr.
     pub log_requests: bool,

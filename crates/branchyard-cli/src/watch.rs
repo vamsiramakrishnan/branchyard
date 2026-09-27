@@ -4,8 +4,8 @@
 //! On a terminal it redraws in place with plain ANSI on the alternate
 //! screen, reading keys through `stty` (no terminal library): `q` or
 //! Ctrl-C exits and restores the terminal. Otherwise it appends one line
-//! per change. Activity comes from reading event logs incrementally:
-//! locally by byte offset in `.branchyard/events/`, remotely from the
+//! per change. Activity comes from the repository's event feed from a
+//! cursor: locally through [`Yard::events_since`], remotely from the
 //! server's event stream.
 
 use std::collections::{HashMap, HashSet};
@@ -18,7 +18,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use branchyard::{Activity, BranchInfo, Event, RecordedEvent, Yard};
 use branchyard_client::api::FeedEntry;
 use branchyard_client::Repo;
-use branchyard_server::tail::{self, LogTail};
 
 use crate::commands::{self, Env, Failure, Outcome, Target};
 use crate::render::{self, Style, Tone};
@@ -34,6 +33,9 @@ pub struct Doing {
     text: String,
     pub last_at_ms: u64,
 }
+
+/// Feed events read per call while catching up.
+const FEED_BATCH: usize = 1000;
 
 /// Text kept per branch for the snippet.
 const TEXT_TAIL: usize = 512;
@@ -325,7 +327,8 @@ pub fn changes(
 enum Source {
     Local {
         yard: Yard,
-        tails: HashMap<String, LogTail>,
+        /// Feed position of the last event read.
+        cursor: u64,
     },
     Remote {
         label: String,
@@ -357,20 +360,20 @@ impl Source {
     fn events(&mut self, infos: &[BranchInfo]) -> Vec<(String, RecordedEvent)> {
         let mut out = Vec::new();
         match self {
-            Source::Local { yard, tails } => {
+            Source::Local { yard, cursor } => {
                 let names: HashSet<&str> = infos.iter().map(|i| i.name.as_str()).collect();
-                tails.retain(|name, _| names.contains(name.as_str()));
-                for info in infos {
-                    let tail = tails
-                        .entry(info.name.clone())
-                        .or_insert_with(|| LogTail::new(tail::log_path(yard.root(), &info.name)));
-                    // A log being rotated or unreadable just shows no
-                    // activity this round.
-                    for line in tail.read().unwrap_or_default() {
-                        if let Ok(event) = line.event {
-                            out.push((info.name.clone(), event));
-                        }
+                // An unreadable store just shows no activity this round.
+                while let Ok(page) = yard.events_since(*cursor, FEED_BATCH) {
+                    if page.events.is_empty() {
+                        break;
                     }
+                    *cursor = page.next_cursor;
+                    out.extend(
+                        page.events
+                            .into_iter()
+                            .filter(|e| names.contains(e.branch.as_str()))
+                            .map(|e| (e.branch, e.event)),
+                    );
                 }
             }
             Source::Remote { events, lost, .. } => loop {
@@ -510,7 +513,7 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
     let mut source = match target {
         Target::Local => Source::Local {
             yard: commands::open()?,
-            tails: HashMap::new(),
+            cursor: 0,
         },
         Target::Remote(remote) => {
             let (tx, rx) = mpsc::channel();

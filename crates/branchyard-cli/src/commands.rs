@@ -778,11 +778,18 @@ pub fn integrate(branch: &str, json: bool) -> Outcome {
     })
 }
 
-pub fn cancel(branch: &str, json: bool) -> Outcome {
-    let result = match harness_delegate(json)? {
-        Some(delegate) => delegate.cancel(branch),
-        None => open_yard()
-            .and_then(|yard| yard.branch(branch)?.cancel())
+/// Inside a harness, cancel a descendant with the branch's authority;
+/// otherwise cancel the branch and its descendants, locally or on the
+/// server.
+pub fn cancel(target: &Target, branch: &str, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.cancel(branch),
+        (None, Target::Remote(remote)) => {
+            let cancelled = remote.repo.cancel(branch)?;
+            Ok(branchyard::Cancelled { cancelled })
+        }
+        (None, Target::Local) => open_yard()
+            .and_then(|yard| yard.cancel_as(branch, "by cancel"))
             .map(|cancelled| branchyard::Cancelled { cancelled }),
     };
     emit(json, result, |c| match c.cancelled.is_empty() {

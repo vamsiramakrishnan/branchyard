@@ -35,12 +35,25 @@
 //!
 //! What the engine guarantees:
 //!
-//! - Every harness event, permission decision, candidate snapshot, status
-//!   change and warning is appended to `.branchyard/events/<name>.jsonl`
-//!   before the observer sees it. Every permission request reaches the
-//!   [`Policy`]; nothing runs with a permission bypass.
-//! - Branch records are written atomically, and branch names are reserved
-//!   with an exclusive create, so parallel branches never share a name.
+//! - State is durable in `.branchyard/state.db` (SQLite, write-ahead log),
+//!   written in transactions. Every harness event, permission decision,
+//!   candidate snapshot, status change and warning is appended to the
+//!   branch's event log before the observer sees it, and can be read back
+//!   from a cursor ([`Branch::events_since`], [`Yard::events_since`]).
+//!   Every permission request reaches the [`Policy`]; nothing runs with a
+//!   permission bypass.
+//! - Branch names are reserved in a transaction, so parallel branches never
+//!   share a name.
+//! - A turn runs under its branch's lease, with a fencing generation that
+//!   every write of the turn checks: two engines, in one process or two,
+//!   never drive one branch at once. Its steps are journaled. When an
+//!   engine stops mid-turn, [`Yard::open`] recovers the branch: it kills the
+//!   harness's process group if pid and start time still match, and sets a
+//!   truthful status, [`BranchStatus::Interrupted`] when the turn's outcome
+//!   is unknown. A submitted prompt is never submitted again. See
+//!   `docs/durability.md`.
+//! - Cancellation is durable: [`Yard::cancel`] records a request that the
+//!   engine running the turn, in any process, observes.
 //! - A turn over budget is interrupted and waited for, never abandoned; the
 //!   harness's process group is torn down when each call returns, and
 //!   descendants that outlived it are named in the event log.
@@ -57,8 +70,8 @@
 //!   under its parent session's identity. [`TaskOptions::isolated`]
 //!   gives it a scrubbed environment and a private home instead, which
 //!   usually means it is not logged in.
-//! - Coordination between processes beyond name reservation: two processes
-//!   sending to the same branch at once race on its record.
+//! - Recovery of a turn whose engine runs on another host: its lease has to
+//!   expire first, and its processes there are not killed.
 //! - Resume and fork across working directories. Some harnesses keep
 //!   sessions per directory (Claude Code keys them by project path), so a
 //!   fork, which runs in a new worktree, may not find its parent's session.
@@ -86,9 +99,12 @@ mod names;
 mod ops;
 mod placement;
 mod policy;
+mod proc;
 mod projection;
 mod record;
+mod recover;
 mod run;
+mod sqlite;
 mod state;
 
 use std::fmt;
@@ -114,6 +130,7 @@ use serde::{Deserialize, Serialize};
 pub struct Yard {
     root: PathBuf,
     repo: Repository,
+    store: state::Store,
     /// Delegation contexts, running children and the broker, shared by
     /// clones.
     hub: Arc<projection::Hub>,
@@ -122,9 +139,61 @@ pub struct Yard {
 impl Yard {
     /// Open the git repository containing `path`, creating `.branchyard/`
     /// and excluding it from git through the repository's `info/exclude`.
-    /// Never touches `.gitignore`.
+    /// Never touches `.gitignore`. Imports state left by earlier versions,
+    /// then recovers every branch whose engine stopped mid-turn, as
+    /// [`Yard::recover`] does.
     pub fn open(path: impl AsRef<Path>) -> Result<Yard, Error> {
         ops::open(path.as_ref())
+    }
+
+    /// Recover every branch whose turn's engine stopped: on this host, a
+    /// process that is gone; anywhere, a lease that expired. Kills the
+    /// turn's recorded harness process group when its pid and start time
+    /// still match, settles the branch's status from its journal, records
+    /// [`Activity::Recovered`], and never submits a prompt again. Returns
+    /// what was recovered. [`Yard::open`] already does this; call it again
+    /// to reconcile a long-lived yard, as the server does.
+    pub fn recover(&self) -> Result<Vec<Recovery>, Error> {
+        recover::all(self)
+    }
+
+    /// Ask `branch`'s running turn, and every running turn delegated below
+    /// it, to stop; each ends `interrupted`. The request is durable and is
+    /// observed by the engine running the turn in any process using this
+    /// repository. Returns the branches that were running.
+    pub fn cancel(&self, branch: &str) -> Result<Vec<String>, Error> {
+        self.cancel_as(branch, "the SDK caller")
+    }
+
+    /// [`Yard::cancel`] on behalf of `by`, whom each cancelled branch's
+    /// event log names.
+    pub fn cancel_as(&self, branch: &str, by: &str) -> Result<Vec<String>, Error> {
+        delegation::cancel_tree(&self.store(), branch, by)
+    }
+
+    /// Up to `limit` recorded events of every branch after feed position
+    /// `cursor`, in the order they were recorded. Positions start at 1 and
+    /// only grow; pass the page's `next_cursor` back to continue. Events
+    /// of removed branches stay in the feed.
+    pub fn events_since(&self, cursor: u64, limit: usize) -> Result<FeedPage, Error> {
+        record::feed(&self.store(), cursor, limit)
+    }
+
+    /// [`Yard::events_since`], waiting up to `timeout` for an event when
+    /// there is none yet. Wakes at once for events recorded in this
+    /// process, and within 100 ms for another process's.
+    pub fn wait_for_events(
+        &self,
+        cursor: u64,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<FeedPage, Error> {
+        record::wait_feed(&self.store(), cursor, limit, timeout)
+    }
+
+    /// The feed position of the last recorded event; 0 when there is none.
+    pub fn events_head(&self) -> Result<u64, Error> {
+        self.store().backend().head()
     }
 
     /// Repository root.
@@ -189,7 +258,7 @@ impl Yard {
     }
 
     fn store(&self) -> state::Store {
-        state::Store::new(&self.root)
+        self.store.clone()
     }
 }
 
@@ -454,6 +523,24 @@ impl Branch {
         record::read(&self.yard.store(), &self.info.name)
     }
 
+    /// Up to `limit` recorded events after the first `cursor`, oldest
+    /// first. Events are numbered from 1 in each branch; pass the page's
+    /// `next_cursor` back to continue.
+    pub fn events_since(&self, cursor: u64, limit: usize) -> Result<Page, Error> {
+        record::since(&self.yard.store(), &self.info.name, cursor, limit)
+    }
+
+    /// [`Branch::events_since`], waiting up to `timeout` for an event when
+    /// there is none yet.
+    pub fn wait_for_events(
+        &self,
+        cursor: u64,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Page, Error> {
+        record::wait(&self.yard.store(), &self.info.name, cursor, limit, timeout)
+    }
+
     /// Act as this branch with your own authority: the same operations its
     /// harness gets, bounded by the envelope it was given, with no token.
     /// A branch without delegation can still inspect itself but cannot
@@ -471,10 +558,9 @@ impl Branch {
     }
 
     /// Ask this branch's running turn, and every running turn delegated
-    /// below it, to stop; each ends `interrupted`. Works on turns running in
-    /// any process on this host. Returns the branches that were running.
+    /// below it, to stop; see [`Yard::cancel`].
     pub fn cancel(&self) -> Result<Vec<String>, Error> {
-        delegation::cancel_tree(&self.yard.store(), &self.info.name, "the SDK caller")
+        self.yard.cancel(&self.info.name)
     }
 
     /// Wait until no descendant of this branch is running a turn on a
@@ -754,6 +840,14 @@ pub enum Activity {
         outcome: String,
         refused: bool,
     },
+    /// Recovery took over a turn whose engine stopped; see
+    /// [`Yard::recover`].
+    Recovered {
+        /// What was known about the turn, and what recovery concluded.
+        reason: String,
+        /// Harness processes that were still running and were killed.
+        killed: Vec<u32>,
+    },
 }
 
 /// Activity from a named branch.
@@ -769,6 +863,44 @@ pub struct RecordedEvent {
     /// Milliseconds since the Unix epoch.
     pub at_ms: u64,
     pub activity: Activity,
+}
+
+/// A page of one branch's events; see [`Branch::events_since`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Page {
+    pub events: Vec<RecordedEvent>,
+    /// The number of the last event returned, or the cursor asked for when
+    /// none were.
+    pub next_cursor: u64,
+}
+
+/// A page of the repository's feed; see [`Yard::events_since`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeedPage {
+    pub events: Vec<FeedEvent>,
+    /// The position of the last event returned, or the cursor asked for
+    /// when none were.
+    pub next_cursor: u64,
+}
+
+/// One event in the repository's feed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeedEvent {
+    /// Position in the feed, from 1.
+    pub position: u64,
+    pub branch: String,
+    pub event: RecordedEvent,
+}
+
+/// A branch [`Yard::recover`] took over.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Recovery {
+    pub branch: String,
+    /// The status recovery settled on.
+    pub status: BranchStatus,
+    pub reason: String,
+    /// Harness processes that were killed.
+    pub killed: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -843,6 +975,9 @@ pub enum Error {
     Denied(String),
     /// The branch is running a turn, and the operation needs it idle.
     Running(String),
+    /// This engine lost the branch's lease to another, which recovered or
+    /// took over the branch; its writes are refused.
+    Fenced(String),
     /// An error the engine running a delegating turn returned through its
     /// broker, with the [`Error::kind`] it had there.
     Remote {
@@ -901,6 +1036,7 @@ impl fmt::Display for Error {
             Error::InvalidCandidate(message) => write!(f, "invalid candidate: {message}"),
             Error::Denied(why) => write!(f, "denied: {why}"),
             Error::Running(name) => write!(f, "branch {name} is running a turn"),
+            Error::Fenced(why) => write!(f, "fenced: {why}"),
             Error::Remote { message, .. } => f.write_str(message),
             Error::Git(message) => write!(f, "git: {message}"),
             Error::Harness(message) => write!(f, "harness: {message}"),
@@ -934,6 +1070,7 @@ impl Error {
             Error::InvalidCandidate(_) => "invalid_candidate",
             Error::Denied(_) => "denied",
             Error::Running(_) => "running",
+            Error::Fenced(_) => "fenced",
             Error::Remote { kind, .. } => kind,
             Error::Git(_) => "git",
             Error::Harness(_) => "harness",

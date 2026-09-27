@@ -12,7 +12,7 @@ use branchyard::{
     Activity, BranchEvent, BranchStatus, Budget, DecisionSource, Error, Event, PermissionDecision,
     Policy, RecordedEvent, TaskOptions, TurnOutcome, Yard,
 };
-use common::{fake_agent, text, Fixture};
+use common::{edit_record, fake_agent, text, Fixture};
 
 fn status_of(fixture: &Fixture, name: &str) -> BranchStatus {
     fixture.yard.branch(name).unwrap().info().status.clone()
@@ -712,11 +712,9 @@ fn a_session_the_harness_cannot_find_fails_precisely() {
     let f = Fixture::new();
     let branch = f.task("WHOAMI").name("lost").run().unwrap();
     // Stand in for a harness that no longer has the session.
-    let path = f.root.join(".branchyard/branches/lost.json");
-    let mut record: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    record["info"]["session"] = "missing-1".into();
-    fs::write(&path, record.to_string()).unwrap();
+    edit_record(&f.root, "lost", |record| {
+        record["info"]["session"] = "missing-1".into()
+    });
 
     let sent = branch.send("WHOAMI", f.options()).unwrap();
     let info = sent.info();

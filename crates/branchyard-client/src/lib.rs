@@ -60,8 +60,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use api::{
-    BranchEvents, BranchList, Diff, ErrorBody, ErrorResponse, FeedEntry, ForkRequest, HarnessList,
-    MergeRequest, Operation, Removed, RepoEntry, RepoList, SendRequest, TaskRequest,
+    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, ErrorResponse,
+    FeedEntry, ForkRequest, HarnessList, MergeRequest, Operation, Removed, RepoEntry, RepoList,
+    SendRequest, TaskRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -390,6 +391,20 @@ impl Repo {
     ) -> Result<Operation, Error> {
         self.client
             .post(&self.branch_path(branch, "/merge"), request, key)
+    }
+
+    /// Ask the branch's running turn, and every running turn delegated
+    /// below it, to stop. Returns the branches that were running; each
+    /// ends `interrupted`. Safe to repeat.
+    pub fn cancel(&self, branch: &str) -> Result<Vec<String>, Error> {
+        Ok(self
+            .client
+            .post::<CancelResult>(
+                &self.branch_path(branch, "/cancel"),
+                &CancelRequest::default(),
+                &new_key(),
+            )?
+            .cancelled)
     }
 
     pub fn branches(&self) -> Result<Vec<BranchInfo>, Error> {
