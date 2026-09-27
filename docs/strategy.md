@@ -1,18 +1,21 @@
 # Product strategy
 
-Branchyard runs *work*: it decides nothing about how agents think, and everything about how their work is delegated, isolated, bounded and merged. Runtimes such as [Agent Substrate](substrate.md) run *agents*. Terminal tools such as Herdr, Warp and OpenRig present agents on one machine. Branchyard should be the layer every one of those surfaces can sit on.
+Branchyard runs *work*: it decides nothing about how agents think, and everything about how their work is delegated, isolated, bounded and merged. Runtimes such as [Agent Substrate](substrate.md) run *agents*. Scion and OpenRig orchestrate teams of agents, and Herdr and Warp present them in a terminal. Scion, OpenRig and Herdr drive most harnesses through their interactive terminal UIs. Branchyard drives them through their machine protocols, and should be the layer those surfaces can sit on.
+
+The table below summarizes [the comparison](comparison.md), which cites each upstream claim at a pinned commit and sets out what to absorb.
 
 ## Positioning
 
 | | Owns | Leaves to others |
 |---|---|---|
 | Agent Substrate | Density, suspend/resume, routing, isolation at cluster scale | Harness semantics, delegation, merging |
-| Herdr | Watching many terminal agents at once | Structured state (it scrapes screens), remote execution |
-| OpenRig | Declarative rigs of agent seats, startup projection | Runtime-grown topology, per-invocation permissions |
+| Scion | Teams of agents in containers, locally or through a Hub on Kubernetes or Cloud Run; provisioning, identity, messaging, chat bridges | Per-invocation approvals (it launches harnesses with permission bypass), cost budgets, validated merging |
+| OpenRig | Declarative rigs of seats, startup delivery, honest restore, runtime grow and shrink, queues and workflows | Per-invocation approvals (its policies set a launch posture), budgets, sandboxing, merging |
+| Herdr | Watching and driving many terminal agents; hooks for some agents, screen manifests for the rest; resume after restart | Structured control of Claude Code and Codex, approvals, budgets, isolation, merging |
 | Warp | A polished terminal experience around agents | An embeddable, headless, permissively licensed contract |
-| **Branchyard** | The contract: typed harness events, permission answers, budgets, and branch/merge semantics | Virtualization, terminals, model loops |
+| **Branchyard** | The contract: typed harness events, permission answers, budgets, and branch/merge semantics | Virtualization, terminals, model loops, team conventions |
 
-Substrate is a backend, not a rival: `branchyard-substrate` already maps its actors onto Branchyard's provider contract.
+Substrate is a backend, not a rival: `branchyard-substrate` already maps its actors onto Branchyard's provider contract. Scion's harness provisioning is being ported; OpenRig's declarative rigs and Herdr's terminal view are the next candidates, as an idea and as a client respectively ([absorption plan](comparison.md#absorption-plan)).
 
 ## The developer model: branches
 
