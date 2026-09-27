@@ -116,11 +116,11 @@ BY_MSB_IMAGE=alpine:3.20 cargo +1.94 test -p branchyard-microsandbox --features 
 
 ## 6. Agent Substrate (cluster; model calls only in the last step)
 
-The Substrate provider has run only against the in-process fake. On a machine with Docker, `kind` and `kubectl`:
+The Substrate provider has run only against the in-process fake. On a machine with Docker, `kind`, `kubectl`, `openssl` and Envoy:
 
-1. **Cluster.** Check out Substrate at the pinned revision (`1d7ca8ced056192a1801d6565251adcaab3eb0c9`) and run `hack/create-kind-cluster.sh` and `hack/install-ate-kind.sh`. Port-forward the `Control` API and the router to this host (plain HTTP; the provider has no TLS yet) and note both URLs. Find how the router addresses an actor and write it as a URL template with `{atespace}` and `{actor}`; the provider cannot know it from the vendored API.
+1. **Cluster.** Check out Substrate at the pinned revision (`1d7ca8ced056192a1801d6565251adcaab3eb0c9`) and run `hack/create-kind-cluster.sh` and `hack/install-ate-kind.sh`. Port-forward the `Control` API and the router to this host and note both URLs; plain HTTP is accepted to loopback, so the first runs need no TLS. Find how the router addresses an actor and write it as a URL template with `{atespace}` and `{actor}`; the provider cannot know it from the vendored API. Note whether the installation serves TLS on either endpoint itself.
 2. **Key.** `cargo build --release -p branchyard-bridge`, then `target/release/branchyard-bridge keygen --out bridge.key`, which prints the public key.
-3. **Image.** Build a static bridge (`rustup target add x86_64-unknown-linux-musl` and `musl-tools` for `ring`, then `cargo build --release -p branchyard-bridge --target x86_64-unknown-linux-musl`) and an image holding it at `/usr/local/bin/branchyard-bridge`, with `git`, `sh`, `sleep`, `cat`, `printf`, an init such as `tini`, a writable `/workspace`, and later the harness. Push it where the cluster can pull it and note its digest.
+3. **Image.** Build a static bridge (`rustup target add x86_64-unknown-linux-musl` and `musl-tools` for `ring`, then `cargo build --release -p branchyard-bridge --target x86_64-unknown-linux-musl`) and an image holding it at `/usr/local/bin/branchyard-bridge`, with `git`, `sh`, `sleep`, `cat`, `printf`, a user for the harness (say `by`, UID and GID 1000, with no `sudo` and no setuid helper) that owns a writable `/workspace`, and later the harness. The bridge is the entry point and runs as root; it needs no separate init. Push it where the cluster can pull it and note its digest.
 4. **Template.** Create an atespace, then the template from the key:
 
    ```sh
@@ -129,17 +129,43 @@ The Substrate provider has run only against the in-process fake. On a machine wi
      BY_SUBSTRATE_ATESPACE=branchyard BY_SUBSTRATE_TEMPLATE=by-bridge \
      BY_SUBSTRATE_KEY=$PWD/bridge.key BY_SUBSTRATE_WORKDIR=/workspace \
      BY_SUBSTRATE_IMAGE=registry.example/by-bridge@sha256:... \
-     BY_SUBSTRATE_BRIDGE=/usr/local/bin/branchyard-bridge \
+     BY_SUBSTRATE_BRIDGE=/usr/local/bin/branchyard-bridge BY_SUBSTRATE_RUN_AS=1000:1000 \
      BY_SUBSTRATE_SANDBOX_CONFIG=gvisor BY_SUBSTRATE_STORAGE=gs://bucket/branchyard
    cargo test -p branchyard-substrate --test cluster -- --ignored create_bridge_template
    ```
 
    Use the router template you found in step 1, and your cluster's `SandboxConfig` name and storage location.
 5. **Cluster tests.** `cargo test -p branchyard-substrate --test cluster -- --ignored --test-threads 1 cluster_` runs the conformance checks without mounts, attempt rotation, and a worktree round trip. All must pass.
-6. **Observe what the fake assumes.** The identity files under `/run/branchyard/identity` after a resume and in a branched actor (new UID); that a superseded or ended credential is refused through the router; that the router forwards WebSocket upgrades and keeps a connection open for a long turn; whether it activates a suspended actor; `stop` ending processes before the suspend. Time create, resume, suspend, tag and branch, cold and warm.
-7. **A harness.** Rebuild the image with a harness installed, recreate the template, then in a throwaway repository: `by run "…" --provider substrate --substrate-endpoint $BY_SUBSTRATE_ENDPOINT --substrate-router "$BY_SUBSTRATE_ROUTER" --substrate-atespace $BY_SUBSTRATE_ATESPACE --substrate-template <it> --substrate-key bridge.key --pass-env ANTHROPIC_API_KEY --yes --budget-usd 1`. The candidate holds the harness's changes, `by merge` works, the actor is gone afterwards (`kubectl ate` or `ListActors`), and a `by send` resumes the session from the carried home. Kill `by` mid-turn and check that `by ls` recovers the branch and deletes the actor.
+6. **TLS.** Make a throwaway authority, a server certificate for the names the client uses (here the loopback address of the port-forwards) and a client certificate:
 
-**Record:** in [Agent Substrate](substrate.md) and [validation](validation.md), with the Substrate revision, the router template, the image digest and which tests passed; mark the provider qualified only when all of this passed.
+   ```sh
+   ec='-newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes'
+   openssl req -x509 $ec -days 7 -subj /CN=by-qual-ca -keyout ca.key -out ca.pem
+   for who in server client; do
+     openssl req $ec -subj /CN=by-qual-$who -keyout $who.key -out $who.csr
+   done
+   openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 7 -out server.crt \
+     -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth')
+   openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 7 -out client.crt \
+     -extfile <(printf 'extendedKeyUsage=clientAuth')
+   openssl req -x509 $ec -days 7 -subj /CN=by-qual-other -keyout other.key -out other-ca.pem
+   ```
+
+   If the installation serves TLS itself, give it `server.crt` and `server.key` (or use its authority as `ca.pem`). Otherwise terminate TLS in front of the port-forwards with Envoy: one listener on 8443 that requires a client certificate from `ca.pem`, offers ALPN `h2` and passes the decrypted stream to 127.0.0.1:8080 with `envoy.filters.network.tcp_proxy`; one on 8444 without client certificates, offering `http/1.1`, to 127.0.0.1:8081. Both use `DownstreamTlsContext` with `server.crt` and `server.key`. Record which you used. Then:
+
+   ```sh
+   export BY_SUBSTRATE_ENDPOINT=https://127.0.0.1:8443 \
+     BY_SUBSTRATE_ROUTER='https://127.0.0.1:8444/{atespace}/{actor}/' \
+     BY_SUBSTRATE_CA=$PWD/ca.pem BY_SUBSTRATE_CLIENT_CERT=$PWD/client.crt \
+     BY_SUBSTRATE_CLIENT_KEY=$PWD/client.key
+   cargo test -p branchyard-substrate --test cluster -- --ignored --test-threads 1 cluster_
+   ```
+
+   All must pass. With `BY_SUBSTRATE_CA=$PWD/other-ca.pem`, or without the client certificate, the first call must fail; with `http://` URLs to a host other than loopback, the provider must refuse before connecting. If the router can route by SNI and pass TLS through to the actor, put `server.crt` and `server.key` in the image (key readable by root only), set `BY_SUBSTRATE_BRIDGE_TLS_CERT` and `BY_SUBSTRATE_BRIDGE_TLS_KEY` to their paths there, recreate the template, and run the tests again against the router's TLS address; the wakeup probe must still succeed.
+7. **Observe what the fake assumes.** The identity files under `/run/branchyard/identity` after a resume and in a branched actor (new UID); that a superseded or ended credential is refused through the router; that the router forwards WebSocket upgrades and keeps a connection open for a long turn; whether it activates a suspended actor; `stop` ending processes before the suspend; that `ResumeActor`, `SuspendActor` and `RevertActor` return the actor they acted on. In an actor, through an exec: `id -u` prints 1000; the state file under `/var/lib/branchyard-bridge` cannot be read; `sh -c 'sleep 1 & exit'` leaves no zombie once `sleep` ends (`ps -o stat` has no `Z`); `kill -TERM 1` changes nothing; deleting or suspending the actor ends the bridge within ten seconds of the runtime's `SIGTERM`. Time create, resume, suspend, tag and branch, cold and warm.
+8. **A harness.** Rebuild the image with a harness installed, recreate the template, then in a throwaway repository: `by run "…" --provider substrate --substrate-endpoint $BY_SUBSTRATE_ENDPOINT --substrate-router "$BY_SUBSTRATE_ROUTER" --substrate-ca ca.pem --substrate-client-cert client.crt --substrate-client-key client.key --substrate-atespace $BY_SUBSTRATE_ATESPACE --substrate-template <it> --substrate-key bridge.key --pass-env ANTHROPIC_API_KEY --yes --budget-usd 1`. The candidate holds the harness's changes, `by merge` works, the actor is gone afterwards (`kubectl ate` or `ListActors`), and a `by send` resumes the session from the carried home. Ask the harness to commit its work in two commits and leave one more change uncommitted: `by log` shows both commits with their messages under the turn's snapshot. Kill `by` mid-turn and check that `by ls` recovers the branch and deletes the actor.
+
+**Record:** in [Agent Substrate](substrate.md) and [validation](validation.md), with the Substrate revision, the router template, how TLS was served on each hop, the image digest and which tests passed; mark the provider qualified only when all of this passed.
 
 ## Cleaning up
 

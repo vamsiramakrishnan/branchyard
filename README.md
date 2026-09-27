@@ -92,12 +92,13 @@ The **Agent Substrate** provider, in the default build, runs each turn's harness
 
 ```sh
 branchyard-bridge keygen --out bridge.key       # its public key goes in the actor template
-by run "Fix the flaky parser test" --provider substrate --substrate-endpoint http://127.0.0.1:8080 \
-  --substrate-router 'http://127.0.0.1:8081/{atespace}/{actor}/' --substrate-template by-claude \
+by run "Fix the flaky parser test" --provider substrate \
+  --substrate-endpoint https://substrate.example --substrate-ca ca.pem \
+  --substrate-router 'wss://router.example/{atespace}/{actor}/' --substrate-template by-claude \
   --substrate-key bridge.key --pass-env ANTHROPIC_API_KEY --check "cargo test" --yes
 ```
 
-It is **unqualified**: it has run only against an in-process fake cluster, the router's addressing is an assumption, and its connections are plain HTTP. See [Agent Substrate](docs/substrate.md) and [live testing](docs/testing-live.md#6-agent-substrate-cluster).
+Both connections use TLS (plain HTTP only to loopback unless `--substrate-insecure`), commits the harness makes come back as commits, and the bridge can be the container's process 1 and run the harness as another user. It is **unqualified**: it has run only against an in-process fake cluster, and the router's addressing and TLS handling are assumptions. See [Agent Substrate](docs/substrate.md) and [live testing](docs/testing-live.md#6-agent-substrate-cluster).
 
 ## Delegation
 
@@ -155,19 +156,19 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | Component | Status |
 |---|---|
 | `branchyard-controls` | Dependency-free Rust resume recipes adapted from Herdr, and one harness identity registry across Herdr, Scion and the integration matrix; 15 tests pass |
-| `branchyard` | The local-mode SDK engine: tasks, branches as git worktrees, forks, budgets, per-invocation permission policies, an event log per branch read from cursors, validated merges, and durable execution on SQLite (leases, journaled steps, cancellation, crash recovery; see [durability](docs/durability.md)), and turns in Substrate actors; 76 hermetic tests against a fake ACP agent, including a killed engine and turns in a fake Substrate cluster, none against a real harness |
+| `branchyard` | The local-mode SDK engine: tasks, branches as git worktrees, forks, budgets, per-invocation permission policies, an event log per branch read from cursors, validated merges, and durable execution on SQLite (leases, journaled steps, cancellation, crash recovery; see [durability](docs/durability.md)), and turns in Substrate actors; 78 hermetic tests against a fake ACP agent, including a killed engine and turns in a fake Substrate cluster, none against a real harness |
 | `branchyard-harness` | Sans-IO protocol drivers: Claude Code stream-json, Codex App Server, Antigravity stream-json, Pi RPC, Amp stream-json, and ACP v1 for ten more harnesses; 15 of 16 targets have a default profile; 68 tests, including replays of recorded Claude Code, Codex, Antigravity and Pi sessions and of documentation-derived Amp sessions, and a conformance contract run against all 17 profiles; both Claude Code profiles pass live protocol qualification |
 | `branchyard-qualify` | Runs driver qualification scenarios against real harness binaries; see [driver qualification](docs/qualification/README.md) |
 | `branchyard-workspace` | Git worktree branches, candidate commits and validated merges: compare-and-swap on the target, checks in a temporary worktree, conflicts returned for repair; 18 tests |
 | `branchyard-runtime` | Runs a driver against a harness process through any sandbox provider, and the local provider: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 27 hermetic tests, including the provider conformance checks, against a fake ACP agent |
-| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `cancel`, `harnesses`, `watch`, `serve`, each also in remote mode; 65 tests, 17 of them running the built binary against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent |
+| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `cancel`, `harnesses`, `watch`, `serve`, each also in remote mode; 66 tests, 17 of them running the built binary against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent |
 | `branchyard-server` | The server: bearer-token authentication, durable operations with idempotency keys, cancellation, a resumable SSE activity feed read from the engine's store, recovery, TLS and graceful shutdown; 24 tests, 9 over real HTTP against a fake ACP agent; see [the server reference](docs/server.md) |
 | `branchyard-client` | The remote SDK: typed blocking client, SSE parsing and reconnect by cursor; 12 tests |
 | `branchyard-mcp` | Branchyard's delegation tools over MCP on stdio (`by mcp`), for harnesses whose shell is restricted; the same operations and token as `by spawn` and the SDKs |
 | `branchyard-sandbox` | The vendor-independent `SandboxProvider` contract, provider conformance checks, and capability admission; unsupported requirements are rejected, never weakened |
 | `branchyard-microsandbox` | A [Microsandbox](https://github.com/superradcompany/microsandbox) provider over its public SDK 0.7.3, behind the off-by-default `microsandbox` feature (the SDK needs Rust 1.94); 11 mapping tests, 4 more with the SDK, and 14 ignored tests for a KVM host; **unqualified** |
-| `branchyard-substrate` | An [Agent Substrate](https://github.com/agent-substrate/substrate) `SandboxProvider` over a client generated from its unmodified proto, exec through the bridge, git transfer, the bridge's actor template, and a fake cluster for tests; 32 tests, including the conformance checks, against the fake, and 4 ignored tests for a cluster; **unqualified** |
-| `branchyard-bridge` | The in-sandbox exec bridge for runtimes without an exec API: a versioned frame protocol over WebSocket, Ed25519-signed per-attempt credentials, process groups with teardown, file and tree transfer, and its host-side client; 17 tests |
+| `branchyard-substrate` | An [Agent Substrate](https://github.com/agent-substrate/substrate) `SandboxProvider` over a client generated from its unmodified proto, exec through the bridge, TLS on both hops, UID fencing before and after each call, quiescence checks, git transfer that keeps the harness's commits, the bridge's actor template, and a fake cluster (optionally over TLS) for tests; 41 tests, including the conformance checks, against the fake, and 4 ignored tests for a cluster; **unqualified** |
+| `branchyard-bridge` | The in-sandbox exec bridge for runtimes without an exec API: a versioned frame protocol over WebSocket, optionally over TLS, Ed25519-signed per-attempt credentials with tamper-evident state, process groups with teardown, reaping and signal handling as process 1, execs as another user, file and tree transfer, and its host-side client; 26 tests, 2 of them only as root |
 | Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |
 | Herdr controls | Original resume source and 22 terminal-observation manifests |
 | OpenRig controls | Launch/readiness contract and configuration fragments; not a standalone adapter |
