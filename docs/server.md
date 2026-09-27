@@ -12,6 +12,11 @@ by serve                      # serves this repository as its directory name on 
 # branchyard-server: created a token in .branchyard/server/token; clients pass --token-file with it
 
 by --remote http://127.0.0.1:8421 --token-file .branchyard/server/token ls
+
+branchyard-server token new --tenant acme --scopes read,run --repo app
+# branchyard-server: token (printed once; give it to the client, never store it): <token>
+# {"token_sha256": "…", "tenant": "acme", "name": "token-…", "scopes": ["read","run"], "repos": ["app"]}
+# paste that object into the configuration's "credentials" array
 ```
 
 Flags (`by serve --help` or `branchyard-server --help`):
@@ -49,8 +54,18 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "repos": { "app": "/srv/app", "docs": "/srv/docs" },
   "tokens": [
     { "name": "ci", "token_file": "/etc/branchyard/ci.token" },
-    { "name": "alice", "token": "at-least-16-characters" }
+    { "name": "alice", "token": "at-least-16-characters" },
+    { "name": "acme-ci", "token_file": "/etc/branchyard/acme-ci.token",
+      "tenant": "acme", "scopes": ["read", "run"], "repos": ["app"] }
   ],
+  "credentials": [
+    { "token_sha256": "…64 lowercase hex characters, from `branchyard-server token new`…",
+      "tenant": "acme", "name": "acme-readonly", "scopes": ["read"] }
+  ],
+  "tenants": {
+    "acme": { "repos": ["app"], "max_running": 4, "max_branches": 20,
+              "max_cost_usd": 50.0, "max_artifact_bytes": 1073741824 }
+  },
   "tls": { "cert": "/etc/branchyard/cert.pem", "key": "/etc/branchyard/key.pem" },
   "max_body_bytes": 1048576,
   "max_artifact_bytes": 268435456,
@@ -67,15 +82,49 @@ Configuration file (relative paths resolve against the file's directory; unknown
 }
 ```
 
-The server refuses to start with no repository, no token, a token shorter than 16 characters, an unknown provider name, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
+The server refuses to start with no repository, no token or credential, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
 
 SIGINT or SIGTERM starts a graceful shutdown: no new connections or operations (`503 shutting_down`), no more operations claimed from the queue, event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`; queued ones stay queued, and run after the restart or on another server sharing the database. A second signal stops waiting at once.
 
-## Authentication
+## Identity and scopes
 
-Every route except `GET /healthz` needs `Authorization: Bearer <token>`, including unknown routes, so routes cannot be probed anonymously. Tokens come from the configuration or token files. The presented token is compared with every configured token in time that depends only on lengths, and neither tokens nor headers are ever logged. A missing or wrong token gets `401 unauthorized` with `WWW-Authenticate: Bearer`.
+Every route except `GET /healthz` needs `Authorization: Bearer <token>`, including unknown routes, so routes cannot be probed anonymously. The presented token is **hashed (SHA-256) and compared against every configured credential's hash** in time that depends only on lengths; the verifier holds hashes, never a plaintext token, and neither tokens nor headers are ever logged. A missing or wrong token gets `401 unauthorized` with `WWW-Authenticate: Bearer`.
 
-The token's configured `name` is the caller's identity for idempotency scoping. There is no per-token authorization: every token can do everything on every served repository.
+**A request's identity comes only from its verified credential, never from anything the request itself says** — there is no `tenant_id` field anywhere in the wire protocol. Each configured credential names a **principal**: a `tenant` (1 to 128 characters, no `/`), a subject `name` (the caller's identity for idempotency scoping and audit), a set of **scopes**, and, optionally, its own repository allowlist narrower than its tenant's. Two ways to configure one:
+
+- **`tokens`** (unchanged from before tenants existed): `{"name", "token"|"token_file"}`, plus optional `tenant`, `scopes` and `repos`. A `tokens` entry that gives none of those three becomes a principal in the unconfigured `default` tenant with every scope and every repository — **exactly what a single-token server did before this existed**, so old configurations keep working unchanged.
+- **`credentials`**: `{"token_sha256", "tenant", "name"?, "scopes"?, "repos"?}` — the token's SHA-256 directly, so the plaintext never has to enter the configuration at all. `branchyard-server token new [--tenant T] [--scopes S,...] [--repo R,...]` (also `by serve token new`) generates a fresh token, prints it once (give it to the client, never store it), and prints the `credentials` object to paste in. There is no hot rotation or revocation API: replacing or removing a hash and restarting is how a token is rotated or revoked, the same restart a `tokens` change already needed.
+
+Scopes: `read` (every `GET`, including the event stream), `run` (submitting a task, send, fork, reincarnate or spawn, and acting on a running turn: cancel, steer, ask, report, escalate, answer), `merge` (merge, integrate), `admin` (removing a branch). Every endpoint checks the caller's scope and returns `403 scope_required` (`detail.scope`) when it is missing.
+
+**Repositories belong to tenants.** A tenant's `repos` (in `tenants`) is the simplest sound model for isolation: it is the tenant's repository allowlist, and a principal's own `repos`, if given, only narrows it further (the intersection). `GET /v1/repos` lists only what the caller's tenant (and its own allowlist) can see; acting on any other repository is `403 repo_not_allowed` (`detail.repo`). `GET /v1/operations/{id}` refuses another tenant's operation with `404 unknown_operation`, indistinguishable from an ID that never existed, so a principal cannot even tell that another tenant's operation exists. This is the whole isolation model: there is no per-branch or per-operation ownership beyond the repository it is in, since a tenant that cannot reach a repository cannot reach anything inside it either. (Operations record the admitting principal — tenant, subject, scopes and repositories — for this check, for `GET /v1/operations?idempotency_key=`, and for the worker that runs them; branches and feed entries do not carry a principal field of their own in this release — an out-of-scope decision documented here rather than left implicit — since the repository-ownership boundary above already makes them unreachable across tenants without it.)
+
+## Quotas
+
+A tenant's `tenants.<name>` entry sets its resource ceilings, all optional (unconfigured means unlimited):
+
+| Field | Enforces | Checked | Refusal |
+|---|---|---|---|
+| `max_running` | Operations of this tenant queued or running at once | In the admission's transaction, against the operation store | `429 quota_exceeded` (`detail.limit = "max_running"`) |
+| `max_branches` | Branches across this tenant's repositories, counting those its queued and running operations will create | In the admission's transaction of a task, fork, reincarnate or spawn | `429 quota_exceeded` (`"max_branches"`) |
+| `max_cost_usd` | Total `cost_usd` recorded across this tenant's currently-open branches (lifetime, not a rolling window — see below) | Live, before a task/fork/reincarnate/spawn is admitted | `429 quota_exceeded` (`"max_cost_usd"`) |
+| `max_artifact_bytes` | Total artifact bytes reachable across this tenant's repositories | Same as `max_cost_usd` | `429 quota_exceeded` (`"max_artifact_bytes"`) |
+
+A refusal's `detail` has `tenant`, `limit`, `max` and `reserved` (or `spent`). A refused admission writes nothing: no operation record, no idempotency binding, no branch lock, no queue row, so a retry with the same key once the tenant is under its ceiling is admitted normally.
+
+**`max_running` is transactional, and holds across servers and restarts.** Every operation's record carries its tenant (`tenant`, with the admitting `principal`). [Admission](#dispatch) counts the tenant's rows in the queue — its queued and running operations, joined to their records — inside the same transaction that writes the new operation, and refuses when that count is at the ceiling. On SQLite that transaction is `BEGIN IMMEDIATE`, so admissions take turns; on PostgreSQL an admission of a tenant with a quota first takes a transaction-scoped advisory lock on the tenant (`pg_advisory_xact_lock(hashtextextended('branchyard tenant ' || tenant, 0))`), so admissions of one tenant take turns on every server sharing the schema while other tenants' do not wait. The count is the database's, not a process's, so two servers on one database cannot both admit a tenant's last slot, and a restarted server sees the same count. Release is implicit: the transaction that records an operation's outcome deletes its queue row, so it stops counting the moment it is `succeeded`, `failed` or `interrupted`. A queued operation survives a restart and keeps its slot until it runs and finishes; one running at shutdown is recorded `interrupted` and frees its slot. Merges and integrations count toward `max_running` but are not refused by it. Servers sharing a database should configure the same `tenants`: each admission checks the ceiling of the server that admits it, against the shared count.
+
+**`max_branches` is transactional too, with one exception.** Admission records the branch names an operation will create (`creates`: the planned names that `branches` reports), and a task, fork, reincarnate or spawn is refused when the tenant's branches would exceed the ceiling: the set of branches that exist in its repositories together with those its queued and running operations will create, each counted once, plus this operation's new ones. Both are read inside the admission's transaction — first the tenant's queued and running operations, then the branches that exist — so an operation that finishes in between is counted by one or the other, never neither, and a concurrent admission of the same tenant waits its turn. What is still best-effort:
+
+- **Branches delegated from inside a running turn** (a harness's `by spawn`, or the delegation tools) are not reserved at admission; they count once they exist, so delegation within a running operation can take a tenant past `max_branches`, bounded only by the operation's delegation envelope. `POST …/spawn` through the server is reserved like any other operation.
+- **Branches created outside the server** (a local `by` on a served repository) count once they exist.
+- **Operations admitted by an earlier version** carry no `creates`; their branches count once they exist.
+
+Removing a branch (`DELETE .../branches/{b}`, needing `admin`) frees its `max_branches` and `max_artifact_bytes` reservation immediately.
+
+`max_cost_usd` and `max_artifact_bytes` stay checked **live** against data the engine keeps durably — a tenant's open branches, their `cost_usd`, and their reachable artifacts — before a branch-creating operation is admitted, so they are exact across a restart with nothing extra to persist, but best-effort: they are not taken in the admission's transaction, two requests racing past the same near-limit tenant can both be admitted, and spend accrues while turns run. `max_cost_usd` is lifetime spend across a tenant's currently-open branches, not a rolling time window — the engine does not otherwise keep a timestamped cost ledger, and adding one only for a windowed quota was judged not worth the added durable state for this release.
+
+**Workers act as the admitting principal.** A queued operation's record holds the principal that admitted it (tenant, subject, scopes, repository allowlist), as its credential verified. The worker that runs it — the admitting server, another server on the database, or a `by worker` process, which needs no credential of its own — runs it as that principal: before running it, the worker checks that the principal holds the operation's scope and that its tenant, under the worker's own `tenants` configuration, owns the repository, and otherwise fails the operation with `403 scope_required` or `403 repo_not_allowed`, the error the request would have got there. Running another tenant's operation reveals nothing to anyone: the operation stays visible only to its own tenant.
 
 ## API reference
 
@@ -180,13 +229,13 @@ From admission until it finishes, the branches an operation works on are locked:
 
 ### Dispatch
 
-Admission is a durable enqueue. In one transaction the server writes the operation's record, its idempotency binding (a unique index on the caller and key), its branch locks, and a queue row holding a description of the work: the request as sent, plus what admission fixed (planned names, a merge's target, an integration's parent, a seat child's name). Only then does it answer `202`. If any of those writes fails, including the queue write, the transaction rolls back and nothing of the operation remains: the client gets `500` and may retry with the same key. The description holds no secret values; a request names secrets, and the server that runs it reads them, like commands, providers and policies, from its own configuration.
+Admission is a durable enqueue. In one transaction the server writes the operation's record (with its tenant and admitting principal), its idempotency binding (a unique index on the caller and key), checks the tenant's `max_running` and `max_branches` against the tenant's queued and running operations ([quotas](#quotas)), takes its branch locks, and writes a queue row holding a description of the work: the request as sent, plus what admission fixed (planned names, a merge's target, an integration's parent, a seat child's name). Only then does it answer `202`. If a quota refuses it, a branch is held, or any of those writes fails, including the queue write, the transaction rolls back and nothing of the operation remains: the client gets `500` and may retry with the same key. The description holds no secret values; a request names secrets, and the server that runs it reads them, like commands, providers and policies, from its own configuration.
 
 A dispatcher in each server claims queue rows oldest first, for the repositories it serves, up to `--max-running` at once. A claim carries a lease, renewed every third of `--operation-lease`, and a fence, its attempt number, which every later write for the operation names. The worker records the operation `running` before it calls the engine, and its outcome after, deleting the queue row and releasing the branch locks in the same transaction; a worker whose claim was taken over is refused both writes. A claim whose lease expired, or whose process is gone from this host, is claimed again by any worker: an operation still `queued` then runs, and one recorded `running` is recorded `interrupted` and never run again, since its turn may have started, and the engine recovers that turn's branch as it recovers any whose engine died.
 
 ### Idempotency
 
-Send `Idempotency-Key: <1–255 visible ASCII characters>` on any `POST`. The key is scoped to the caller (token name) and fingerprinted with the route and the canonical request. A repeat with the same request returns the original operation, `200` if it has finished (with its result) or `202` if not, with `Idempotent-Replayed: true`, and never starts a second run; this holds across restarts and across servers sharing the operation store, since the key is bound in the admission's transaction. Two concurrent requests with one key meet at the store's unique index: the second waits for the first to commit, then replays it. The same key with a different request gets `422 idempotency_key_reused`. Keys are kept for as long as the registry is. `branchyard-client` and `by` send a fresh key per command and retry a `POST` with the same key after a connection failure; a client that lost the response can also look the operation up with `GET /v1/operations?idempotency_key=` (`Client::operation_by_key`).
+Send `Idempotency-Key: <1–255 visible ASCII characters>` on any `POST`. The key is scoped to the caller — its principal's subject name, prefixed with its tenant (`tenant/name`) outside the `default` tenant, so two tenants' principals of one name never share a key — and fingerprinted with the route and the canonical request. A repeat with the same request returns the original operation, `200` if it has finished (with its result) or `202` if not, with `Idempotent-Replayed: true`, and never starts a second run; this holds across restarts and across servers sharing the operation store, since the key is bound in the admission's transaction. Two concurrent requests with one key meet at the store's unique index: the second waits for the first to commit, then replays it. The same key with a different request gets `422 idempotency_key_reused`. `GET /v1/operations?idempotency_key=` finds only the caller's own tenant's operation. Keys are kept for as long as the registry is. `branchyard-client` and `by` send a fresh key per command and retry a `POST` with the same key after a connection failure; a client that lost the response can also look the operation up with `GET /v1/operations?idempotency_key=` (`Client::operation_by_key`).
 
 ### Event stream
 
@@ -241,7 +290,10 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 |---|---|---|
 | `unauthorized` | 401 | Missing or wrong bearer token |
 | `not_found`, `method_not_allowed` | 404, 405 | No such route or method |
-| `unknown_repo`, `unknown_branch`, `unknown_operation` | 404 | No such thing |
+| `unknown_repo`, `unknown_branch`, `unknown_operation` | 404 | No such thing, or another tenant's (indistinguishable from unknown) |
+| `scope_required` | 403 | The caller's principal lacks a scope this endpoint needs; `detail.scope` |
+| `repo_not_allowed` | 403 | The repository is outside the caller's tenant, or its own narrower allowlist; `detail.repo` |
+| `quota_exceeded` | 429 | A tenant quota (`docs/server.md#quotas`) is at its configured limit; `detail.tenant`, `detail.limit`, `detail.max`, and `detail.reserved` or `detail.spent` |
 | `invalid_request` | 400 | Malformed JSON, unknown field, empty prompt, bad budget, bad cursor |
 | `unsupported_media_type` | 415 | `POST` body not declared as JSON |
 | `body_too_large` | 413 | Body over `max_body_bytes`, or an artifact upload over `max_artifact_bytes`; `detail.limit` |
@@ -302,7 +354,7 @@ Every command runs remotely, with the same flags: `--provider` and its options, 
 | State | Where | Survives a restart |
 |---|---|---|
 | Branches, candidates, event logs, the activity feed | Each repository's `.branchyard/state.db`, or the database with `--database`, written by the engine in transactions | Yes |
-| Operations, idempotency keys and the dispatch queue | `DATA-DIR/state.db` committed with `synchronous=FULL`, or the database's `by_operations` and `by_operation_queue` tables committed with `synchronous_commit = on`, in one transaction before `202`, and at each state change | Yes; queued ones run after the restart, running ones become `interrupted` |
+| Operations (with their tenant and admitting principal), idempotency keys and the dispatch queue | `DATA-DIR/state.db` committed with `synchronous=FULL`, or the database's `by_operations` and `by_operation_queue` tables committed with `synchronous_commit = on`, in one transaction before `202`, and at each state change | Yes; queued ones run after the restart and keep counting toward their tenant's `max_running`, running ones become `interrupted` |
 | Cancel requests, `max_duration` deadlines, turn leases, journaled steps, harness process identities | Each repository's `.branchyard/state.db`, or the database | Yes |
 | Webhook delivery cursors | `DATA-DIR/state.db`'s `webhook_cursors` table, or the database's `by_webhook_cursors` | Yes |
 | Branch locks | The same store's `branch_locks` (`by_branch_locks`), with the operation's admission and outcome | Yes, with their operations; a removal's expires after 10 minutes |
@@ -318,7 +370,7 @@ Build with the `postgres` feature (`cargo install --locked --path crates/branchy
 by serve --database 'postgres://branchyard@db.internal/branchyard' --repo app=/srv/app
 ```
 
-Each served repository's branch records, event log and feed, leases, journaled steps, harness processes, cancels and steered input are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations`, `by_operation_queue` and `by_branch_locks` tables. Tables are created when missing, in the connection's `search_path` schema: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token.
+Each served repository's branch records, event log and feed, leases, journaled steps, harness processes, cancels and steered input are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations`, `by_operation_queue` and `by_branch_locks` tables. Tables are created when missing, in the connection's `search_path` schema: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token (a `--worker`, which serves no requests, creates none).
 
 ### Several servers on one database
 
@@ -335,7 +387,7 @@ Any of them accepts an operation, any claims it, and each answers for every oper
 Limits:
 
 - **Same repositories, same checkouts.** Servers sharing a database must serve the same repositories under the same names, at paths that are the same checkout: the same host, or one shared file system. Worktrees and delegation tokens live in the checkout, and the engine's recovery kills a dead engine's harness only on its own host (elsewhere it waits for the turn's lease to expire).
-- **Same configuration.** An operation runs with its worker's `harness_commands`, secrets and allow flags; a worker that would refuse the request fails the operation with the error the request would have got from it.
+- **Same configuration.** An operation runs with its worker's `harness_commands`, secrets, allow flags and `tenants`; a worker that would refuse the request fails the operation with the error the request would have got from it. It runs as the principal that admitted it, recorded with the operation, so a `by worker` needs no `tokens` or `credentials`. Quotas are counted in the shared database ([quotas](#quotas)); give every server the same `tenants`.
 - **Webhooks** are delivered by every server that configures them, each from the shared cursor: configure them on one.
 - **Throughput.** Each server uses one database connection for its registry; claims poll rather than `LISTEN`.
 - **No automatic failover of a running turn.** A turn whose server died is recovered as interrupted, never resumed elsewhere.
@@ -352,7 +404,7 @@ What it is not yet:
 - **Allowed providers use the server's credentials.** A token holder chooses which of the server's variables a sandboxed turn gets through `pass_env`, and which Substrate endpoint, router and key path it uses.
 - **Delegation** gives the server's harnesses the delegation tools, bounded by the envelope. As in local mode, a harness running as the server's user can read other branches' tokens in `.branchyard/`; the envelope stops honest mistakes, not a hostile harness, until harnesses run in sandboxes. `--allow-unapproved-tools` lets token holders run profiles whose tools the request's policy never sees.
 - **`allow_client_commands`** additionally lets any token holder choose the executable the server launches. Leave it off outside tests; configure `harness_commands` instead.
-- **Tokens are all-powerful and equal.** No scopes, no per-repository access, no expiry or rotation beyond editing the configuration and restarting. Treat each as the server user's password.
+- **Scopes and tenants bound what a credential can reach (`read`/`run`/`merge`/`admin`, a tenant's repositories, quotas), but not what it does within reach.** A `run`-scoped credential on an allowed repository can still make a harness do anything the server's operating-system user can, exactly as before: scopes are not sandboxing. There is still no expiry beyond a `credentials` hash the operator removes, and no hot rotation or revocation API — replacing a hash (or a `tokens` entry) and restarting is how a token is rotated or revoked.
 - **Plain HTTP** exposes tokens, prompts and code to anyone on the path. The server refuses it off loopback unless told `--insecure-bind`.
 - **Information exposure.** Responses include server paths (worktrees, repository roots) and the server's harness availability.
 - **Policy is per request.** A `deny` default is safe; rules match tool names only, as in the SDK.

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use branchyard_client::api::{Operation, PolicySpec, TaskRequest};
 use branchyard_client::{new_key, Client};
-use branchyard_server::config::Token;
+use branchyard_server::config::{Principal, TenantPolicy, Token};
 use branchyard_server::{Config, Running, Stopped};
 
 pub const TOKEN: &str = "test-token-0123456789";
@@ -110,6 +110,23 @@ impl Fixture {
         }
     }
 
+    /// A second repository under this fixture's directory, with one commit
+    /// on `main`, for tests of more than one served repository (such as
+    /// per-tenant repository ownership). Not served unless added to a
+    /// `Config`'s `repos`.
+    pub fn extra_repo(&self, name: &str) -> PathBuf {
+        let root = self.dir.join(name);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "user.email", "test@localhost"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "initial"]);
+        root
+    }
+
     /// A configuration serving the repository as `app` on an ephemeral
     /// loopback port, with the fake agent as `gemini-cli`.
     pub fn config(&self) -> Config {
@@ -190,6 +207,48 @@ impl Drop for Server {
             self.stop_inner();
         }
     }
+}
+
+pub const ACME_TOKEN: &str = "acme-token-0123456789ab";
+pub const GLOBEX_TOKEN: &str = "globex-token-0123456789";
+
+/// Two tenants on `config`: `acme` owning `app` and `globex` owning the
+/// repository at `appb` (served as `appb`), each with one principal of its
+/// own name holding every scope ([`ACME_TOKEN`], [`GLOBEX_TOKEN`]), and
+/// `tenant_max_running` as both tenants' `max_running`.
+pub fn two_tenants(config: &mut Config, appb: PathBuf, tenant_max_running: Option<usize>) {
+    config.repos.push(("appb".into(), appb));
+    config.tokens = Vec::new();
+    for (tenant, secret, repo) in [
+        ("acme", ACME_TOKEN, "app"),
+        ("globex", GLOBEX_TOKEN, "appb"),
+    ] {
+        config.tokens.push(Token {
+            name: tenant.into(),
+            secret: secret.into(),
+        });
+        let mut principal = Principal::default_for(tenant);
+        principal.tenant = tenant.into();
+        config.principals.insert(tenant.into(), principal);
+        config.tenants.insert(
+            tenant.into(),
+            TenantPolicy {
+                repos: Some([repo.to_owned()].into_iter().collect()),
+                max_running: tenant_max_running,
+                ..TenantPolicy::default()
+            },
+        );
+    }
+}
+
+/// Whether `branch` of `repo` exists and its harness has been sent a
+/// prompt: its turn has started.
+pub fn started(client: &Client, repo: &str, branch: &str) -> bool {
+    client.repo(repo).events(branch, 0).is_ok_and(|page| {
+        page.events
+            .iter()
+            .any(|e| matches!(e.activity, branchyard::Activity::Prompt(_)))
+    })
 }
 
 /// A task for the fake agent, allowed every permission.
