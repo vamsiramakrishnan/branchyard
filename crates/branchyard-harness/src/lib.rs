@@ -512,6 +512,22 @@ pub enum Event {
     InterruptAcknowledged {
         turn: u64,
     },
+    /// The harness took steered input ([`Driver::steer`]) into the running
+    /// turn. `steer` counts the driver's steers from 1, in call order. It
+    /// says the harness will deliver the input within this turn, not that
+    /// the model has read it yet; each driver documents when that happens.
+    SteerAccepted {
+        turn: u64,
+        steer: u64,
+    },
+    /// The harness refused steered input, or dropped it undelivered: an
+    /// interrupt cancelled it, or the turn ended first. The input never
+    /// reached the model.
+    SteerRejected {
+        turn: u64,
+        steer: u64,
+        reason: String,
+    },
     TurnEnded {
         turn: u64,
         outcome: TurnOutcome,
@@ -552,6 +568,9 @@ pub enum Rejected {
     NotReady,
     /// A turn is already in flight.
     TurnInProgress,
+    /// The turn in flight cannot take steered input yet, for example
+    /// because the harness has not acknowledged it; try again shortly.
+    SteerNotYet,
     /// No turn is in flight.
     NoTurn,
     /// No such outstanding permission request.
@@ -566,6 +585,9 @@ impl fmt::Display for Rejected {
             Rejected::Unsupported(what) => write!(f, "unsupported: {what}"),
             Rejected::NotReady => f.write_str("the session is not ready"),
             Rejected::TurnInProgress => f.write_str("a turn is already in flight"),
+            Rejected::SteerNotYet => {
+                f.write_str("the turn in flight cannot take steered input yet")
+            }
             Rejected::NoTurn => f.write_str("no turn is in flight"),
             Rejected::UnknownPermission => f.write_str("no such permission request"),
             Rejected::InvalidOpen(why) => write!(f, "invalid open: {why}"),
@@ -586,6 +608,8 @@ pub struct Capabilities {
     /// Acknowledgment of a turn before it completes.
     pub turn_acknowledgment: bool,
     pub usage: bool,
+    /// Input delivered into a running turn ([`Driver::steer`]).
+    pub steer: bool,
 }
 
 /// What a task needs from its harness. Unset fields are not required.
@@ -597,6 +621,7 @@ pub struct Requirements {
     pub tool_approvals: bool,
     pub turn_acknowledgment: bool,
     pub usage: bool,
+    pub steer: bool,
 }
 
 /// A capability name (as [`admit`] and [`Driver::capabilities`] name it,
@@ -646,6 +671,7 @@ pub fn admit(required: &Requirements, offered: &Capabilities) -> Result<(), Vec<
             offered.turn_acknowledgment,
         ),
         ("usage", required.usage, offered.usage),
+        ("steer", required.steer, offered.steer),
     ]
     .into_iter()
     .filter(|(_, needed, available)| *needed && !available)
@@ -682,6 +708,31 @@ pub trait Driver {
 
     /// Request cancellation of the turn in flight.
     fn interrupt(&mut self) -> Result<Vec<Frame>, Rejected>;
+
+    /// Deliver `text` as user input into the turn in flight, without
+    /// ending or interrupting it: the harness's own mid-turn input, never a
+    /// silent interrupt-and-resubmit. The turn's number does not change,
+    /// and it ends as usual with [`Event::TurnEnded`], once the harness has
+    /// answered the steered input too. The harness confirms or refuses it
+    /// with [`Event::SteerAccepted`] or [`Event::SteerRejected`], numbered
+    /// by call order from 1.
+    ///
+    /// When the model sees the input differs by harness; each driver's
+    /// module documents it. An interrupt also drops steered input the
+    /// harness has not yet delivered.
+    ///
+    /// Rejected with [`Rejected::Unsupported`] and the reason when the
+    /// profile cannot take input mid-turn (whatever its state, so a caller
+    /// can ask before a turn runs), [`Rejected::NotReady`] before the
+    /// handshake, [`Rejected::NoTurn`] with no turn in flight, and
+    /// [`Rejected::SteerNotYet`] when the turn cannot take it yet. The
+    /// default refuses, for drivers that do not implement it.
+    fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
+        let _ = text;
+        Err(Rejected::Unsupported(
+            "this driver cannot deliver input into a running turn".into(),
+        ))
+    }
 
     /// Answer an outstanding permission request.
     fn respond(
@@ -838,6 +889,11 @@ mod tests {
             admit(&required, &offered),
             Err(vec!["fork", "tool_approvals"])
         );
+        let steering = Requirements {
+            steer: true,
+            ..Requirements::default()
+        };
+        assert_eq!(admit(&steering, &offered), Err(vec!["steer"]));
         assert_eq!(admit(&Requirements::default(), &offered), Ok(()));
     }
 

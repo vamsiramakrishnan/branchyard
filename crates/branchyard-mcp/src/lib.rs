@@ -3,7 +3,7 @@
 //! The engine starts a harness with this server when the branch may
 //! delegate (`TaskOptions::delegation`), passing `--root <repository>
 //! --branch <name>` and the turn's token in `BRANCHYARD_DELEGATION`. The
-//! server offers `spawn`, `inspect`, `events`, `send`,
+//! server offers `spawn`, `inspect`, `events`, `send`, `steer`,
 //! `propose_integration`, `cancel` and `children`, and forwards each call
 //! through [`branchyard::Delegate`] to the engine running that turn, where
 //! children run on the engine's threads. `by spawn` and its siblings, and
@@ -44,11 +44,12 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
 /// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 7] = [
+pub const TOOLS: [&str; 8] = [
     "spawn",
     "inspect",
     "events",
     "send",
+    "steer",
     "propose_integration",
     "cancel",
     "children",
@@ -56,7 +57,8 @@ pub const TOOLS: [&str; 7] = [
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
 delegate: spawn child branches with their own harness and budget, watch them with inspect \
-and events, continue them with send, merge a finished child into your own branch with \
+and events, continue them with send, add to a child's running turn with steer, merge a \
+finished child into your own branch with \
 propose_integration (its check must pass), stop them with cancel, and list them with \
 children. Children run in parallel; spawn returns once a child has started. You act only as your own branch and only \
 on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
@@ -162,6 +164,22 @@ pub fn tools() -> Vec<Tool> {
                     "prompt": {"type": "string"},
                 },
                 "required": ["branch", "prompt"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "steer",
+            "Add a message to a descendant's running turn without interrupting it; the \
+             harness reads it at its next step, such as after the current tool call. Refused \
+             when the descendant is not running a turn or its harness cannot take input \
+             mid-turn. Returns whether it was delivered.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "branch": branch_property("A descendant that is running a turn"),
+                    "text": {"type": "string"},
+                },
+                "required": ["branch", "text"],
                 "additionalProperties": false,
             })),
         ),

@@ -477,6 +477,63 @@ fn by_cancel_stops_a_turn_on_the_server() {
 }
 
 #[test]
+fn by_send_steer_reaches_a_turn_on_the_server() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let args = with_agent(&["run", "AWAIT_STEER", "--name", "live"]);
+    let running = command(BY, &dir.0)
+        .arg("--remote")
+        .arg(&server.url)
+        .arg("--token-file")
+        .arg(&server.token_file)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let runner = std::thread::spawn(move || running.wait_with_output().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !text(&server.by(&dir.0, &["log", "live"]).stdout).contains("waiting for steering") {
+        assert!(Instant::now() < deadline, "the turn never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let steer = server.by(
+        &dir.0,
+        &["send", "live", "--steer", "and the tests", "--json"],
+    );
+    assert!(steer.status.success(), "{}", text(&steer.stderr));
+    let steered: Value = serde_json::from_slice(&steer.stdout).unwrap();
+    assert_eq!(steered["branch"], "live");
+    assert!(
+        steered["by"]
+            .as_str()
+            .unwrap()
+            .ends_with("through the server"),
+        "{steered}"
+    );
+    assert!(
+        matches!(
+            steered["state"]["state"].as_str(),
+            Some("delivered" | "accepted")
+        ),
+        "{steered}"
+    );
+    let ran = runner.join().unwrap();
+    assert!(ran.status.success(), "{}", text(&ran.stderr));
+    let log = text(&server.by(&dir.0, &["log", "live"]).stdout);
+    assert!(log.contains("steered: and the tests"), "{log}");
+    // No turn runs now: refused, as locally.
+    let late = server.by(&dir.0, &["send", "live", "--steer", "late"]);
+    assert!(!late.status.success());
+    assert!(
+        text(&late.stderr).contains("is not running a turn"),
+        "{}",
+        text(&late.stderr)
+    );
+}
+
+#[test]
 fn remote_mode_is_configured_by_flags_or_environment() {
     let dir = Dir::new();
     let one = dir.repo("one");

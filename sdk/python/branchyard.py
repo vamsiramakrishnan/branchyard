@@ -32,11 +32,14 @@ __all__ = [
     "BranchyardError",
     "DeniedError",
     "RunningError",
+    "NotRunningError",
+    "SteerRefusedError",
     "NotFoundError",
     "Spawned",
     "Inspection",
     "EventPage",
     "Sent",
+    "Steer",
     "Merged",
     "Cancelled",
     "Children",
@@ -44,6 +47,7 @@ __all__ = [
     "inspect",
     "events",
     "send",
+    "steer",
     "integrate",
     "cancel",
     "children",
@@ -68,11 +72,25 @@ class RunningError(BranchyardError):
     """The branch is running a turn and must be idle for this."""
 
 
+class NotRunningError(BranchyardError):
+    """The branch is not running a turn, and steering needs one."""
+
+
+class SteerRefusedError(BranchyardError):
+    """The running turn did not take steered input; the message says why."""
+
+
 class NotFoundError(BranchyardError):
     """No such branch."""
 
 
-_KINDS = {"denied": DeniedError, "running": RunningError, "unknown_branch": NotFoundError}
+_KINDS = {
+    "denied": DeniedError,
+    "running": RunningError,
+    "not_running": NotRunningError,
+    "steer_refused": SteerRefusedError,
+    "unknown_branch": NotFoundError,
+}
 
 
 @dataclasses.dataclass
@@ -127,6 +145,17 @@ class EventPage:
 class Sent:
     name: str
     status: Dict[str, Any]
+
+
+@dataclasses.dataclass
+class Steer:
+    id: int
+    branch: str
+    by: str
+    text: str
+    requested_at_ms: int
+    # {"state": "pending" | "delivered" | "accepted"}; refusals raise.
+    state: Dict[str, Any]
 
 
 @dataclasses.dataclass
@@ -239,6 +268,17 @@ def events(branch: Optional[str] = None, cursor: Optional[int] = None,
 def send(branch: str, prompt: str) -> Sent:
     """Start a descendant's next turn with `prompt`."""
     return _make(Sent, _run(["send", branch, "--", prompt]))
+
+
+def steer(branch: str, text: str) -> Steer:
+    """Add `text` to a descendant's running turn without interrupting it.
+
+    Waits briefly for delivery. Raises NotRunningError when it runs no turn,
+    SteerRefusedError when its harness did not take the input, and a
+    BranchyardError of kind "unsupported" when its harness cannot take input
+    mid-turn.
+    """
+    return _make(Steer, _run(["send", branch, "--steer", "--", text]))
 
 
 def integrate(branch: str) -> Merged:

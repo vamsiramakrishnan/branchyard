@@ -8,7 +8,7 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use crate::state::{now_ms, Acquired, Backend, Begun, Fence, Owner, ProcessRow, Record};
-use crate::{Activity, BranchStatus, Error, RecordedEvent};
+use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
 
 const TTL: Duration = Duration::from_secs(30);
 
@@ -250,6 +250,89 @@ pub(crate) fn cancels(s: Opened) {
     store.finish(&fence, None, None).unwrap();
     let next = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
     assert_eq!(store.cancel_requested(&next).unwrap(), None);
+}
+
+pub(crate) fn steers(s: Opened) {
+    let store = &s.backend;
+    store.reserve("b", &owner("a")).unwrap();
+    assert!(matches!(
+        store.request_steer("nope", "x", "t"),
+        Err(Error::UnknownBranch(_))
+    ));
+    assert_eq!(store.request_steer("b", "x", "t").unwrap(), None, "no turn");
+    let fence = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+    let first = store.request_steer("b", "alice", "one").unwrap().unwrap();
+    let second = store.request_steer("b", "bob", "two").unwrap().unwrap();
+    assert!(second > first);
+    let pending = store.pending_steers(&fence).unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|r| (
+                r.id,
+                r.by.as_str(),
+                r.text.as_str(),
+                r.turn,
+                r.state.clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (first, "alice", "one", fence.turn, SteerState::Pending),
+            (second, "bob", "two", fence.turn, SteerState::Pending)
+        ]
+    );
+    assert!(pending
+        .iter()
+        .all(|r| r.branch == "b" && r.requested_ms > 0));
+    store
+        .settle_steer(&fence, first, &SteerState::Delivered)
+        .unwrap();
+    store
+        .settle_steer(&fence, first, &SteerState::Accepted)
+        .unwrap();
+    let refused = SteerState::Refused {
+        reason: "no".into(),
+    };
+    store.settle_steer(&fence, second, &refused).unwrap();
+    assert!(store.pending_steers(&fence).unwrap().is_empty());
+    assert_eq!(
+        store.steer("b", first).unwrap().map(|r| r.state),
+        Some(SteerState::Accepted)
+    );
+    assert_eq!(
+        store.steer("b", second).unwrap().map(|r| r.state),
+        Some(refused)
+    );
+    assert_eq!(store.steer("b", second + 100).unwrap(), None);
+
+    // Settling is fenced: an engine whose lease was taken over cannot.
+    let third = store.request_steer("b", "carol", "three").unwrap().unwrap();
+    let row = store.leases().unwrap().remove(0);
+    let taken = store.take_over(&row, &owner("b"), TTL).unwrap().unwrap();
+    assert!(matches!(
+        store.settle_steer(&fence, third, &SteerState::Delivered),
+        Err(Error::Fenced(_))
+    ));
+    // The takeover keeps the turn, so its input is still that turn's.
+    assert_eq!(store.pending_steers(&taken).unwrap().len(), 1);
+
+    // Bound to its turn: the next turn does not see it.
+    store.finish(&taken, None, None).unwrap();
+    let next = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+    assert!(store.pending_steers(&next).unwrap().is_empty());
+    let fourth = store.request_steer("b", "dan", "four").unwrap().unwrap();
+    assert_eq!(
+        store
+            .pending_steers(&next)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>(),
+        [fourth]
+    );
+    store.finish(&next, None, None).unwrap();
+    store.delete("b").unwrap();
+    assert_eq!(store.steer("b", fourth).unwrap(), None);
 }
 
 pub(crate) fn records(s: Opened) {
@@ -502,7 +585,7 @@ pub(crate) fn races(s: Opened) {
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
-        suite!($open; fencing, expiry, steps, cancels, records, reservations, events,
+        suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
             concurrent_appends, races);
     };
     ($open:expr; $($check:ident),*) => {

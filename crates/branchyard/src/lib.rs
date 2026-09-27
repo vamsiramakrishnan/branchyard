@@ -54,7 +54,9 @@
 //!   is unknown. A submitted prompt is never submitted again. See
 //!   `docs/durability.md`.
 //! - Cancellation is durable: [`Yard::cancel`] records a request that the
-//!   engine running the turn, in any process, observes.
+//!   engine running the turn, in any process, observes. So is steering:
+//!   [`Branch::steer`] queues input that engine delivers into the running
+//!   turn, where the harness supports it.
 //! - A turn over budget is interrupted and waited for, never abandoned; the
 //!   harness's process group is torn down when each call returns, and
 //!   descendants that outlived it are named in the event log.
@@ -115,6 +117,7 @@ mod run;
 mod seats;
 mod sqlite;
 mod state;
+mod steer;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -200,6 +203,37 @@ impl Yard {
     /// event log names.
     pub fn cancel_as(&self, branch: &str, by: &str) -> Result<Vec<String>, Error> {
         delegation::cancel_tree(&self.store(), branch, by)
+    }
+
+    /// Deliver `text` into `branch`'s running turn as input from `by`,
+    /// whom the branch's event log names ([`Activity::Steered`]). The turn
+    /// may run in this process or another using the repository: the input
+    /// is queued durably, bound to that turn like a cancel, and the engine
+    /// running it writes it to the harness within about 100 ms; it is never
+    /// delivered to a later turn. The harness takes it into the turn in
+    /// flight without ending or interrupting it, at a point its protocol
+    /// defines (`docs/harness-integration.md`), and the turn ends once, as
+    /// usual, with its budget and policy unchanged.
+    ///
+    /// Returns the queued [`Steer`]; [`Yard::wait_steer`] follows it.
+    /// Fails with [`Error::Unsupported`] and the reason when the branch's
+    /// profile cannot take input mid-turn (no silent interrupt), and with
+    /// [`Error::NotRunning`] when no turn is running.
+    pub fn steer_as(&self, branch: &str, text: &str, by: &str) -> Result<Steer, Error> {
+        steer::request(self, branch, text, by)
+    }
+
+    /// What became of steered input `id` of `branch`. Input still pending
+    /// when its turn has ended was never delivered, and is reported
+    /// [`SteerState::Refused`].
+    pub fn steer_state(&self, branch: &str, id: u64) -> Result<Steer, Error> {
+        steer::state(&self.store(), branch, id)
+    }
+
+    /// [`Yard::steer_state`], waiting up to `timeout` for the input to
+    /// leave [`SteerState::Pending`].
+    pub fn wait_steer(&self, branch: &str, id: u64, timeout: Duration) -> Result<Steer, Error> {
+        steer::wait(&self.store(), branch, id, timeout)
     }
 
     /// Up to `limit` recorded events of every branch after feed position
@@ -742,6 +776,13 @@ impl Branch {
         self.yard.cancel(&self.info.name)
     }
 
+    /// Deliver `text` into this branch's running turn, in whichever process
+    /// runs it, without interrupting it; see [`Yard::steer_as`]. The event
+    /// log names the SDK caller as its sender.
+    pub fn steer(&self, text: &str) -> Result<Steer, Error> {
+        self.yard.steer_as(&self.info.name, text, "the SDK caller")
+    }
+
     /// Wait until no descendant of this branch is running a turn, then
     /// return the descendants' records. Descendants on threads of this
     /// process are joined; one another process drives is waited for through
@@ -1036,6 +1077,15 @@ pub enum Activity {
         /// Secrets given that this harness does not read.
         unused_secrets: Vec<String>,
     },
+    /// Input from `by` was written into the running turn; see
+    /// [`Branch::steer`]. The harness's `steer_accepted` or
+    /// `steer_rejected` event follows.
+    Steered {
+        /// The steer's ID, as [`Steer::id`].
+        id: u64,
+        by: String,
+        text: String,
+    },
     /// Recovery took over a turn whose engine stopped; see
     /// [`Yard::recover`].
     Recovered {
@@ -1044,6 +1094,38 @@ pub enum Activity {
         /// Harness processes that were still running and were killed.
         killed: Vec<u32>,
     },
+}
+
+/// Input for a branch's running turn, and what became of it; see
+/// [`Branch::steer`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Steer {
+    /// Unique in the repository's store.
+    pub id: u64,
+    pub branch: String,
+    /// Who sent it, as the branch's event log names them.
+    pub by: String,
+    pub text: String,
+    /// Milliseconds since the Unix epoch.
+    pub requested_at_ms: u64,
+    pub state: SteerState,
+}
+
+/// Where a [`Steer`] is. Serialized as an object tagged by `state`, such as
+/// `{"state": "refused", "reason": "..."}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SteerState {
+    /// Queued for the running turn; the engine running it writes it to the
+    /// harness within about 100 ms, in whichever process it runs.
+    Pending,
+    /// Written to the harness, which has not yet confirmed it.
+    Delivered,
+    /// The harness took it into the running turn.
+    Accepted,
+    /// Never reached the model: the harness refused or dropped it, an
+    /// interrupt cancelled it, or the turn ended first.
+    Refused { reason: String },
 }
 
 /// Activity from a named branch.
@@ -1171,6 +1253,9 @@ pub enum Error {
     Denied(String),
     /// The branch is running a turn, and the operation needs it idle.
     Running(String),
+    /// The branch is not running a turn, and the operation needs one, such
+    /// as [`Branch::steer`].
+    NotRunning(String),
     /// This engine lost the branch's lease to another, which recovered or
     /// took over the branch; its writes are refused.
     Fenced(String),
@@ -1232,6 +1317,7 @@ impl fmt::Display for Error {
             Error::InvalidCandidate(message) => write!(f, "invalid candidate: {message}"),
             Error::Denied(why) => write!(f, "denied: {why}"),
             Error::Running(name) => write!(f, "branch {name} is running a turn"),
+            Error::NotRunning(name) => write!(f, "branch {name} is not running a turn"),
             Error::Fenced(why) => write!(f, "fenced: {why}"),
             Error::Remote { message, .. } => f.write_str(message),
             Error::Git(message) => write!(f, "git: {message}"),
@@ -1266,6 +1352,7 @@ impl Error {
             Error::InvalidCandidate(_) => "invalid_candidate",
             Error::Denied(_) => "denied",
             Error::Running(_) => "running",
+            Error::NotRunning(_) => "not_running",
             Error::Fenced(_) => "fenced",
             Error::Remote { kind, .. } => kind,
             Error::Git(_) => "git",

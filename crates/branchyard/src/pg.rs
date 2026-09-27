@@ -10,8 +10,8 @@
 //! start when PostgreSQL reports a serialization failure or a deadlock, so
 //! they behave as SQLite's serialized `BEGIN IMMEDIATE` transactions do: a
 //! fence check and the write it guards commit together, and two engines
-//! never both take a lease. Records, leases, steps, processes and cancels
-//! commit with `synchronous_commit = on`; event appends with `off`, which
+//! never both take a lease. Records, leases, steps, processes, cancels and
+//! steered input commit with `synchronous_commit = on`; event appends with `off`, which
 //! survives a crash of this process but may lose the last appends to a
 //! database crash, as SQLite's `synchronous=NORMAL` does. A later
 //! synchronous commit makes every earlier one durable too.
@@ -35,9 +35,9 @@ use serde_json::Value;
 
 use crate::state::{
     now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
-    ReservationRow, StepRow,
+    ReservationRow, SteerRow, StepRow,
 };
-use crate::{Error, RecordedEvent};
+use crate::{Error, RecordedEvent, SteerState};
 
 const SCHEMA: i64 = 1;
 /// How long a write keeps retrying serialization failures.
@@ -104,6 +104,18 @@ CREATE TABLE IF NOT EXISTS by_cancels (
     subtree BOOLEAN NOT NULL,
     PRIMARY KEY (incarnation, turn)
 );
+CREATE TABLE IF NOT EXISTS by_steers (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    incarnation BIGINT NOT NULL,
+    turn BIGINT NOT NULL,
+    branch TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    text TEXT NOT NULL,
+    at_ms BIGINT NOT NULL,
+    state TEXT NOT NULL,
+    reason TEXT
+);
+CREATE INDEX IF NOT EXISTS by_steers_turn ON by_steers (incarnation, turn, state);
 CREATE TABLE IF NOT EXISTS by_reservations (
     repo TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -130,6 +142,18 @@ CREATE TABLE IF NOT EXISTS by_events (
     UNIQUE (incarnation, seq)
 );
 ";
+
+fn steer_row(r: &Row) -> SteerRow {
+    SteerRow {
+        id: uint(r.get::<_, i64>(0)),
+        branch: r.get(1),
+        turn: uint(r.get::<_, i64>(2)),
+        by: r.get(3),
+        text: r.get(4),
+        requested_ms: uint(r.get::<_, i64>(5)),
+        state: SteerState::from_columns(&r.get::<_, String>(6), r.get(7)),
+    }
+}
 
 /// Branch state for one repository scope in a PostgreSQL database.
 pub(crate) struct Postgres {
@@ -687,6 +711,7 @@ impl Backend for Postgres {
                 "DELETE FROM by_steps WHERE incarnation = $1",
                 "DELETE FROM by_processes WHERE incarnation = $1",
                 "DELETE FROM by_cancels WHERE incarnation = $1",
+                "DELETE FROM by_steers WHERE incarnation = $1",
                 "DELETE FROM by_leases WHERE incarnation = $1",
                 "DELETE FROM by_branches WHERE incarnation = $1",
             ] {
@@ -1053,6 +1078,86 @@ impl Backend for Postgres {
                 )
             })?
             .map(|r| r.get(0)))
+    }
+
+    fn request_steer(&self, name: &str, by: &str, text: &str) -> Result<Option<u64>, Error> {
+        self.tx(true, |tx| {
+            let Some(incarnation) = self.incarnation(tx, name)? else {
+                return Err(Error::UnknownBranch(name.to_owned()).into());
+            };
+            let lease = self.lease_row(tx, name)?;
+            let Some(lease) = lease.filter(|l| l.owner.is_some() && l.incarnation == incarnation)
+            else {
+                return Ok(None);
+            };
+            let row = tx
+                .query_one(
+                    "INSERT INTO by_steers (incarnation, turn, branch, requested_by, text, at_ms, \
+                     state) VALUES ($1, $2, $3, $4, $5, $6, 'pending') RETURNING id",
+                    &[
+                        &incarnation,
+                        &int(lease.turn),
+                        &name,
+                        &by,
+                        &text,
+                        &int(now_ms()),
+                    ],
+                )
+                .map_err(db("steer"))?;
+            Ok(Some(uint(row.get::<_, i64>(0))))
+        })
+    }
+
+    fn pending_steers(&self, fence: &Fence) -> Result<Vec<SteerRow>, Error> {
+        Ok(self
+            .query(|c| {
+                c.query(
+                    "SELECT id, branch, turn, requested_by, text, at_ms, state, reason \
+                     FROM by_steers WHERE incarnation = $1 AND turn = $2 AND state = 'pending' \
+                     ORDER BY id",
+                    &[&fence.incarnation, &int(fence.turn)],
+                )
+            })?
+            .iter()
+            .map(steer_row)
+            .collect())
+    }
+
+    fn settle_steer(&self, fence: &Fence, id: u64, state: &SteerState) -> Result<(), Error> {
+        let (name, reason) = state.columns();
+        self.tx(true, |tx| {
+            self.check(tx, fence)?;
+            tx.execute(
+                "UPDATE by_steers SET state = $4, reason = $5 \
+                 WHERE id = $1 AND incarnation = $2 AND turn = $3",
+                &[
+                    &int(id),
+                    &fence.incarnation,
+                    &int(fence.turn),
+                    &name,
+                    &reason,
+                ],
+            )
+            .map_err(db("steer"))?;
+            Ok(())
+        })
+    }
+
+    fn steer(&self, name: &str, id: u64) -> Result<Option<SteerRow>, Error> {
+        let repo = self.repo.clone();
+        let name = name.to_owned();
+        Ok(self
+            .query(move |c| {
+                c.query_opt(
+                    "SELECT s.id, s.branch, s.turn, s.requested_by, s.text, s.at_ms, s.state, \
+                     s.reason FROM by_steers s JOIN by_branches b \
+                     ON b.incarnation = s.incarnation \
+                     WHERE b.repo = $1 AND b.name = $2 AND s.id = $3",
+                    &[&repo, &name, &int(id)],
+                )
+            })?
+            .as_ref()
+            .map(steer_row))
     }
 
     fn append(

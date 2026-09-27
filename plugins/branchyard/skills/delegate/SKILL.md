@@ -33,7 +33,10 @@ session, and merging overlapping edits produces conflicts.
    first.
 3. Watch. `by inspect <child>` shows status, diffstat, cost and its last
    message; `by events <child>` shows its activity. Wait with `--wait` or
-   by polling; do not busy-loop faster than every few seconds.
+   by polling; do not busy-loop faster than every few seconds. To correct
+   a child that is still running, `by send <child> --steer "<text>"` adds
+   to its running turn without stopping it; the child reads it at its next
+   step. Some harnesses cannot take it, and the refusal says so.
 4. Integrate. When a child is `ready`, `by integrate <child>` merges it
    into your branch after its check passes. Your working tree moves to the
    merge. A conflict or failed check is an error: send the child a fix with
@@ -54,6 +57,7 @@ by children
 by inspect parser-flake
 by events parser-flake --cursor 0
 by spawn "Add a regression test for issue 42" --name issue-42 --budget-usd 0.30 --wait
+by send parser-flake --steer "Use the fixture in tests/data, not a new one."
 by send parser-flake "The seed must come from the test name, not the clock."
 by integrate parser-flake
 by cancel retry-docs

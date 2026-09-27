@@ -143,6 +143,8 @@ pub enum Command {
         branch: String,
         prompt: String,
         task: TaskArgs,
+        /// `--steer`: into the running turn rather than a new one.
+        steer: bool,
         json: bool,
     },
     Fork {
@@ -498,6 +500,12 @@ const FRESH_SESSION: Flag = Flag {
     value: None,
     help: "Start a new session if the harness cannot fork its conversation",
 };
+const STEER: Flag = Flag {
+    long: "steer",
+    value: None,
+    help: "Add the prompt to the branch's running turn without interrupting it, instead of \
+           starting a new turn; refused when no turn runs or the harness cannot take it",
+};
 const JSON: Flag = Flag {
     long: "json",
     value: None,
@@ -724,6 +732,7 @@ pub static COMMANDS: &[Spec] = &[
         positionals: &["branch", "prompt"],
         summary: "Continue a branch's session with another prompt",
         flags: &[
+            STEER,
             CHECK,
             BUDGET_USD,
             MAX_TURNS,
@@ -970,6 +979,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             branch: next(),
             prompt: next(),
             task: m.task()?,
+            steer: m.switch("steer"),
             json: m.switch("json"),
         },
         "fork" => Command::Fork {
@@ -1918,6 +1928,22 @@ mod tests {
     }
 
     #[test]
+    fn send_steer_is_a_switch() {
+        let Command::Send {
+            steer, json, task, ..
+        } = parse_str("send b --steer --json also-this").unwrap()
+        else {
+            panic!("not send")
+        };
+        assert!(steer && json);
+        assert_eq!(task, TaskArgs::default());
+        let Command::Send { steer, .. } = parse_str("send b go").unwrap() else {
+            panic!("not send")
+        };
+        assert!(!steer);
+    }
+
+    #[test]
     fn mcp_needs_a_root_and_a_branch() {
         assert_eq!(
             parse_str("mcp --root /r --branch b").unwrap(),
@@ -1973,6 +1999,7 @@ mod tests {
                     permissions: Permissions::Yes,
                     ..TaskArgs::default()
                 },
+                steer: false,
                 json: false,
             }
         );

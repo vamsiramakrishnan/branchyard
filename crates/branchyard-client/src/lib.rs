@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use branchyard::{BranchInfo, Children, EventPage, HarnessInfo, Inspection};
+use branchyard::{BranchInfo, Children, EventPage, HarnessInfo, Inspection, Steer};
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -62,7 +62,7 @@ use serde::Serialize;
 use api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, ErrorResponse,
     FeedEntry, ForkRequest, HarnessList, IntegrateRequest, MergeRequest, Operation, Removed,
-    RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
+    RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest, TaskRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -457,6 +457,22 @@ impl Repo {
                 &new_key(),
             )?
             .cancelled)
+    }
+
+    /// Add `text` to the branch's running turn without interrupting it, like
+    /// `by send --steer`, in whichever process of the server runs the turn.
+    /// Returns the steer once the engine has delivered or refused it, or
+    /// still pending after the server's brief wait. Refused with
+    /// `not_running` when no turn runs and `unsupported` when the harness
+    /// cannot take input mid-turn.
+    pub fn steer(&self, branch: &str, text: &str) -> Result<Steer, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/steer"),
+            &SteerRequest {
+                text: text.to_owned(),
+            },
+            &new_key(),
+        )
     }
 
     pub fn branches(&self) -> Result<Vec<BranchInfo>, Error> {

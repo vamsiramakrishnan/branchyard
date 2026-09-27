@@ -89,6 +89,7 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/branches/{b}/fork` | New branch from its candidate | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/merge` | Validated merge of its candidate | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/cancel` | Stop its running turn and every running turn delegated below it | `{"cancelled": ["b", …]}` |
+| `POST /v1/repos/{repo}/branches/{b}/steer` | Add input to its running turn without interrupting it | `Steer`: `{id, branch, by, text, requested_at_ms, state}` |
 | `DELETE /v1/repos/{repo}/branches/{b}` | Remove worktree and record | `{"removed": "b"}` |
 | `GET /v1/repos/{repo}/branches/{b}/diff` | Candidate diff against the base | `{"diff": "..."}` |
 | `GET /v1/repos/{repo}/branches/{b}/events?cursor=N` | Recorded events after the first `N` (default 0); a branch's events are numbered from 1 | `{"events": [RecordedEvent], "cursor": M}`; pass `M` next |
@@ -136,6 +137,8 @@ Only `prompt` is required. Give `harness` for one branch or `harnesses` for one 
 `spawn` takes `prompt`, `harness`, `name`, `base`, `budget`, `policy`, `check`, `max_depth`, `deny`, `unapproved_tools` and `seat`, the flags of `by spawn`; with a `seat` and no `name`, the child is named `<parent>-<seat>` before the operation starts. It acts with the server's authority as a person, as `by spawn --parent` does locally: the parent's envelope bounds the child exactly as it bounds a local spawn, and a parent without delegation cannot spawn. The operation runs the child's first turn, waits for the parent's subtree on this server as the local command does, and its result holds the child's `inspection`. It locks the parent as well as the child, as `integrate` locks both branches, so a send to the parent or its removal is refused with `409 branch_busy` until the operation finishes. `integrate` takes `{}` and refuses (`403 denied`) a branch no other branch delegated; its result holds `merged`. The inspection, event page and children reads act with the same authority and need no opt-in.
 
 `cancel` takes an empty object, `{}`. It is not an operation: it records a durable cancel request for the branch's running turn and each running turn delegated below it, and answers `200` with the branches that were running (an empty list when none was, and for a repeat). The engine running each turn, in the server or in another process on the repository such as a local `by run`, observes the request within 100 ms, interrupts the harness, and ends the branch `interrupted`; the operation that ran the turn then succeeds with that status. The branch's log records `cancelled by <token name> through the server`. It ignores branch locks, since the branches it is for are the ones an operation holds, and needs no idempotency key.
+
+`steer` takes `{"text": "..."}`. Like `cancel`, it is not an operation and ignores branch locks: the running turn's operation holds them, and the input is for exactly that turn. It queues the input durably, bound to the branch's running turn ([durability](durability.md#steered-input)); the engine running that turn, in the server or in another process on the repository, writes it to the harness within 100 ms through the harness's own mid-turn input ([which harnesses, and when the model sees it](harness-integration.md#steering-a-running-turn)). The answer waits up to 10 seconds for that and returns the `Steer`, whose `state` is `{"state": "delivered" | "accepted" | "pending"}` or `{"state": "refused", "reason": "..."}`. It is refused with `409 not_running` when no turn runs, and `422 unsupported`, with the reason, when the branch's harness cannot take input mid-turn; it never interrupts the turn instead. The branch's log records `steered` with `by` `<token name> through the server`. Budgets and permissions are the running turn's own. `by --remote send --steer` calls it.
 
 ### Operations
 
@@ -209,7 +212,7 @@ export BRANCHYARD_REMOTE=https://by.example:8421
 export BRANCHYARD_TOKEN_FILE=~/.config/branchyard/token
 by --repo app run "Make the flaky parser test deterministic" --check "cargo test" --yes
 by fan "..." --harness claude-code,codex --yes
-by ls; by diff flaky; by merge flaky; by watch; by cancel flaky
+by ls; by diff flaky; by merge flaky; by watch; by send flaky --steer "also run the linter"; by cancel flaky
 ```
 
 Global options go before the command: `--remote URL`, `--token-file FILE`, `--repo NAME` (needed when the server serves several), `--ca-file FILE` (extra trust for `https`). Each has an environment variable: `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO`, `BRANCHYARD_CA_FILE`. Output is the local output: the CLI renders the same SDK values with the same code, and tests compare each command's output, `watch` aside, local against remote, including the `--json` output of `spawn` (with and without `--seat`), `inspect`, `events`, `children`, `integrate`, `send` and `rig run`.
@@ -252,7 +255,7 @@ Build with the `postgres` feature (`cargo install --locked --path crates/branchy
 by serve --database 'postgres://branchyard@db.internal/branchyard' --repo app=/srv/app
 ```
 
-Each served repository's branch records, event log and feed, leases, journaled steps, harness processes and cancels are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations` table. Tables are created when missing, in the connection's `search_path` schema, so one schema per server: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token.
+Each served repository's branch records, event log and feed, leases, journaled steps, harness processes, cancels and steered input are kept in the database under the repository's served name, with [the same semantics as SQLite](durability.md#postgresql); the operation registry is the `by_operations` table. Tables are created when missing, in the connection's `search_path` schema, so one schema per server: add `?options=-csearch_path%3Dname` to the URL to choose one. Worktrees, private homes and delegation tokens stay in each repository's `.branchyard/`, and the data directory still holds the default token.
 
 What it is not yet:
 

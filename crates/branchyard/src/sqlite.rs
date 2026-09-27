@@ -3,7 +3,8 @@
 //! Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the
 //! write it guards commit together and concurrent writers in other
 //! processes wait (up to [`BUSY`]) instead of failing. Records, leases,
-//! steps, processes and cancels commit with `synchronous=FULL`; event
+//! steps, processes, cancels and steered input commit with
+//! `synchronous=FULL`; event
 //! appends with `synchronous=NORMAL`, which survives a process crash but
 //! may lose the last appends to an operating-system crash. A later `FULL`
 //! commit makes every earlier append durable too.
@@ -23,9 +24,9 @@ use serde_json::Value;
 
 use crate::state::{
     now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
-    ReservationRow, StepRow,
+    ReservationRow, SteerRow, StepRow,
 };
-use crate::{Error, RecordedEvent};
+use crate::{Error, RecordedEvent, SteerState};
 
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
@@ -88,6 +89,18 @@ CREATE TABLE IF NOT EXISTS cancels (
     subtree INTEGER NOT NULL,
     PRIMARY KEY (incarnation, turn)
 );
+CREATE TABLE IF NOT EXISTS steers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incarnation INTEGER NOT NULL,
+    turn INTEGER NOT NULL,
+    branch TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    text TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    reason TEXT
+);
+CREATE INDEX IF NOT EXISTS steers_turn ON steers (incarnation, turn, state);
 CREATE TABLE IF NOT EXISTS reservations (
     name TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
@@ -238,6 +251,18 @@ fn insert_event(tx: &Transaction<'_>, name: &str, event: &RecordedEvent) -> Resu
     )
     .map_err(|e| db("append", e))?;
     Ok(uint(seq))
+}
+
+fn steer_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SteerRow> {
+    Ok(SteerRow {
+        id: uint(r.get(0)?),
+        branch: r.get(1)?,
+        turn: uint(r.get(2)?),
+        by: r.get(3)?,
+        text: r.get(4)?,
+        requested_ms: uint(r.get(5)?),
+        state: SteerState::from_columns(&r.get::<_, String>(6)?, r.get(7)?),
+    })
 }
 
 fn lease_row(conn: &Connection, name: &str) -> Result<Option<LeaseRow>, Error> {
@@ -653,6 +678,7 @@ impl Backend for Sqlite {
                 "DELETE FROM steps WHERE incarnation = ?1",
                 "DELETE FROM processes WHERE incarnation = ?1",
                 "DELETE FROM cancels WHERE incarnation = ?1",
+                "DELETE FROM steers WHERE incarnation = ?1",
                 "DELETE FROM leases WHERE incarnation = ?1",
                 "DELETE FROM branches WHERE incarnation = ?1",
             ] {
@@ -1025,6 +1051,72 @@ impl Backend for Sqlite {
             )
             .optional()
             .map_err(|e| db("cancel", e))
+        })
+    }
+
+    fn request_steer(&self, name: &str, by: &str, text: &str) -> Result<Option<u64>, Error> {
+        self.tx(true, |tx| {
+            let Some(incarnation) = incarnation(tx, name)? else {
+                return Err(Error::UnknownBranch(name.to_owned()));
+            };
+            let lease = lease_row(tx, name)?;
+            let Some(lease) = lease.filter(|l| l.owner.is_some() && l.incarnation == incarnation)
+            else {
+                return Ok(None);
+            };
+            tx.execute(
+                "INSERT INTO steers (incarnation, turn, branch, requested_by, text, at_ms, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending')",
+                params![incarnation, int(lease.turn), name, by, text, int(now_ms())],
+            )
+            .map_err(|e| db("steer", e))?;
+            Ok(Some(uint(tx.last_insert_rowid())))
+        })
+    }
+
+    fn pending_steers(&self, fence: &Fence) -> Result<Vec<SteerRow>, Error> {
+        self.query(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT id, branch, turn, requested_by, text, at_ms, state, reason \
+                     FROM steers WHERE incarnation = ?1 AND turn = ?2 AND state = 'pending' \
+                     ORDER BY id",
+                )
+                .map_err(|e| db("steers", e))?;
+            let rows = statement
+                .query_map(params![fence.incarnation, int(fence.turn)], steer_row)
+                .map_err(|e| db("steers", e))?;
+            rows.collect::<Result<_, _>>().map_err(|e| db("steers", e))
+        })
+    }
+
+    fn settle_steer(&self, fence: &Fence, id: u64, state: &SteerState) -> Result<(), Error> {
+        let (name, reason) = state.columns();
+        self.tx(true, |tx| {
+            check(tx, fence)?;
+            tx.execute(
+                "UPDATE steers SET state = ?4, reason = ?5 \
+                 WHERE id = ?1 AND incarnation = ?2 AND turn = ?3",
+                params![int(id), fence.incarnation, int(fence.turn), name, reason],
+            )
+            .map_err(|e| db("steer", e))?;
+            Ok(())
+        })
+    }
+
+    fn steer(&self, name: &str, id: u64) -> Result<Option<SteerRow>, Error> {
+        self.query(|conn| {
+            let Some(incarnation) = incarnation(conn, name)? else {
+                return Ok(None);
+            };
+            conn.query_row(
+                "SELECT id, branch, turn, requested_by, text, at_ms, state, reason \
+                 FROM steers WHERE id = ?1 AND incarnation = ?2",
+                params![int(id), incarnation],
+                steer_row,
+            )
+            .optional()
+            .map_err(|e| db("steer", e))
         })
     }
 

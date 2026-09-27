@@ -51,8 +51,11 @@ use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
 use crate::{
     git, harness, names, ops, Activity, BranchInfo, BranchStatus, Budget, CandidateInfo, Error,
-    Event, Merged, Policy, RecordedEvent, Rule, TaskOptions, Yard,
+    Event, Merged, Policy, RecordedEvent, Rule, Steer, SteerState, TaskOptions, Yard,
 };
+
+/// How long `steer` waits for the input to be delivered.
+const STEER_WAIT: Duration = Duration::from_secs(10);
 
 /// Most events one `events` call returns.
 const EVENTS_MAX: usize = 200;
@@ -517,6 +520,21 @@ impl Delegate {
         match &self.via {
             Via::Local(local) => local.integrate(branch),
             Via::Remote(_) => self.typed("propose_integration", json!({ "branch": branch })),
+        }
+    }
+
+    /// Deliver `text` into a descendant's running turn without
+    /// interrupting it, as input from this branch; see
+    /// [`crate::Yard::steer_as`]. Waits up to ten seconds for the engine
+    /// running that turn to deliver it, and returns what became of it:
+    /// delivered, accepted, refused with the reason, or still pending.
+    /// Refused up front when the descendant's harness cannot take input
+    /// mid-turn ([`Error::Unsupported`]) or is not running a turn
+    /// ([`Error::NotRunning`]).
+    pub fn steer(&self, branch: &str, text: &str) -> Result<Steer, Error> {
+        match &self.via {
+            Via::Local(local) => local.steer(branch, text),
+            Via::Remote(_) => self.typed("steer", json!({"branch": branch, "text": text})),
         }
     }
 
@@ -1332,6 +1350,21 @@ impl Local {
         ops::merge(&self.yard, branch, &caller.info.git_branch)
     }
 
+    fn steer(&self, branch: &str, text: &str) -> Result<Steer, Error> {
+        let result = self.require_descendant(branch, false).and_then(|()| {
+            let steer = crate::steer::request(&self.yard, branch, text, &self.branch)?;
+            crate::steer::wait(&self.store(), branch, steer.id, STEER_WAIT)
+        });
+        self.note("steer", branch, &result, |s| match &s.state {
+            SteerState::Refused { reason } => format!("steered input {} refused: {reason}", s.id),
+            SteerState::Pending => format!("steered input {} queued", s.id),
+            SteerState::Delivered | SteerState::Accepted => {
+                format!("steered input {} delivered", s.id)
+            }
+        });
+        result
+    }
+
     fn cancel(&self, branch: &str) -> Result<Cancelled, Error> {
         let result = self
             .require_descendant(branch, false)
@@ -1497,6 +1530,13 @@ struct SendArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SteerArgs {
+    branch: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NoArgs {}
 
 fn parse<T: DeserializeOwned>(tool: &str, arguments: Value) -> Result<T, Error> {
@@ -1554,6 +1594,10 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "propose_integration" | "integrate" => {
             let args: TargetArgs = parse(tool, arguments)?;
             to_json(&local.integrate(&required(tool, args.branch)?)?)
+        }
+        "steer" => {
+            let args: SteerArgs = parse(tool, arguments)?;
+            to_json(&local.steer(&args.branch, &args.text)?)
         }
         "cancel" => {
             let args: TargetArgs = parse(tool, arguments)?;

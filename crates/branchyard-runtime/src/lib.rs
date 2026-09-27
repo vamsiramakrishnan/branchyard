@@ -490,6 +490,15 @@ impl Session {
         self.write(&frames)
     }
 
+    /// Deliver `text` into the turn in flight, as the driver's
+    /// [`Driver::steer`](branchyard_harness::Driver::steer) does. The
+    /// harness confirms or refuses it with `SteerAccepted` or
+    /// `SteerRejected`.
+    pub fn steer(&mut self, text: &str) -> Result<(), RuntimeError> {
+        let frames = self.driver.steer(text)?;
+        self.write(&frames)
+    }
+
     /// Answer an outstanding permission request.
     pub fn respond(
         &mut self,
