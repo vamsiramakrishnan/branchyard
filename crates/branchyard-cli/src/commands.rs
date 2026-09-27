@@ -6,11 +6,12 @@ use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use branchyard::{
-    Branch, BranchInfo, BranchStatus, Budget, Delegate, Envelope, Policy, Provider, RemoveOptions,
-    SandboxOptions, Spawn, SubstrateOptions, TaskOptions, Yard, ENV_BRANCH, ENV_TOKEN,
+    Activity, Branch, BranchInfo, BranchStatus, Budget, Delegate, Envelope, Event, Policy,
+    Provider, RecordedEvent, RemoveOptions, SandboxOptions, Spawn, SubstrateOptions, TaskOptions,
+    Yard, ENV_BRANCH, ENV_TOKEN,
 };
 use serde::Serialize;
 
@@ -506,7 +507,10 @@ fn page(text: &str) -> Outcome {
     Ok(())
 }
 
-pub fn log(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
+pub fn log(env: &Env, target: &Target, branch: &str, as_json: bool, follow: bool) -> Outcome {
+    if follow {
+        return log_follow(env, target, branch, as_json);
+    }
     let events = match target {
         Target::Local => open()?.branch(branch)?.events()?,
         Target::Remote(remote) => remote.repo.events(branch, 0)?.events,
@@ -516,6 +520,79 @@ pub fn log(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
         return print(&json::text(&serde_json::Value::Array(list)));
     }
     print(&render::log_text(&events, env.style()))
+}
+
+/// How often `by log --follow` asks a server for new events.
+const FOLLOW_POLL: Duration = Duration::from_millis(500);
+
+/// `by log --follow`: print what is recorded, then each new event as it is
+/// recorded, until interrupted. Locally it waits on the store; remotely it
+/// polls the branch's events by cursor and rides out a server restart.
+/// Message text still streaming is held back until the stream pauses, so
+/// a reply is not cut into many stamped pieces.
+fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
+    let local = match target {
+        Target::Local => Some(open()?.branch(branch)?),
+        Target::Remote(_) => None,
+    };
+    let mut cursor = 0u64;
+    let mut held: Vec<RecordedEvent> = Vec::new();
+    let mut unreachable = false;
+    loop {
+        let (events, next) = match (&local, target) {
+            (Some(branch), _) => {
+                let page = branch.wait_for_events(cursor, 500, FOLLOW_POLL)?;
+                (page.events, page.next_cursor)
+            }
+            (None, Target::Remote(remote)) => match remote.repo.events(branch, cursor) {
+                Ok(page) => {
+                    if unreachable {
+                        unreachable = false;
+                        eprintln!("by: reconnected to {}", remote.client.endpoint());
+                    }
+                    (page.events, page.cursor)
+                }
+                // A restarting server: keep the pane alive and try again.
+                Err(error @ branchyard_client::Error::Transport { .. }) => {
+                    if !unreachable {
+                        unreachable = true;
+                        eprintln!("by: {error}; retrying");
+                    }
+                    std::thread::sleep(FOLLOW_POLL * 2);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            },
+            (None, Target::Local) => unreachable!("a local target opened its branch"),
+        };
+        let quiet = events.is_empty();
+        cursor = next;
+        held.extend(events);
+        // Everything up to the last event that is not message text is
+        // complete; trailing text waits for more unless the stream paused.
+        let split = match quiet {
+            true => held.len(),
+            false => held
+                .iter()
+                .rposition(|e| !matches!(e.activity, Activity::Harness(Event::MessageDelta { .. })))
+                .map_or(0, |i| i + 1),
+        };
+        let ready: Vec<RecordedEvent> = held.drain(..split).collect();
+        if !ready.is_empty() {
+            let text = match as_json {
+                true => ready
+                    .iter()
+                    .map(|event| format!("{}\n", json::recorded(event)))
+                    .collect(),
+                false => render::log_text(&ready, env.style()),
+            };
+            print(&text)?;
+        }
+        // Locally the wait above already paused.
+        if quiet && local.is_none() {
+            std::thread::sleep(FOLLOW_POLL);
+        }
+    }
 }
 
 pub fn merge(target: &Target, branch: &str, into: Option<&str>) -> Outcome {

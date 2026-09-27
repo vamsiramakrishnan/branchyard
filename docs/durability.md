@@ -91,7 +91,7 @@ Reserving a name records the reserving engine as a lease does (owner, host and b
 
 ## One server per data directory
 
-The server takes an exclusive advisory lock (`flock`, through `std::fs::File::try_lock`) on `DATA-DIR/lock` before it opens anything and holds it until it has stopped. A second server on the same directory fails at start with an error naming the holder's pid. The operating system releases the lock when the process exits, however it exits. `DirLock` in the engine crate is the helper.
+The server takes an exclusive advisory lock (`flock`, through `std::fs::File::try_lock`) on `DATA-DIR/lock` before it opens anything and holds it until it has stopped. A second server on the same directory fails at start, after retrying for up to 2 seconds, with an error naming the holder's pid. The retry covers a lock released an instant earlier but still held by a copy of the file that a child starting on another thread took with it, which a server restarted in the same process could otherwise hit. The operating system releases the lock when the process exits, however it exits. `DirLock` in the engine crate is the helper.
 
 ## Reading events from a cursor
 

@@ -636,6 +636,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-herdr"
+version = "0.0.1"
+dependencies = [
+ "branchyard",
+ "branchyard-client",
+ "serde",
+ "serde_json",
+ "toml_edit",
+]
+
+[[package]]
 name = "branchyard-mcp"
 version = "0.0.1"
 dependencies = [
