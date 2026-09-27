@@ -221,6 +221,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Harness integration](docs/harness-integration.md): interfaces, callback placement, session semantics, and qualification.
 - [Implementation plan](docs/implementation-plan.md): ordered milestones and acceptance gates.
 - [Comparison](docs/comparison.md): Scion, OpenRig and Herdr against Branchyard, and what to absorb from each.
+- [Lifecycle](docs/lifecycle.md): stall detection, webhook notifications and reincarnation.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
 
 ## License

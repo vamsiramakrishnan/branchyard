@@ -24,6 +24,7 @@ Surfaces:
 | Continue a branch | `Branch::send` | `send` | yes | `POST …/send` | `send` | `send`, to a descendant, returning once its turn started |
 | `send --json` (`Sent`) | the SDK returns the `Branch` | yes | yes | the operation's `branches` | yes | yes |
 | Fork | `Branch::fork` | `fork` | yes | `POST …/fork` | `fork` | no: children start from a revision, not a session |
+| Reincarnate ([lifecycle](lifecycle.md#reincarnation)) | `Branch::reincarnate` | `reincarnate` | yes | `POST …/reincarnate` | `reincarnate` | no: not a delegation operation; act as the branch's owner instead |
 | List, show | `branches`, `branch` | `ls`, `show` | yes | yes | yes | `children`, `inspect` |
 | Diff | `Branch::diff` | `diff` | yes | yes | yes | no: `inspect` reports the candidate |
 | Event log | `events`, `events_since` | `log` | yes | `GET …/events?cursor` | `events` | `events` |
@@ -40,6 +41,7 @@ Surfaces:
 | Option | SDK | by | by --remote | HTTP | client | delegation |
 |---|---|---|---|---|---|---|
 | Harness, name, base, budget, check | yes | yes | yes | yes | yes | yes, bounded by the envelope |
+| Stall detection ([lifecycle](lifecycle.md#stall-detection)) | `Budget::stall_after`/`stall_action` | `--stall-after`, `--stall-action` | yes | `budget.stall_after_seconds`/`stall_action` | yes | the caller's own, not part of the envelope |
 | Policy: allow, deny, rules | `Policy` | `--yes`, default deny | yes | `policy` | yes | the parent's, narrowed by `deny` |
 | Policy: ask | `Policy::ask` | `--ask` | no: the harness runs on the server, which has no terminal | no, same | no, same | no: a child inherits its parent's policy |
 | `isolated` | yes | `--isolated` | yes | yes | yes | inherited |
@@ -115,6 +117,14 @@ Every result a surface returns is the SDK's serde form: `BranchInfo`, `RecordedE
 | `TaskOptions::seats`, `TaskRequest::seats` | none | the seats a rig's root may spawn; needs an envelope, and on a server `--allow-delegation` |
 | `Spawn::seat`, `by spawn --seat`, `seat=`, the MCP `seat`, `SpawnRequest::seat` | none | fill a seat; required in a rig, refused outside one |
 | `Inspection` | no seat | `seat` and `seats` for a branch in a rig; absent otherwise |
+
+## Added with lifecycle features
+
+| Surface | Before | Now |
+|---|---|---|
+| `Budget::stall_after`, `Budget::stall_action`, `BranchInfo::stalled`, `Inspection::stalled`, `Activity::Stalled`/`Resumed` | none | stall detection ([lifecycle](lifecycle.md#stall-detection)); `stalled` is serde-default so JSON stays compatible |
+| `Branch::reincarnate`, `by reincarnate`, `POST …/reincarnate`, `client::reincarnate`, `BranchInfo::superseded_by` | none | reincarnation ([lifecycle](lifecycle.md#reincarnation)); `superseded_by` is serde-default |
+| `by serve --webhook`/`--webhook-secret`/`--webhook-events`/`--webhook-insecure`, `webhooks` in the JSON config | none | operator-configured webhook notifications ([server](server.md#webhooks)); a server-only addition, no SDK, CLI-local or delegation surface |
 
 ## Changed from 4609ca1
 

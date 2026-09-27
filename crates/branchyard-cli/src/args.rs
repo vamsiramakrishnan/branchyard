@@ -30,6 +30,10 @@ pub struct TaskArgs {
     pub max_turns: Option<u32>,
     /// From `--max-minutes`.
     pub max_duration: Option<Duration>,
+    /// From `--stall-after`, in minutes.
+    pub stall_after: Option<Duration>,
+    /// From `--stall-action`; ignored without `--stall-after`.
+    pub stall_action: branchyard::StallAction,
     pub permissions: Permissions,
     pub isolated: bool,
     /// Executable and fixed arguments replacing the profile's.
@@ -176,6 +180,10 @@ pub enum Command {
         branch: String,
         prompt: String,
         fresh_session: bool,
+        task: TaskArgs,
+    },
+    Reincarnate {
+        branch: String,
         task: TaskArgs,
     },
     Ls {
@@ -416,6 +424,16 @@ const MAX_MINUTES: Flag = Flag {
     long: "max-minutes",
     value: Some("N"),
     help: "Interrupt the turn after N minutes",
+};
+const STALL_AFTER: Flag = Flag {
+    long: "stall-after",
+    value: Some("N"),
+    help: "Mark the branch stalled after N minutes with no harness activity",
+};
+const STALL_ACTION: Flag = Flag {
+    long: "stall-action",
+    value: Some("notify|interrupt"),
+    help: "What a stall does (default: notify); needs --stall-after",
 };
 const ISOLATED: Flag = Flag {
     long: "isolated",
@@ -701,6 +719,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -746,6 +766,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -789,6 +811,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             COMMAND,
@@ -816,6 +840,54 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
+            YES,
+            ASK,
+            ISOLATED,
+            COMMAND,
+            PROVIDER,
+            IMAGE,
+            CPUS,
+            MEMORY,
+            PASS_ENV,
+            SUBSTRATE_ENDPOINT,
+            SUBSTRATE_ROUTER,
+            SUBSTRATE_TEMPLATE,
+            SUBSTRATE_KEY,
+            SUBSTRATE_ATESPACE,
+            SUBSTRATE_WORKDIR,
+            SUBSTRATE_HOME,
+            SUBSTRATE_CA,
+            SUBSTRATE_CLIENT_CERT,
+            SUBSTRATE_CLIENT_KEY,
+            SUBSTRATE_ROUTER_CA,
+            SUBSTRATE_INSECURE,
+            DELEGATE,
+            ALLOW_DELEGATION,
+            ALLOW_UNAPPROVED_TOOLS,
+            SECRET,
+            AUTH,
+            MCP,
+            INSTRUCTIONS,
+            MODEL,
+            EFFORT,
+            TELEMETRY,
+        ],
+    },
+    Spec {
+        name: "reincarnate",
+        positionals: &["branch"],
+        summary: "Fork a branch's candidate into a fresh session with a generated handoff brief",
+        flags: &[
+            NAME,
+            HARNESS,
+            CHECK,
+            BUDGET_USD,
+            MAX_TURNS,
+            MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -917,6 +989,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             MAX_DEPTH,
             DENY,
             ALLOW_UNAPPROVED_TOOLS,
@@ -1058,6 +1132,10 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             branch: next(),
             prompt: next(),
             fresh_session: m.switch("fresh-session"),
+            task: m.task()?,
+        },
+        "reincarnate" => Command::Reincarnate {
+            branch: next(),
             task: m.task()?,
         },
         "ls" => Command::Ls {
@@ -1458,6 +1536,37 @@ impl Matches {
                 }
             },
         };
+        let stall_after = match self.value("stall-after") {
+            None => None,
+            Some(text) => match text
+                .parse::<f64>()
+                .ok()
+                .filter(|m| m.is_finite() && *m > 0.0)
+            {
+                Some(minutes) => Some(
+                    Duration::try_from_secs_f64(minutes * 60.0)
+                        .map_err(|_| self.error(format!("--stall-after {text} is too large")))?,
+                ),
+                None => {
+                    return Err(self.error(format!(
+                        "--stall-after needs a positive number of minutes, not '{text}'"
+                    )))
+                }
+            },
+        };
+        let stall_action = match self.value("stall-action") {
+            None => branchyard::StallAction::Notify,
+            Some("notify") => branchyard::StallAction::Notify,
+            Some("interrupt") => branchyard::StallAction::Interrupt,
+            Some(text) => {
+                return Err(self.error(format!(
+                    "--stall-action must be 'notify' or 'interrupt', not '{text}'"
+                )))
+            }
+        };
+        if self.value("stall-action").is_some() && stall_after.is_none() {
+            return Err(self.error("--stall-action needs --stall-after"));
+        }
         let command = match self.value("command") {
             None => None,
             Some(line) => {
@@ -1495,6 +1604,8 @@ impl Matches {
             budget_usd,
             max_turns,
             max_duration,
+            stall_after,
+            stall_action,
             permissions,
             isolated: self.switch("isolated"),
             command,
@@ -1828,6 +1939,8 @@ mod tests {
                     budget_usd: Some(2.5),
                     max_turns: Some(3),
                     max_duration: Some(Duration::from_secs(90)),
+                    stall_after: None,
+                    stall_action: branchyard::StallAction::Notify,
                     permissions: Permissions::Yes,
                     isolated: true,
                     command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),

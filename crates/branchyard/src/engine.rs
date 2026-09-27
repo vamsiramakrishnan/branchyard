@@ -35,8 +35,8 @@ use crate::record::Recorder;
 use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
 use crate::{
     git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource, Error,
-    Event, NativeSession, PermissionDecision, PermissionRequest, Policy, SteerState, TaskOptions,
-    TurnOutcome, Yard,
+    Event, NativeSession, PermissionDecision, PermissionRequest, Policy, StallAction, SteerState,
+    TaskOptions, TurnOutcome, Yard,
 };
 
 /// How long a harness may take to complete its handshake.
@@ -90,6 +90,9 @@ pub(crate) enum End {
     Lost {
         reason: String,
     },
+    /// Interrupted by the engine after a stall; see
+    /// [`crate::StallAction::Interrupt`].
+    Stalled,
 }
 
 /// The journaled steps of a turn.
@@ -127,6 +130,9 @@ enum Stop {
     Limit(&'static str),
     Cancelled(String),
     Failure(String),
+    /// Stopping after a stall, with [`Budget::stall_action`]
+    /// [`StallAction::Interrupt`].
+    Stall,
 }
 
 /// Run the turn under `lease` and record its result. Harness failures
@@ -457,6 +463,20 @@ fn run(
     // resume or fork may have landed somewhere else.
     let mut confirmed = false;
     let mut kill = false;
+    // Stall detection: `last_activity` moves forward on every protocol
+    // event, including a permission answer. It is never checked while the
+    // engine itself is blocked (delivering a permission answer synchronously
+    // stops the loop from ticking at all) or while a child branch is
+    // running (`delegation::any_child_running`); a future asynchronous wait,
+    // such as an inbox answer, has the same shape and can add its own
+    // exclusion here.
+    let mut last_activity = started;
+    let mut stalled = false;
+    let write_stalled = |value: bool| -> Result<(), Error> {
+        let mut updated = record.clone();
+        updated.info.stalled = value;
+        store.write_fenced(&updated, fence)
+    };
     let fail = |confirmed: bool, detail: String| -> End {
         End::failed(match (&turn.mode, confirmed) {
             (SessionMode::Fresh, _) | (_, true) => detail,
@@ -513,6 +533,31 @@ fn run(
             _ => {}
         }
         steering.poll(recorder, &mut session, &store, fence, &phase)?;
+        if let (Phase::Running(n), Some(window)) = (&phase, bounds.budget.stall_after) {
+            let n = *n;
+            let idle = now.duration_since(last_activity);
+            if !stalled
+                && idle >= window
+                && !delegation::any_child_running(&store, &record.info.name)
+            {
+                stalled = true;
+                let since_ms = now_ms().saturating_sub(idle.as_millis() as u64);
+                recorder.record(Activity::Stalled { since_ms })?;
+                write_stalled(true)?;
+                if bounds.budget.stall_action == StallAction::Interrupt {
+                    if let Err(error) = session.interrupt() {
+                        recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                        kill = true;
+                        break End::Stalled;
+                    }
+                    phase = Phase::Stopping {
+                        turn: n,
+                        why: Stop::Stall,
+                        since: now,
+                    };
+                }
+            }
+        }
         match &phase {
             Phase::Opening if late => {
                 kill = true;
@@ -548,6 +593,7 @@ fn run(
                     Stop::Limit(limit) => End::budget(*limit),
                     Stop::Cancelled(by) => End::cancelled(by.clone()),
                     Stop::Failure(reason) => End::failed(reason.clone()),
+                    Stop::Stall => End::Stalled,
                 };
             }
             _ => {}
@@ -567,6 +613,12 @@ fn run(
         };
         recorder.record(Activity::Harness(event.clone()))?;
         steering.event(&store, fence, &event)?;
+        last_activity = Instant::now();
+        if stalled && matches!(phase, Phase::Running(_)) {
+            stalled = false;
+            recorder.record(Activity::Resumed)?;
+            write_stalled(false)?;
+        }
         match event {
             Event::Ready if matches!(phase, Phase::Opening) => {
                 recorder.record(Activity::Prompt(turn.prompt.to_owned()))?;
@@ -607,14 +659,20 @@ fn run(
             }
             Event::PermissionRequested { request, .. } => {
                 let stopping = matches!(phase, Phase::Stopping { .. });
-                if let Some(reason) = answer(
+                let answered = answer(
                     recorder,
                     &mut session,
                     turn,
                     &bounds.policy,
                     &request,
                     stopping,
-                )? {
+                )?;
+                // The policy may have blocked delivering this answer for a
+                // while (an `--ask` prompt, say); that time is never a
+                // stall, so the idle window starts over from here rather
+                // than from when the request first arrived.
+                last_activity = Instant::now();
+                if let Some(reason) = answered {
                     if let Phase::Running(n) = phase {
                         if session.interrupt().is_err() {
                             kill = true;
@@ -665,6 +723,9 @@ fn run(
                         why: Stop::Failure(reason),
                         ..
                     } => End::failed(reason),
+                    Phase::Stopping {
+                        why: Stop::Stall, ..
+                    } => End::Stalled,
                     _ => End::Outcome { outcome },
                 };
             }
@@ -1042,6 +1103,12 @@ pub(crate) fn conclude(
         End::Failed { reason } => BranchStatus::Failed { reason },
         End::Lost { reason } => {
             recorder.record(Activity::Warning(reason))?;
+            BranchStatus::Interrupted
+        }
+        End::Stalled => {
+            recorder.record(Activity::Warning(
+                "interrupted after a stall: no harness activity for its stall window".into(),
+            ))?;
             BranchStatus::Interrupted
         }
     };

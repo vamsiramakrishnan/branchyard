@@ -630,6 +630,8 @@ mod tests {
                 turns: 1,
                 cost_usd: None,
                 created_at: 0,
+                stalled: false,
+                superseded_by: None,
             },
             created_ms: 0,
             check: None,

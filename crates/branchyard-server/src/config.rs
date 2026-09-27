@@ -55,6 +55,70 @@ pub struct TlsFiles {
     pub key: PathBuf,
 }
 
+/// An operator-configured webhook target; see `docs/server.md#webhooks`.
+#[derive(Clone)]
+pub struct WebhookConfig {
+    /// Stable across restarts: identifies this target's durable delivery
+    /// cursor. Derived from the URL unless the file gives one explicitly.
+    pub id: String,
+    pub url: String,
+    /// HMAC-SHA256 key signing each envelope. Never in `Debug` output.
+    pub secret: String,
+    /// Activity kinds this target receives (`status`, `stall`,
+    /// `permission_wait`, `merge`, `failure`); empty means every kind.
+    pub events: BTreeSet<String>,
+}
+
+impl fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookConfig")
+            .field("id", &self.id)
+            .field("url", &self.url)
+            .field("secret", &"<redacted>")
+            .field("events", &self.events)
+            .finish()
+    }
+}
+
+/// Recognized webhook event kinds, matched against a stall, a permission
+/// request, and a status change (further split into `merge` and `failure`
+/// for its `Merged` and `Failed` states). An empty filter means all of
+/// them.
+pub const WEBHOOK_EVENT_KINDS: &[&str] =
+    &["status", "stall", "permission_wait", "merge", "failure"];
+
+pub fn check_webhook_event_kind(name: &str) -> Result<(), String> {
+    match WEBHOOK_EVENT_KINDS.contains(&name) {
+        true => Ok(()),
+        false => Err(format!(
+            "{name:?} is not a webhook event kind; use one of {}",
+            WEBHOOK_EVENT_KINDS.join(", ")
+        )),
+    }
+}
+
+/// Refuse a webhook URL that is not `https://`, unless its host is a
+/// loopback literal (`localhost`, `127.0.0.1`, `::1`) or `insecure` is set.
+pub fn check_webhook_url(url: &str, insecure: bool) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("webhook url {url:?}: {e}"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+            match loopback || insecure {
+                true => Ok(()),
+                false => Err(format!(
+                    "webhook url {url:?} is not https and not loopback; pass \
+                     --webhook-insecure to allow it anyway"
+                )),
+            }
+        }
+        other => Err(format!(
+            "webhook url {url:?} has scheme {other:?}; use https:// (or http:// on loopback)"
+        )),
+    }
+}
+
 /// A resolved configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -100,6 +164,10 @@ pub struct Config {
     pub poll_interval: Duration,
     /// Log one line per request to stderr.
     pub log_requests: bool,
+    /// Webhook targets notified of every served repository's activity feed.
+    pub webhooks: Vec<WebhookConfig>,
+    /// Allow a webhook's `http://` URL off loopback. Only from the flag.
+    pub webhook_insecure: bool,
 }
 
 impl Config {
@@ -125,6 +193,8 @@ impl Config {
             database: None,
             poll_interval: Duration::from_millis(500),
             log_requests: true,
+            webhooks: Vec::new(),
+            webhook_insecure: false,
         }
     }
 
@@ -169,6 +239,23 @@ impl Config {
         }
         if self.max_body_bytes < 1024 {
             return Err("max_body_bytes must be at least 1024".into());
+        }
+        let mut ids: Vec<&str> = self.webhooks.iter().map(|w| w.id.as_str()).collect();
+        ids.sort_unstable();
+        if let Some(pair) = ids.windows(2).find(|w| w[0] == w[1]) {
+            return Err(format!("webhook {} is configured twice", pair[0]));
+        }
+        for webhook in &self.webhooks {
+            check_webhook_url(&webhook.url, self.webhook_insecure)?;
+            if webhook.secret.len() < 16 {
+                return Err(format!(
+                    "webhook {} secret is shorter than 16 characters",
+                    webhook.id
+                ));
+            }
+            for kind in &webhook.events {
+                check_webhook_event_kind(kind)?;
+            }
         }
         if self.listen.ip().is_loopback() || self.tls.is_some() {
             return Ok(None);
@@ -269,6 +356,22 @@ struct FileConfig {
     #[serde(default)]
     secrets: BTreeMap<String, String>,
     database: Option<String>,
+    #[serde(default)]
+    webhooks: Vec<FileWebhook>,
+    #[serde(default)]
+    webhook_insecure: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileWebhook {
+    /// Defaults to the URL when omitted.
+    id: Option<String>,
+    url: String,
+    secret: Option<String>,
+    secret_file: Option<PathBuf>,
+    #[serde(default)]
+    events: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -305,6 +408,8 @@ pub struct Partial {
     pub allow_unapproved_tools: bool,
     pub secrets: BTreeMap<String, branchyard::SecretSource>,
     pub database: Option<String>,
+    pub webhooks: Vec<WebhookConfig>,
+    pub webhook_insecure: bool,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -421,6 +526,34 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             })
             .collect::<Result<_, String>>()?,
         database: file.database,
+        webhooks: file
+            .webhooks
+            .into_iter()
+            .map(|w| {
+                let secret = match (w.secret, w.secret_file) {
+                    (Some(secret), None) => secret,
+                    (None, Some(file)) => read_token_file(&resolve(file), &mut warnings)?,
+                    _ => {
+                        return Err(format!(
+                            "config {}: webhook {} needs exactly one of secret and secret_file",
+                            path.display(),
+                            w.url
+                        ))
+                    }
+                };
+                for kind in &w.events {
+                    check_webhook_event_kind(kind)
+                        .map_err(|e| format!("config {}: {e}", path.display()))?;
+                }
+                Ok(WebhookConfig {
+                    id: w.id.unwrap_or_else(|| w.url.clone()),
+                    url: w.url,
+                    secret,
+                    events: w.events.into_iter().collect(),
+                })
+            })
+            .collect::<Result<_, String>>()?,
+        webhook_insecure: file.webhook_insecure,
         warnings,
     })
 }
@@ -502,6 +635,45 @@ mod tests {
         assert_eq!(repo_name_for(Path::new("/")), "repo");
         let debug = format!("{:?}", config("127.0.0.1:0").tokens[0]);
         assert!(!debug.contains("0123456789abcdef"), "{debug}");
+    }
+
+    fn hook(id: &str, url: &str) -> WebhookConfig {
+        WebhookConfig {
+            id: id.into(),
+            url: url.into(),
+            secret: "0123456789abcdef".into(),
+            events: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn webhook_urls_need_https_unless_loopback_or_insecure() {
+        assert!(check_webhook_url("https://example.com/hook", false).is_ok());
+        assert!(check_webhook_url("http://127.0.0.1:9/hook", false).is_ok());
+        assert!(check_webhook_url("http://localhost/hook", false).is_ok());
+        let err = check_webhook_url("http://example.com/hook", false).unwrap_err();
+        assert!(err.contains("--webhook-insecure"), "{err}");
+        assert!(check_webhook_url("http://example.com/hook", true).is_ok());
+        assert!(check_webhook_url("ftp://example.com/hook", false).is_err());
+        assert!(check_webhook_event_kind("stall").is_ok());
+        assert!(check_webhook_event_kind("bogus").is_err());
+    }
+
+    #[test]
+    fn webhooks_are_validated_and_refused_when_duplicated_or_weak() {
+        let mut c = config("127.0.0.1:0");
+        c.webhooks.push(hook("h", "https://example.com/a"));
+        assert_eq!(c.validate(), Ok(None));
+        c.webhooks.push(hook("h", "https://example.com/b"));
+        assert!(c.validate().unwrap_err().contains("configured twice"));
+        let mut c = config("127.0.0.1:0");
+        c.webhooks.push(hook("h", "http://example.com/a"));
+        assert!(c.validate().unwrap_err().contains("--webhook-insecure"));
+        let mut c = config("127.0.0.1:0");
+        let mut weak = hook("h", "https://example.com/a");
+        weak.secret = "short".into();
+        c.webhooks.push(weak);
+        assert!(c.validate().unwrap_err().contains("shorter than 16"));
     }
 
     #[test]

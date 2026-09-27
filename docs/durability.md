@@ -72,6 +72,8 @@ The engine running the turn, in any process using the repository, reads the turn
 
 A turn with `max_duration` stores its deadline with the lease. The engine that owns the turn enforces it; recovery reports whether it had passed. Since a recovered turn is never continued, no engine counts it further.
 
+A turn with `Budget::stall_after` marks itself stalled the same way `max_duration` stores its deadline: on the transition, the engine writes the branch's record under the turn's fence with `stalled: true` (and back to `false` on new activity), so a concurrent reader — `by ls`, `by inspect`, another process's `Yard::branch` — sees it live, not only after the turn ends. This is an ordinary fenced write of the same record `create` already wrote at lease acquisition, not a new journaled step: recovery never needs to reconstruct it, because whichever status the turn ends with, `conclude` writes the final record with `stalled: false`. See `docs/lifecycle.md`.
+
 ## Recovery
 
 `Yard::open` runs `Yard::recover`; the server runs it at start and every 30 seconds; `send`, `merge` and `remove` run it for their branch first. For each stale lease, recovery takes the lease over with a new generation (only one engine wins), then:
@@ -116,6 +118,10 @@ A wait wakes at once for events recorded in the same process and within 100 ms f
 The SSE cursor is the feed position. Its documented semantics hold: `open` then one `activity` per event after the cursor, resume by `?cursor=` or `Last-Event-ID` with no gap or repeat, `cursor_out_of_range` past the head, across restarts. Positions only grow; do not assume they are contiguous. The per-branch `?cursor=N` of `GET …/events` means the same as before, events after the first *N*. **Changed:** stream positions now come from the repository's store rather than a server-side copy, so a cursor saved from a server of an earlier version names a different event; reconnect from 0 or from now.
 
 Events of a removed branch stay in the feed; a new branch with the same name numbers its own events from 1.
+
+### Webhook cursors
+
+The server's webhook deliveries (`docs/server.md#webhooks`) read the same feed from a cursor, one per `<repo>:<webhook id>`, durable in the operation store (`OperationStore::load_webhook_cursor`/`save_webhook_cursor`; SQLite's `webhook_cursors` table or PostgreSQL's `by_webhook_cursors`, alongside operations). A delivery's cursor only advances after that entry has either been delivered or dead-lettered, so a restart resumes from exactly where it left off: no entry is silently skipped, and none already delivered is replayed. This is at-least-once, the same guarantee the SSE stream and `events_since` give a client resuming by cursor, extended to a target the server calls out to instead of one that calls in.
 
 ## State from earlier versions
 

@@ -119,6 +119,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             fresh_session,
             task,
         } => commands::fork(env, target, &branch, &prompt, fresh_session, &task),
+        Command::Reincarnate { branch, task } => commands::reincarnate(env, target, &branch, &task),
         Command::Ls { json } => commands::ls(env, target, json),
         Command::Show { branch, json } => commands::show(env, target, &branch, json),
         Command::Diff { branch } => commands::diff(env, target, &branch),

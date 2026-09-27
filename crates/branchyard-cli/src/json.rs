@@ -181,6 +181,11 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "reason": reason,
             "killed": killed,
         }),
+        Activity::Stalled { since_ms } => json!({
+            "activity": "stalled",
+            "since_ms": since_ms,
+        }),
+        Activity::Resumed => json!({ "activity": "resumed" }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value
@@ -223,6 +228,8 @@ mod tests {
             turns: 2,
             cost_usd: None,
             created_at: 7,
+            stalled: false,
+            superseded_by: None,
         };
         let value = branch(&info);
         assert_eq!(value["status"], json!({ "state": "failed", "reason": "r" }));
@@ -257,7 +264,9 @@ mod tests {
                 "status",
                 "turns",
                 "cost_usd",
-                "created_at"
+                "created_at",
+                "stalled",
+                "superseded_by"
             ]
         );
         let harness = harness(&HarnessInfo {
