@@ -41,6 +41,18 @@ by rm make-the-flaky-parser-test-deterministic-claude-code
 
 Every tool permission request reaches Branchyard: `--ask` prompts on the terminal, `--yes` allows each one, and with neither flag and no terminal they are denied. `by log` shows each decision. These commands are tested end to end against a fake ACP agent; they have not yet run against a real harness. Resuming or forking a session in another worktree may fail for harnesses that keep sessions per directory, such as Claude Code; the branch then reports the failure rather than starting over silently.
 
+## Sandbox providers
+
+A harness runs through a sandbox provider. The default **local** provider is the local mode above. The **Microsandbox** provider runs each turn's harness in a microVM booted from an OCI image with the harness installed: the branch's worktree is mounted at `/workspace`, the harness gets only `HOME` and the variables you name with `--pass-env`, and the microVM is destroyed when the turn ends.
+
+```sh
+cargo +1.94 install --locked --path crates/branchyard-cli --features microsandbox
+by run "Fix the flaky parser test" --provider microsandbox --image ghcr.io/you/claude-code:2.1 \
+  --cpus 2 --memory 4096 --pass-env ANTHROPIC_API_KEY --check "cargo test" --yes
+```
+
+It needs Linux with KVM and the `msb` 0.7.3 runtime, and the `microsandbox` cargo feature, which is off by default because the pinned SDK needs Rust 1.94 while the workspace pins 1.90. It is **unqualified**: its unit tests pass, but its KVM tests have not run. See [sandbox providers](docs/providers.md) for the contract, each provider's guarantees, and how to run those tests.
+
 ## Architecture
 
 Clients submit work and observe results. All managed harness execution happens on servers.
@@ -81,13 +93,14 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | Component | Status |
 |---|---|
 | `branchyard-controls` | Dependency-free Rust resume recipes adapted from Herdr, and one harness identity registry across Herdr, Scion and the integration matrix; 15 tests pass |
-| `branchyard` | The local-mode SDK engine: tasks, branches as git worktrees, forks, budgets, per-invocation permission policies, an event log per branch, and validated merges; 30 hermetic tests against a fake ACP agent, none against a real harness |
+| `branchyard` | The local-mode SDK engine: tasks, branches as git worktrees, forks, budgets, per-invocation permission policies, an event log per branch, and validated merges; 35 hermetic tests against a fake ACP agent, none against a real harness |
 | `branchyard-harness` | Sans-IO protocol drivers: Claude Code stream-json, Codex App Server, and ACP v1 for ten more harnesses; 12 of 16 targets have a default profile; 43 tests, including replays and a conformance contract run against all 14 profiles of recorded Claude Code and Codex sessions; both Claude Code profiles pass live protocol qualification |
 | `branchyard-qualify` | Runs driver qualification scenarios against real harness binaries; see [driver qualification](docs/qualification/README.md) |
 | `branchyard-workspace` | Git worktree branches, candidate commits and validated merges: compare-and-swap on the target, checks in a temporary worktree, conflicts returned for repair; 18 tests |
-| `branchyard-runtime` | Runs a driver against a real harness process: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 12 hermetic tests against a fake ACP agent |
-| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `harnesses`; 42 tests, 5 of them running the built binary against a temporary repository and a fake ACP agent |
-| `branchyard-sandbox` | Vendor-independent sandbox capabilities and admission checks; unsupported requirements are rejected, never weakened |
+| `branchyard-runtime` | Runs a driver against a harness process through any sandbox provider, and the local provider: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 27 hermetic tests, including the provider conformance checks, against a fake ACP agent |
+| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `harnesses`; 43 tests, 5 of them running the built binary against a temporary repository and a fake ACP agent |
+| `branchyard-sandbox` | The vendor-independent `SandboxProvider` contract, provider conformance checks, and capability admission; unsupported requirements are rejected, never weakened |
+| `branchyard-microsandbox` | A [Microsandbox](https://github.com/superradcompany/microsandbox) provider over its public SDK 0.7.3, behind the off-by-default `microsandbox` feature (the SDK needs Rust 1.94); 11 mapping tests, 4 more with the SDK, and 14 ignored tests for a KVM host; **unqualified** |
 | `branchyard-substrate` | [Agent Substrate](https://github.com/agent-substrate/substrate) provider adapter over a client generated from its unmodified proto; tested against an in-process fake, **unqualified** against a cluster |
 | Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |
 | Herdr controls | Original resume source and 22 terminal-observation manifests |
