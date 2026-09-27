@@ -38,12 +38,13 @@ use crate::state::{
     ReservationRow, SteerRow, StepRow,
 };
 use crate::storage::{
-    ArtifactRef, ArtifactRow, LockOutcome, NewArtifact, ScratchArea, ScratchLock, ScratchRow,
-    StorageBackend,
+    ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
+    NewScratch, ScratchArea, ScratchLock, ScratchRow, Share, StorageBackend,
 };
 use crate::{BranchStatus, Error, Message, RecordedEvent, SteerState};
 
-const SCHEMA: i64 = 1;
+/// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
+const SCHEMA: i64 = 2;
 /// How long a write keeps retrying serialization failures.
 const RETRY_FOR: Duration = Duration::from_secs(30);
 
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS by_branches (
     name TEXT NOT NULL,
     created_ms BIGINT NOT NULL,
     record TEXT,
+    parent_incarnation BIGINT,
     UNIQUE (repo, name)
 );
 CREATE TABLE IF NOT EXISTS by_leases (
@@ -158,12 +160,15 @@ CREATE TABLE IF NOT EXISTS by_artifacts (
     turn BIGINT NOT NULL,
     created_ms BIGINT NOT NULL,
     labels TEXT NOT NULL,
+    publisher_incarnation BIGINT,
+    ancestry_incarnations TEXT NOT NULL DEFAULT '[]',
     UNIQUE (repo, id)
 );
 CREATE TABLE IF NOT EXISTS by_artifact_shares (
     repo TEXT NOT NULL,
     id TEXT NOT NULL,
     branch TEXT NOT NULL,
+    incarnation BIGINT,
     PRIMARY KEY (repo, id, branch)
 );
 CREATE TABLE IF NOT EXISTS by_scratch_areas (
@@ -172,12 +177,15 @@ CREATE TABLE IF NOT EXISTS by_scratch_areas (
     owner TEXT NOT NULL,
     ancestry TEXT NOT NULL,
     created_ms BIGINT NOT NULL,
+    owner_incarnation BIGINT,
+    ancestry_incarnations TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (repo, name)
 );
 CREATE TABLE IF NOT EXISTS by_scratch_shares (
     repo TEXT NOT NULL,
     name TEXT NOT NULL,
     branch TEXT NOT NULL,
+    incarnation BIGINT,
     PRIMARY KEY (repo, name, branch)
 );
 CREATE TABLE IF NOT EXISTS by_scratch_locks (
@@ -185,6 +193,7 @@ CREATE TABLE IF NOT EXISTS by_scratch_locks (
     name TEXT NOT NULL,
     holder TEXT NOT NULL,
     acquired_ms BIGINT NOT NULL,
+    holder_incarnation BIGINT,
     PRIMARY KEY (repo, name)
 );
 CREATE TABLE IF NOT EXISTS by_messages (
@@ -376,6 +385,7 @@ impl Postgres {
                     Ok(())
                 }
                 Some(Ok(SCHEMA)) => Ok(()),
+                Some(Ok(1)) => upgrade_to_identities(tx),
                 Some(other) => Err(Fail::Error(Error::State(format!(
                     "the database has Branchyard schema {other:?}; this version understands \
                      {SCHEMA}"
@@ -526,6 +536,19 @@ impl Postgres {
             tx.execute(
                 "INSERT INTO by_branches (repo, name, created_ms, record) VALUES ($1, $2, $3, $4)",
                 &[&self.repo, name, &created, &text],
+            )
+            .map_err(db("write"))?;
+        }
+        // Bind the parent's incarnation once, if it is older: the first
+        // write naming a parent is the child's creation, while its parent
+        // is alive (see `crate::storage::Lineage`).
+        if let Some(parent) = &record.info.parent {
+            tx.execute(
+                "UPDATE by_branches b SET parent_incarnation = (SELECT p.incarnation \
+                 FROM by_branches p WHERE p.repo = $1 AND p.name = $3 AND p.record IS NOT NULL \
+                 AND p.incarnation < b.incarnation) \
+                 WHERE b.repo = $1 AND b.name = $2 AND b.parent_incarnation IS NULL",
+                &[&self.repo, name, parent],
             )
             .map_err(db("write"))?;
         }
@@ -1514,9 +1537,145 @@ fn message_row(r: &Row) -> Result<Message, Error> {
     })
 }
 
+/// Upgrade a schema 1 database: add the identity columns and bind every
+/// name-only grant of every repository once, by [`LegacyBinder`]'s rule, in
+/// the transaction (and under the advisory lock) that checked the schema.
+fn upgrade_to_identities(tx: &mut Transaction<'_>) -> R<()> {
+    let e = || db("upgrade to schema 2");
+    for sql in [
+        "ALTER TABLE by_branches ADD COLUMN IF NOT EXISTS parent_incarnation BIGINT",
+        "ALTER TABLE by_artifacts ADD COLUMN IF NOT EXISTS publisher_incarnation BIGINT",
+        "ALTER TABLE by_artifacts ADD COLUMN IF NOT EXISTS ancestry_incarnations TEXT NOT NULL \
+         DEFAULT '[]'",
+        "ALTER TABLE by_artifact_shares ADD COLUMN IF NOT EXISTS incarnation BIGINT",
+        "ALTER TABLE by_scratch_areas ADD COLUMN IF NOT EXISTS owner_incarnation BIGINT",
+        "ALTER TABLE by_scratch_areas ADD COLUMN IF NOT EXISTS ancestry_incarnations TEXT \
+         NOT NULL DEFAULT '[]'",
+        "ALTER TABLE by_scratch_shares ADD COLUMN IF NOT EXISTS incarnation BIGINT",
+        "ALTER TABLE by_scratch_locks ADD COLUMN IF NOT EXISTS holder_incarnation BIGINT",
+    ] {
+        tx.execute(sql, &[]).map_err(e())?;
+    }
+    let mut repos: std::collections::BTreeMap<String, Vec<LegacyBranch>> = Default::default();
+    for row in tx
+        .query(
+            "SELECT repo, incarnation, name, created_ms, record FROM by_branches \
+             WHERE record IS NOT NULL",
+            &[],
+        )
+        .map_err(e())?
+    {
+        let name: String = row.get(2);
+        let text: String = row.get(4);
+        let record: Record = decode(&format!("record {name}"), &text)?;
+        repos.entry(row.get(0)).or_default().push(LegacyBranch {
+            name,
+            incarnation: row.get(1),
+            created_ms: uint(row.get(3)),
+            parent: record.info.parent,
+        });
+    }
+    let empty = Vec::new();
+    let binder_for = |repo: &str| LegacyBinder::new(repos.get(repo).unwrap_or(&empty));
+    for branches in repos.values() {
+        let binder = LegacyBinder::new(branches);
+        for branch in branches {
+            tx.execute(
+                "UPDATE by_branches SET parent_incarnation = $2 WHERE incarnation = $1",
+                &[&branch.incarnation, &binder.parent(branch)],
+            )
+            .map_err(e())?;
+        }
+    }
+    for row in tx
+        .query(
+            "SELECT repo, seq, publisher, ancestry, created_ms FROM by_artifacts",
+            &[],
+        )
+        .map_err(e())?
+    {
+        let binder = binder_for(row.get(0));
+        let seq: i64 = row.get(1);
+        let publisher: String = row.get(2);
+        let ancestry: Vec<String> = decode("artifact ancestry", row.get(3))?;
+        let created = uint(row.get(4));
+        let ancestry = encode("ancestry", &binder.bind_all(&ancestry, created))?;
+        tx.execute(
+            "UPDATE by_artifacts SET publisher_incarnation = $2, ancestry_incarnations = $3 \
+             WHERE seq = $1",
+            &[&seq, &binder.bind(&publisher, Some(created)), &ancestry],
+        )
+        .map_err(e())?;
+    }
+    for row in tx
+        .query(
+            "SELECT repo, name, owner, ancestry, created_ms FROM by_scratch_areas",
+            &[],
+        )
+        .map_err(e())?
+    {
+        let repo: String = row.get(0);
+        let binder = binder_for(&repo);
+        let name: String = row.get(1);
+        let owner: String = row.get(2);
+        let ancestry: Vec<String> = decode("scratch ancestry", row.get(3))?;
+        let created = uint(row.get(4));
+        let ancestry = encode("ancestry", &binder.bind_all(&ancestry, created))?;
+        tx.execute(
+            "UPDATE by_scratch_areas SET owner_incarnation = $3, ancestry_incarnations = $4 \
+             WHERE repo = $1 AND name = $2",
+            &[&repo, &name, &binder.bind(&owner, Some(created)), &ancestry],
+        )
+        .map_err(e())?;
+    }
+    for (table, key) in [("by_artifact_shares", "id"), ("by_scratch_shares", "name")] {
+        for row in tx
+            .query(&format!("SELECT repo, {key}, branch FROM {table}"), &[])
+            .map_err(e())?
+        {
+            let repo: String = row.get(0);
+            let id: String = row.get(1);
+            let branch: String = row.get(2);
+            let bound = binder_for(&repo).bind(&branch, None);
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET incarnation = $4 \
+                     WHERE repo = $1 AND {key} = $2 AND branch = $3"
+                ),
+                &[&repo, &id, &branch, &bound],
+            )
+            .map_err(e())?;
+        }
+    }
+    for row in tx
+        .query(
+            "SELECT repo, name, holder, acquired_ms FROM by_scratch_locks",
+            &[],
+        )
+        .map_err(e())?
+    {
+        let repo: String = row.get(0);
+        let name: String = row.get(1);
+        let holder: String = row.get(2);
+        let bound = binder_for(&repo).bind(&holder, Some(uint(row.get(3))));
+        tx.execute(
+            "UPDATE by_scratch_locks SET holder_incarnation = $3 WHERE repo = $1 AND name = $2",
+            &[&repo, &name, &bound],
+        )
+        .map_err(e())?;
+    }
+    tx.execute(
+        "UPDATE by_meta SET value = $1 WHERE key = 'schema'",
+        &[&SCHEMA.to_string()],
+    )
+    .map_err(e())?;
+    Ok(())
+}
+
 fn artifact_row_from(row: &Row) -> Result<ArtifactRow, Error> {
     let ancestry: String = row.get(6);
     let labels: String = row.get(9);
+    let ancestry_incarnations: String = row.get(11);
     Ok(ArtifactRow {
         artifact: ArtifactRef {
             id: row.get(0),
@@ -1530,14 +1689,20 @@ fn artifact_row_from(row: &Row) -> Result<ArtifactRow, Error> {
             labels: decode("artifact labels", &labels)?,
         },
         ancestry: decode("artifact ancestry", &ancestry)?,
+        publisher_incarnation: row.get(10),
+        ancestry_incarnations: decode("artifact ancestry", &ancestry_incarnations)?,
     })
 }
 
-const ARTIFACT_COLUMNS: &str =
-    "id, digest, size, name, media_type, publisher, ancestry, turn, created_ms, labels";
+const ARTIFACT_COLUMNS: &str = "id, digest, size, name, media_type, publisher, ancestry, turn, \
+     created_ms, labels, publisher_incarnation, ancestry_incarnations";
+
+const SCRATCH_COLUMNS: &str =
+    "name, owner, ancestry, created_ms, owner_incarnation, ancestry_incarnations";
 
 fn scratch_row_from(row: &Row) -> Result<ScratchRow, Error> {
     let ancestry: String = row.get(2);
+    let ancestry_incarnations: String = row.get(5);
     Ok(ScratchRow {
         area: ScratchArea {
             name: row.get(0),
@@ -1545,29 +1710,75 @@ fn scratch_row_from(row: &Row) -> Result<ScratchRow, Error> {
             created_at: uint(row.get::<_, i64>(3)) / 1000,
         },
         ancestry: decode("scratch ancestry", &ancestry)?,
+        owner_incarnation: row.get(4),
+        ancestry_incarnations: decode("scratch ancestry", &ancestry_incarnations)?,
     })
 }
 
+fn share_from(row: &Row) -> Share {
+    Share {
+        branch: row.get(0),
+        incarnation: row.get(1),
+    }
+}
+
 impl Postgres {
-    fn is_running(&self, tx: &mut Transaction<'_>, name: &str) -> R<bool> {
-        match self.stored_record(tx, name)? {
-            Some(record) => Ok(record.info.status == BranchStatus::Running),
+    /// Whether the branch at `incarnation` says `running`; a removed one
+    /// does not.
+    fn is_running(&self, tx: &mut Transaction<'_>, incarnation: i64) -> R<bool> {
+        let text: Option<String> = tx
+            .query_opt(
+                "SELECT record FROM by_branches WHERE repo = $1 AND incarnation = $2",
+                &[&self.repo, &incarnation],
+            )
+            .map_err(db("read"))?
+            .and_then(|r| r.get(0));
+        match text {
+            Some(text) => {
+                let record: Record = decode("record", &text)?;
+                Ok(record.info.status == BranchStatus::Running)
+            }
             None => Ok(false),
         }
     }
 }
 
 impl StorageBackend for Postgres {
+    fn identities(&self) -> Result<Vec<Identity>, Error> {
+        let rows = self.query(|c| {
+            c.query(
+                "SELECT incarnation, name, parent_incarnation, record FROM by_branches \
+                 WHERE repo = $1 AND record IS NOT NULL",
+                &[&self.repo],
+            )
+        })?;
+        rows.iter()
+            .map(|r| {
+                let name: String = r.get(1);
+                let text: String = r.get(3);
+                let record: Record = decode(&format!("record {name}"), &text)?;
+                Ok(Identity {
+                    name,
+                    incarnation: r.get(0),
+                    parent_incarnation: r.get(2),
+                    parent: record.info.parent,
+                })
+            })
+            .collect()
+    }
+
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {
         self.tx(true, |tx| {
             let now = int(now_ms());
             let ancestry = encode("ancestry", &new.ancestry)?;
+            let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
             let labels = encode("labels", &new.labels)?;
             let seq: i64 = tx
                 .query_one(
                     "INSERT INTO by_artifacts (repo, id, digest, size, name, media_type, \
-                     publisher, ancestry, turn, created_ms, labels) \
-                     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING seq",
+                     publisher, ancestry, turn, created_ms, labels, publisher_incarnation, \
+                     ancestry_incarnations) \
+                     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING seq",
                     &[
                         &self.repo,
                         &new.digest,
@@ -1579,6 +1790,8 @@ impl StorageBackend for Postgres {
                         &int(new.turn),
                         &now,
                         &labels,
+                        &new.publisher_incarnation,
+                        &ancestry_incarnations,
                     ],
                 )
                 .map_err(db("artifact"))?
@@ -1602,6 +1815,8 @@ impl StorageBackend for Postgres {
                     labels: new.labels.clone(),
                 },
                 ancestry: new.ancestry.clone(),
+                publisher_incarnation: Some(new.publisher_incarnation),
+                ancestry_incarnations: new.ancestry_incarnations.clone(),
             })
         })
     }
@@ -1629,17 +1844,17 @@ impl StorageBackend for Postgres {
         rows.iter().map(artifact_row_from).collect()
     }
 
-    fn artifact_shares(&self, id: &str) -> Result<Vec<String>, Error> {
+    fn artifact_shares(&self, id: &str) -> Result<Vec<Share>, Error> {
         let rows = self.query(|c| {
             c.query(
-                "SELECT branch FROM by_artifact_shares WHERE repo = $1 AND id = $2",
+                "SELECT branch, incarnation FROM by_artifact_shares WHERE repo = $1 AND id = $2",
                 &[&self.repo, &id],
             )
         })?;
-        Ok(rows.iter().map(|r| r.get(0)).collect())
+        Ok(rows.iter().map(share_from).collect())
     }
 
-    fn share_artifact(&self, id: &str, branch: &str) -> Result<bool, Error> {
+    fn share_artifact(&self, id: &str, branch: &str, incarnation: i64) -> Result<bool, Error> {
         self.tx(true, |tx| {
             let exists = tx
                 .query_opt(
@@ -1650,9 +1865,10 @@ impl StorageBackend for Postgres {
                 .is_some();
             if exists {
                 tx.execute(
-                    "INSERT INTO by_artifact_shares (repo, id, branch) VALUES ($1, $2, $3) \
-                     ON CONFLICT DO NOTHING",
-                    &[&self.repo, &id, &branch],
+                    "INSERT INTO by_artifact_shares (repo, id, branch, incarnation) \
+                     VALUES ($1, $2, $3, $4) ON CONFLICT (repo, id, branch) \
+                     DO UPDATE SET incarnation = excluded.incarnation",
+                    &[&self.repo, &id, &branch, &incarnation],
                 )
                 .map_err(db("artifact share"))?;
             }
@@ -1686,14 +1902,24 @@ impl StorageBackend for Postgres {
         Ok(uint(row.get::<_, i64>(0)))
     }
 
-    fn create_scratch(&self, name: &str, owner: &str, ancestry: &[String]) -> Result<bool, Error> {
+    fn create_scratch(&self, new: &NewScratch) -> Result<bool, Error> {
         self.tx(true, |tx| {
-            let ancestry = encode("ancestry", &ancestry)?;
+            let ancestry = encode("ancestry", &new.ancestry)?;
+            let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
             let inserted = tx
                 .execute(
-                    "INSERT INTO by_scratch_areas (repo, name, owner, ancestry, created_ms) \
-                     VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-                    &[&self.repo, &name, &owner, &ancestry, &int(now_ms())],
+                    "INSERT INTO by_scratch_areas (repo, name, owner, ancestry, created_ms, \
+                     owner_incarnation, ancestry_incarnations) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+                    &[
+                        &self.repo,
+                        &new.name,
+                        &new.owner,
+                        &ancestry,
+                        &int(now_ms()),
+                        &new.owner_incarnation,
+                        &ancestry_incarnations,
+                    ],
                 )
                 .map_err(db("scratch"))?;
             Ok(inserted == 1)
@@ -1703,8 +1929,9 @@ impl StorageBackend for Postgres {
     fn scratch(&self, name: &str) -> Result<Option<ScratchRow>, Error> {
         self.query(|c| {
             c.query_opt(
-                "SELECT name, owner, ancestry, created_ms FROM by_scratch_areas \
-                 WHERE repo = $1 AND name = $2",
+                &format!(
+                    "SELECT {SCRATCH_COLUMNS} FROM by_scratch_areas WHERE repo = $1 AND name = $2"
+                ),
                 &[&self.repo, &name],
             )
         })?
@@ -1715,25 +1942,27 @@ impl StorageBackend for Postgres {
     fn scratch_list(&self) -> Result<Vec<ScratchRow>, Error> {
         let rows = self.query(|c| {
             c.query(
-                "SELECT name, owner, ancestry, created_ms FROM by_scratch_areas \
-                 WHERE repo = $1 ORDER BY created_ms",
+                &format!(
+                    "SELECT {SCRATCH_COLUMNS} FROM by_scratch_areas WHERE repo = $1 \
+                     ORDER BY created_ms"
+                ),
                 &[&self.repo],
             )
         })?;
         rows.iter().map(scratch_row_from).collect()
     }
 
-    fn scratch_shares(&self, name: &str) -> Result<Vec<String>, Error> {
+    fn scratch_shares(&self, name: &str) -> Result<Vec<Share>, Error> {
         let rows = self.query(|c| {
             c.query(
-                "SELECT branch FROM by_scratch_shares WHERE repo = $1 AND name = $2",
+                "SELECT branch, incarnation FROM by_scratch_shares WHERE repo = $1 AND name = $2",
                 &[&self.repo, &name],
             )
         })?;
-        Ok(rows.iter().map(|r| r.get(0)).collect())
+        Ok(rows.iter().map(share_from).collect())
     }
 
-    fn share_scratch(&self, name: &str, branch: &str) -> Result<bool, Error> {
+    fn share_scratch(&self, name: &str, branch: &str, incarnation: i64) -> Result<bool, Error> {
         self.tx(true, |tx| {
             let exists = tx
                 .query_opt(
@@ -1744,9 +1973,10 @@ impl StorageBackend for Postgres {
                 .is_some();
             if exists {
                 tx.execute(
-                    "INSERT INTO by_scratch_shares (repo, name, branch) VALUES ($1, $2, $3) \
-                     ON CONFLICT DO NOTHING",
-                    &[&self.repo, &name, &branch],
+                    "INSERT INTO by_scratch_shares (repo, name, branch, incarnation) \
+                     VALUES ($1, $2, $3, $4) ON CONFLICT (repo, name, branch) \
+                     DO UPDATE SET incarnation = excluded.incarnation",
+                    &[&self.repo, &name, &branch, &incarnation],
                 )
                 .map_err(db("scratch share"))?;
             }
@@ -1767,7 +1997,12 @@ impl StorageBackend for Postgres {
         })
     }
 
-    fn scratch_lock(&self, name: &str, branch: &str) -> Result<Option<LockOutcome>, Error> {
+    fn scratch_lock(
+        &self,
+        name: &str,
+        branch: &str,
+        incarnation: i64,
+    ) -> Result<Option<LockOutcome>, Error> {
         self.tx(true, |tx| {
             let known = tx
                 .query_opt(
@@ -1781,19 +2016,26 @@ impl StorageBackend for Postgres {
             }
             let current = tx
                 .query_opt(
-                    "SELECT holder, acquired_ms FROM by_scratch_locks \
+                    "SELECT holder, acquired_ms, holder_incarnation FROM by_scratch_locks \
                      WHERE repo = $1 AND name = $2",
                     &[&self.repo, &name],
                 )
                 .map_err(db("scratch lock"))?
-                .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1)));
+                .map(|r| {
+                    (
+                        r.get::<_, String>(0),
+                        r.get::<_, i64>(1),
+                        r.get::<_, Option<i64>>(2),
+                    )
+                });
             let grant = |tx: &mut Transaction<'_>| -> R<LockOutcome> {
                 let now = int(now_ms());
                 tx.execute(
-                    "INSERT INTO by_scratch_locks (repo, name, holder, acquired_ms) \
-                     VALUES ($1, $2, $3, $4) ON CONFLICT (repo, name) \
-                     DO UPDATE SET holder = excluded.holder, acquired_ms = excluded.acquired_ms",
-                    &[&self.repo, &name, &branch, &now],
+                    "INSERT INTO by_scratch_locks (repo, name, holder, acquired_ms, \
+                     holder_incarnation) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (repo, name) \
+                     DO UPDATE SET holder = excluded.holder, acquired_ms = excluded.acquired_ms, \
+                     holder_incarnation = excluded.holder_incarnation",
+                    &[&self.repo, &name, &branch, &now, &incarnation],
                 )
                 .map_err(db("scratch lock"))?;
                 Ok(LockOutcome::Granted(ScratchLock {
@@ -1804,9 +2046,11 @@ impl StorageBackend for Postgres {
             };
             match current {
                 None => Ok(Some(grant(tx)?)),
-                Some((holder, _)) if holder == branch => Ok(Some(grant(tx)?)),
-                Some((holder, _)) if !self.is_running(tx, &holder)? => Ok(Some(grant(tx)?)),
-                Some((holder, acquired_ms)) => Ok(Some(LockOutcome::Held(ScratchLock {
+                Some((_, _, holder)) if holder == Some(incarnation) => Ok(Some(grant(tx)?)),
+                // An unbound holder (see `LegacyBinder`) is gone.
+                Some((_, _, None)) => Ok(Some(grant(tx)?)),
+                Some((_, _, Some(holder))) if !self.is_running(tx, holder)? => Ok(Some(grant(tx)?)),
+                Some((holder, acquired_ms, _)) => Ok(Some(LockOutcome::Held(ScratchLock {
                     name: name.to_owned(),
                     holder_branch: holder,
                     acquired_at: uint(acquired_ms) / 1000,
@@ -1815,12 +2059,13 @@ impl StorageBackend for Postgres {
         })
     }
 
-    fn scratch_unlock(&self, name: &str, branch: &str) -> Result<bool, Error> {
+    fn scratch_unlock(&self, name: &str, incarnation: i64) -> Result<bool, Error> {
         self.tx(true, |tx| {
             let changed = tx
                 .execute(
-                    "DELETE FROM by_scratch_locks WHERE repo = $1 AND name = $2 AND holder = $3",
-                    &[&self.repo, &name, &branch],
+                    "DELETE FROM by_scratch_locks WHERE repo = $1 AND name = $2 \
+                     AND holder_incarnation = $3",
+                    &[&self.repo, &name, &incarnation],
                 )
                 .map_err(db("scratch lock"))?;
             Ok(changed == 1)

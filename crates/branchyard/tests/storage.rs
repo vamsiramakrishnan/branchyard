@@ -260,3 +260,220 @@ fn scratch_path_matches_authorized_area() {
         f.root.join(".branchyard/scratch/shared-cache")
     );
 }
+
+/// Review finding: grants were bound to branch names, and a name is reusable
+/// once its branch is removed. A new, unrelated branch that takes a removed
+/// publisher's name, a removed share target's name or a removed scratch
+/// owner's name must not inherit their access.
+#[test]
+fn a_reused_branch_name_inherits_no_grant() {
+    let f = Fixture::new();
+    for name in ["root", "kid", "friend"] {
+        f.task("do nothing").name(name).run().unwrap();
+    }
+    make_child(&f, "kid", "root");
+    let file = f.dir.join("payload.txt");
+    fs::write(&file, b"kid's work").unwrap();
+    let by_kid = f
+        .yard
+        .publish_artifact("kid", &file, None, None, BTreeMap::new())
+        .unwrap();
+    let by_root = f
+        .yard
+        .publish_artifact("root", &file, None, None, BTreeMap::new())
+        .unwrap();
+    f.yard
+        .share_artifact("root", &by_root.id, "friend")
+        .unwrap();
+    f.yard.create_scratch("kid", "kid-cache").unwrap();
+    assert!(f
+        .yard
+        .artifacts("friend")
+        .unwrap()
+        .iter()
+        .any(|a| a.id == by_root.id));
+
+    // kid and friend are removed; root (kid's ancestor) keeps kid's
+    // artifact and scratch area alive.
+    f.yard.remove("kid").unwrap();
+    f.yard.remove("friend").unwrap();
+    assert!(f
+        .yard
+        .artifacts("root")
+        .unwrap()
+        .iter()
+        .any(|a| a.id == by_kid.id));
+
+    // Unrelated branches take both names.
+    for name in ["kid", "friend"] {
+        f.task("do nothing").name(name).run().unwrap();
+    }
+    let out = f.dir.join("out.txt");
+    assert!(
+        matches!(
+            f.yard.read_artifact("kid", &by_kid.id, &out),
+            Err(Error::Denied(_))
+        ),
+        "a new branch named like the removed publisher read its artifact"
+    );
+    assert!(!f
+        .yard
+        .artifacts("kid")
+        .unwrap()
+        .iter()
+        .any(|a| a.id == by_kid.id));
+    assert!(
+        matches!(
+            f.yard.read_artifact("friend", &by_root.id, &out),
+            Err(Error::Denied(_))
+        ),
+        "a new branch named like a removed share target read the shared artifact"
+    );
+    assert!(!f
+        .yard
+        .scratch_areas("kid")
+        .unwrap()
+        .iter()
+        .any(|s| s.name == "kid-cache"));
+    assert!(matches!(
+        f.yard.lock_scratch("kid", "kid-cache"),
+        Err(Error::Denied(_))
+    ));
+    // The rightful reader still reads.
+    f.yard.read_artifact("root", &by_kid.id, &out).unwrap();
+}
+
+/// Review finding: collection only re-examined what the removed branch
+/// itself published, so an artifact kept alive by an ancestor was never
+/// collected once that ancestor went too.
+#[test]
+fn a_grandchilds_artifact_is_collected_after_its_last_reader_is_removed() {
+    let f = Fixture::new();
+    for name in ["root", "a", "aa"] {
+        f.task("do nothing").name(name).run().unwrap();
+    }
+    make_child(&f, "a", "root");
+    make_child(&f, "aa", "a");
+    let file = f.dir.join("payload.txt");
+    fs::write(&file, b"grandchild output").unwrap();
+    let published = f
+        .yard
+        .publish_artifact("aa", &file, None, None, BTreeMap::new())
+        .unwrap();
+    f.yard.create_scratch("aa", "deep").unwrap();
+    let blob = f
+        .root
+        .join(".branchyard/artifacts")
+        .join(&published.digest[..2])
+        .join(&published.digest);
+
+    f.yard.remove("aa").unwrap();
+    f.yard.remove("a").unwrap();
+    // root, an ancestor captured at publish time, still reads it.
+    assert!(blob.is_file());
+    f.yard
+        .read_artifact("root", &published.id, f.dir.join("out.txt"))
+        .unwrap();
+
+    f.yard.remove("root").unwrap();
+    assert!(
+        !blob.exists(),
+        "the last reader is gone: the blob is collected"
+    );
+    assert!(
+        !f.yard.scratch_path("deep").exists(),
+        "the last reader is gone: the scratch area is collected"
+    );
+    f.task("do nothing").name("root").run().unwrap();
+    assert!(f.yard.artifacts("root").unwrap().is_empty());
+}
+
+/// Review finding: the digest was computed on one open of the path and the
+/// bytes copied from a second open, so bytes changed in between were stored
+/// under the wrong digest. A FIFO makes the two opens see different bytes
+/// deterministically.
+#[cfg(unix)]
+#[test]
+fn published_bytes_are_the_bytes_that_were_hashed() {
+    let f = Fixture::new();
+    f.task("do nothing").name("root").run().unwrap();
+    let fifo = f.dir.join("changing");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let writer = {
+        let fifo = fifo.clone();
+        std::thread::spawn(move || {
+            // The first open sees "first" and then end of file; any second
+            // open, once the first has read to the end, sees "second".
+            fs::write(&fifo, b"first").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let _ = fs::write(&fifo, b"second");
+        })
+    };
+    let published = f
+        .yard
+        .publish_artifact("root", &fifo, None, None, BTreeMap::new())
+        .unwrap();
+    // Unblock the writer's second open if publishing never made one: on
+    // Linux, opening a FIFO for reading and writing never blocks.
+    let unblock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fifo)
+        .unwrap();
+    writer.join().unwrap();
+    drop(unblock);
+    assert_eq!(published.digest, blake3::hash(b"first").to_hex().as_str());
+    let out = f.dir.join("out.txt");
+    f.yard.read_artifact("root", &published.id, &out).unwrap();
+    assert_eq!(fs::read(&out).unwrap(), b"first");
+}
+
+/// The same finding with a regular file rewritten in place while it is
+/// published: whatever bytes publishing read, the stored blob must hash to
+/// the recorded digest, so every read of every publish succeeds.
+#[test]
+fn a_file_rewritten_while_published_is_stored_consistently() {
+    use std::io::{Seek, SeekFrom, Write};
+    let f = Fixture::new();
+    f.task("do nothing").name("root").run().unwrap();
+    let path = f.dir.join("busy.bin");
+    let size = 4 * 1024 * 1024;
+    fs::write(&path, vec![b'a'; size]).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (path, stop) = (path.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+            let mut n = 0u8;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                n = n.wrapping_add(1);
+                file.seek(SeekFrom::Start(0)).unwrap();
+                file.write_all(&vec![b'a' + n % 26; size]).unwrap();
+            }
+        })
+    };
+    let mut published = Vec::new();
+    for _ in 0..20 {
+        published.push(
+            f.yard
+                .publish_artifact("root", &path, None, None, BTreeMap::new())
+                .unwrap(),
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+    let out = f.dir.join("out.bin");
+    for artifact in published {
+        f.yard
+            .read_artifact("root", &artifact.id, &out)
+            .unwrap_or_else(|e| panic!("{} stored inconsistently: {e}", artifact.id));
+        assert_eq!(
+            blake3::hash(&fs::read(&out).unwrap()).to_hex().as_str(),
+            artifact.digest
+        );
+    }
+}

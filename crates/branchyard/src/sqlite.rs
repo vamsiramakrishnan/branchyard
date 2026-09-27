@@ -27,14 +27,15 @@ use crate::state::{
     ReservationRow, SteerRow, StepRow,
 };
 use crate::storage::{
-    ArtifactRef, ArtifactRow, LockOutcome, NewArtifact, ScratchArea, ScratchLock, ScratchRow,
-    StorageBackend,
+    ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
+    NewScratch, ScratchArea, ScratchLock, ScratchRow, Share, StorageBackend,
 };
 use crate::{BranchStatus, Error, Message, RecordedEvent, SteerState};
 
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
-const SCHEMA: i64 = 1;
+/// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
+const SCHEMA: i64 = 2;
 
 const TABLES: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -45,7 +46,8 @@ CREATE TABLE IF NOT EXISTS branches (
     incarnation INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     created_ms INTEGER NOT NULL,
-    record TEXT
+    record TEXT,
+    parent_incarnation INTEGER
 );
 CREATE TABLE IF NOT EXISTS leases (
     branch TEXT PRIMARY KEY,
@@ -133,28 +135,35 @@ CREATE TABLE IF NOT EXISTS artifacts (
     ancestry TEXT NOT NULL,
     turn INTEGER NOT NULL,
     created_ms INTEGER NOT NULL,
-    labels TEXT NOT NULL
+    labels TEXT NOT NULL,
+    publisher_incarnation INTEGER,
+    ancestry_incarnations TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS artifact_shares (
     id TEXT NOT NULL,
     branch TEXT NOT NULL,
+    incarnation INTEGER,
     PRIMARY KEY (id, branch)
 );
 CREATE TABLE IF NOT EXISTS scratch_areas (
     name TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
     ancestry TEXT NOT NULL,
-    created_ms INTEGER NOT NULL
+    created_ms INTEGER NOT NULL,
+    owner_incarnation INTEGER,
+    ancestry_incarnations TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS scratch_shares (
     name TEXT NOT NULL,
     branch TEXT NOT NULL,
+    incarnation INTEGER,
     PRIMARY KEY (name, branch)
 );
 CREATE TABLE IF NOT EXISTS scratch_locks (
     name TEXT PRIMARY KEY,
     holder TEXT NOT NULL,
-    acquired_ms INTEGER NOT NULL
+    acquired_ms INTEGER NOT NULL,
+    holder_incarnation INTEGER
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,6 +293,161 @@ fn put(tx: &Transaction<'_>, record: &Record) -> Result<(), Error> {
         )
         .map_err(|e| db("write", e))?;
     }
+    if let Some(parent) = &record.info.parent {
+        bind_parent(tx, name, parent)?;
+    }
+    Ok(())
+}
+
+/// Bind `name`'s parent to the incarnation of the live branch `parent`,
+/// once, if it is older than `name`: the first write that names a parent is
+/// the child's creation, while its parent is alive. Grants follow this
+/// binding after the parent is removed (see `crate::storage::Lineage`).
+fn bind_parent(tx: &Transaction<'_>, name: &str, parent: &str) -> Result<(), Error> {
+    tx.execute(
+        "UPDATE branches SET parent_incarnation = (SELECT p.incarnation FROM branches p \
+         WHERE p.name = ?2 AND p.record IS NOT NULL AND p.incarnation < branches.incarnation) \
+         WHERE name = ?1 AND parent_incarnation IS NULL",
+        params![name, parent],
+    )
+    .map_err(|e| db("write", e))?;
+    Ok(())
+}
+
+/// Upgrade a schema 1 store: add the identity columns and bind every
+/// name-only grant once, by [`LegacyBinder`]'s rule, in the transaction
+/// that checked the schema.
+fn upgrade_to_identities(tx: &Transaction<'_>) -> Result<(), Error> {
+    let e = |error| db("upgrade to schema 2", error);
+    for sql in [
+        "ALTER TABLE branches ADD COLUMN parent_incarnation INTEGER",
+        "ALTER TABLE artifacts ADD COLUMN publisher_incarnation INTEGER",
+        "ALTER TABLE artifacts ADD COLUMN ancestry_incarnations TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE artifact_shares ADD COLUMN incarnation INTEGER",
+        "ALTER TABLE scratch_areas ADD COLUMN owner_incarnation INTEGER",
+        "ALTER TABLE scratch_areas ADD COLUMN ancestry_incarnations TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE scratch_shares ADD COLUMN incarnation INTEGER",
+        "ALTER TABLE scratch_locks ADD COLUMN holder_incarnation INTEGER",
+    ] {
+        tx.execute(sql, []).map_err(e)?;
+    }
+    let mut branches = Vec::new();
+    {
+        let mut statement = tx
+            .prepare("SELECT incarnation, name, created_ms, record FROM branches WHERE record IS NOT NULL")
+            .map_err(e)?;
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(e)?;
+        for row in rows {
+            let (incarnation, name, created_ms, text) = row.map_err(e)?;
+            let record: Record = decode(&format!("record {name}"), &text)?;
+            branches.push(LegacyBranch {
+                name,
+                incarnation,
+                created_ms: uint(created_ms),
+                parent: record.info.parent,
+            });
+        }
+    }
+    let binder = LegacyBinder::new(&branches);
+    for branch in &branches {
+        tx.execute(
+            "UPDATE branches SET parent_incarnation = ?2 WHERE incarnation = ?1",
+            params![branch.incarnation, binder.parent(branch)],
+        )
+        .map_err(e)?;
+    }
+    let rows: Vec<(i64, String, String, i64)> = {
+        let mut statement = tx
+            .prepare("SELECT seq, publisher, ancestry, created_ms FROM artifacts")
+            .map_err(e)?;
+        let rows = statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)?
+    };
+    for (seq, publisher, ancestry, created_ms) in rows {
+        let ancestry: Vec<String> = decode("artifact ancestry", &ancestry)?;
+        tx.execute(
+            "UPDATE artifacts SET publisher_incarnation = ?2, ancestry_incarnations = ?3 \
+             WHERE seq = ?1",
+            params![
+                seq,
+                binder.bind(&publisher, Some(uint(created_ms))),
+                encode("ancestry", &binder.bind_all(&ancestry, uint(created_ms)))?,
+            ],
+        )
+        .map_err(e)?;
+    }
+    let rows: Vec<(String, String, String, i64)> = {
+        let mut statement = tx
+            .prepare("SELECT name, owner, ancestry, created_ms FROM scratch_areas")
+            .map_err(e)?;
+        let rows = statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)?
+    };
+    for (name, owner, ancestry, created_ms) in rows {
+        let ancestry: Vec<String> = decode("scratch ancestry", &ancestry)?;
+        tx.execute(
+            "UPDATE scratch_areas SET owner_incarnation = ?2, ancestry_incarnations = ?3 \
+             WHERE name = ?1",
+            params![
+                name,
+                binder.bind(&owner, Some(uint(created_ms))),
+                encode("ancestry", &binder.bind_all(&ancestry, uint(created_ms)))?,
+            ],
+        )
+        .map_err(e)?;
+    }
+    for (table, key) in [("artifact_shares", "id"), ("scratch_shares", "name")] {
+        let rows: Vec<(String, String)> = {
+            let mut statement = tx
+                .prepare(&format!("SELECT {key}, branch FROM {table}"))
+                .map_err(e)?;
+            let rows = statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(e)?;
+            rows.collect::<Result<_, _>>().map_err(e)?
+        };
+        for (id, branch) in rows {
+            tx.execute(
+                &format!("UPDATE {table} SET incarnation = ?3 WHERE {key} = ?1 AND branch = ?2"),
+                params![id, branch, binder.bind(&branch, None)],
+            )
+            .map_err(e)?;
+        }
+    }
+    let rows: Vec<(String, String, i64)> = {
+        let mut statement = tx
+            .prepare("SELECT name, holder, acquired_ms FROM scratch_locks")
+            .map_err(e)?;
+        let rows = statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)?
+    };
+    for (name, holder, acquired_ms) in rows {
+        tx.execute(
+            "UPDATE scratch_locks SET holder_incarnation = ?2 WHERE name = ?1",
+            params![name, binder.bind(&holder, Some(uint(acquired_ms)))],
+        )
+        .map_err(e)?;
+    }
+    tx.execute(
+        "UPDATE meta SET value = ?1 WHERE key = 'schema'",
+        params![SCHEMA.to_string()],
+    )
+    .map_err(e)?;
     Ok(())
 }
 
@@ -412,6 +576,7 @@ impl Sqlite {
                     Ok(())
                 }
                 Some(Ok(SCHEMA)) => Ok(()),
+                Some(Ok(1)) => upgrade_to_identities(tx),
                 Some(other) => Err(Error::State(format!(
                     "{} has schema {other:?}; this version understands {SCHEMA}",
                     store.path.display()
@@ -1490,6 +1655,8 @@ struct ArtifactCols {
     turn: i64,
     created_ms: i64,
     labels: String,
+    publisher_incarnation: Option<i64>,
+    ancestry_incarnations: String,
 }
 
 fn artifact_row_from(cols: ArtifactCols) -> Result<ArtifactRow, Error> {
@@ -1506,11 +1673,13 @@ fn artifact_row_from(cols: ArtifactCols) -> Result<ArtifactRow, Error> {
             labels: decode("artifact labels", &cols.labels)?,
         },
         ancestry: decode("artifact ancestry", &cols.ancestry)?,
+        publisher_incarnation: cols.publisher_incarnation,
+        ancestry_incarnations: decode("artifact ancestry", &cols.ancestry_incarnations)?,
     })
 }
 
-const ARTIFACT_COLUMNS: &str =
-    "id, digest, size, name, media_type, publisher, ancestry, turn, created_ms, labels";
+const ARTIFACT_COLUMNS: &str = "id, digest, size, name, media_type, publisher, ancestry, turn, \
+     created_ms, labels, publisher_incarnation, ancestry_incarnations";
 
 fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactCols> {
     Ok(ArtifactCols {
@@ -1524,35 +1693,138 @@ fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactCols> 
         turn: row.get(7)?,
         created_ms: row.get(8)?,
         labels: row.get(9)?,
+        publisher_incarnation: row.get(10)?,
+        ancestry_incarnations: row.get(11)?,
     })
 }
 
-/// Whether `name`'s record, as stored in this transaction, says `running`.
-fn is_running(tx: &Transaction<'_>, name: &str) -> Result<bool, Error> {
-    match stored_record(tx, name)? {
-        Some(record) => Ok(record.info.status == BranchStatus::Running),
+const SCRATCH_COLUMNS: &str =
+    "name, owner, ancestry, created_ms, owner_incarnation, ancestry_incarnations";
+
+type ScratchCols = (String, String, String, i64, Option<i64>, String);
+
+fn scratch_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ScratchCols> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+    ))
+}
+
+fn scratch_row_from(cols: ScratchCols) -> Result<ScratchRow, Error> {
+    let (name, owner, ancestry, created_ms, owner_incarnation, ancestry_incarnations) = cols;
+    Ok(ScratchRow {
+        area: ScratchArea {
+            name,
+            owner_branch: owner,
+            created_at: uint(created_ms) / 1000,
+        },
+        ancestry: decode("scratch ancestry", &ancestry)?,
+        owner_incarnation,
+        ancestry_incarnations: decode("scratch ancestry", &ancestry_incarnations)?,
+    })
+}
+
+/// Whether the branch at `incarnation`, as stored in this transaction,
+/// says `running`; a removed one does not.
+fn is_running(tx: &Transaction<'_>, incarnation: i64) -> Result<bool, Error> {
+    let text: Option<Option<String>> = tx
+        .query_row(
+            "SELECT record FROM branches WHERE incarnation = ?1",
+            params![incarnation],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| db("read", e))?;
+    match text.flatten() {
+        Some(text) => {
+            let record: Record = decode("record", &text)?;
+            Ok(record.info.status == BranchStatus::Running)
+        }
         None => Ok(false),
     }
 }
 
+/// The shares in `table` keyed by `key` = `value`.
+fn shares(conn: &Connection, table: &str, key: &str, value: &str) -> Result<Vec<Share>, Error> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT branch, incarnation FROM {table} WHERE {key} = ?1"
+        ))
+        .map_err(|e| db(table, e))?;
+    let rows = statement
+        .query_map(params![value], |r| {
+            Ok(Share {
+                branch: r.get(0)?,
+                incarnation: r.get(1)?,
+            })
+        })
+        .map_err(|e| db(table, e))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| db(table, e))
+}
+
 impl StorageBackend for Sqlite {
+    fn identities(&self) -> Result<Vec<Identity>, Error> {
+        self.query(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT incarnation, name, parent_incarnation, record FROM branches \
+                     WHERE record IS NOT NULL",
+                )
+                .map_err(|e| db("identities", e))?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(|e| db("identities", e))?;
+            let mut found = Vec::new();
+            for row in rows {
+                let (incarnation, name, parent_incarnation, text) =
+                    row.map_err(|e| db("identities", e))?;
+                let record: Record = decode(&format!("record {name}"), &text)?;
+                found.push(Identity {
+                    name,
+                    incarnation,
+                    parent_incarnation,
+                    parent: record.info.parent,
+                });
+            }
+            Ok(found)
+        })
+    }
+
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {
         self.tx(true, |tx| {
             let now = int(now_ms());
+            let ancestry = encode("ancestry", &new.ancestry)?;
+            let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
+            let labels = encode("labels", &new.labels)?;
             tx.execute(
                 "INSERT INTO artifacts \
                  (id, digest, size, name, media_type, publisher, ancestry, turn, created_ms, \
-                  labels) VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  labels, publisher_incarnation, ancestry_incarnations) \
+                 VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     new.digest,
                     int(new.size),
                     new.name,
                     new.media_type,
                     new.publisher_branch,
-                    encode("ancestry", &new.ancestry)?,
+                    ancestry,
                     int(new.turn),
                     now,
-                    encode("labels", &new.labels)?,
+                    labels,
+                    new.publisher_incarnation,
+                    ancestry_incarnations,
                 ],
             )
             .map_err(|e| db("artifact", e))?;
@@ -1570,10 +1842,12 @@ impl StorageBackend for Sqlite {
                 name: new.name.clone(),
                 media_type: new.media_type.clone(),
                 publisher: new.publisher_branch.clone(),
-                ancestry: encode("ancestry", &new.ancestry)?,
+                ancestry,
                 turn: int(new.turn),
                 created_ms: now,
-                labels: encode("labels", &new.labels)?,
+                labels,
+                publisher_incarnation: Some(new.publisher_incarnation),
+                ancestry_incarnations,
             })
         })
     }
@@ -1611,20 +1885,11 @@ impl StorageBackend for Sqlite {
         })
     }
 
-    fn artifact_shares(&self, id: &str) -> Result<Vec<String>, Error> {
-        self.query(|conn| {
-            let mut statement = conn
-                .prepare("SELECT branch FROM artifact_shares WHERE id = ?1")
-                .map_err(|e| db("artifact shares", e))?;
-            let rows = statement
-                .query_map(params![id], |r| r.get(0))
-                .map_err(|e| db("artifact shares", e))?;
-            rows.collect::<Result<Vec<String>, _>>()
-                .map_err(|e| db("artifact shares", e))
-        })
+    fn artifact_shares(&self, id: &str) -> Result<Vec<Share>, Error> {
+        self.query(|conn| shares(conn, "artifact_shares", "id", id))
     }
 
-    fn share_artifact(&self, id: &str, branch: &str) -> Result<bool, Error> {
+    fn share_artifact(&self, id: &str, branch: &str, incarnation: i64) -> Result<bool, Error> {
         self.tx(true, |tx| {
             let exists: bool = tx
                 .query_row("SELECT 1 FROM artifacts WHERE id = ?1", params![id], |_| {
@@ -1635,8 +1900,9 @@ impl StorageBackend for Sqlite {
                 .unwrap_or(false);
             if exists {
                 tx.execute(
-                    "INSERT OR IGNORE INTO artifact_shares (id, branch) VALUES (?1, ?2)",
-                    params![id, branch],
+                    "INSERT INTO artifact_shares (id, branch, incarnation) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT (id, branch) DO UPDATE SET incarnation = excluded.incarnation",
+                    params![id, branch, incarnation],
                 )
                 .map_err(|e| db("artifact share", e))?;
             }
@@ -1666,13 +1932,20 @@ impl StorageBackend for Sqlite {
         })
     }
 
-    fn create_scratch(&self, name: &str, owner: &str, ancestry: &[String]) -> Result<bool, Error> {
+    fn create_scratch(&self, new: &NewScratch) -> Result<bool, Error> {
         self.tx(true, |tx| {
             let inserted = tx
                 .execute(
-                    "INSERT OR IGNORE INTO scratch_areas (name, owner, ancestry, created_ms) \
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![name, owner, encode("ancestry", &ancestry)?, int(now_ms())],
+                    "INSERT OR IGNORE INTO scratch_areas (name, owner, ancestry, created_ms, \
+                     owner_incarnation, ancestry_incarnations) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        new.name,
+                        new.owner,
+                        encode("ancestry", &new.ancestry)?,
+                        int(now_ms()),
+                        new.owner_incarnation,
+                        encode("ancestry", &new.ancestry_incarnations)?,
+                    ],
                 )
                 .map_err(|e| db("scratch", e))?;
             Ok(inserted == 1)
@@ -1682,29 +1955,13 @@ impl StorageBackend for Sqlite {
     fn scratch(&self, name: &str) -> Result<Option<ScratchRow>, Error> {
         self.query(|conn| {
             conn.query_row(
-                "SELECT name, owner, ancestry, created_ms FROM scratch_areas WHERE name = ?1",
+                &format!("SELECT {SCRATCH_COLUMNS} FROM scratch_areas WHERE name = ?1"),
                 params![name],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                },
+                scratch_from_row,
             )
             .optional()
             .map_err(|e| db("scratch", e))?
-            .map(|(name, owner, ancestry, created_ms)| {
-                Ok(ScratchRow {
-                    area: ScratchArea {
-                        name,
-                        owner_branch: owner,
-                        created_at: uint(created_ms) / 1000,
-                    },
-                    ancestry: decode("scratch ancestry", &ancestry)?,
-                })
-            })
+            .map(scratch_row_from)
             .transpose()
         })
     }
@@ -1712,50 +1969,26 @@ impl StorageBackend for Sqlite {
     fn scratch_list(&self) -> Result<Vec<ScratchRow>, Error> {
         self.query(|conn| {
             let mut statement = conn
-                .prepare(
-                    "SELECT name, owner, ancestry, created_ms FROM scratch_areas ORDER BY created_ms",
-                )
+                .prepare(&format!(
+                    "SELECT {SCRATCH_COLUMNS} FROM scratch_areas ORDER BY created_ms"
+                ))
                 .map_err(|e| db("scratch", e))?;
             let rows = statement
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                })
+                .query_map([], scratch_from_row)
                 .map_err(|e| db("scratch", e))?;
             let mut found = Vec::new();
             for row in rows {
-                let (name, owner, ancestry, created_ms) = row.map_err(|e| db("scratch", e))?;
-                found.push(ScratchRow {
-                    area: ScratchArea {
-                        name,
-                        owner_branch: owner,
-                        created_at: uint(created_ms) / 1000,
-                    },
-                    ancestry: decode("scratch ancestry", &ancestry)?,
-                });
+                found.push(scratch_row_from(row.map_err(|e| db("scratch", e))?)?);
             }
             Ok(found)
         })
     }
 
-    fn scratch_shares(&self, name: &str) -> Result<Vec<String>, Error> {
-        self.query(|conn| {
-            let mut statement = conn
-                .prepare("SELECT branch FROM scratch_shares WHERE name = ?1")
-                .map_err(|e| db("scratch shares", e))?;
-            let rows = statement
-                .query_map(params![name], |r| r.get(0))
-                .map_err(|e| db("scratch shares", e))?;
-            rows.collect::<Result<Vec<String>, _>>()
-                .map_err(|e| db("scratch shares", e))
-        })
+    fn scratch_shares(&self, name: &str) -> Result<Vec<Share>, Error> {
+        self.query(|conn| shares(conn, "scratch_shares", "name", name))
     }
 
-    fn share_scratch(&self, name: &str, branch: &str) -> Result<bool, Error> {
+    fn share_scratch(&self, name: &str, branch: &str, incarnation: i64) -> Result<bool, Error> {
         self.tx(true, |tx| {
             let exists: bool = tx
                 .query_row(
@@ -1768,8 +2001,9 @@ impl StorageBackend for Sqlite {
                 .unwrap_or(false);
             if exists {
                 tx.execute(
-                    "INSERT OR IGNORE INTO scratch_shares (name, branch) VALUES (?1, ?2)",
-                    params![name, branch],
+                    "INSERT INTO scratch_shares (name, branch, incarnation) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT (name, branch) DO UPDATE SET incarnation = excluded.incarnation",
+                    params![name, branch, incarnation],
                 )
                 .map_err(|e| db("scratch share", e))?;
             }
@@ -1789,7 +2023,12 @@ impl StorageBackend for Sqlite {
         })
     }
 
-    fn scratch_lock(&self, name: &str, branch: &str) -> Result<Option<LockOutcome>, Error> {
+    fn scratch_lock(
+        &self,
+        name: &str,
+        branch: &str,
+        incarnation: i64,
+    ) -> Result<Option<LockOutcome>, Error> {
         self.tx(true, |tx| {
             let known: bool = tx
                 .query_row(
@@ -1803,21 +2042,23 @@ impl StorageBackend for Sqlite {
             if !known {
                 return Ok(None);
             }
-            let current: Option<(String, i64)> = tx
+            let current: Option<(String, i64, Option<i64>)> = tx
                 .query_row(
-                    "SELECT holder, acquired_ms FROM scratch_locks WHERE name = ?1",
+                    "SELECT holder, acquired_ms, holder_incarnation FROM scratch_locks \
+                     WHERE name = ?1",
                     params![name],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()
                 .map_err(|e| db("scratch lock", e))?;
             let grant = |tx: &Transaction<'_>| -> Result<LockOutcome, Error> {
                 let now = int(now_ms());
                 tx.execute(
-                    "INSERT INTO scratch_locks (name, holder, acquired_ms) VALUES (?1, ?2, ?3) \
-                     ON CONFLICT(name) DO UPDATE SET holder = excluded.holder, \
-                     acquired_ms = excluded.acquired_ms",
-                    params![name, branch, now],
+                    "INSERT INTO scratch_locks (name, holder, acquired_ms, holder_incarnation) \
+                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT(name) DO UPDATE SET \
+                     holder = excluded.holder, acquired_ms = excluded.acquired_ms, \
+                     holder_incarnation = excluded.holder_incarnation",
+                    params![name, branch, now, incarnation],
                 )
                 .map_err(|e| db("scratch lock", e))?;
                 Ok(LockOutcome::Granted(ScratchLock {
@@ -1828,9 +2069,11 @@ impl StorageBackend for Sqlite {
             };
             match current {
                 None => Ok(Some(grant(tx)?)),
-                Some((holder, _)) if holder == branch => Ok(Some(grant(tx)?)),
-                Some((holder, _)) if !is_running(tx, &holder)? => Ok(Some(grant(tx)?)),
-                Some((holder, acquired_ms)) => Ok(Some(LockOutcome::Held(ScratchLock {
+                Some((_, _, holder)) if holder == Some(incarnation) => Ok(Some(grant(tx)?)),
+                // An unbound holder (see `LegacyBinder`) is gone.
+                Some((_, _, None)) => Ok(Some(grant(tx)?)),
+                Some((_, _, Some(holder))) if !is_running(tx, holder)? => Ok(Some(grant(tx)?)),
+                Some((holder, acquired_ms, _)) => Ok(Some(LockOutcome::Held(ScratchLock {
                     name: name.to_owned(),
                     holder_branch: holder,
                     acquired_at: uint(acquired_ms) / 1000,
@@ -1839,12 +2082,12 @@ impl StorageBackend for Sqlite {
         })
     }
 
-    fn scratch_unlock(&self, name: &str, branch: &str) -> Result<bool, Error> {
+    fn scratch_unlock(&self, name: &str, incarnation: i64) -> Result<bool, Error> {
         self.tx(true, |tx| {
             let changed = tx
                 .execute(
-                    "DELETE FROM scratch_locks WHERE name = ?1 AND holder = ?2",
-                    params![name, branch],
+                    "DELETE FROM scratch_locks WHERE name = ?1 AND holder_incarnation = ?2",
+                    params![name, incarnation],
                 )
                 .map_err(|e| db("scratch lock", e))?;
             Ok(changed == 1)
