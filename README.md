@@ -222,6 +222,8 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Implementation plan](docs/implementation-plan.md): ordered milestones and acceptance gates.
 - [Comparison](docs/comparison.md): Scion, OpenRig and Herdr against Branchyard, and what to absorb from each.
 - [Lifecycle](docs/lifecycle.md): stall detection, webhook notifications and reincarnation.
+- [Distribution](docs/distribution.md): installing the skill for Claude Code and Codex, and reproducible plugin/SDK archives.
+- [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
 
 ## License

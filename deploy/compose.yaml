@@ -1,0 +1,65 @@
+# Self-hosted `by serve` behind PostgreSQL. See docs/deploy.md.
+#
+# Secrets (the bearer token, the database password) are files, never
+# environment variables or compose-file literals: set BRANCHYARD_SECRETS_DIR
+# to a directory holding token.txt (16+ characters) and db-password.txt
+# (URL-safe) before `docker compose -f deploy/compose.yaml up --build`, and
+# BRANCHYARD_CONFIG to an edited copy of config.example.json and
+# BRANCHYARD_REPO to the repository `by serve` will serve.
+#
+# `--insecure-bind` is used because the server listens on 0.0.0.0 inside
+# the compose network; it is not reachable from outside this host unless
+# something publishes 8421, so put a real TLS-terminating reverse proxy in
+# front of that before doing so (or configure --tls-cert/--tls-key and
+# drop --insecure-bind instead).
+services:
+  database:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: branchyard
+      POSTGRES_USER: branchyard
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes:
+      - branchyard-database:/var/lib/postgresql/data
+    secrets:
+      - db_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U branchyard -d branchyard"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        exec by serve --config /config/server.json --insecure-bind
+        --database "postgres://branchyard:$$(cat /run/secrets/db_password)@database:5432/branchyard"
+    ports:
+      - "127.0.0.1:8421:8421"
+    volumes:
+      - ${BRANCHYARD_CONFIG:?set an absolute path to an edited config.example.json}:/config/server.json:ro
+      - ${BRANCHYARD_REPO:?set an absolute path to the repository to serve}:/repos/app
+      - branchyard-data:/data
+    secrets:
+      - branchyard_token
+      - db_password
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8421/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+volumes:
+  branchyard-database:
+  branchyard-data:
+secrets:
+  branchyard_token:
+    file: ${BRANCHYARD_SECRETS_DIR:?set a directory holding token.txt and db-password.txt}/token.txt
+  db_password:
+    file: ${BRANCHYARD_SECRETS_DIR:?set a directory holding token.txt and db-password.txt}/db-password.txt

@@ -6,6 +6,11 @@ license.workspace = true
 publish.workspace = true
 description = "Blocking Rust client for the Branchyard server API: the remote SDK"
 
+[features]
+# Derive schemars::JsonSchema on every wire request/response type, and build
+# schema/contract.json from them; see tools/schema-gen and docs/server.md.
+schema = ["dep:schemars", "branchyard/schema"]
+
 [dependencies]
 blake3 = "1"
 branchyard = { path = "../branchyard" }
@@ -15,3 +20,4 @@ rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 webpki-roots = "1"
+schemars = { version = "1", optional = true }

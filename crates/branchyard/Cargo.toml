@@ -13,6 +13,9 @@ microsandbox = ["branchyard-microsandbox/microsandbox"]
 # Keep a repository's state in PostgreSQL (Yard::open_postgres) as well as
 # SQLite; see docs/durability.md.
 postgres = ["dep:postgres", "dep:tokio"]
+# Derive schemars::JsonSchema on the branch/delegation wire types, for
+# schema/contract.json; see tools/schema-gen.
+schema = ["dep:schemars", "branchyard-provision/schema", "branchyard-harness/schema"]
 
 [dependencies]
 blake3 = "1"
@@ -29,6 +32,7 @@ serde_json = "1"
 rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
 postgres = { version = "0.19", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }
+schemars = { version = "1", optional = true }
 
 [dev-dependencies]
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }

@@ -8,12 +8,14 @@ use branchyard::{ArtifactRef, ScratchArea, ScratchLock};
 use serde::{Deserialize, Serialize};
 
 /// `GET .../artifacts`: every artifact the acting branch may read.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactList {
     pub artifacts: Vec<ArtifactRef>,
 }
 
 /// `POST .../artifacts/{id}/share` and `.../scratch/{name}/share`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShareRequest {
@@ -21,6 +23,7 @@ pub struct ShareRequest {
 }
 
 /// `POST .../scratch`: create a scratch area owned by the acting branch.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateScratchRequest {
@@ -28,12 +31,14 @@ pub struct CreateScratchRequest {
 }
 
 /// `GET .../scratch`: every scratch area the acting branch may reach.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScratchList {
     pub areas: Vec<ScratchArea>,
 }
 
 /// `GET .../scratch/{name}/lock`: the area's writer lock, if any is held.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LockState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,12 +46,14 @@ pub struct LockState {
 }
 
 /// A trivial success, printed as `{"ok": true}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ack {
     pub ok: bool,
 }
 
 /// `POST .../scratch/{name}/lock` and `.../unlock`: no fields yet.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Empty {}

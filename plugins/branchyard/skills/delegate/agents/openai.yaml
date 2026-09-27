@@ -1,0 +1,4 @@
+interface:
+  display_name: "Branchyard"
+  short_description: "Delegate work to child branches"
+  default_prompt: "Use $branchyard to delegate part of this task to a child branch."

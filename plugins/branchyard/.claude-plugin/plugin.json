@@ -2,5 +2,6 @@
   "name": "branchyard",
   "description": "Delegate work to child branches with Branchyard: spawn, watch, integrate and cancel children within your envelope.",
   "version": "0.0.1",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "skills": "./skills/"
 }

@@ -254,6 +254,10 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `remote_error` | 502 | An error the engine running a delegating turn returned through its broker; `detail.kind` is its kind |
 | `harness_unavailable`, `unsupported`, `check_failed`, `check_timed_out`, `check_not_started`, `invalid_candidate` | 422 | SDK refusals; check failures have `detail.output_tail` |
 
+## Published schema
+
+[`schema/contract.json`](../schema/contract.json) is the JSON Schema for every request and response type above (`crate::api` and `crate::storage_api` in `branchyard-client`), generated from their Rust definitions with [`schemars`](https://docs.rs/schemars) rather than hand-maintained: `#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]` on the wire types (and the branch, delegation and provisioning types they reference), a `schema` feature per crate that pulls it in, and `cargo run -p branchyard-client --features schema --example generate_contract` to print it. `crates/branchyard-client/tests/contract.rs` regenerates it in-process and diffs against the checked-in file, so a changed wire type without a regenerated schema fails `cargo test -p branchyard-client --features schema` in CI. `tests/test_schema_validation.py` validates this document's own worked examples (the ones in this page) against it with a small stdlib-only structural validator, as a sanity check on the schema itself.
+
 ## Remote mode in `by`
 
 ```sh

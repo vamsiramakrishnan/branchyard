@@ -1,0 +1,22 @@
+{
+  "listen": "0.0.0.0:8421",
+  "data_dir": "/data",
+  "repos": {
+    "app": "/repos/app"
+  },
+  "tokens": [
+    { "name": "ci", "token_file": "/run/secrets/branchyard_token" }
+  ],
+  "max_body_bytes": 1048576,
+  "max_artifact_bytes": 268435456,
+  "max_running": 8,
+  "shutdown_grace_seconds": 60,
+  "harness_commands": {},
+  "allow_client_commands": false,
+  "allow_providers": [],
+  "allow_delegation": false,
+  "allow_unapproved_tools": false,
+  "secrets": {},
+  "webhooks": [],
+  "webhook_insecure": false
+}
