@@ -54,15 +54,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use branchyard::{BranchInfo, HarnessInfo};
+use branchyard::{BranchInfo, Children, EventPage, HarnessInfo, Inspection};
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, ErrorResponse,
-    FeedEntry, ForkRequest, HarnessList, MergeRequest, Operation, Removed, RepoEntry, RepoList,
-    SendRequest, TaskRequest,
+    FeedEntry, ForkRequest, HarnessList, IntegrateRequest, MergeRequest, Operation, Removed,
+    RepoEntry, RepoList, SendRequest, SpawnRequest, TaskRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -213,7 +213,7 @@ impl Client {
     /// Harness profiles, as found on the server.
     pub fn harnesses(&self) -> Result<Vec<HarnessInfo>, Error> {
         let list: HarnessList = self.get("/v1/harnesses")?;
-        Ok(list.harnesses.into_iter().map(Into::into).collect())
+        Ok(list.harnesses)
     }
 
     pub fn operation(&self, id: &str) -> Result<Operation, Error> {
@@ -391,6 +391,58 @@ impl Repo {
     ) -> Result<Operation, Error> {
         self.client
             .post(&self.branch_path(branch, "/merge"), request, key)
+    }
+
+    /// Create a child of `parent` with the server's authority, bounded by
+    /// the parent's envelope, and run its first turn; like
+    /// `by spawn --parent`. The finished operation's result holds the
+    /// child's inspection.
+    pub fn spawn(
+        &self,
+        parent: &str,
+        request: &SpawnRequest,
+        key: &str,
+    ) -> Result<Operation, Error> {
+        self.client
+            .post(&self.branch_path(parent, "/spawn"), request, key)
+    }
+
+    /// Merge a delegated child into the parent that delegated it, after
+    /// its check passes; like `by integrate`. The finished operation's
+    /// result holds the merge.
+    pub fn integrate(&self, branch: &str, key: &str) -> Result<Operation, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/integrate"),
+            &IntegrateRequest::default(),
+            key,
+        )
+    }
+
+    /// A branch as a delegating parent sees it; like `by inspect`.
+    pub fn inspect(&self, branch: &str) -> Result<Inspection, Error> {
+        self.client.get(&self.branch_path(branch, "/inspection"))
+    }
+
+    /// Up to `limit` of a branch's recorded events after `cursor`, or the
+    /// most recent without one; like `by events`.
+    pub fn event_page(
+        &self,
+        branch: &str,
+        cursor: Option<usize>,
+        limit: usize,
+    ) -> Result<EventPage, Error> {
+        let mut query = format!("?limit={limit}");
+        if let Some(cursor) = cursor {
+            query.push_str(&format!("&cursor={cursor}"));
+        }
+        self.client
+            .get(&self.branch_path(branch, &format!("/event-page{query}")))
+    }
+
+    /// Every branch `branch` delegated to, directly or below; like
+    /// `by children`.
+    pub fn children(&self, branch: &str) -> Result<Children, Error> {
+        self.client.get(&self.branch_path(branch, "/children"))
     }
 
     /// Ask the branch's running turn, and every running turn delegated

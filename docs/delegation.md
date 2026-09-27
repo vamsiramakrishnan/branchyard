@@ -1,6 +1,6 @@
 # Delegation
 
-A harness running on a Branchyard branch can act as a meta-harness: it creates child branches, gives each a harness, a prompt and a budget, watches them, merges the ones it wants into its own branch, and cancels the rest. Children can delegate further when their envelope allows. This works in local mode today, tested against a fake ACP agent; no real harness has delegated through it yet.
+A harness running on a Branchyard branch can act as a meta-harness: it creates child branches, gives each a harness, a prompt and a budget, watches them, merges the ones it wants into its own branch, and cancels the rest. Children can delegate further when their envelope allows. This works in local mode and through a server whose operator allows it, tested against a fake ACP agent; no real harness has delegated through it yet.
 
 There is one set of operations and one authority model. Four surfaces reach them:
 
@@ -147,6 +147,22 @@ The acting branch comes from the token, never from a name in a request: `branch`
 
 In local mode this stops honest mistakes: a harness that confuses branches, reaches for its parent, or escapes its budget by asking. It does not stop a hostile harness running as your user. Such a harness can read every token file in `.branchyard/`, connect to the broker's socket, and act as any branch with a running turn; it can also run git and `by` directly with your authority. Server mode, with harnesses in sandboxes and tokens that never leave the server, is where the envelope becomes a boundary.
 
+## Through a server
+
+A server started with `by serve --allow-delegation` offers the same tools to the harnesses it runs. The harness runs on the server's host, so the mechanism is the one above: the engine in the server process issues the token, listens on the broker socket under the served repository's `.branchyard/delegation/`, and puts the server's `by` first on the harness's `PATH` (`--by-path` chooses it; by default it is the server's own executable under `by serve`). Children run on the server's threads, and the operation that ran the parent's turn waits for them, as `by run` does, and reports them as `descendants`.
+
+```sh
+by serve --allow-delegation                      # on the server
+by --remote URL run "Split this and delegate" --delegate --allow-delegation --yes
+by --remote URL spawn "Port the tokenizer" --parent root --budget-usd 1 --yes --json
+by --remote URL inspect kid --json; by --remote URL events kid --cursor 0 --json
+by --remote URL children root --json; by --remote URL integrate kid --json
+```
+
+A person reaches the same operations remotely, with the server's authority, exactly as they act locally outside a harness: `spawn` needs `--parent` and is bounded by the parent's envelope, `integrate` merges a child into the branch that delegated it, and `inspect`, `events` and `children` read any branch. `by --remote … send --json` prints `Sent` once the turn and its subtree have ended on the server. The JSON is the same as local mode's, and refusals print the same `{"error": {"kind", "message"}}`. The HTTP routes are in [the server reference](server.md#api-reference).
+
+Without `--allow-delegation`, the server refuses an envelope, `allow_delegation`, a spawn, and a send to a branch that was given an envelope (`403 delegation_not_allowed`); reading and integrating need no opt-in.
+
 ## How it runs
 
 Children run on threads of the process that runs their parent's turn, whether that process is `by run` or your own program. A spawn returns once the child's record exists and its thread has started. While any of its turns may delegate, the engine listens on a Unix socket in `.branchyard/delegation/`, or in the temporary directory when that path is too long; `by`, the Python module and the MCP server reach it there. A socket, unlike a loopback port, stays reachable from a sandbox without network that can still see the repository.
@@ -161,5 +177,5 @@ A child's own spend counts against every ancestor through the reservations. `ins
 - Tool calls longer than a harness's own MCP or shell timeout, such as an integration whose check runs for many minutes.
 - Isolation. Local mode runs everything as your user.
 - Delegation from a sandboxed harness. The tools reach the engine over a host socket with the host's `by`, so a turn with `--provider microsandbox` and `--delegate` fails, and a sandboxed branch runs without the tools.
-- Delegation through a server. `by spawn`, `inspect`, `events`, `integrate`, `children` and `send --json` refuse `--remote`, and the server does not offer the tools to its harnesses. `by --remote … cancel` works for a person, with the server's authority, not a branch's.
+- A boundary through a server. Harnesses on the server still run as the server's user unless a sandbox provider is used, and a sandboxed turn gets no tools; the envelope stops honest mistakes there too.
 - Any real harness delegating end to end. The projections were checked against Claude Code 2.1.283 and codex-cli 0.157.1 without model calls; the full loop was tested against the fake ACP agent only.

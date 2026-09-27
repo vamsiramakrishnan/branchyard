@@ -10,6 +10,10 @@ description = "Serves Branchyard repositories over an authenticated HTTP JSON an
 name = "branchyard-server"
 path = "src/main.rs"
 
+[features]
+# `--database postgres://...`: branch state and operations in PostgreSQL.
+postgres = ["dep:postgres", "branchyard/postgres"]
+
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 branchyard = { path = "../branchyard" }
@@ -18,6 +22,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "server", "server-graceful"] }
 rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
+postgres = { version = "0.19", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }

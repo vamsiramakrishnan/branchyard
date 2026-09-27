@@ -129,3 +129,16 @@ Record the results with the [runtime qualification record](implementation-plan.m
 It guarantees, beyond the contract: every attempt's credential is refused once the attempt ends or a newer one starts, even across a bridge restart; operations on a known actor are bound to its UID. It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree. It is not isolated from the router's network path (plain HTTP) and it is tested only against an in-process fake cluster. It declares `exec` for a template that runs the bridge, `ingress`, and checkpoint and branch with the template's commit scope, crash consistency and portability.
 
 `TaskOptions::provider` selects it with `Provider::Substrate(SubstrateOptions)`; the CLI flags are `--provider substrate --substrate-endpoint URL --substrate-router URL --substrate-template NAME --substrate-key FILE [--substrate-atespace NAME] [--substrate-workdir PATH] [--substrate-home PATH] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. [Agent Substrate](substrate.md) documents the bridge protocol, the credentials, the transfer, the template and what remains unqualified; [live testing](testing-live.md#6-agent-substrate-cluster) says how to run it on a kind cluster.
+
+## Through a server
+
+A server runs a request's provider only when its operator allowed it: `by serve --allow-provider microsandbox,substrate`, or `"allow_providers"` in the configuration. `local` is always allowed; anything else is refused with `403 provider_not_allowed`. `by --remote … --provider …` sends the same flags as a `provider` object, [`Provider`](../crates/branchyard/src/lib.rs)'s serde form, and the server stores it with the branch as local mode does.
+
+Everything a provider names is the server's:
+
+- `--pass-env` names are read from **the server's environment** at each turn, not the caller's. Set the credentials in the server's environment (its service unit, for example) and let callers name them.
+- `--substrate-key` is a path on the server and must be absolute; `by --remote` refuses a relative one rather than resolve it against the caller's directory.
+- The Microsandbox provider needs a server built with the `microsandbox` feature, on a host with KVM.
+- The Substrate endpoint and router must be reachable from the server.
+
+`by --remote run --provider substrate` is tested against the fake cluster with a spawned `by serve`; the refusal without `--allow-provider` is tested too.

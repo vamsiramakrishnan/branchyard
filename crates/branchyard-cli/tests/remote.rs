@@ -616,3 +616,239 @@ fn serve_refuses_a_public_address_without_tls() {
     let help = command(BY, &root).args(["help", "serve"]).output().unwrap();
     assert!(text(&help.stdout).contains("--insecure-bind"));
 }
+
+#[test]
+fn delegation_commands_print_what_local_ones_do() {
+    let dir = Dir::new();
+    let here = dir.repo("here");
+    let there = dir.repo("there");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &["--allow-client-commands", "--allow-delegation"],
+    );
+    let both = |args: &[&str]| -> (Output, Output) {
+        let l = local(&here, args);
+        let r = server.by(
+            &dir.0,
+            &with_agent(args)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        (l, r)
+    };
+    // The same exit status, and the same JSON on stdout.
+    let same_json = |args: &[&str]| -> Value {
+        let (l, r) = both(args);
+        assert_eq!(
+            l.status.code(),
+            r.status.code(),
+            "{args:?}\nlocal: {}\nremote: {}",
+            text(&l.stderr),
+            text(&r.stderr)
+        );
+        let (l, r) = (json(&l.stdout, &here), json(&r.stdout, &there));
+        assert_eq!(l, r, "{args:?}");
+        r
+    };
+    let same_text = |args: &[&str]| {
+        let (l, r) = both(args);
+        assert_eq!(l.status.code(), r.status.code(), "{args:?}");
+        assert_eq!(
+            normalize(&text(&l.stdout), &here),
+            normalize(&text(&r.stdout), &there),
+            "{args:?}\nremote stderr: {}",
+            text(&r.stderr)
+        );
+    };
+
+    for args in [
+        &["run", "say hi", "--name", "root", "--delegate=2", "--yes"][..],
+        &["run", "say hi", "--name", "plain", "--yes"],
+    ] {
+        let (l, r) = both(args);
+        assert!(
+            l.status.success() && r.status.success(),
+            "{}",
+            text(&r.stderr)
+        );
+    }
+    let kid = same_json(&[
+        "spawn",
+        "WRITE kid.txt=k",
+        "--parent",
+        "root",
+        "--name",
+        "kid",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(kid["status"]["state"], "ready");
+    assert_eq!(kid["envelope"]["max_depth"], 1);
+    same_json(&["inspect", "kid", "--json"]);
+    same_json(&["inspect", "root", "--json"]);
+    same_json(&["children", "root", "--json"]);
+    same_json(&["events", "kid", "--cursor", "0", "--limit", "2", "--json"]);
+    same_json(&["events", "kid", "--json"]);
+    let sent = same_json(&["send", "kid", "WHOAMI", "--json"]);
+    assert_eq!(sent["name"], "kid");
+    same_text(&["inspect", "kid"]);
+    same_text(&["events", "kid", "--cursor", "1", "--limit", "3"]);
+    let merged = same_json(&["integrate", "kid", "--json"]);
+    assert_eq!(merged["target"], "by/root");
+    assert_eq!(
+        command("git", &there)
+            .args(["show", "by/root:kid.txt"])
+            .output()
+            .unwrap()
+            .stdout,
+        b"k\n"
+    );
+
+    // Refusals are the same JSON errors.
+    for args in [
+        &["spawn", "x", "--parent", "plain", "--json"][..],
+        &["spawn", "x", "--json"],
+        &["integrate", "plain", "--json"],
+        &["inspect", "nope", "--json"],
+        &["children", "--json"],
+        &["events", "nope", "--json"],
+    ] {
+        let error = same_json(args);
+        assert!(error["error"]["kind"].is_string(), "{args:?}: {error}");
+    }
+    let (l, r) = both(&["integrate", "plain"]);
+    assert_eq!(l.status.code(), Some(1));
+    assert_eq!(text(&l.stderr), text(&r.stderr));
+}
+
+#[test]
+fn a_harness_on_the_server_delegates_with_by_in_its_shell() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let prompt = [
+        "SH by spawn 'WRITE kid.txt=k' --name kid --wait --json",
+        "SH by integrate kid --json",
+    ]
+    .join("\n");
+    let args = with_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    // Refused unless the operator offers delegation.
+    let plain = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let refused = plain.by(&dir.0, &args);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        text(&refused.stderr).contains("does not offer delegation"),
+        "{}",
+        text(&refused.stderr)
+    );
+    drop(plain);
+
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &["--allow-client-commands", "--allow-delegation"],
+    );
+    let out = server.by(&dir.0, &args);
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("delegated") && stdout.contains("kid"),
+        "{stdout}"
+    );
+    let log = text(&server.by(&dir.0, &["log", "root", "--json"]).stdout);
+    assert!(
+        log.contains("\"sh: 0\\n"),
+        "the harness's by commands succeeded: {log}"
+    );
+    let root: Value =
+        serde_json::from_slice(&server.by(&dir.0, &["show", "root", "--json"]).stdout).unwrap();
+    assert_eq!(root["children"], serde_json::json!(["kid"]));
+    let kid: Value =
+        serde_json::from_slice(&server.by(&dir.0, &["show", "kid", "--json"]).stdout).unwrap();
+    assert_eq!(kid["status"]["state"], "merged");
+    assert_eq!(
+        command("git", &there)
+            .args(["show", "by/root:kid.txt"])
+            .output()
+            .unwrap()
+            .stdout,
+        b"k\n"
+    );
+}
+
+#[test]
+fn unapproved_tools_need_the_operators_consent() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let args = with_agent(&[
+        "run",
+        "WRITE u.txt=1",
+        "--name",
+        "u",
+        "--allow-unapproved-tools",
+        "--yes",
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let plain = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let refused = plain.by(&dir.0, &args);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        text(&refused.stderr).contains("--allow-unapproved-tools"),
+        "{}",
+        text(&refused.stderr)
+    );
+    drop(plain);
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &["--allow-client-commands", "--allow-unapproved-tools"],
+    );
+    let out = server.by(&dir.0, &args);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("wrote u.txt"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+/// `by serve --database`: the same commands with the server's state in
+/// PostgreSQL. Runs with the `postgres` feature when
+/// `BY_TEST_POSTGRES_URL` is set.
+#[cfg(feature = "postgres")]
+#[test]
+fn by_serve_keeps_its_state_in_postgres() {
+    let Some(url) = std::env::var("BY_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+    else {
+        eprintln!("skipped: set BY_TEST_POSTGRES_URL to run the PostgreSQL remote test");
+        return;
+    };
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    // A repository name no other run uses, since it scopes the state.
+    let name = format!("pg-{}", std::process::id());
+    let server = Served::start(
+        &dir.0,
+        &[(&name, &there)],
+        &["--allow-client-commands", "--database", &url],
+    );
+    let args = with_agent(&["run", "WRITE p.txt=1", "--name", "p", "--yes"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = server.by(&dir.0, &args);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let listed = server.by(&dir.0, &["ls", "--json"]);
+    let branches: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(branches[0]["name"], "p");
+    assert_eq!(branches[0]["status"]["state"], "ready");
+    assert!(!there.join(".branchyard/state.db").exists());
+}

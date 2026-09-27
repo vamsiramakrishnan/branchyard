@@ -96,6 +96,9 @@ by watch
 - Stop the server mid-turn (Ctrl-C), restart it: the operation reads as interrupted, as [the server reference](server.md) says.
 - The same idempotency key submitted twice runs once.
 - A wrong token gets 401; binding to a non-loopback address without TLS or `--insecure-bind` is refused.
+- Delegation: restart with `by serve --allow-delegation`, then `by run "…delegate with by spawn…" --delegate --allow-delegation --yes --budget-usd 1` remotely. The harness's `by spawn` works in its shell on the server, `by children <root> --json` and `by inspect <child> --json` print what local mode prints, and `by run` shows the `delegated` table. Without the flag, the same run is refused with `delegation_not_allowed`.
+- Providers: after section 6, restart with `--allow-provider substrate` and repeat its step 7 with `by --remote`, giving the key's absolute path on the server and exporting the `--pass-env` variables in the server's environment, not yours.
+- PostgreSQL: build with `--features postgres`, run `by serve --database postgres://…` against a real server, run a task, restart `by serve`, and check that `by ls` and the operation survive. Record the PostgreSQL version.
 
 **Record:** in [the server reference](server.md) if behavior differs.
 

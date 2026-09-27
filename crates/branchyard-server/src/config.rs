@@ -12,11 +12,16 @@
 //!   "max_running": 8,
 //!   "shutdown_grace_seconds": 60,
 //!   "harness_commands": { "codex": ["/opt/codex/bin/codex"] },
-//!   "allow_client_commands": false
+//!   "allow_client_commands": false,
+//!   "allow_providers": ["substrate"],
+//!   "allow_delegation": false,
+//!   "by_path": "/usr/local/bin/by",
+//!   "allow_unapproved_tools": false,
+//!   "database": "postgres://branchyard@db/branchyard"
 //! }
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
@@ -70,6 +75,21 @@ pub struct Config {
     /// Accept a request's own `command`. Off by default: it lets any token
     /// holder choose what the server executes.
     pub allow_client_commands: bool,
+    /// Providers a request may name besides `local`: `microsandbox`,
+    /// `substrate`. Empty by default.
+    pub allow_providers: BTreeSet<String>,
+    /// Accept a delegation envelope, `allow_delegation`, and the spawn
+    /// endpoint. Off by default.
+    pub allow_delegation: bool,
+    /// The `by` a delegating harness gets. Default: the server's own
+    /// executable when it is `by`, else `by` beside it, else on `PATH`.
+    pub by_path: Option<PathBuf>,
+    /// Accept `unapproved_tools`, which runs profiles whose tools bypass
+    /// the request's policy. Off by default.
+    pub allow_unapproved_tools: bool,
+    /// A PostgreSQL URL: keep branch state and operations there instead of
+    /// SQLite. Only in a build with the `postgres` feature.
+    pub database: Option<String>,
     /// How often the feed looks in the repository's store for activity
     /// recorded by other processes.
     pub poll_interval: Duration,
@@ -92,6 +112,11 @@ impl Config {
             shutdown_grace: Duration::from_secs(60),
             harness_commands: BTreeMap::new(),
             allow_client_commands: false,
+            allow_providers: BTreeSet::new(),
+            allow_delegation: false,
+            by_path: None,
+            allow_unapproved_tools: false,
+            database: None,
             poll_interval: Duration::from_millis(500),
             log_requests: true,
         }
@@ -123,6 +148,19 @@ impl Config {
                 ));
             }
         }
+        for provider in &self.allow_providers {
+            check_provider_name(provider)?;
+        }
+        if let Some(by) = &self.by_path {
+            if !by.is_file() {
+                return Err(format!("by_path {} is not a file", by.display()));
+            }
+        }
+        if let Some(url) = &self.database {
+            if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+                return Err("database must be a PostgreSQL URL, postgres://user@host/name".into());
+            }
+        }
         if self.max_body_bytes < 1024 {
             return Err("max_body_bytes must be at least 1024".into());
         }
@@ -142,6 +180,19 @@ impl Config {
              replay the tokens.",
             self.listen
         )))
+    }
+}
+
+/// The providers a server can allow requests to name.
+pub const PROVIDERS: &[&str] = &["local", "microsandbox", "substrate"];
+
+pub fn check_provider_name(name: &str) -> Result<(), String> {
+    match PROVIDERS.contains(&name) {
+        true => Ok(()),
+        false => Err(format!(
+            "{name:?} is not a provider; allow one of {}",
+            PROVIDERS.join(", ")
+        )),
     }
 }
 
@@ -202,6 +253,14 @@ struct FileConfig {
     harness_commands: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     allow_client_commands: bool,
+    #[serde(default)]
+    allow_providers: Vec<String>,
+    #[serde(default)]
+    allow_delegation: bool,
+    by_path: Option<PathBuf>,
+    #[serde(default)]
+    allow_unapproved_tools: bool,
+    database: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -232,6 +291,11 @@ pub struct Partial {
     pub shutdown_grace: Option<Duration>,
     pub harness_commands: BTreeMap<String, Vec<String>>,
     pub allow_client_commands: bool,
+    pub allow_providers: Vec<String>,
+    pub allow_delegation: bool,
+    pub by_path: Option<PathBuf>,
+    pub allow_unapproved_tools: bool,
+    pub database: Option<String>,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -297,7 +361,12 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             secret,
         });
     }
-    if inline {
+    let password = file.database.as_deref().is_some_and(|url| {
+        url.split_once("://")
+            .and_then(|(_, rest)| rest.split_once('@'))
+            .is_some_and(|(user, _)| user.contains(':'))
+    });
+    if inline || password {
         if let Some(warning) = readable_by_others(path) {
             warnings.push(warning);
         }
@@ -329,6 +398,11 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         shutdown_grace,
         harness_commands: file.harness_commands,
         allow_client_commands: file.allow_client_commands,
+        allow_providers: file.allow_providers,
+        allow_delegation: file.allow_delegation,
+        by_path: file.by_path.map(resolve),
+        allow_unapproved_tools: file.allow_unapproved_tools,
+        database: file.database,
         warnings,
     })
 }

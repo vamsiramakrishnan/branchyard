@@ -32,6 +32,15 @@ Options:
   --harness-command H=CMD   Run harness H as CMD, split on spaces; repeatable
   --allow-client-commands   Accept a request's own command: any token holder can then
                             choose what the server executes
+  --allow-provider P,...    Accept requests that name these providers besides local:
+                            microsandbox, substrate; repeatable
+  --allow-delegation        Accept delegation envelopes and spawns: harnesses get the
+                            delegation tools, with this server's by
+  --by-path PATH            The by a delegating harness gets (default: this by, or by
+                            beside this executable, or on PATH)
+  --allow-unapproved-tools  Accept requests to run profiles whose tools bypass the policy
+  --database URL            Keep branch state and operations in PostgreSQL
+                            (postgres://...); needs a build with the postgres feature
   --max-running N           Operations running at once (default: 8)
   --shutdown-grace SECS     At shutdown, wait this long for running operations (default: 60)
   --quiet                   Do not log requests
@@ -55,6 +64,11 @@ struct Flags {
     insecure_bind: bool,
     harness_commands: Vec<(String, Vec<String>)>,
     allow_client_commands: bool,
+    allow_providers: Vec<String>,
+    allow_delegation: bool,
+    by_path: Option<PathBuf>,
+    allow_unapproved_tools: bool,
+    database: Option<String>,
     max_running: Option<usize>,
     shutdown_grace: Option<Duration>,
     quiet: bool,
@@ -116,6 +130,23 @@ fn parse(args: &[String]) -> Result<Flags, String> {
             "--insecure-bind" if inline.is_none() => flags.insecure_bind = true,
             "--allow-client-commands" if inline.is_none() => flags.allow_client_commands = true,
             "--quiet" if inline.is_none() => flags.quiet = true,
+            "--allow-delegation" if inline.is_none() => flags.allow_delegation = true,
+            "--allow-unapproved-tools" if inline.is_none() => flags.allow_unapproved_tools = true,
+            "--allow-provider" => {
+                let text = value("PROVIDER,...")?;
+                for name in text.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                    config::check_provider_name(name)?;
+                    flags.allow_providers.push(name.to_owned());
+                }
+            }
+            "--by-path" => {
+                once(flags.by_path.is_some())?;
+                flags.by_path = Some(value("PATH")?.into());
+            }
+            "--database" => {
+                once(flags.database.is_some())?;
+                flags.database = Some(value("URL")?);
+            }
             "--harness-command" => {
                 let text = value("HARNESS=CMD")?;
                 let (harness, command) = text
@@ -257,6 +288,15 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.harness_commands = partial.harness_commands;
     config.harness_commands.extend(flags.harness_commands);
     config.allow_client_commands = partial.allow_client_commands || flags.allow_client_commands;
+    config.allow_providers = partial
+        .allow_providers
+        .into_iter()
+        .chain(flags.allow_providers)
+        .collect();
+    config.allow_delegation = partial.allow_delegation || flags.allow_delegation;
+    config.by_path = flags.by_path.or(partial.by_path);
+    config.allow_unapproved_tools = partial.allow_unapproved_tools || flags.allow_unapproved_tools;
+    config.database = flags.database.or(partial.database);
     config.log_requests = !flags.quiet;
     Ok((config, warnings))
 }
@@ -381,9 +421,18 @@ mod tests {
     fn flags_parse() {
         let flags = parse(&args(
             "--listen 0.0.0.0:1 --repo a=/x --repo=b=/y --insecure-bind --token-file t \
-             --harness-command gemini-cli=/bin/agent --max-running 2 --shutdown-grace 1.5",
+             --harness-command gemini-cli=/bin/agent --max-running 2 --shutdown-grace 1.5 \
+             --allow-provider substrate --allow-provider=microsandbox,local --allow-delegation \
+             --by-path /opt/by --allow-unapproved-tools --database postgres://u@h/d",
         ))
         .unwrap();
+        assert_eq!(
+            flags.allow_providers,
+            ["substrate", "microsandbox", "local"]
+        );
+        assert!(flags.allow_delegation && flags.allow_unapproved_tools);
+        assert_eq!(flags.by_path, Some(PathBuf::from("/opt/by")));
+        assert_eq!(flags.database.as_deref(), Some("postgres://u@h/d"));
         assert_eq!(flags.listen.as_deref(), Some("0.0.0.0:1"));
         assert_eq!(
             flags.repos,
@@ -402,6 +451,11 @@ mod tests {
             ("--config a --config b", "--config given twice"),
             ("--max-running 0", "positive number"),
             ("--insecure-bind=1", "unknown option --insecure-bind"),
+            ("--allow-provider docker", "\"docker\" is not a provider"),
+            (
+                "--allow-delegation=yes",
+                "unknown option --allow-delegation",
+            ),
             ("extra", "unexpected argument"),
         ] {
             let got = parse(&args(line)).unwrap_err();

@@ -93,6 +93,8 @@
 //! stops honest mistakes, not a hostile harness.
 
 mod broker;
+#[cfg(test)]
+mod conformance;
 mod delegation;
 mod engine;
 mod git;
@@ -100,6 +102,8 @@ mod harness;
 mod lock;
 mod names;
 mod ops;
+#[cfg(feature = "postgres")]
+mod pg;
 mod placement;
 mod policy;
 mod proc;
@@ -148,6 +152,22 @@ impl Yard {
     /// [`Yard::recover`] does.
     pub fn open(path: impl AsRef<Path>) -> Result<Yard, Error> {
         ops::open(path.as_ref())
+    }
+
+    /// [`Yard::open`], with the repository's state in the PostgreSQL
+    /// database at `url` (`postgres://user@host/db`) instead of
+    /// `.branchyard/state.db`, under `scope`, a name that separates
+    /// repositories sharing a database. Worktrees, private homes and
+    /// delegation tokens stay in `.branchyard/`. The tables are created in
+    /// the connection's `search_path` schema when missing. Nothing is
+    /// imported from `state.db`, and `by` on the same repository without
+    /// the database sees none of this state. Needs the `postgres` feature;
+    /// see `docs/durability.md`.
+    #[cfg(feature = "postgres")]
+    pub fn open_postgres(path: impl AsRef<Path>, url: &str, scope: &str) -> Result<Yard, Error> {
+        ops::open_with(path.as_ref(), |root| {
+            state::Store::open_postgres(root, url, scope)
+        })
     }
 
     /// Recover every branch whose turn's engine stopped: on this host, a
@@ -982,7 +1002,7 @@ pub struct Merged {
 }
 
 /// Known harness profile and local availability.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub harness: String,
     pub profile: String,

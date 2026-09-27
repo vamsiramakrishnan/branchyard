@@ -258,6 +258,113 @@ impl OperationStore for SqliteStore {
     }
 }
 
+/// Operations in a PostgreSQL database, in the connection's `search_path`
+/// schema, each save committed with `synchronous_commit = on` before it
+/// returns. One server per schema: a server that opens the registry records
+/// every unfinished operation in it as interrupted.
+///
+/// Every call runs on a thread of its own, since the registry is called
+/// from the server's asynchronous handlers and the client blocks.
+#[cfg(feature = "postgres")]
+pub struct PostgresStore {
+    url: String,
+    conn: Mutex<Option<postgres::Client>>,
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresStore {
+    /// Connect and create the `by_operations` table if it is missing.
+    pub fn open(url: &str) -> io::Result<PostgresStore> {
+        let store = PostgresStore {
+            url: url.to_owned(),
+            conn: Mutex::new(None),
+        };
+        store.with(|client| {
+            let mut tx = client.transaction()?;
+            tx.execute("SELECT pg_advisory_xact_lock(7390184326)", &[])?;
+            tx.batch_execute(
+                "CREATE TABLE IF NOT EXISTS by_operations (
+                     id TEXT PRIMARY KEY,
+                     seq BIGINT GENERATED ALWAYS AS IDENTITY,
+                     body TEXT NOT NULL
+                 )",
+            )?;
+            tx.commit()
+        })?;
+        Ok(store)
+    }
+
+    /// Run `f` with a connection, on another thread, reconnecting after
+    /// the connection closed.
+    fn with<T: Send>(
+        &self,
+        f: impl FnOnce(&mut postgres::Client) -> Result<T, postgres::Error> + Send,
+    ) -> io::Result<T> {
+        let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn: &mut Option<postgres::Client> = &mut guard;
+        let url = &self.url;
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    if conn.as_ref().is_none_or(postgres::Client::is_closed) {
+                        // Dropped here, on this thread, off the runtime.
+                        *conn = Some(postgres::Client::connect(url, postgres::NoTls)?);
+                    }
+                    f(conn.as_mut().expect("connected above"))
+                })
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+        .map_err(|e| match e.as_db_error() {
+            Some(db) => io::Error::other(format!("operation registry: {}", db.message())),
+            None => io::Error::other(format!("operation registry: {e}")),
+        })
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl Drop for PostgresStore {
+    /// The client blocks to close its connection, which a Tokio runtime's
+    /// thread may not.
+    fn drop(&mut self) {
+        let conn = self.conn.get_mut().unwrap_or_else(|p| p.into_inner());
+        if let Some(client) = conn.take() {
+            std::thread::scope(|scope| {
+                scope.spawn(move || drop(client));
+            });
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl OperationStore for PostgresStore {
+    fn load(&self) -> io::Result<Vec<StoredOperation>> {
+        let rows =
+            self.with(|c| c.query("SELECT id, body FROM by_operations ORDER BY seq", &[]))?;
+        rows.iter()
+            .map(|row| {
+                let (id, body): (String, String) = (row.get(0), row.get(1));
+                serde_json::from_str(&body).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("operation {id}: {e}"))
+                })
+            })
+            .collect()
+    }
+
+    fn save(&self, operation: &StoredOperation) -> io::Result<()> {
+        let body = serde_json::to_string(operation)?;
+        let id = operation.operation.id.clone();
+        self.with(move |c| {
+            c.execute(
+                "INSERT INTO by_operations (id, body) VALUES ($1, $2) \
+                 ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body",
+                &[&id, &body],
+            )
+        })?;
+        Ok(())
+    }
+}
+
 /// Operations in memory only, for tests and embedding.
 #[derive(Default)]
 pub struct MemoryStore {

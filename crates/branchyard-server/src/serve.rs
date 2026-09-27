@@ -206,7 +206,7 @@ type Opened = (BTreeMap<String, RepoState>, Arc<Registry>);
 fn open_state(config: &Config) -> Result<Opened, String> {
     let mut repos = BTreeMap::new();
     for (name, path) in &config.repos {
-        let yard = Yard::open(path)
+        let yard = open_yard(config, name, path)
             .map_err(|e| format!("repository {name} at {}: {e}", path.display()))?;
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
@@ -220,13 +220,52 @@ fn open_state(config: &Config) -> Result<Opened, String> {
             },
         );
     }
+    let (store, place) = operation_store(config)?;
+    let registry = Registry::open(store, config.max_running)
+        .map_err(|e| format!("operation registry {place}: {e}"))?;
+    Ok((repos, registry))
+}
+
+/// A served repository, with its state in the configured database or in
+/// its own `.branchyard/state.db`.
+fn open_yard(config: &Config, name: &str, path: &std::path::Path) -> Result<Yard, String> {
+    match &config.database {
+        None => Yard::open(path).map_err(|e| e.to_string()),
+        #[cfg(feature = "postgres")]
+        Some(url) => Yard::open_postgres(path, url, name).map_err(|e| e.to_string()),
+        #[cfg(not(feature = "postgres"))]
+        Some(_) => {
+            let _ = name;
+            Err(NO_POSTGRES.into())
+        }
+    }
+}
+
+#[cfg(not(feature = "postgres"))]
+const NO_POSTGRES: &str = "this build has no PostgreSQL support; build by or \
+     branchyard-server with the postgres feature to use --database";
+
+type Store = Box<dyn crate::store::OperationStore>;
+
+/// The operation registry's store, and where it is for messages.
+fn operation_store(config: &Config) -> Result<(Store, String), String> {
+    #[cfg(feature = "postgres")]
+    if let Some(url) = &config.database {
+        let place = "in the database".to_owned();
+        let store = crate::store::PostgresStore::open(url)
+            .map_err(|e| format!("operation registry {place}: {e}"))?;
+        return Ok((Box::new(store), place));
+    }
+    #[cfg(not(feature = "postgres"))]
+    if config.database.is_some() {
+        return Err(NO_POSTGRES.into());
+    }
     let store_path = config.data_dir.join("state.db");
+    let place = store_path.display().to_string();
     let legacy = config.data_dir.join("operations.jsonl");
     let store = SqliteStore::open(&store_path, Some(&legacy))
-        .map_err(|e| format!("operation registry {}: {e}", store_path.display()))?;
-    let registry = Registry::open(Box::new(store), config.max_running)
-        .map_err(|e| format!("operation registry {}: {e}", store_path.display()))?;
-    Ok((repos, registry))
+        .map_err(|e| format!("operation registry {place}: {e}"))?;
+    Ok((Box::new(store), place))
 }
 
 /// How often the server looks for branches whose engine stopped, such as a
