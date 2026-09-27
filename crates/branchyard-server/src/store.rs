@@ -29,7 +29,7 @@
 //! without changing the transaction's shape. [`FileStore`], the JSON-lines
 //! file earlier versions used, is only read, to import it once.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,8 @@ use branchyard_client::api::Operation;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::config::{Principal, DEFAULT_TENANT};
 
 /// An idempotency key as the server scopes it: per authenticated caller and
 /// per request route, with a fingerprint of the request body.
@@ -61,6 +63,113 @@ pub struct StoredOperation {
     /// Branch names no other operation may change while this one runs.
     #[serde(default)]
     pub locks: Vec<String>,
+    /// The tenant of the principal that submitted this operation. Absent
+    /// (default) on a record from before tenants existed, which reads as
+    /// [`crate::config::DEFAULT_TENANT`] everywhere this is used: not part
+    /// of the wire `Operation`, since it is for the server's own isolation
+    /// and quota bookkeeping, not something a caller needs echoed back.
+    /// Admission counts a tenant's queued and running operations by this
+    /// field of the durable record, so `max_running` holds across servers
+    /// sharing the store and across restarts.
+    #[serde(default)]
+    pub tenant: String,
+    /// The principal that admitted this operation, as its credential
+    /// verified at admission: the worker that runs it, on any server or a
+    /// `by worker` process with no credentials of its own, acts with this
+    /// principal's tenant, scopes and repositories, never its own. Absent
+    /// on a record from before tenants existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
+    /// Branches of `operation.repo` this operation will create, as planned
+    /// at admission: counted against its tenant's `max_branches` while it
+    /// is queued or running, before they exist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub creates: Vec<String>,
+}
+
+impl StoredOperation {
+    /// The tenant this operation belongs to: a record from before tenants
+    /// existed belongs to [`DEFAULT_TENANT`].
+    pub fn tenant(&self) -> &str {
+        match self.tenant.is_empty() {
+            true => DEFAULT_TENANT,
+            false => &self.tenant,
+        }
+    }
+}
+
+/// A tenant's ceilings that admission checks inside its transaction,
+/// against the operation store's own durable rows: what makes them hold
+/// across every server sharing the store and across restarts.
+#[derive(Default)]
+pub struct AdmissionQuota {
+    /// Queued and running operations of the tenant at once.
+    pub max_running: Option<usize>,
+    /// Branches the tenant has, or will have once its queued and running
+    /// operations create theirs, across its repositories.
+    pub max_branches: Option<usize>,
+    /// With `max_branches`: the branches (repository, name) that exist in
+    /// the tenant's repositories now. Called inside the admission's
+    /// transaction, after the tenant's unfinished operations were read, so
+    /// an operation that finishes in between is counted by one or the
+    /// other.
+    pub existing_branches: Option<ExistingBranches>,
+}
+
+/// Reads the branches that exist in a tenant's repositories.
+pub type ExistingBranches = Box<dyn Fn() -> io::Result<BTreeSet<(String, String)>> + Send + Sync>;
+
+impl AdmissionQuota {
+    fn is_empty(&self) -> bool {
+        self.max_running.is_none() && self.max_branches.is_none()
+    }
+
+    /// The refusal, if admitting `operation` next to the tenant's
+    /// `unfinished` operations would exceed a ceiling.
+    fn check(
+        &self,
+        operation: &StoredOperation,
+        unfinished: &[StoredOperation],
+    ) -> io::Result<Option<Admission>> {
+        if let Some(max) = self.max_running {
+            if unfinished.len() >= max {
+                return Ok(Some(Admission::Quota {
+                    limit: "max_running",
+                    max,
+                    reserved: unfinished.len(),
+                }));
+            }
+        }
+        let Some(max) = self.max_branches else {
+            return Ok(None);
+        };
+        if operation.creates.is_empty() {
+            return Ok(None);
+        }
+        let mut branches: BTreeSet<(String, String)> = unfinished
+            .iter()
+            .flat_map(|o| {
+                o.creates
+                    .iter()
+                    .map(|b| (o.operation.repo.clone(), b.clone()))
+            })
+            .collect();
+        if let Some(existing) = &self.existing_branches {
+            branches.extend(existing()?);
+        }
+        let reserved = branches.len();
+        let after = operation
+            .creates
+            .iter()
+            .filter(|b| !branches.contains(&(operation.operation.repo.clone(), (*b).clone())))
+            .count()
+            + reserved;
+        Ok((after > max).then_some(Admission::Quota {
+            limit: "max_branches",
+            max,
+            reserved,
+        }))
+    }
 }
 
 /// A process that claims queued operations: named like the engine names a
@@ -110,6 +219,13 @@ pub enum Admission {
     Replayed(Box<StoredOperation>),
     /// A branch is held; nothing was written.
     Busy { branch: String, holder: String },
+    /// The tenant is at a ceiling of its [`AdmissionQuota`]; nothing was
+    /// written.
+    Quota {
+        limit: &'static str,
+        max: usize,
+        reserved: usize,
+    },
 }
 
 /// Durable operation records, dispatch queue and branch locks.
@@ -135,10 +251,19 @@ pub trait OperationStore: Send + Sync {
     fn orphans(&self) -> io::Result<Vec<StoredOperation>>;
 
     /// In one transaction: the operation's record and idempotency binding,
-    /// its branch locks, and its queue row carrying `work`. Nothing is
-    /// written when the key already names an operation, when a branch is
-    /// held, or when any write fails.
-    fn admit(&self, operation: &StoredOperation, work: &Value) -> io::Result<Admission>;
+    /// its tenant's `quota` checked against the tenant's queued and running
+    /// operations, its branch locks, and its queue row carrying `work`.
+    /// Nothing is written when the key already names an operation, when
+    /// the tenant is at a ceiling, when a branch is held, or when any write
+    /// fails. Admissions of one tenant with a quota take turns.
+    fn admit(
+        &self,
+        operation: &StoredOperation,
+        work: &Value,
+        quota: &AdmissionQuota,
+    ) -> io::Result<Admission>;
+    /// The tenant's queued and running operations.
+    fn unfinished(&self, tenant: &str) -> io::Result<Vec<StoredOperation>>;
     /// Claim the oldest queued operation of one of `repos` that no live
     /// claim holds, for `lease`. A claim whose lease expired, or whose
     /// process is gone from this host, is claimed again under a new fence.
@@ -497,6 +622,26 @@ fn sqlite_insert(conn: &Conn, operation: &StoredOperation, replace: bool) -> io:
     .map_err(sql)
 }
 
+/// The tenant's operations with a queue row: queued or running. A record
+/// without a tenant (from before tenants existed) is the default tenant's.
+fn sqlite_unfinished(conn: &Conn, tenant: &str) -> io::Result<Vec<StoredOperation>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT o.id, o.body FROM operation_queue q JOIN operations o ON o.id = q.id \
+             WHERE COALESCE(NULLIF(json_extract(o.body, '$.tenant'), ''), ?2) = ?1 \
+             ORDER BY q.seq",
+        )
+        .map_err(sql)?;
+    let rows: Vec<(String, String)> = statement
+        .query_map([tenant, DEFAULT_TENANT], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(sql)?
+        .collect::<Result<_, _>>()
+        .map_err(sql)?;
+    rows.iter()
+        .map(|(id, body)| parse_op(id, body, ""))
+        .collect()
+}
+
 /// Release claims held by processes gone from this host.
 fn sqlite_reap(conn: &Conn, worker: &Worker, now: i64) -> io::Result<()> {
     let mut statement = conn
@@ -578,13 +723,26 @@ impl OperationStore for SqliteStore {
             .collect()
     }
 
-    fn admit(&self, operation: &StoredOperation, work: &Value) -> io::Result<Admission> {
+    fn admit(
+        &self,
+        operation: &StoredOperation,
+        work: &Value,
+        quota: &AdmissionQuota,
+    ) -> io::Result<Admission> {
         let work = serde_json::to_string(work)?;
         let op = &operation.operation;
+        // `BEGIN IMMEDIATE` makes every admission take its turn, so the
+        // tenant's count below cannot change before this one commits.
         self.immediate(|tx| {
             if let Some(idem) = &operation.idempotency {
                 if let Some(existing) = sqlite_by_key(tx, &idem.caller, &idem.key)? {
                     return Ok((Admission::Replayed(Box::new(existing)), false));
+                }
+            }
+            if !quota.is_empty() {
+                let unfinished = sqlite_unfinished(tx, operation.tenant())?;
+                if let Some(refused) = quota.check(operation, &unfinished)? {
+                    return Ok((refused, false));
                 }
             }
             let now = sqlite_now();
@@ -621,6 +779,10 @@ impl OperationStore for SqliteStore {
             .map_err(sql)?;
             Ok((Admission::Admitted, true))
         })
+    }
+
+    fn unfinished(&self, tenant: &str) -> io::Result<Vec<StoredOperation>> {
+        sqlite_unfinished(&self.conn(), tenant)
     }
 
     fn claim(
@@ -904,6 +1066,35 @@ const PG_BY_KEY: &str = "SELECT id, body FROM by_operations \
      WHERE (body::jsonb) #>> '{idempotency,caller}' = $1 \
        AND (body::jsonb) #>> '{idempotency,key}' = $2";
 
+/// The tenant's operations with a queue row (`$1`), a record without a
+/// tenant being the default tenant's (`$2`).
+#[cfg(feature = "postgres")]
+const PG_UNFINISHED: &str = "SELECT o.id, o.body FROM by_operation_queue q \
+     JOIN by_operations o ON o.id = q.id \
+     WHERE COALESCE(NULLIF((o.body::jsonb) ->> 'tenant', ''), $2) = $1 ORDER BY q.seq";
+
+/// Why a PostgreSQL admission wrote nothing.
+#[cfg(feature = "postgres")]
+enum Refused {
+    /// The key is bound already.
+    Replayed,
+    /// A branch is held.
+    Busy(String),
+    /// A quota's refusal.
+    Admission(Admission),
+    Io(io::Error),
+}
+
+#[cfg(feature = "postgres")]
+fn pg_ops(rows: &[postgres::Row]) -> io::Result<Vec<StoredOperation>> {
+    rows.iter()
+        .map(|row| {
+            let (id, body): (String, String) = (row.get(0), row.get(1));
+            parse_op(&id, &body, "")
+        })
+        .collect()
+}
+
 #[cfg(feature = "postgres")]
 fn pg_op(rows: &[postgres::Row]) -> io::Result<Option<StoredOperation>> {
     rows.first()
@@ -1035,15 +1226,31 @@ impl OperationStore for PostgresStore {
             .collect()
     }
 
-    fn admit(&self, operation: &StoredOperation, work: &Value) -> io::Result<Admission> {
+    fn admit(
+        &self,
+        operation: &StoredOperation,
+        work: &Value,
+        quota: &AdmissionQuota,
+    ) -> io::Result<Admission> {
         let body = serde_json::to_string(operation)?;
         let work = serde_json::to_string(work)?;
         let op = &operation.operation;
         let (id, repo) = (op.id.clone(), op.repo.clone());
         let idem = operation.idempotency.clone();
         let locks = lock_order(&operation.locks);
+        let tenant = operation.tenant().to_owned();
         let admitted = self.with(move |c| {
             let mut tx = c.transaction()?;
+            if !quota.is_empty() {
+                // Admissions of one tenant with a quota take turns, on
+                // every server sharing the schema: the count below then
+                // cannot change before this one commits or rolls back.
+                // Taken before any row, so it never waits behind one.
+                tx.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('branchyard tenant ' || $1, 0))",
+                    &[&tenant],
+                )?;
+            }
             // The idempotency binding first: a second admission with this
             // key waits here for the first to commit, then replays it.
             let inserted = tx.execute(
@@ -1052,7 +1259,28 @@ impl OperationStore for PostgresStore {
             )?;
             if inserted == 0 {
                 tx.rollback()?;
-                return Ok(Err(None));
+                return Ok(Err(Refused::Replayed));
+            }
+            if !quota.is_empty() {
+                let rows = tx.query(PG_UNFINISHED, &[&tenant, &DEFAULT_TENANT])?;
+                let unfinished = match pg_ops(&rows) {
+                    Ok(ops) => ops,
+                    Err(e) => {
+                        tx.rollback()?;
+                        return Ok(Err(Refused::Io(e)));
+                    }
+                };
+                match quota.check(operation, &unfinished) {
+                    Ok(None) => {}
+                    Ok(Some(refused)) => {
+                        tx.rollback()?;
+                        return Ok(Err(Refused::Admission(refused)));
+                    }
+                    Err(e) => {
+                        tx.rollback()?;
+                        return Ok(Err(Refused::Io(e)));
+                    }
+                }
             }
             for branch in &locks {
                 tx.execute(
@@ -1067,7 +1295,7 @@ impl OperationStore for PostgresStore {
                 )?;
                 if taken == 0 {
                     tx.rollback()?;
-                    return Ok(Err(Some(branch.clone())));
+                    return Ok(Err(Refused::Busy(branch.clone())));
                 }
             }
             tx.execute(
@@ -1079,7 +1307,9 @@ impl OperationStore for PostgresStore {
         })?;
         match admitted {
             Ok(()) => Ok(Admission::Admitted),
-            Err(None) => {
+            Err(Refused::Admission(refused)) => Ok(refused),
+            Err(Refused::Io(e)) => Err(e),
+            Err(Refused::Replayed) => {
                 let existing = match &idem {
                     Some(idem) => self.by_key(&idem.caller, &idem.key)?,
                     None => None,
@@ -1090,7 +1320,7 @@ impl OperationStore for PostgresStore {
                         io::Error::other(format!("operation {} was already recorded", op.id))
                     })
             }
-            Err(Some(branch)) => {
+            Err(Refused::Busy(branch)) => {
                 let (repo, name) = (op.repo.clone(), branch.clone());
                 let rows = self.with(move |c| {
                     c.query(
@@ -1105,6 +1335,12 @@ impl OperationStore for PostgresStore {
                 Ok(Admission::Busy { branch, holder })
             }
         }
+    }
+
+    fn unfinished(&self, tenant: &str) -> io::Result<Vec<StoredOperation>> {
+        let tenant = tenant.to_owned();
+        let rows = self.with(move |c| c.query(PG_UNFINISHED, &[&tenant, &DEFAULT_TENANT]))?;
+        pg_ops(&rows)
     }
 
     fn claim(
@@ -1380,7 +1616,9 @@ impl OperationStore for MemoryStore {
         by_key(caller: &str, key: &str) -> io::Result<Option<StoredOperation>>;
         save(operation: &StoredOperation) -> io::Result<()>;
         orphans() -> io::Result<Vec<StoredOperation>>;
-        admit(operation: &StoredOperation, work: &Value) -> io::Result<Admission>;
+        admit(operation: &StoredOperation, work: &Value, quota: &AdmissionQuota)
+            -> io::Result<Admission>;
+        unfinished(tenant: &str) -> io::Result<Vec<StoredOperation>>;
         claim(worker: &Worker, repos: &[String], lease: Duration) -> io::Result<Option<Claim>>;
         renew(worker: &Worker, id: &str, fence: i64, lease: Duration) -> io::Result<bool>;
         start(worker: &Worker, fence: i64, operation: &StoredOperation, lease: Duration)
@@ -1419,6 +1657,9 @@ mod tests {
             },
             idempotency: None,
             locks: Vec::new(),
+            tenant: String::new(),
+            principal: None,
+            creates: Vec::new(),
         }
     }
 
@@ -1543,17 +1784,32 @@ mod tests {
         let store = MemoryStore::default();
         let work = serde_json::json!({ "kind": "test" });
         assert_eq!(
-            store.admit(&keyed("a", "k", &["x", "y"]), &work).unwrap(),
+            store
+                .admit(
+                    &keyed("a", "k", &["x", "y"]),
+                    &work,
+                    &AdmissionQuota::default()
+                )
+                .unwrap(),
             Admission::Admitted
         );
         // The same key replays, whatever else differs.
-        match store.admit(&keyed("b", "k", &[]), &work).unwrap() {
+        match store
+            .admit(&keyed("b", "k", &[]), &work, &AdmissionQuota::default())
+            .unwrap()
+        {
             Admission::Replayed(existing) => assert_eq!(existing.operation.id, "a"),
             other => panic!("{other:?}"),
         }
         // A held branch refuses the whole admission.
         assert_eq!(
-            store.admit(&keyed("c", "k2", &["z", "y"]), &work).unwrap(),
+            store
+                .admit(
+                    &keyed("c", "k2", &["z", "y"]),
+                    &work,
+                    &AdmissionQuota::default()
+                )
+                .unwrap(),
             Admission::Busy {
                 branch: "y".into(),
                 holder: "a".into()
@@ -1587,7 +1843,13 @@ mod tests {
         );
         // Its locks went with it.
         assert_eq!(
-            store.admit(&keyed("c", "k2", &["x", "y"]), &work).unwrap(),
+            store
+                .admit(
+                    &keyed("c", "k2", &["x", "y"]),
+                    &work,
+                    &AdmissionQuota::default()
+                )
+                .unwrap(),
             Admission::Admitted
         );
     }
@@ -1596,7 +1858,11 @@ mod tests {
     fn an_expired_claim_is_claimed_again_under_a_new_fence() {
         let store = MemoryStore::default();
         store
-            .admit(&keyed("a", "k", &["x"]), &serde_json::json!({}))
+            .admit(
+                &keyed("a", "k", &["x"]),
+                &serde_json::json!({}),
+                &AdmissionQuota::default(),
+            )
             .unwrap();
         let (one, two) = (worker("one"), worker("two"));
         let repos = ["r".to_owned()];
@@ -1633,12 +1899,133 @@ mod tests {
             )
             .unwrap();
         let error = store
-            .admit(&keyed("a", "k", &["x"]), &serde_json::json!({}))
+            .admit(
+                &keyed("a", "k", &["x"]),
+                &serde_json::json!({}),
+                &AdmissionQuota::default(),
+            )
             .unwrap_err();
         assert!(error.to_string().contains("injected"), "{error}");
         assert!(store.get("a").unwrap().is_none());
         assert!(store.by_key("c", "k").unwrap().is_none());
         assert_eq!(store.hold("r", "x", "a removal", "t", LEASE).unwrap(), None);
         assert_eq!(store.pending(&["r".into()]).unwrap(), 0);
+    }
+
+    fn in_tenant(id: &str, tenant: &str, locks: &[&str], creates: &[&str]) -> StoredOperation {
+        let mut stored = keyed(id, &format!("key-{id}"), locks);
+        stored.tenant = tenant.into();
+        stored.creates = creates.iter().map(|s| s.to_string()).collect();
+        stored
+    }
+
+    #[test]
+    fn a_quota_refusal_writes_nothing_and_terminal_operations_stop_counting() {
+        let store = MemoryStore::default();
+        let work = serde_json::json!({});
+        let quota = AdmissionQuota {
+            max_running: Some(1),
+            ..AdmissionQuota::default()
+        };
+        assert_eq!(
+            store
+                .admit(&in_tenant("a", "acme", &["x"], &[]), &work, &quota)
+                .unwrap(),
+            Admission::Admitted
+        );
+        assert_eq!(
+            store
+                .admit(&in_tenant("b", "acme", &["y"], &[]), &work, &quota)
+                .unwrap(),
+            Admission::Quota {
+                limit: "max_running",
+                max: 1,
+                reserved: 1
+            }
+        );
+        // Nothing of the refused admission was written: no record, no key
+        // binding, no queue row, no lock.
+        assert!(store.get("b").unwrap().is_none());
+        assert!(store.by_key("c", "key-b").unwrap().is_none());
+        assert_eq!(store.pending(&["r".into()]).unwrap(), 1);
+        assert_eq!(store.hold("r", "y", "a removal", "t", LEASE).unwrap(), None);
+        store.unhold("r", "y", "t").unwrap();
+        // Another tenant, and a record from before tenants (the default
+        // tenant's), count on their own.
+        assert_eq!(
+            store
+                .admit(&in_tenant("c", "other", &[], &[]), &work, &quota)
+                .unwrap(),
+            Admission::Admitted
+        );
+        assert_eq!(store.unfinished("acme").unwrap().len(), 1);
+        assert_eq!(store.unfinished("other").unwrap().len(), 1);
+        assert!(store.unfinished(DEFAULT_TENANT).unwrap().is_empty());
+        // Finished: it no longer counts.
+        let one = worker("one");
+        let claim = store.claim(&one, &["r".into()], LEASE).unwrap().unwrap();
+        assert_eq!(claim.operation.operation.id, "a");
+        let mut done = claim.operation.clone();
+        done.operation.state = OperationState::Succeeded;
+        assert!(store.finish(&one, claim.fence, &done).unwrap());
+        assert_eq!(
+            store
+                .admit(&in_tenant("b", "acme", &["y"], &[]), &work, &quota)
+                .unwrap(),
+            Admission::Admitted
+        );
+    }
+
+    #[test]
+    fn max_branches_counts_existing_and_planned_branches_once() {
+        let store = MemoryStore::default();
+        let work = serde_json::json!({});
+        let quota = || AdmissionQuota {
+            max_branches: Some(3),
+            existing_branches: Some(Box::new(|| {
+                Ok([("r".to_owned(), "old".to_owned())].into_iter().collect())
+            })),
+            ..AdmissionQuota::default()
+        };
+        assert_eq!(
+            store
+                .admit(&in_tenant("a", "acme", &[], &["one"]), &work, &quota())
+                .unwrap(),
+            Admission::Admitted
+        );
+        // Two more would make four: refused, with the three reserved.
+        assert_eq!(
+            store
+                .admit(
+                    &in_tenant("b", "acme", &[], &["two", "three"]),
+                    &work,
+                    &quota()
+                )
+                .unwrap(),
+            Admission::Quota {
+                limit: "max_branches",
+                max: 3,
+                reserved: 2
+            }
+        );
+        assert!(store.get("b").unwrap().is_none());
+        // A branch that already exists is not counted twice.
+        assert_eq!(
+            store
+                .admit(
+                    &in_tenant("c", "acme", &[], &["old", "two"]),
+                    &work,
+                    &quota()
+                )
+                .unwrap(),
+            Admission::Admitted
+        );
+        // An operation that creates nothing is not refused.
+        assert_eq!(
+            store
+                .admit(&in_tenant("d", "acme", &[], &[]), &work, &quota())
+                .unwrap(),
+            Admission::Admitted
+        );
     }
 }

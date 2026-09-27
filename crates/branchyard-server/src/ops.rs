@@ -18,6 +18,11 @@
 //! `interrupted`, never run again, since its turn may have started; the
 //! engine recovers that turn's branch as it does any whose engine died.
 //!
+//! Each operation belongs to the tenant of the principal that admitted it,
+//! recorded with it: only that tenant sees it, admission counts the
+//! tenant's queued and running operations against its quotas in the same
+//! transaction, and whichever worker runs it acts as that principal.
+//!
 //! Its idempotency key, scoped to the caller, maps every retry to the same
 //! operation on any server sharing the store, and a retry never starts a
 //! second run. Branch locks keep two operations from changing one branch
@@ -41,8 +46,11 @@ use branchyard_client::api::{
 };
 use serde_json::Value;
 
+use crate::config::Principal;
 use crate::error::ApiError;
-use crate::store::{Admission, Claim, Idempotency, OperationStore, StoredOperation, Worker};
+use crate::store::{
+    Admission, AdmissionQuota, Claim, Idempotency, OperationStore, StoredOperation, Worker,
+};
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -58,9 +66,10 @@ pub struct Finished {
     pub end_cursor: Option<u64>,
 }
 
-/// Runs a claimed operation's work description.
+/// Runs a claimed operation's work description, as the principal its
+/// record names (`StoredOperation::principal`), never as the worker.
 pub trait Executor: Send + Sync {
-    fn execute(&self, operation: &Operation, work: &Value) -> Finished;
+    fn execute(&self, operation: &StoredOperation, work: &Value) -> Finished;
 }
 
 pub struct NewOperation {
@@ -71,6 +80,14 @@ pub struct NewOperation {
     /// Branches of `repo` to lock until the operation finishes.
     pub locks: Vec<String>,
     pub idempotency: Option<Idempotency>,
+    /// The admitting principal, as its credential verified. Its tenant
+    /// owns the operation: `GET /v1/operations/{id}` hides it from every
+    /// other tenant, and the worker that runs it acts as this principal.
+    pub principal: Principal,
+    /// Branches of `repo` the operation will create, as planned.
+    pub creates: Vec<String>,
+    /// The tenant's ceilings, checked in the admission's transaction.
+    pub quota: AdmissionQuota,
 }
 
 /// How a registry dispatches.
@@ -202,20 +219,47 @@ impl Registry {
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))
     }
 
-    /// The operation an earlier request with this key created, if any.
-    pub fn replay(&self, idem: &Idempotency) -> Result<Option<Operation>, ApiError> {
+    /// `id`'s operation, only when it belongs to `tenant`: an operation of
+    /// another tenant reads as absent, exactly like an unknown ID, so a
+    /// principal cannot distinguish another tenant's operation from one
+    /// that never existed.
+    pub fn get_for_tenant(&self, id: &str, tenant: &str) -> Result<Option<Operation>, ApiError> {
+        let found = self
+            .store
+            .get(id)
+            .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))?;
+        Ok(found
+            .filter(|stored| stored.tenant() == tenant)
+            .map(|stored| stored.operation))
+    }
+
+    /// The operation an earlier request of `tenant` with this key created,
+    /// if any.
+    pub fn replay(&self, idem: &Idempotency, tenant: &str) -> Result<Option<Operation>, ApiError> {
         let found = self
             .store
             .by_key(&idem.caller, &idem.key)
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))?;
-        found.map(|stored| same_request(stored, idem)).transpose()
+        found
+            .map(|stored| same_request(stored, idem, tenant))
+            .transpose()
     }
 
-    /// The operation `caller` created with `key`, whatever the request.
-    pub fn by_key(&self, caller: &str, key: &str) -> Result<Option<Operation>, ApiError> {
+    /// The operation `caller` of `tenant` created with `key`, whatever the
+    /// request; another tenant's reads as absent.
+    pub fn by_key(
+        &self,
+        caller: &str,
+        key: &str,
+        tenant: &str,
+    ) -> Result<Option<Operation>, ApiError> {
         self.store
             .by_key(caller, key)
-            .map(|found| found.map(|s| s.operation))
+            .map(|found| {
+                found
+                    .filter(|stored| stored.tenant() == tenant)
+                    .map(|s| s.operation)
+            })
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))
     }
 
@@ -224,7 +268,7 @@ impl Registry {
     /// (`true`).
     pub fn submit(&self, new: NewOperation, work: Value) -> Result<(Operation, bool), ApiError> {
         if let Some(idem) = &new.idempotency {
-            if let Some(existing) = self.replay(idem)? {
+            if let Some(existing) = self.replay(idem, &new.principal.tenant)? {
                 return Ok((existing, true));
             }
         }
@@ -248,10 +292,13 @@ impl Registry {
             },
             idempotency: new.idempotency,
             locks: new.locks,
+            tenant: new.principal.tenant.clone(),
+            principal: Some(new.principal),
+            creates: new.creates,
         };
         let admitted = self
             .store
-            .admit(&stored, &work)
+            .admit(&stored, &work, &new.quota)
             .map_err(|e| ApiError::internal(format!("could not record the operation: {e}")))?;
         match admitted {
             Admission::Admitted => {
@@ -262,9 +309,14 @@ impl Registry {
             }
             Admission::Replayed(existing) => {
                 let idem = stored.idempotency.as_ref().expect("replayed by its key");
-                Ok((same_request(*existing, idem)?, true))
+                Ok((same_request(*existing, idem, stored.tenant())?, true))
             }
             Admission::Busy { branch, holder } => Err(busy(&branch, &holder)),
+            Admission::Quota {
+                limit,
+                max,
+                reserved,
+            } => Err(quota_exceeded(limit, stored.tenant(), max, reserved)),
         }
     }
 
@@ -395,8 +447,8 @@ impl Registry {
                 return;
             }
         }
-        let operation = stored.operation.clone();
-        let finished = catch_unwind(AssertUnwindSafe(|| executor.execute(&operation, &work)))
+        let admitted = stored.clone();
+        let finished = catch_unwind(AssertUnwindSafe(|| executor.execute(&admitted, &work)))
             .unwrap_or_else(|_| Finished {
                 result: Err(*ApiError::internal("the operation panicked; see the server log").body),
                 end_cursor: None,
@@ -538,8 +590,21 @@ impl Registry {
     }
 }
 
-/// The stored operation, if the key's original request was this one.
-fn same_request(stored: StoredOperation, idem: &Idempotency) -> Result<Operation, ApiError> {
+/// The stored operation, if the key's original request was this one, by
+/// `tenant`. A key bound by another tenant is refused without naming its
+/// operation.
+fn same_request(
+    stored: StoredOperation,
+    idem: &Idempotency,
+    tenant: &str,
+) -> Result<Operation, ApiError> {
+    if stored.tenant() != tenant {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "idempotency_key_reused",
+            "this idempotency key was used for a different request",
+        ));
+    }
     let same = stored
         .idempotency
         .as_ref()
@@ -562,6 +627,22 @@ fn busy(branch: &str, holder: &str) -> ApiError {
         format!("branch {branch} is busy with {holder}"),
     )
     .detail(serde_json::json!({ "branch": branch, "holder": holder }))
+}
+
+/// `429 quota_exceeded`, for any of the quotas in
+/// `docs/server.md#quotas`.
+pub(crate) fn quota_exceeded(limit: &str, tenant: &str, max: usize, reserved: usize) -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "quota_exceeded",
+        format!(
+            "tenant {tenant} is at its {limit} quota ({reserved} of {max}); wait for one to \
+             finish, or ask the operator to raise it"
+        ),
+    )
+    .detail(
+        serde_json::json!({ "tenant": tenant, "limit": limit, "max": max, "reserved": reserved }),
+    )
 }
 
 /// A branch held by [`Registry::hold`], released on drop.
@@ -603,7 +684,7 @@ mod tests {
     }
 
     impl Executor for Recorder {
-        fn execute(&self, _: &Operation, work: &Value) -> Finished {
+        fn execute(&self, _: &StoredOperation, work: &Value) -> Finished {
             if work["wait"] == true {
                 let gate = self.gate.lock().unwrap().take();
                 if let Some(gate) = gate {
@@ -632,7 +713,16 @@ mod tests {
                 key: key.into(),
                 fingerprint: "f".into(),
             }),
+            principal: Principal::default_for("c"),
+            creates: Vec::new(),
+            quota: AdmissionQuota::default(),
         }
+    }
+
+    fn in_tenant(mut new: NewOperation, tenant: &str, max_running: Option<usize>) -> NewOperation {
+        new.principal.tenant = tenant.into();
+        new.quota.max_running = max_running;
+        new
     }
 
     fn options(max_running: usize) -> Options {
@@ -700,6 +790,58 @@ mod tests {
         drop(hold);
         assert!(registry.submit(new(None, &["b"]), Value::Null).is_ok());
         registry.close();
+    }
+
+    #[test]
+    fn a_tenants_max_running_quota_is_reserved_at_admission_and_released() {
+        let (registry, recorder) = started(Box::new(MemoryStore::default()), 4);
+        let (release, gate) = mpsc::channel::<()>();
+        *recorder.gate.lock().unwrap() = Some(gate);
+        let (op, _) = registry
+            .submit(
+                in_tenant(new(None, &["a"]), "acme", Some(1)),
+                serde_json::json!({ "wait": true }),
+            )
+            .unwrap();
+        let error = registry
+            .submit(in_tenant(new(None, &["b"]), "acme", Some(1)), Value::Null)
+            .unwrap_err();
+        assert_eq!(error.body.code, "quota_exceeded");
+        assert_eq!(error.body.detail.as_ref().unwrap()["reserved"], 1);
+        // A different tenant is unaffected.
+        assert!(registry
+            .submit(in_tenant(new(None, &["c"]), "other", Some(1)), Value::Null)
+            .is_ok());
+        release.send(()).unwrap();
+        assert!(registry.wait_idle(Duration::from_secs(5)));
+        assert_eq!(state(&registry, &op.id), OperationState::Succeeded);
+        // Released: the tenant can submit again.
+        assert!(registry
+            .submit(in_tenant(new(None, &["d"]), "acme", Some(1)), Value::Null)
+            .is_ok());
+        registry.close();
+    }
+
+    #[test]
+    fn get_for_tenant_hides_another_tenants_operation() {
+        let registry = Registry::open(Box::new(MemoryStore::default()), options(1)).unwrap();
+        let (op, _) = registry
+            .submit(in_tenant(new(Some("k"), &[]), "acme", None), Value::Null)
+            .unwrap();
+        assert!(registry.get_for_tenant(&op.id, "acme").unwrap().is_some());
+        assert!(registry.get_for_tenant(&op.id, "other").unwrap().is_none());
+        assert!(registry
+            .get_for_tenant("op_bogus", "acme")
+            .unwrap()
+            .is_none());
+        assert!(registry.by_key("c", "k", "acme").unwrap().is_some());
+        assert!(registry.by_key("c", "k", "other").unwrap().is_none());
+        // Another tenant's key never replays its operation.
+        let error = registry
+            .submit(in_tenant(new(Some("k"), &[]), "other", None), Value::Null)
+            .unwrap_err();
+        assert_eq!(error.body.code, "idempotency_key_reused");
+        assert!(error.body.detail.is_none());
     }
 
     #[test]

@@ -158,8 +158,11 @@ fn a_server_marks_operations_interrupted_in_postgres() {
 
 use branchyard_client::api::{Operation, OperationKind, TaskRequest};
 use branchyard_client::Client;
+use branchyard_server::config::{Principal, TenantPolicy};
 use branchyard_server::ops::{NewOperation, Options, Registry, WORKER_LOST};
-use branchyard_server::store::{OperationStore, PostgresStore, Worker};
+use branchyard_server::store::{
+    Admission, AdmissionQuota, Idempotency, OperationStore, PostgresStore, StoredOperation, Worker,
+};
 use branchyard_server::work::Work;
 
 /// Prompts the branch's harness was sent: one per turn that ran.
@@ -210,6 +213,9 @@ fn admit_only(url: &str, request: TaskRequest, key: &str) -> Operation {
                     key: key.into(),
                     fingerprint: "admitted-directly".into(),
                 }),
+                principal: Principal::default_for("tester"),
+                creates: Vec::new(),
+                quota: AdmissionQuota::default(),
             },
             Work::Task { request }.to_value().unwrap(),
         )
@@ -421,4 +427,326 @@ fn a_failed_queue_write_rolls_the_admission_back() {
         .unwrap();
     let op = client.repo("app").submit_task(&request, &key).unwrap();
     assert_eq!(wait(&client, &op.id).state, OperationState::Succeeded);
+}
+
+// Tenants on the durable queue: quotas counted in the admission's
+// transaction, and operations run as the principal that admitted them.
+
+/// A configuration on `url` whose default tenant may have `tenant_max`
+/// operations queued or running at once, running `process_max` at once
+/// itself, and shutting down quickly.
+fn quota_config(
+    f: &Fixture,
+    url: &str,
+    tenant_max: usize,
+    process_max: usize,
+) -> branchyard_server::Config {
+    let mut config = f.config();
+    config.database = Some(url.to_owned());
+    config.max_running = process_max;
+    config.shutdown_grace = Duration::from_millis(300);
+    config.tenants.insert(
+        "default".into(),
+        TenantPolicy {
+            max_running: Some(tenant_max),
+            ..TenantPolicy::default()
+        },
+    );
+    config
+}
+
+#[test]
+fn max_running_holds_across_two_servers_on_one_database() {
+    let Some(url) = database() else { return };
+    let f = Fixture::new();
+    let config = quota_config(&f, &url, 2, 8);
+    let a = Server::start(config.clone());
+    let b = Server::start(second(&f, &config, "data-b"));
+    let urls = [a.url(), b.url()];
+    // Eight admissions race, half to each server: exactly two get in.
+    let outcomes: Vec<(String, Result<Operation, branchyard_client::Error>)> =
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|n| {
+                    let url = urls[n % 2].clone();
+                    scope.spawn(move || {
+                        let client = Client::new(&url, common::TOKEN).unwrap();
+                        let name = format!("race{n}");
+                        let result = client
+                            .repo("app")
+                            .submit_task(&task("HANG", &name), &new_key());
+                        (name, result)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+    let mut admitted = Vec::new();
+    for (name, outcome) in outcomes {
+        match outcome {
+            Ok(op) => admitted.push((name, op)),
+            Err(e) => assert_eq!(e.code(), Some("quota_exceeded"), "{e:?}"),
+        }
+    }
+    assert_eq!(admitted.len(), 2, "{admitted:?}");
+    let (ca, cb) = (a.client(), b.client());
+    for (name, _) in &admitted {
+        eventually("the admitted turn to start", || {
+            common::started(&ca, "app", name)
+        });
+    }
+    let denied = cb
+        .repo("app")
+        .submit_task(&task("WRITE a.txt=x", "late"), &new_key())
+        .unwrap_err();
+    assert_eq!(denied.code(), Some("quota_exceeded"));
+    assert!(denied.to_string().contains("(2 of 2)"), "{denied}");
+    // Released by either server's outcome.
+    for (name, op) in &admitted {
+        assert_eq!(cb.repo("app").cancel(name).unwrap(), [name.as_str()]);
+        assert_eq!(wait(&ca, &op.id).state, OperationState::Succeeded);
+    }
+    let after = run(&cb, &task("WRITE a.txt=x", "late"));
+    assert_eq!(after.state, OperationState::Succeeded, "{after:?}");
+}
+
+#[test]
+fn max_running_holds_across_a_restart_with_queued_operations() {
+    let Some(url) = database() else { return };
+    let f = Fixture::new();
+    // One turn at a time per process, two per tenant.
+    let config = quota_config(&f, &url, 2, 1);
+    let a = Server::start(config.clone());
+    let client = a.client();
+    let first = client
+        .repo("app")
+        .submit_task(&task("HANG", "h1"), &new_key())
+        .unwrap();
+    eventually("h1 to start", || common::started(&client, "app", "h1"));
+    let queued = client
+        .repo("app")
+        .submit_task(&task("HANG", "h2"), &new_key())
+        .unwrap();
+    let denied = client
+        .repo("app")
+        .submit_task(&task("WRITE a.txt=x", "h3"), &new_key())
+        .unwrap_err();
+    assert_eq!(denied.code(), Some("quota_exceeded"));
+    a.stop();
+
+    // Another server on the database: the queued operation survived and
+    // still counts; the interrupted one does not.
+    let b = Server::start(second(&f, &config, "data-b"));
+    let client = b.client();
+    assert_eq!(
+        client.operation(&first.id).unwrap().state,
+        OperationState::Interrupted
+    );
+    eventually("h2 to start", || common::started(&client, "app", "h2"));
+    let third = client
+        .repo("app")
+        .submit_task(&task("WRITE a.txt=x", "h3"), &new_key())
+        .unwrap();
+    let denied = client
+        .repo("app")
+        .submit_task(&task("WRITE a.txt=y", "h4"), &new_key())
+        .unwrap_err();
+    assert_eq!(denied.code(), Some("quota_exceeded"));
+    assert!(denied.to_string().contains("(2 of 2)"), "{denied}");
+    assert_eq!(client.repo("app").cancel("h2").unwrap(), ["h2"]);
+    assert_eq!(wait(&client, &queued.id).state, OperationState::Succeeded);
+    assert_eq!(wait(&client, &third.id).state, OperationState::Succeeded);
+}
+
+fn stored(id: &str, tenant: &str, lock: &str, creates: &[&str]) -> StoredOperation {
+    let mut principal = Principal::default_for("ci");
+    principal.tenant = tenant.into();
+    StoredOperation {
+        operation: Operation {
+            id: id.into(),
+            repo: "app".into(),
+            kind: OperationKind::Task,
+            state: OperationState::Queued,
+            branches: vec![lock.into()],
+            cursor: 0,
+            end_cursor: None,
+            created_at_ms: 1,
+            finished_at_ms: None,
+            result: None,
+            error: None,
+        },
+        idempotency: Some(Idempotency {
+            caller: format!("{tenant}/ci"),
+            key: format!("key-{id}"),
+            fingerprint: "f".into(),
+        }),
+        locks: vec![lock.into()],
+        tenant: tenant.into(),
+        principal: Some(principal),
+        creates: creates.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[test]
+fn a_quota_refusal_writes_nothing() {
+    let Some(url) = database() else { return };
+    let store = PostgresStore::open(&url).unwrap();
+    let work = serde_json::json!({});
+    let running = AdmissionQuota {
+        max_running: Some(1),
+        ..AdmissionQuota::default()
+    };
+    assert_eq!(
+        store
+            .admit(&stored("a", "acme", "x", &[]), &work, &running)
+            .unwrap(),
+        Admission::Admitted
+    );
+    assert_eq!(
+        store
+            .admit(&stored("b", "acme", "y", &[]), &work, &running)
+            .unwrap(),
+        Admission::Quota {
+            limit: "max_running",
+            max: 1,
+            reserved: 1
+        }
+    );
+    let branches = AdmissionQuota {
+        max_branches: Some(2),
+        existing_branches: Some(Box::new(|| {
+            Ok([("app".to_owned(), "old".to_owned())].into_iter().collect())
+        })),
+        ..AdmissionQuota::default()
+    };
+    assert_eq!(
+        store
+            .admit(
+                &stored("c", "globex", "z", &["one", "two"]),
+                &work,
+                &branches
+            )
+            .unwrap(),
+        Admission::Quota {
+            limit: "max_branches",
+            max: 2,
+            reserved: 1
+        }
+    );
+    let mut db = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    for (table, column) in [
+        ("by_operations", "id"),
+        ("by_operation_queue", "id"),
+        ("by_branch_locks", "token"),
+    ] {
+        let ids: Vec<String> = db
+            .query(&format!("SELECT {column} FROM {table} ORDER BY 1"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(ids, ["a"], "{table}");
+    }
+    assert!(store.by_key("acme/ci", "key-b").unwrap().is_none());
+    assert_eq!(store.unfinished("acme").unwrap().len(), 1);
+    assert!(store.unfinished("globex").unwrap().is_empty());
+    // The refused admission's branch lock was never taken.
+    assert_eq!(
+        store
+            .hold("app", "y", "a removal", "t", Duration::from_secs(5))
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_worker_runs_another_tenants_operation_as_its_principal_without_leaking_it() {
+    let Some(url) = database() else { return };
+    let f = Fixture::new();
+    let appb = f.extra_repo("appb");
+    // Acme's operation, admitted by a server that stopped right after.
+    let registry = Registry::open(
+        Box::new(PostgresStore::open(&url).unwrap()),
+        Options {
+            exclusive: false,
+            ..Options::new(vec!["app".into()])
+        },
+    )
+    .unwrap();
+    let mut acme = Principal::default_for("acme");
+    acme.tenant = "acme".into();
+    let (op, _) = registry
+        .submit(
+            NewOperation {
+                repo: "app".into(),
+                kind: OperationKind::Task,
+                branches: vec!["acme-work".into()],
+                cursor: 0,
+                locks: vec!["acme-work".into()],
+                idempotency: Some(Idempotency {
+                    caller: "acme/acme".into(),
+                    key: "acme-key".into(),
+                    fingerprint: "admitted-directly".into(),
+                }),
+                principal: acme,
+                creates: vec!["acme-work".into()],
+                quota: AdmissionQuota::default(),
+            },
+            Work::Task {
+                request: task("WRITE w.txt=acme", "acme-work"),
+            }
+            .to_value()
+            .unwrap(),
+        )
+        .unwrap();
+    drop(registry);
+
+    // A worker with no credentials at all runs it.
+    let mut worker = second(&f, &f.config(), "worker");
+    worker.tokens = Vec::new();
+    worker.database = Some(url.clone());
+    worker.worker_only = true;
+    let worker = Server::start(worker);
+    let store = PostgresStore::open(&url).unwrap();
+    eventually("the worker to run acme's operation", || {
+        store
+            .get(&op.id)
+            .unwrap()
+            .is_some_and(|s| s.operation.state.is_terminal())
+    });
+    let record = store.get(&op.id).unwrap().unwrap();
+    assert_eq!(
+        record.operation.state,
+        OperationState::Succeeded,
+        "{record:?}"
+    );
+    assert_eq!(record.tenant, "acme");
+    assert_eq!(record.principal.as_ref().unwrap().tenant, "acme");
+    drop(worker);
+
+    // Only acme sees it, by ID or by key; to globex it does not exist.
+    let mut config = f.config();
+    config.database = Some(url);
+    common::two_tenants(&mut config, appb, None);
+    let server = Server::start(config);
+    let acme = Client::new(&server.url(), common::ACME_TOKEN).unwrap();
+    let globex = Client::new(&server.url(), common::GLOBEX_TOKEN).unwrap();
+    assert_eq!(
+        acme.operation(&op.id).unwrap().state,
+        OperationState::Succeeded
+    );
+    assert_eq!(acme.operation_by_key("acme-key").unwrap().id, op.id);
+    assert_eq!(
+        globex.operation(&op.id).unwrap_err().code(),
+        Some("unknown_operation")
+    );
+    assert_eq!(
+        globex.operation_by_key("acme-key").unwrap_err().code(),
+        Some("unknown_operation")
+    );
+    assert!(globex.repo("appb").branches().unwrap().is_empty());
+    assert_eq!(
+        globex.repo("app").branches().unwrap_err().code(),
+        Some("repo_not_allowed")
+    );
 }

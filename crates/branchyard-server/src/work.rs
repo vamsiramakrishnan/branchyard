@@ -18,8 +18,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use branchyard::{Branch, Spawn, TaskOptions, Yard};
 use branchyard_client::api::{
-    ErrorBody, ForkRequest, Operation, OperationKind, OperationResult, ReincarnateRequest,
-    SendRequest, SpawnRequest, TaskRequest,
+    ErrorBody, ForkRequest, OperationKind, OperationResult, ReincarnateRequest, SendRequest,
+    SpawnRequest, TaskRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +27,7 @@ use serde_json::Value;
 use crate::api::{App, RepoState};
 use crate::error::{self, ApiError};
 use crate::ops::{Executor, Finished};
+use crate::store::StoredOperation;
 
 /// Every kind of operation, as its queue row describes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -183,8 +184,15 @@ impl Work {
 pub struct AppExecutor(pub Arc<App>);
 
 impl Executor for AppExecutor {
-    fn execute(&self, operation: &Operation, work: &Value) -> Finished {
+    fn execute(&self, stored: &StoredOperation, work: &Value) -> Finished {
         let app = &self.0;
+        let operation = &stored.operation;
+        if let Err(refused) = admitted_principal_allowed(app, stored) {
+            return Finished {
+                result: Err(*refused.body),
+                end_cursor: None,
+            };
+        }
         let Some(repo) = app.repos.get(&operation.repo) else {
             return Finished {
                 result: Err(*ApiError::new(
@@ -209,6 +217,45 @@ impl Executor for AppExecutor {
         };
         Finished { result, end_cursor }
     }
+}
+
+/// The scope an operation of `kind` needs, as its endpoint checks it.
+pub(crate) fn scope_for(kind: OperationKind) -> &'static str {
+    match kind {
+        OperationKind::Merge | OperationKind::Integrate => "merge",
+        _ => "run",
+    }
+}
+
+/// Refuse to run an operation whose admitting principal this worker's
+/// configuration would not let act on its repository, with the error the
+/// request would have got here. The worker holds no credential of its
+/// own: it acts as the recorded principal. A record from before tenants
+/// existed was admitted with every scope, in the default tenant.
+fn admitted_principal_allowed(app: &App, stored: &StoredOperation) -> Result<(), ApiError> {
+    let Some(principal) = &stored.principal else {
+        return Ok(());
+    };
+    let repo = &stored.operation.repo;
+    let scope = scope_for(stored.operation.kind);
+    if !principal.allows(scope) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "scope_required",
+            format!("this operation's principal does not hold the {scope} scope"),
+        )
+        .detail(serde_json::json!({ "scope": scope })));
+    }
+    let policy = app.config.tenant_policy(&principal.tenant);
+    if !principal.repo_allowed(&policy, repo) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "repo_not_allowed",
+            format!("this operation's principal may not act on repository {repo}"),
+        )
+        .detail(serde_json::json!({ "repo": repo })));
+    }
+    Ok(())
 }
 
 /// The branches an operation ran, once every branch they delegated to on

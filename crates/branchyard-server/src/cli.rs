@@ -8,8 +8,110 @@ use std::time::Duration;
 
 use branchyard::Yard;
 
-use crate::config::{self, Config, TlsFiles, Token};
+use crate::config::{self, sha256_hex, Config, TlsFiles, Token, DEFAULT_TENANT, SCOPES};
 use crate::serve;
+
+pub const TOKEN_USAGE: &str = "\
+Generate a bearer token and the hashed credential to configure for it.
+
+Usage: branchyard-server token new [options]
+
+The token is printed once, in cleartext: give it to the client and discard
+it; only its hash goes in the server's configuration; branchyard-server
+never stores or logs the plaintext. Paste the printed `credentials` entry
+into your configuration's `credentials` array (see `docs/server.md`).
+
+Options:
+  --name NAME       This credential's subject name (default: a random one)
+  --tenant TENANT   Its tenant (default: 'default')
+  --scopes S,...    Its scopes: read, run, merge, admin (default: all four)
+  --repo R,...      Its own repository allowlist, narrower than its
+                     tenant's (default: none, meaning whatever its tenant
+                     allows)
+  -h, --help        Show this help
+";
+
+fn token_new(args: &[String], program: &str) -> ExitCode {
+    let mut name = None;
+    let mut tenant = DEFAULT_TENANT.to_owned();
+    let mut scopes: Vec<String> = SCOPES.iter().map(|s| s.to_string()).collect();
+    let mut repos: Option<Vec<String>> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((n, v)) if n.starts_with("--") => (n, Some(v.to_owned())),
+            _ => (arg.as_str(), None),
+        };
+        let mut value = |what: &str| -> Result<String, String> {
+            match &inline {
+                Some(v) => Ok(v.clone()),
+                None => args
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| format!("{flag} needs a value {what}")),
+            }
+        };
+        let result = match flag {
+            "-h" | "--help" => {
+                print!("{TOKEN_USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            "--name" => value("NAME").map(|v| name = Some(v)),
+            "--tenant" => value("TENANT").map(|v| tenant = v),
+            "--scopes" => value("S,...").map(|v| {
+                scopes = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+            }),
+            "--repo" => value("R,...").map(|v| {
+                repos = Some(
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                );
+            }),
+            other => Err(format!("unknown option {other}")),
+        };
+        if let Err(error) = result {
+            eprintln!("{program}: {error}\nTry '{program} token new --help'.");
+            return ExitCode::from(2);
+        }
+    }
+    for scope in &scopes {
+        if let Err(error) = config::check_scope_name(scope) {
+            eprintln!("{program}: --scopes: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let name = name.unwrap_or_else(|| format!("token-{}", &branchyard_client::new_key()[..8]));
+    let secret = format!(
+        "{}{}",
+        branchyard_client::new_key(),
+        branchyard_client::new_key()
+    );
+    let hash = sha256_hex(secret.as_bytes());
+    eprintln!("{program}: token (printed once; give it to the client, never store it): {secret}");
+    let credential = serde_json::json!({
+        "token_sha256": hash,
+        "tenant": tenant,
+        "name": name,
+        "scopes": scopes,
+        "repos": repos,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&credential).unwrap_or_default()
+    );
+    eprintln!(
+        "{program}: add the object above to your configuration's top-level 'credentials' array"
+    );
+    ExitCode::SUCCESS
+}
 
 pub const USAGE: &str = "\
 Serve Branchyard repositories over an authenticated HTTP API.
@@ -17,6 +119,7 @@ Serve Branchyard repositories over an authenticated HTTP API.
 Usage: branchyard-server [options]
        by serve [options]
        by worker --database URL [options]
+       branchyard-server token new [options]   (see 'branchyard-server token new --help')
 
 Options:
   --config FILE             JSON configuration; see docs/server.md
@@ -345,7 +448,13 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     };
     let mut tokens = partial.tokens;
     let mut token_files = flags.token_files;
-    if tokens.is_empty() && token_files.is_empty() {
+    // A worker serves no requests, so it needs no credential: it runs each
+    // operation as the principal that admitted it.
+    if tokens.is_empty()
+        && token_files.is_empty()
+        && partial.credentials.is_empty()
+        && !flags.worker
+    {
         let path = data_dir.join("token");
         default_token(&path)?;
         token_files.push(path);
@@ -367,6 +476,9 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     }
     config.repos = repos;
     config.tokens = tokens;
+    config.principals = partial.principals;
+    config.credentials = partial.credentials;
+    config.tenants = partial.tenants;
     config.tls = match (flags.tls_cert, flags.tls_key) {
         (Some(cert), Some(key)) => Some(TlsFiles { cert, key }),
         (None, None) => partial.tls,
@@ -463,6 +575,15 @@ async fn signal() {
 /// Run the server with `args` (after the program name); `program` names it
 /// in messages.
 pub fn main(args: &[String], program: &str) -> ExitCode {
+    if args.first().map(String::as_str) == Some("token") {
+        return match args.get(1).map(String::as_str) {
+            Some("new") => token_new(&args[2..], program),
+            _ => {
+                eprintln!("{program}: usage: {program} token new [options]");
+                ExitCode::from(2)
+            }
+        };
+    }
     let flags = match parse(args) {
         Ok(flags) => flags,
         Err(error) => {
@@ -660,5 +781,51 @@ mod tests {
             error.contains("token file") || error.contains("--tls-key"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_configuration_files_tenants_and_credentials_reach_the_server() {
+        let dir =
+            std::env::temp_dir().join(format!("branchyard-cli-tenants-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hash = crate::config::sha256_hex(b"acme-token-0123456789");
+        let file = dir.join("config.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "data_dir": "data",
+                "repos": { "app": "app" },
+                "tokens": [{ "name": "ops", "token": "ops-token-0123456789", "tenant": "ops" }],
+                "credentials": [{ "token_sha256": hash, "tenant": "acme", "name": "ci" }],
+                "tenants": { "acme": { "repos": ["app"], "max_running": 2, "max_branches": 5 } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let config_arg = format!("--config {}", file.display());
+        let (config, _) = build(parse(&args(&config_arg)).unwrap()).unwrap();
+        assert_eq!(config.credentials.len(), 1);
+        assert_eq!(config.credentials[0].principal.tenant, "acme");
+        assert_eq!(config.principals["ops"].tenant, "ops");
+        assert_eq!(config.tenant_policy("acme").max_running, Some(2));
+        assert_eq!(config.tenant_policy("acme").max_branches, Some(5));
+        assert!(
+            !dir.join("data/token").exists(),
+            "no default token beside credentials"
+        );
+
+        // A worker needs no credential at all.
+        std::fs::write(
+            &file,
+            serde_json::json!({ "data_dir": "data", "repos": { "app": "app" } }).to_string(),
+        )
+        .unwrap();
+        let line = format!("{config_arg} --worker --database postgres://db/branchyard");
+        let (config, _) = build(parse(&args(&line)).unwrap()).unwrap();
+        assert!(config.tokens.is_empty() && config.credentials.is_empty());
+        assert!(!dir.join("data/token").exists());
+        assert!(config.validate().is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
