@@ -788,7 +788,7 @@ pub fn cancel(target: &Target, branch: &str, json: bool) -> Outcome {
             Ok(branchyard::Cancelled { cancelled })
         }
         (None, Target::Local) => open_yard()
-            .and_then(|yard| yard.cancel(branch))
+            .and_then(|yard| yard.cancel_as(branch, "by cancel"))
             .map(|cancelled| branchyard::Cancelled { cancelled }),
     };
     emit(json, result, |c| match c.cancelled.is_empty() {

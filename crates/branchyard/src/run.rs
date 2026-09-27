@@ -367,6 +367,10 @@ pub(crate) fn prepare_send(
     let store = yard.store();
     recover::stale(yard, name)?;
     let mut record = store.read(name)?;
+    // What is still held after recovery belongs to a live engine.
+    if store.backend().leases()?.iter().any(|l| l.branch == name) {
+        return Err(Error::Running(name.to_owned()));
+    }
     if idle && record.info.status == BranchStatus::Running {
         return Err(Error::Running(name.to_owned()));
     }

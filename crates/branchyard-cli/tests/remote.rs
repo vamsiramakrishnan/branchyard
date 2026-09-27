@@ -415,6 +415,7 @@ fn remote_commands_print_what_local_ones_do() {
         &["send", "nope", "x"],
         &["run", "x", "--harness", "nope"],
         &["rm", "nope"],
+        &["cancel", "nope"],
     ] {
         let (l, r) = same(args);
         assert_eq!(l.status.code(), Some(1), "{args:?}");
@@ -433,6 +434,45 @@ fn remote_commands_print_what_local_ones_do() {
     assert_eq!(
         server.by(&dir.0, &["merge", "nope"]).stderr,
         b"by: no branch named nope\n"
+    );
+}
+
+#[test]
+fn by_cancel_stops_a_turn_on_the_server() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let args = with_agent(&["run", "HANG", "--name", "held"]);
+    let running = command(BY, &dir.0)
+        .arg("--remote")
+        .arg(&server.url)
+        .arg("--token-file")
+        .arg(&server.token_file)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let runner = std::thread::spawn(move || running.wait_with_output().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !text(&server.by(&dir.0, &["log", "held"]).stdout).contains("prompt: HANG") {
+        assert!(Instant::now() < deadline, "the turn never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let cancel = server.by(&dir.0, &["cancel", "held"]);
+    assert!(cancel.status.success(), "{}", text(&cancel.stderr));
+    assert_eq!(text(&cancel.stdout), "asked held to stop\n");
+    let ran = runner.join().unwrap();
+    assert!(ran.status.success(), "{}", text(&ran.stderr));
+    assert!(
+        text(&ran.stdout).contains("interrupted"),
+        "{}",
+        text(&ran.stdout)
+    );
+    let json_cancel = server.by(&dir.0, &["cancel", "held", "--json"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&json_cancel.stdout).unwrap(),
+        serde_json::json!({"cancelled": []})
     );
 }
 

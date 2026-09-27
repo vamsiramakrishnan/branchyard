@@ -104,7 +104,14 @@ pub(crate) fn merge(yard: &Yard, name: &str, target: &str) -> Result<Merged, Err
     let intent = json!({ "target": target, "candidate": candidate.commit, "expected": expected });
     let recorded = match store.backend().begin_step(&fence, 0, &step, &intent)? {
         Begun::Done(outcome) => serde_json::from_value::<Merged>(outcome).ok(),
-        Begun::Pending(intent) => landed(yard, name, target, &candidate.commit, &intent)?,
+        Begun::Pending(intent) => {
+            let landed = landed(yard, name, target, &candidate.commit, &intent)?;
+            if let Some(merged) = &landed {
+                let outcome = serde_json::to_value(merged).unwrap_or_default();
+                store.backend().finish_step(&fence, 0, &step, &outcome)?;
+            }
+            landed
+        }
         Begun::Fresh => None,
     };
     let merged = match recorded {

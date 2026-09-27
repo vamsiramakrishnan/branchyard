@@ -283,6 +283,57 @@ fn send_continues_and_max_minutes_interrupts() {
 }
 
 #[test]
+fn by_cancel_stops_a_turn_that_another_by_runs() {
+    let repo = Repo::new();
+    let agent = fake_agent().display().to_string();
+    let running = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["run", "HANG", "--name", "held", "--harness", "gemini-cli"])
+        .args(["--command", &agent])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let runner = std::thread::spawn(move || running.wait_with_output().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let log = repo.by(&["log", "held"]);
+        if stdout(&log).contains("prompt: HANG") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // Another process may not send to it while it runs.
+    let refused = repo.by_agent(&["send", "held", "WHOAMI"]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("branch held is running a turn"),
+        "{}",
+        stderr(&refused)
+    );
+    let cancel = repo.by(&["cancel", "held"]);
+    assert!(cancel.status.success(), "{}", stderr(&cancel));
+    assert_eq!(stdout(&cancel), "asked held to stop\n");
+    let ran = runner.join().unwrap();
+    assert!(ran.status.success(), "{}", stderr(&ran));
+    assert!(stdout(&ran).contains("interrupted"), "{}", stdout(&ran));
+    assert_eq!(
+        repo.json(&["show", "held", "--json"])["status"]["state"],
+        "interrupted"
+    );
+    let log = stdout(&repo.by(&["log", "held"]));
+    assert!(log.contains("warning: cancelled by by cancel"), "{log}");
+    assert_eq!(
+        stdout(&repo.by(&["cancel", "held"])),
+        "nothing was running\n"
+    );
+}
+
+#[test]
 fn errors_exit_nonzero() {
     let repo = Repo::new();
     let missing = repo.by(&["merge", "nope"]);

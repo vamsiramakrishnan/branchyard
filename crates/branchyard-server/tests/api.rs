@@ -341,6 +341,48 @@ fn the_event_stream_resumes_by_cursor() {
 }
 
 #[test]
+fn a_running_turn_is_cancelled_over_http() {
+    let f = Fixture::new();
+    let server = Server::start(f.config());
+    let client = server.client();
+    let repo = client.repo("app");
+    let op = repo.submit_task(&task("HANG", "held"), &new_key()).unwrap();
+    eventually("the prompt to be submitted", || {
+        repo.events("held", 0).is_ok_and(|page| {
+            page.events
+                .iter()
+                .any(|e| matches!(e.activity, branchyard::Activity::Prompt(_)))
+        })
+    });
+    // The branch lock is the operation's; a cancel does not need it.
+    assert_eq!(repo.cancel("held").unwrap(), ["held"]);
+    let done = wait(&client, &op.id);
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    assert_eq!(
+        done.result.unwrap().branches[0].status,
+        BranchStatus::Interrupted
+    );
+    let events = repo.events("held", 0).unwrap().events;
+    assert!(events.iter().any(|e| e.activity
+        == branchyard::Activity::Warning("cancelled by tester through the server".into())));
+    assert!(repo.cancel("held").unwrap().is_empty(), "nothing runs now");
+
+    let missing = repo.cancel("nope").unwrap_err();
+    assert_eq!(missing.code(), Some("unknown_branch"));
+    let (status, _, body) = raw(
+        server.addr,
+        &post(
+            "/v1/repos/app/branches/held/cancel",
+            Some(TOKEN),
+            "",
+            r#"{"subtree": false}"#,
+        ),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(json(&body)["error"]["code"], "invalid_request");
+}
+
+#[test]
 fn operations_survive_a_restart() {
     let f = Fixture::new();
     let server = Server::start(f.config());

@@ -16,6 +16,10 @@
 //!   whether this process opened the session with `session/resume` or
 //!   `session/load`.
 //! - `HANG`: replies nothing until `session/cancel`, then ends `cancelled`.
+//! - `ORPHAN`: like `HANG`, and also appends a line to `orphan.log` in its
+//!   working directory, starts `sleep 60` in its process group, replies
+//!   `orphan <own pid> <sleep pid>`, and from then on outlives its closed
+//!   stdin by 60 seconds: a harness that ignores its engine's death.
 //! - `BACKGROUND`: starts `sleep 30` in its process group and replies with its
 //!   pid.
 //! - `EXIT`: writes to stderr and exits mid-turn.
@@ -37,6 +41,9 @@
 //! - `INSTRUCTED`: replies `instructed=<bool>`, whether a prompt this
 //!   process received began with Branchyard's instructions preamble. The
 //!   preamble is removed before any keyword is looked for.
+//!
+//! With `FAKE_ACP_SILENT=1` in its environment it never answers
+//! `initialize`, so no prompt is ever submitted to it.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -85,6 +92,8 @@ fn main() {
     let mut resumed = false;
     let mut active: Option<Active> = None;
     let mut next_request = 1000;
+    let silent = std::env::var_os("FAKE_ACP_SILENT").is_some_and(|v| v == "1");
+    let mut stubborn = false;
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
@@ -94,6 +103,7 @@ fn main() {
         let id = message.get("id").cloned();
         let params = &message["params"];
         match (message["method"].as_str(), id) {
+            (Some("initialize"), Some(_)) if silent => {}
             (Some("initialize"), Some(id)) => reply(
                 &id,
                 json!({
@@ -145,6 +155,16 @@ fn main() {
                     reply(&id, json!({"stopReason": "end_turn"}));
                     continue;
                 }
+                if text.contains("ORPHAN") {
+                    stubborn = true;
+                    chunk(&session, &orphan());
+                    active = Some(Active {
+                        id,
+                        permission: None,
+                        text: text.to_owned(),
+                    });
+                    continue;
+                }
                 active = prompt(&session, resumed, id, text, &mut next_request);
             }
             (Some("session/cancel"), None) => {
@@ -179,6 +199,32 @@ fn main() {
             }
             _ => {}
         }
+    }
+    if stubborn {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+/// For `ORPHAN`: note the prompt in `orphan.log`, start a child in this
+/// process group, and say which processes to look for.
+fn orphan() -> String {
+    let noted = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("orphan.log")
+        .and_then(|mut log| writeln!(log, "prompt received"));
+    if let Err(error) = noted {
+        return format!("orphan.log failed: {error}");
+    }
+    match Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => format!("orphan {} {}", std::process::id(), child.id()),
+        Err(error) => format!("orphan failed: {error}"),
     }
 }
 

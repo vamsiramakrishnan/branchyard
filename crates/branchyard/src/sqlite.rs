@@ -1030,3 +1030,176 @@ impl Backend for Sqlite {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Activity, BranchStatus};
+
+    struct Temp(PathBuf);
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn open(name: &str) -> (Temp, Sqlite) {
+        let dir =
+            std::env::temp_dir().join(format!("branchyard-sqlite-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = Sqlite::open(&dir).unwrap();
+        (Temp(dir), store)
+    }
+
+    fn record(name: &str) -> Record {
+        serde_json::from_value(serde_json::json!({
+            "info": {
+                "name": name, "git_branch": format!("by/{name}"), "worktree": "/w",
+                "prompt": "p", "harness": "h", "profile": "p", "session": null,
+                "parent": null, "base": "b", "candidate": null,
+                "status": {"state": "running"}, "turns": 0, "cost_usd": null,
+                "created_at": 0
+            },
+            "created_ms": 0, "check": null, "command": null, "home": null,
+            "cost_baseline": null
+        }))
+        .unwrap()
+    }
+
+    fn owner(id: &str) -> Owner {
+        Owner {
+            id: id.into(),
+            host: crate::proc::host().into(),
+            pid: std::process::id(),
+            start: crate::proc::own_start().into(),
+        }
+    }
+
+    fn event() -> RecordedEvent {
+        RecordedEvent {
+            at_ms: 1,
+            activity: Activity::Status(BranchStatus::Running),
+        }
+    }
+
+    fn granted(acquired: Acquired) -> Fence {
+        match acquired {
+            Acquired::Granted(fence) => fence,
+            Acquired::Held(row) => panic!("held by {row:?}"),
+        }
+    }
+
+    const TTL: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn a_stale_owners_writes_are_fenced_once_the_lease_is_taken_over() {
+        let (_temp, store) = open("fence");
+        assert!(store.reserve("b").unwrap());
+        assert!(!store.reserve("b").unwrap());
+        let first = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+        assert_eq!((first.generation, first.turn), (1, 1));
+        // A second engine is refused while the first holds the lease.
+        let Acquired::Held(row) = store.acquire(&record("b"), &owner("b"), TTL).unwrap() else {
+            panic!("a held lease was granted twice");
+        };
+        assert_eq!(row.owner.as_deref(), Some("a"));
+        assert_eq!(row.stale(now_ms()), None, "a live owner in this process");
+        store.append("b", &event(), Some(&first)).unwrap();
+
+        // Recovery takes it over: same turn, next generation.
+        let second = store.take_over(&row, &owner("b"), TTL).unwrap().unwrap();
+        assert_eq!((second.generation, second.turn), (2, 1));
+        assert_eq!(store.take_over(&row, &owner("c"), TTL).unwrap(), None);
+        for refused in [
+            store.write(&record("b"), Some(&first)),
+            store.append("b", &event(), Some(&first)).map(|_| ()),
+            store.renew(&first, TTL),
+            store.set_deadline(&first, Some(1)),
+            store.finish(&first, Some(&record("b")), None),
+        ] {
+            assert!(
+                matches!(&refused, Err(Error::Fenced(why)) if why.contains("superseded")),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(store.append("b", &event(), Some(&second)).unwrap(), 2);
+        store
+            .finish(&second, Some(&record("b")), Some(&event()))
+            .unwrap();
+        assert!(matches!(
+            store.renew(&second, TTL),
+            Err(Error::Fenced(why)) if why.contains("released")
+        ));
+        assert!(store.leases().unwrap().is_empty());
+        assert_eq!(store.event_count("b").unwrap(), 3);
+    }
+
+    #[test]
+    fn an_expired_lease_is_stale_and_a_new_turn_gets_the_next_generation() {
+        let (_temp, store) = open("expiry");
+        store.reserve("b").unwrap();
+        let fence = granted(
+            store
+                .acquire(&record("b"), &owner("a"), Duration::ZERO)
+                .unwrap(),
+        );
+        let row = store.leases().unwrap().remove(0);
+        assert!(row.stale(now_ms()).unwrap().contains("expired"));
+        store.finish(&fence, None, None).unwrap();
+        let next = granted(store.acquire(&record("b"), &owner("b"), TTL).unwrap());
+        assert_eq!((next.generation, next.turn), (2, 2));
+    }
+
+    #[test]
+    fn a_step_records_its_intent_once_and_replays_its_outcome() {
+        let (_temp, store) = open("steps");
+        store.reserve("b").unwrap();
+        let fence = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+        let intent = serde_json::json!({ "prompt": "p" });
+        assert_eq!(
+            store.begin_step(&fence, 1, "submit", &intent).unwrap(),
+            Begun::Fresh
+        );
+        assert_eq!(
+            store.begin_step(&fence, 1, "submit", &intent).unwrap(),
+            Begun::Pending(intent.clone())
+        );
+        let outcome = serde_json::json!({ "turn": 1 });
+        store.finish_step(&fence, 1, "submit", &outcome).unwrap();
+        assert_eq!(
+            store.begin_step(&fence, 1, "submit", &intent).unwrap(),
+            Begun::Done(outcome.clone())
+        );
+        // A completed step is not forgotten; a pending one is.
+        store.abandon_step(&fence, 1, "submit").unwrap();
+        store.begin_step(&fence, 1, "merge", &intent).unwrap();
+        store.abandon_step(&fence, 1, "merge").unwrap();
+        let steps = store.steps("b", 1).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].outcome, Some(outcome));
+        assert!(store.finish_step(&fence, 2, "submit", &intent).is_err());
+    }
+
+    #[test]
+    fn a_cancel_is_bound_to_the_turn_it_was_asked_of() {
+        let (_temp, store) = open("cancel");
+        store.reserve("b").unwrap();
+        assert!(matches!(
+            store.request_cancel("nope", "x", false),
+            Err(Error::UnknownBranch(_))
+        ));
+        assert!(!store.request_cancel("b", "x", false).unwrap(), "no turn");
+        let fence = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+        assert!(store.request_cancel("b", "first", true).unwrap());
+        assert!(store.request_cancel("b", "second", false).unwrap());
+        assert_eq!(
+            store.cancel_requested(&fence).unwrap().as_deref(),
+            Some("first")
+        );
+        store.finish(&fence, None, None).unwrap();
+        let next = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
+        assert_eq!(store.cancel_requested(&next).unwrap(), None);
+    }
+}
