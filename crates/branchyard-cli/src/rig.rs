@@ -421,7 +421,7 @@ impl Parser<'_> {
                 "startup" => startup = self.startup(item, &key, line)?,
                 "pods" => {
                     let table = self.table(item, &key, line)?;
-                    for (pod, item, line) in self.entries_any(table, "pods")? {
+                    for (pod, item, line) in self.entries_any(table) {
                         let field = join("pods", &pod);
                         named(pod.clone(), &field, line)?;
                         pods.insert(pod, self.pod(item, &field, line)?);
@@ -455,7 +455,7 @@ impl Parser<'_> {
             seats.ok_or_else(|| error("seats", None, "required: at least the root seat"))?;
         let table = self.table(seats_item, "seats", seats_line)?;
         let mut seats = Vec::new();
-        for (seat, item, line) in self.entries_any(table, "seats")? {
+        for (seat, item, line) in self.entries_any(table) {
             let field = join("seats", &seat);
             named(seat.clone(), &field, line)?;
             seats.push(self.seat(&seat, item, &field, line)?);
@@ -472,12 +472,8 @@ impl Parser<'_> {
     }
 
     /// Entries whose keys are names, not fields.
-    fn entries_any<'t>(
-        &self,
-        table: &'t dyn TableLike,
-        _path: &str,
-    ) -> Result<Entries<'t>, RigError> {
-        Ok(table
+    fn entries_any<'t>(&self, table: &'t dyn TableLike) -> Entries<'t> {
+        table
             .iter()
             .map(|(key, item)| {
                 let line = table
@@ -486,7 +482,7 @@ impl Parser<'_> {
                     .or_else(|| self.line(item.span()));
                 (key.to_owned(), item, line)
             })
-            .collect())
+            .collect()
     }
 
     fn pod(&self, item: &Item, field: &str, line: Option<usize>) -> Result<Pod, RigError> {
@@ -651,7 +647,7 @@ impl Parser<'_> {
                 }
                 "mcp" => {
                     let servers = self.table(item, &path, line)?;
-                    for (server, item, line) in self.entries_any(servers, &path)? {
+                    for (server, item, line) in self.entries_any(servers) {
                         let at = join(&path, &server);
                         let command = string(item, &at, line)?;
                         let spec = McpServerSpec::parse(&format!("{server}={command}"))
