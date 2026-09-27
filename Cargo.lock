@@ -527,6 +527,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-bridge"
+version = "0.0.1"
+dependencies = [
+ "branchyard-sandbox",
+ "libc",
+ "ring",
+]
+
+[[package]]
 name = "branchyard-cli"
 version = "0.0.1"
 dependencies = [
