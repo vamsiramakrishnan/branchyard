@@ -9,6 +9,7 @@ description = "Harness driver contract and protocol drivers for Claude Code, Cod
 [dependencies]
 agent-client-protocol-schema = { version = "1.9", default-features = false }
 branchyard-controls = { path = "../branchyard-controls" }
-# For `conformance::assert_conforms`; already in the tree through serde_json.
-serde = "1"
+# For `conformance::assert_conforms` and serializable events; already in the
+# tree through serde_json.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -76,12 +76,19 @@ const DEFAULT_STRIP: [&str; 4] = ["ANTHROPIC", "CLAUDE", "OPENAI", "CODEX"];
 ///
 /// It inherits this process's environment, removes every variable whose
 /// upper-cased name starts with a stripped prefix unless it is kept by exact
-/// name, sets `HOME` to a private directory, then applies explicit settings.
+/// name, removes variables named exactly by [`Environment::remove`], sets
+/// `HOME` to a private directory, then applies explicit settings.
+///
+/// [`Environment::inherit`] is the exception: it strips no prefixes and
+/// leaves `HOME` as it is, for running a harness with the user's own login.
 #[derive(Clone, Debug)]
 pub struct Environment {
     home: PathBuf,
+    /// Leave `HOME` as inherited instead of setting it.
+    inherit_home: bool,
     keep: BTreeSet<String>,
     strip: Vec<String>,
+    remove: BTreeSet<String>,
     set: BTreeMap<String, String>,
 }
 
@@ -91,10 +98,36 @@ impl Environment {
     pub fn new(home: impl Into<PathBuf>) -> Self {
         Self {
             home: home.into(),
+            inherit_home: false,
             keep: BTreeSet::new(),
             strip: DEFAULT_STRIP.iter().map(|p| (*p).to_owned()).collect(),
+            remove: BTreeSet::new(),
             set: BTreeMap::new(),
         }
+    }
+
+    /// This process's environment, `HOME` and credentials included, with
+    /// nothing stripped. It scrubs nothing: use [`Environment::remove`] for
+    /// variables the harness must not see. [`Environment::home`] is the
+    /// inherited `HOME`, or empty when it is unset.
+    pub fn inherit() -> Self {
+        Self {
+            home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default(),
+            inherit_home: true,
+            keep: BTreeSet::new(),
+            strip: Vec::new(),
+            remove: BTreeSet::new(),
+            set: BTreeMap::new(),
+        }
+    }
+
+    /// Remove this variable, matched by exact name. [`Environment::set`]
+    /// still wins.
+    pub fn remove(mut self, name: impl Into<String>) -> Self {
+        self.remove.insert(name.into());
+        self
     }
 
     /// Pass this variable through even if a stripped prefix matches it.
@@ -125,11 +158,13 @@ impl Environment {
             let Some(name) = name.to_str() else { continue };
             let upper = name.to_ascii_uppercase();
             let stripped = self.strip.iter().any(|p| upper.starts_with(p.as_str()));
-            if stripped && !self.keep.contains(name) {
+            if (stripped && !self.keep.contains(name)) || self.remove.contains(name) {
                 command.env_remove(name);
             }
         }
-        command.env("HOME", &self.home);
+        if !self.inherit_home {
+            command.env("HOME", &self.home);
+        }
         for (name, value) in &self.set {
             command.env(name, value);
         }

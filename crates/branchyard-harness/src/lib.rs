@@ -30,6 +30,7 @@ pub mod profiles;
 
 use std::fmt;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use serde_json::Value;
 
 /// A native session identifier, as the harness names it.
@@ -51,6 +52,23 @@ impl NativeSession {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Serialized as the bare identifier string.
+impl Serialize for NativeSession {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+/// Deserialization applies the same validation as [`NativeSession::new`].
+impl<'de> Deserialize<'de> for NativeSession {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        NativeSession::new(value.clone()).ok_or_else(|| {
+            serde::de::Error::custom(format!("{value:?} is not a usable native session ID"))
+        })
     }
 }
 
@@ -123,10 +141,10 @@ impl Output {
 }
 
 /// Identifies one outstanding permission request.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PermissionKey(pub String);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PermissionRequest {
     pub key: PermissionKey,
     /// The harness's name for the tool or action.
@@ -135,7 +153,8 @@ pub struct PermissionRequest {
     pub input: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
 pub enum PermissionDecision {
     /// Allow this one invocation.
     Allow,
@@ -146,7 +165,7 @@ pub enum PermissionDecision {
 
 /// Token and cost observations. Fields a protocol does not report are `None`,
 /// never zero.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     /// True when the values are running totals for the session rather than
     /// for one turn; consumers take deltas instead of summing.
@@ -158,7 +177,8 @@ pub struct Usage {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TurnOutcome {
     Completed,
     Interrupted,
@@ -175,7 +195,11 @@ pub enum TurnOutcome {
 
 /// Normalized driver events. Model stop, process exit and task acceptance
 /// are different transitions and never share an event.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Serialized as an object tagged by `type` in snake case, such as
+/// `{"type": "turn_ended", "turn": 1, "outcome": {"kind": "completed"}}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     /// The protocol handshake completed.
     Ready,
@@ -445,6 +469,54 @@ mod tests {
         for bad in ["", "--resume", "a b", "a\nb", &"x".repeat(257)] {
             assert!(NativeSession::new(bad).is_none(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn events_round_trip_through_json_and_sessions_stay_validated() {
+        let events = [
+            Event::Ready,
+            Event::SessionStarted {
+                session: NativeSession::new("s2").unwrap(),
+                forked_from: NativeSession::new("s1"),
+            },
+            Event::PermissionRequested {
+                turn: Some(1),
+                request: PermissionRequest {
+                    key: PermissionKey("7".into()),
+                    tool: "Bash".into(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+            },
+            Event::UsageObserved {
+                turn: None,
+                usage: Usage {
+                    cumulative: true,
+                    cost_usd: Some(0.25),
+                    ..Usage::default()
+                },
+            },
+            Event::TurnEnded {
+                turn: 1,
+                outcome: TurnOutcome::Failed {
+                    message: "m".into(),
+                },
+            },
+            Event::SessionClosed,
+        ];
+        for event in &events {
+            let text = serde_json::to_string(event).unwrap();
+            assert_eq!(&serde_json::from_str::<Event>(&text).unwrap(), event);
+        }
+        assert_eq!(
+            serde_json::to_value(&events[4]).unwrap(),
+            serde_json::json!({"type": "turn_ended", "turn": 1, "outcome": {"kind": "failed", "message": "m"}})
+        );
+        let decision = PermissionDecision::Deny {
+            message: "no".into(),
+        };
+        let text = serde_json::to_string(&decision).unwrap();
+        assert_eq!(text, r#"{"decision":"deny","message":"no"}"#);
+        assert!(serde_json::from_str::<NativeSession>(r#""--resume""#).is_err());
     }
 
     #[test]

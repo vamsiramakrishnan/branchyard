@@ -2,11 +2,19 @@
 //!
 //! It answers `initialize`, `session/new`, `session/resume`, `session/load`
 //! and `session/prompt` over newline-delimited JSON-RPC on stdio, and exits
-//! when stdin closes. A prompt replies `echo: <prompt>` unless it contains a
+//! when stdin closes. Resuming or loading a session whose ID starts with
+//! `missing` fails as not found. A prompt replies `echo: <prompt>` unless it contains a
 //! keyword:
 //!
 //! - `PERMISSION`: asks `session/request_permission` and replies `allowed` or
-//!   `denied` by the option selected.
+//!   `denied` by the option selected. Any `WRITE` in the prompt happens only
+//!   if allowed.
+//! - `WRITE path=content`: writes `content` and a newline to `path` in its
+//!   working directory, creating parent directories; may repeat. Replies
+//!   `wrote <path>` for each.
+//! - `WHOAMI`: replies `session <id> resumed=<bool>`, where `resumed` says
+//!   whether this process opened the session with `session/resume` or
+//!   `session/load`.
 //! - `HANG`: replies nothing until `session/cancel`, then ends `cancelled`.
 //! - `BACKGROUND`: starts `sleep 30` in its process group and replies with its
 //!   pid.
@@ -46,10 +54,13 @@ fn chunk(session: &str, text: &str) {
 struct Active {
     id: Value,
     permission: Option<u64>,
+    /// The prompt, for writes that wait on the permission.
+    text: String,
 }
 
 fn main() {
     let mut session = "fake-session-1".to_owned();
+    let mut resumed = false;
     let mut active: Option<Active> = None;
     let mut next_request = 1000;
     for line in io::stdin().lock().lines() {
@@ -69,13 +80,25 @@ fn main() {
                 }),
             ),
             (Some("session/new"), Some(id)) => reply(&id, json!({"sessionId": session})),
+            (Some("session/resume" | "session/load"), Some(id))
+                if params["sessionId"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("missing")) =>
+            {
+                send(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": -32002, "message": "Resource not found", "data": params["sessionId"]},
+                }));
+            }
             (Some("session/resume" | "session/load"), Some(id)) => {
                 session = params["sessionId"].as_str().unwrap_or_default().to_owned();
+                resumed = true;
                 reply(&id, json!({}));
             }
             (Some("session/prompt"), Some(id)) => {
                 let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
-                active = prompt(&session, id, text, &mut next_request);
+                active = prompt(&session, resumed, id, text, &mut next_request);
             }
             (Some("session/cancel"), None) => {
                 if let Some(turn) = active.take() {
@@ -97,7 +120,10 @@ fn main() {
                 if waiting && outcome["outcome"] == "selected" {
                     let turn = active.take().expect("checked above");
                     let answer = match outcome["optionId"].as_str() {
-                        Some("allow") => "allowed",
+                        Some("allow") => {
+                            write_files(&session, &turn.text);
+                            "allowed"
+                        }
                         _ => "denied",
                     };
                     chunk(&session, answer);
@@ -109,8 +135,40 @@ fn main() {
     }
 }
 
+/// Carry out every `WRITE path=content` in `text`, relative to the current
+/// directory.
+fn write_files(session: &str, text: &str) {
+    let mut words = text.split_whitespace();
+    while let Some(word) = words.next() {
+        if word != "WRITE" {
+            continue;
+        }
+        let Some((path, content)) = words.next().and_then(|w| w.split_once('=')) else {
+            chunk(session, "WRITE needs path=content\n");
+            continue;
+        };
+        let path = std::path::Path::new(path);
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(path, format!("{content}\n")) {
+            Ok(()) => chunk(session, &format!("wrote {}\n", path.display())),
+            Err(error) => chunk(
+                session,
+                &format!("write {} failed: {error}\n", path.display()),
+            ),
+        }
+    }
+}
+
 /// Act on a prompt; returns the turn if it stays open.
-fn prompt(session: &str, id: Value, text: &str, next_request: &mut u64) -> Option<Active> {
+fn prompt(
+    session: &str,
+    resumed: bool,
+    id: Value,
+    text: &str,
+    next_request: &mut u64,
+) -> Option<Active> {
     if text.contains("GARBAGE") {
         println!("this is not JSON");
     }
@@ -123,6 +181,7 @@ fn prompt(session: &str, id: Value, text: &str, next_request: &mut u64) -> Optio
         return Some(Active {
             id,
             permission: None,
+            text: text.to_owned(),
         });
     }
     if text.contains("PERMISSION") {
@@ -143,8 +202,10 @@ fn prompt(session: &str, id: Value, text: &str, next_request: &mut u64) -> Optio
         return Some(Active {
             id,
             permission: Some(*next_request),
+            text: text.to_owned(),
         });
     }
+    write_files(session, text);
     let answer = if text.contains("BACKGROUND") {
         // Same process group, detached from the protocol pipes.
         match Command::new("sleep")
@@ -157,6 +218,10 @@ fn prompt(session: &str, id: Value, text: &str, next_request: &mut u64) -> Optio
             Ok(child) => format!("background pid {}", child.id()),
             Err(error) => format!("background failed: {error}"),
         }
+    } else if text.contains("WHOAMI") {
+        format!("session {session} resumed={resumed}")
+    } else if text.contains("WRITE") {
+        String::new()
     } else if let Some(rest) = text.split("ENV").nth(1) {
         std::iter::once("HOME")
             .chain(rest.split_whitespace())
@@ -168,7 +233,9 @@ fn prompt(session: &str, id: Value, text: &str, next_request: &mut u64) -> Optio
     } else {
         format!("echo: {text}")
     };
-    chunk(session, &answer);
+    if !answer.is_empty() {
+        chunk(session, &answer);
+    }
     reply(&id, json!({"stopReason": "end_turn"}));
     None
 }
