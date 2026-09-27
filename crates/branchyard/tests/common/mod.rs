@@ -141,3 +141,32 @@ pub fn text(events: &[RecordedEvent]) -> String {
         })
         .collect()
 }
+
+/// Change a branch's stored record in `.branchyard/state.db` directly,
+/// standing in for state the engine did not write.
+pub fn edit_record(root: &Path, name: &str, edit: impl FnOnce(&mut serde_json::Value)) {
+    let db = rusqlite::Connection::open(root.join(".branchyard/state.db")).unwrap();
+    let text: String = db
+        .query_row("SELECT record FROM branches WHERE name = ?1", [name], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut record: serde_json::Value = serde_json::from_str(&text).unwrap();
+    edit(&mut record);
+    db.execute(
+        "UPDATE branches SET record = ?2 WHERE name = ?1",
+        [name, &record.to_string()],
+    )
+    .unwrap();
+}
+
+/// A branch's stored record, as JSON.
+pub fn stored_record(root: &Path, name: &str) -> serde_json::Value {
+    let db = rusqlite::Connection::open(root.join(".branchyard/state.db")).unwrap();
+    let text: String = db
+        .query_row("SELECT record FROM branches WHERE name = ?1", [name], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    serde_json::from_str(&text).unwrap()
+}

@@ -8,11 +8,13 @@ use std::path::PathBuf;
 use branchyard_harness::profiles::{self, Profile};
 use branchyard_harness::SessionMode;
 use branchyard_workspace::Commit;
+use serde_json::json;
 
 use crate::delegation::Grant;
 use crate::engine::{self, Turn};
 use crate::placement;
-use crate::state::{now_ms, Record};
+use crate::recover;
+use crate::state::{now_ms, Lease, Record, Taken};
 use crate::{
     git, harness, names, Branch, BranchInfo, BranchStatus, Error, NativeSession, Provider,
     TaskOptions, Yard,
@@ -79,9 +81,13 @@ pub(crate) struct NewBranch<'a> {
     pub depth: u32,
 }
 
-/// Write the record for a reserved name and create its worktree. A
-/// worktree that cannot be created leaves the branch `Failed`.
-pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
+/// The journaled step that creates a branch's worktree.
+const STEP_CREATE: &str = "create";
+
+/// Write the record for a reserved name, take its lease for the first
+/// turn, and create its worktree as a journaled step. A worktree that
+/// cannot be created leaves the branch `Failed`.
+pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<(Record, Lease), Error> {
     let store = yard.store();
     let branch = names::validate(new.name)?;
     let created_ms = now_ms();
@@ -114,24 +120,60 @@ pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
         provider: new.provider,
         grant: new.grant,
     };
-    let created = {
-        let _lock = git::lock();
-        yard.repo
-            .create_branch(&branch, &Commit(new.base), &record.info.worktree)
+    let lease = match store.acquire(&record)? {
+        Taken::Granted(lease) => lease,
+        Taken::Stale => return Err(Error::Running(new.name.to_owned())),
     };
-    match created {
-        Ok(workspace) => record.info.worktree = workspace.path,
+    let fence = lease.fence().clone();
+    let settled = (|| {
+        let intent = json!({ "base": new.base, "worktree": record.info.worktree });
+        store
+            .backend()
+            .begin_step(&fence, fence.turn, STEP_CREATE, &intent)?;
+        let created = {
+            let _lock = git::lock();
+            yard.repo
+                .create_branch(&branch, &Commit(new.base), &record.info.worktree)
+        };
+        let outcome = match created {
+            Ok(workspace) => {
+                record.info.worktree = workspace.path;
+                json!({ "worktree": record.info.worktree })
+            }
+            Err(error) => {
+                let reason = format!("could not create the worktree: {error}");
+                record.info.status = BranchStatus::Failed {
+                    reason: reason.clone(),
+                };
+                json!({ "error": reason })
+            }
+        };
+        if let Some(home) = &record.home {
+            std::fs::create_dir_all(home)?;
+        }
+        store.write_fenced(&record, &fence)?;
+        store
+            .backend()
+            .finish_step(&fence, fence.turn, STEP_CREATE, &outcome)
+    })();
+    match settled {
+        Ok(()) => Ok((record, lease)),
         Err(error) => {
             record.info.status = BranchStatus::Failed {
-                reason: format!("could not create the worktree: {error}"),
-            }
+                reason: format!("could not create the branch: {error}"),
+            };
+            let _ = lease.finish(Some(&record), None);
+            Err(error)
         }
     }
-    if let Some(home) = &record.home {
-        std::fs::create_dir_all(home)?;
-    }
-    store.write(&record)?;
-    Ok(record)
+}
+
+/// Settle a branch that was created but whose turn will not run.
+pub(crate) fn abandon(lease: Lease, mut record: Record, why: &Error) {
+    record.info.status = BranchStatus::Failed {
+        reason: format!("its turn did not start: {why}"),
+    };
+    let _ = lease.finish(Some(&record), None);
 }
 
 pub(crate) fn isolated_home(yard: &Yard, options: &TaskOptions, name: &str) -> Option<PathBuf> {
@@ -175,17 +217,20 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             depth: 0,
         },
     );
-    let record = record.inspect_err(|_| store.release(&name))?;
-    engine::execute(Turn {
-        yard,
-        record,
-        profile: launch.profile,
-        command: launch.command,
-        mode: SessionMode::Fresh,
-        prompt,
-        options,
-        fork_source: None,
-    })
+    let (record, lease) = record.inspect_err(|_| store.release(&name))?;
+    engine::execute(
+        Turn {
+            yard,
+            record,
+            profile: launch.profile,
+            command: launch.command,
+            mode: SessionMode::Fresh,
+            prompt,
+            options,
+            fork_source: None,
+        },
+        lease,
+    )
 }
 
 pub(crate) fn run_on(
@@ -237,19 +282,25 @@ pub(crate) fn run_on(
             },
         );
         match record {
-            Ok(record) => turns.push(Turn {
-                yard,
-                record,
-                profile: launch.profile,
-                command: launch.command,
-                mode: SessionMode::Fresh,
-                prompt,
-                options,
-                fork_source: None,
-            }),
+            Ok((record, lease)) => turns.push((
+                Turn {
+                    yard,
+                    record,
+                    profile: launch.profile,
+                    command: launch.command,
+                    mode: SessionMode::Fresh,
+                    prompt,
+                    options,
+                    fork_source: None,
+                },
+                lease,
+            )),
             Err(error) => {
                 for name in &reserved[index..] {
                     store.release(name);
+                }
+                for (turn, lease) in turns {
+                    abandon(lease, turn.record, &error);
                 }
                 return Err(error);
             }
@@ -258,7 +309,7 @@ pub(crate) fn run_on(
     let results: Vec<Result<Branch, Error>> = std::thread::scope(|scope| {
         let handles: Vec<_> = turns
             .into_iter()
-            .map(|turn| scope.spawn(move || engine::execute(turn)))
+            .map(|(turn, lease)| scope.spawn(move || engine::execute(turn, lease)))
             .collect();
         handles
             .into_iter()
@@ -278,28 +329,35 @@ pub(crate) fn send(
     options: &TaskOptions,
 ) -> Result<Branch, Error> {
     let prepared = prepare_send(yard, name, options, false)?;
-    engine::execute(Turn {
-        yard,
-        record: prepared.record,
-        profile: prepared.profile,
-        command: prepared.command,
-        mode: prepared.mode,
-        prompt,
-        options,
-        fork_source: None,
-    })
+    engine::execute(
+        Turn {
+            yard,
+            record: prepared.record,
+            profile: prepared.profile,
+            command: prepared.command,
+            mode: prepared.mode,
+            prompt,
+            options,
+            fork_source: None,
+        },
+        prepared.lease,
+    )
 }
 
-/// A send checked and recorded as running, ready to execute.
+/// A send checked and recorded as running under its lease, ready to
+/// execute.
 pub(crate) struct Prepared {
     pub record: Record,
+    pub lease: Lease,
     pub profile: &'static Profile,
     pub command: Vec<String>,
     pub mode: SessionMode,
 }
 
-/// Check that `name` can continue its session and mark it running.
-/// `idle` refuses a branch whose status says it is running a turn.
+/// Check that `name` can continue its session, and mark it running under
+/// a new lease. Refused while an engine runs a turn on it; a turn left by
+/// an engine that stopped is recovered first. `idle` also refuses a branch
+/// whose status says it is running a turn.
 pub(crate) fn prepare_send(
     yard: &Yard,
     name: &str,
@@ -307,6 +365,7 @@ pub(crate) fn prepare_send(
     idle: bool,
 ) -> Result<Prepared, Error> {
     let store = yard.store();
+    recover::stale(yard, name)?;
     let mut record = store.read(name)?;
     if idle && record.info.status == BranchStatus::Running {
         return Err(Error::Running(name.to_owned()));
@@ -369,11 +428,15 @@ pub(crate) fn prepare_send(
         });
     }
     record.info.status = BranchStatus::Running;
-    // A cancel meant for an earlier turn must not stop this one.
-    store.clear_cancel(name);
-    store.write(&record)?;
+    // A cancel is bound to the turn it was asked of, so one meant for an
+    // earlier turn cannot stop this one.
+    let lease = match store.acquire(&record)? {
+        Taken::Granted(lease) => lease,
+        Taken::Stale => return Err(Error::Running(name.to_owned())),
+    };
     Ok(Prepared {
         record,
+        lease,
         profile,
         command,
         mode: SessionMode::Resume(session),
@@ -470,14 +533,18 @@ pub(crate) fn fork(
         },
     )
     .inspect_err(|_| store.release(&reserved))?;
-    engine::execute(Turn {
-        yard,
-        record,
-        profile,
-        command: launch_command,
-        mode,
-        prompt,
-        options,
-        fork_source: forking.then(|| parent.info.worktree.clone()),
-    })
+    let (record, lease) = record;
+    engine::execute(
+        Turn {
+            yard,
+            record,
+            profile,
+            command: launch_command,
+            mode,
+            prompt,
+            options,
+            fork_source: forking.then(|| parent.info.worktree.clone()),
+        },
+        lease,
+    )
 }

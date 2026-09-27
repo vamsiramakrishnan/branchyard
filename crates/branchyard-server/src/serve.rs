@@ -21,7 +21,7 @@ use crate::auth::Tokens;
 use crate::config::{Config, TlsFiles};
 use crate::feed::Feed;
 use crate::ops::Registry;
-use crate::store::FileStore;
+use crate::store::SqliteStore;
 
 /// How long open connections get to finish after shutdown begins.
 const DRAIN: Duration = Duration::from_secs(10);
@@ -143,7 +143,8 @@ fn tls_acceptor(files: &TlsFiles) -> Result<TlsAcceptor, String> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-/// Open every repository, the registry and the feeds, bind, and start
+/// Open every repository (recovering branches whose engine stopped), the
+/// registry and the feeds, bind, and start
 /// serving. Needs a multi-threaded Tokio runtime.
 pub async fn start(config: Config) -> Result<Running, String> {
     config.validate()?;
@@ -202,11 +203,8 @@ fn open_state(config: &Config) -> Result<Opened, String> {
     for (name, path) in &config.repos {
         let yard = Yard::open(path)
             .map_err(|e| format!("repository {name} at {}: {e}", path.display()))?;
-        let feed_path = config.data_dir.join("feeds").join(format!("{name}.jsonl"));
-        let feed = Feed::open(feed_path.clone(), yard.root())
-            .map_err(|e| format!("feed {}: {e}", feed_path.display()))?;
-        feed.sync()
-            .map_err(|e| format!("reading the event logs of {name}: {e}"))?;
+        let feed = Feed::open(yard.clone())
+            .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(
             name.clone(),
             RepoState {
@@ -217,27 +215,57 @@ fn open_state(config: &Config) -> Result<Opened, String> {
             },
         );
     }
-    let store_path = config.data_dir.join("operations.jsonl");
-    let store = FileStore::open(&store_path)
+    let store_path = config.data_dir.join("state.db");
+    let legacy = config.data_dir.join("operations.jsonl");
+    let store = SqliteStore::open(&store_path, Some(&legacy))
         .map_err(|e| format!("operation registry {}: {e}", store_path.display()))?;
     let registry = Registry::open(Box::new(store), config.max_running)
         .map_err(|e| format!("operation registry {}: {e}", store_path.display()))?;
     Ok((repos, registry))
 }
 
-/// Ingest a repository's activity when the engine reports some, and
+/// How often the server looks for branches whose engine stopped, such as a
+/// local `by run` that was killed.
+const RECOVER_EVERY: Duration = Duration::from_secs(30);
+
+/// Publish a repository's feed head when the engine reports activity, and
 /// otherwise every `interval`, which picks up other processes' activity.
+/// Every [`RECOVER_EVERY`], recover branches whose engine stopped.
 async fn poll(repo: RepoState, interval: Duration, mut shutdown: watch::Receiver<bool>) {
+    let mut recovered = tokio::time::Instant::now();
     loop {
         tokio::select! {
             _ = repo.wake.notified() => {}
             _ = tokio::time::sleep(interval) => {}
             _ = shutdown.changed() => {}
         }
-        let feed = repo.feed.clone();
-        match tokio::task::spawn_blocking(move || feed.sync()).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => eprintln!("branchyard-server: feed of {}: {e}", repo.name),
+        let recover = recovered.elapsed() >= RECOVER_EVERY;
+        if recover {
+            recovered = tokio::time::Instant::now();
+        }
+        let (feed, yard) = (repo.feed.clone(), repo.yard.clone());
+        let polled = tokio::task::spawn_blocking(move || {
+            let recovered = match recover {
+                true => yard.recover().map(|r| r.len()),
+                false => Ok(0),
+            };
+            (feed.sync(), recovered)
+        })
+        .await;
+        match polled {
+            Ok((synced, recovered)) => {
+                if let Err(e) = synced {
+                    eprintln!("branchyard-server: feed of {}: {e}", repo.name);
+                }
+                match recovered {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!(
+                        "branchyard-server: recovered {n} branch(es) of {} whose engine stopped",
+                        repo.name
+                    ),
+                    Err(e) => eprintln!("branchyard-server: recovering {}: {e}", repo.name),
+                }
+            }
             Err(_) => return,
         }
         if *shutdown.borrow() {

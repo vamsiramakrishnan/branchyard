@@ -430,6 +430,12 @@ impl Session {
         Ok(session)
     }
 
+    /// The provider's identifier for the harness process: its pid for a
+    /// local process, which also leads its own process group.
+    pub fn process_id(&self) -> String {
+        self.process.id()
+    }
+
     /// Wait for the handshake: `Ok` on [`Event::Ready`], an error on
     /// [`Event::OpenFailed`], exit or timeout. Permission requests that arrive
     /// meanwhile stay unanswered.

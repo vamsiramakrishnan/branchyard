@@ -183,6 +183,18 @@ pub struct MergeRequest {
     pub target: Option<String>,
 }
 
+/// `POST /v1/repos/{repo}/branches/{branch}/cancel`: no fields yet.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelRequest {}
+
+/// The branches a cancel asked to stop: the branch and its delegated
+/// descendants that were running a turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelResult {
+    pub cancelled: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {

@@ -249,6 +249,20 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             let verb = if *refused { "refused" } else { "delegated" };
             style.paint(tone, &format!("{verb}: {tool}{target}: {outcome}"))
         }
+        Activity::Recovered { reason, killed } => {
+            let killed = match killed.is_empty() {
+                true => String::new(),
+                false => format!(
+                    " (killed {})",
+                    killed
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            style.paint(Tone::Yellow, &format!("recovered: {reason}{killed}"))
+        }
     })
 }
 

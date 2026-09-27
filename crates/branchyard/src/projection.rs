@@ -423,7 +423,7 @@ pub(crate) fn same_token(a: &str, b: &str) -> bool {
 /// The token file in `root` holding `token`, if any. Every file is read and
 /// compared in full.
 pub(crate) fn find_token(root: &Path, token: &str) -> Option<TokenFile> {
-    let dir = crate::state::Store::new(root).dir().join("delegation");
+    let dir = crate::state::dir(root).join("delegation");
     let mut found = None;
     for entry in fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();

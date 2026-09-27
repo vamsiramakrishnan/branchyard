@@ -96,6 +96,7 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::InvalidCandidate(_) => (S::UNPROCESSABLE_ENTITY, "invalid_candidate"),
         E::Denied(_) => (S::FORBIDDEN, "denied"),
         E::Running(_) => (S::CONFLICT, "running"),
+        E::Fenced(_) => (S::CONFLICT, "fenced"),
         E::Remote { .. } => (S::BAD_GATEWAY, "remote_error"),
         E::Git(_) => (S::INTERNAL_SERVER_ERROR, "git_error"),
         E::Harness(_) => (S::INTERNAL_SERVER_ERROR, "harness_error"),

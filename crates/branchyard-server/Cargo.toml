@@ -17,6 +17,7 @@ branchyard-client = { path = "../branchyard-client" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "server", "server-graceful"] }
+rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }

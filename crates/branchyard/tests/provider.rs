@@ -3,7 +3,7 @@
 mod common;
 
 use branchyard::{BranchStatus, Error, Provider, SandboxOptions, TaskOptions};
-use common::Fixture;
+use common::{stored_record, Fixture};
 
 fn microsandbox() -> Provider {
     Provider::Microsandbox(SandboxOptions {
@@ -47,8 +47,7 @@ fn an_explicit_local_provider_runs_as_before_and_is_kept_for_sends() {
         .run()
         .unwrap();
     assert_eq!(branch.info().status, BranchStatus::Ready);
-    let record = std::fs::read(f.root.join(".branchyard/branches/local.json")).unwrap();
-    let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
+    let record = stored_record(&f.root, "local");
     assert_eq!(record["provider"], serde_json::json!({"kind": "local"}));
     let sent = branch.send("WHOAMI", f.options()).unwrap();
     assert_eq!(sent.info().turns, 2);

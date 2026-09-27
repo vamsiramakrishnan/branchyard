@@ -48,7 +48,6 @@ pub mod feed;
 pub mod ops;
 pub mod serve;
 pub mod store;
-pub mod tail;
 
 pub use config::Config;
 pub use serve::{start, Handle, Running, Stopped};
