@@ -114,7 +114,11 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Ls { json } => commands::ls(env, target, json),
         Command::Show { branch, json } => commands::show(env, target, &branch, json),
         Command::Diff { branch } => commands::diff(env, target, &branch),
-        Command::Log { branch, json } => commands::log(env, target, &branch, json),
+        Command::Log {
+            branch,
+            json,
+            follow,
+        } => commands::log(env, target, &branch, json, follow),
         Command::Merge { branch, into } => commands::merge(target, &branch, into.as_deref()),
         Command::Rm { branch } => commands::rm(target, &branch),
         Command::Harnesses { json } => commands::harnesses(env, target, json),

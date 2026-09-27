@@ -527,6 +527,40 @@ impl EventStream {
         self
     }
 
+    /// Connect now and return the feed position the stream starts after:
+    /// the cursor it was given, or the feed's head when it was given none.
+    /// Read a snapshot (such as [`Repo::branches`]) after this, then apply
+    /// the entries that follow, and nothing recorded in between is missed.
+    /// Call it before the first `next`; it does not retry.
+    pub fn open(&mut self) -> Result<u64, Error> {
+        if self.reader.is_none() {
+            self.connect()?;
+        }
+        let reader = self.reader.as_mut().expect("connected above");
+        match reader.next_event() {
+            Ok(Some(event)) if event.event == "open" => {
+                let id = event
+                    .id
+                    .and_then(|id| id.parse().ok())
+                    .ok_or_else(|| Error::Protocol("open event without a cursor".into()))?;
+                self.cursor = Some(id);
+                Ok(id)
+            }
+            Ok(Some(event)) => Err(Error::Protocol(format!(
+                "the stream began with {:?}, not open",
+                event.event
+            ))),
+            Ok(None) => {
+                self.reader = None;
+                Err(self.repo.client.transport("the event stream ended at once"))
+            }
+            Err(error) => {
+                self.reader = None;
+                Err(self.repo.client.transport(error))
+            }
+        }
+    }
+
     fn connect(&mut self) -> Result<(), Error> {
         let mut path = self.repo.path("/events/stream");
         if let Some(cursor) = self.cursor {

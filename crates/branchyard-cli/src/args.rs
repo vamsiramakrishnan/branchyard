@@ -164,6 +164,7 @@ pub enum Command {
     Log {
         branch: String,
         json: bool,
+        follow: bool,
     },
     Merge {
         branch: String,
@@ -501,6 +502,11 @@ const JSON: Flag = Flag {
     value: None,
     help: "Print JSON",
 };
+const FOLLOW: Flag = Flag {
+    long: "follow",
+    value: None,
+    help: "Keep printing events as they are recorded, until interrupted; with --json, one object per line",
+};
 const INTERVAL: Flag = Flag {
     long: "interval",
     value: Some("SECS"),
@@ -798,7 +804,7 @@ pub static COMMANDS: &[Spec] = &[
         name: "log",
         positionals: &["branch"],
         summary: "Show a branch's recorded events",
-        flags: &[JSON],
+        flags: &[JSON, FOLLOW],
     },
     Spec {
         name: "merge",
@@ -977,6 +983,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "log" => Command::Log {
             branch: next(),
             json: m.switch("json"),
+            follow: m.switch("follow"),
         },
         "merge" => Command::Merge {
             branch: next(),
@@ -1999,7 +2006,16 @@ mod tests {
             parse_str("log b").unwrap(),
             Command::Log {
                 branch: "b".into(),
-                json: false
+                json: false,
+                follow: false
+            }
+        );
+        assert_eq!(
+            parse_str("log --follow b").unwrap(),
+            Command::Log {
+                branch: "b".into(),
+                json: false,
+                follow: true
             }
         );
         assert_eq!(
