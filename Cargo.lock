@@ -567,6 +567,7 @@ dependencies = [
  "branchyard-bridge",
  "branchyard-harness",
  "branchyard-microsandbox",
+ "branchyard-provision",
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-substrate",
@@ -650,6 +651,16 @@ dependencies = [
  "branchyard-sandbox",
  "microsandbox",
  "tokio",
+]
+
+[[package]]
+name = "branchyard-provision"
+version = "0.0.1"
+dependencies = [
+ "branchyard-controls",
+ "branchyard-harness",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

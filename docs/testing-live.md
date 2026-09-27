@@ -6,7 +6,7 @@ Record what you ran in the place each section names. A result that is not record
 
 ## 0. Machine and budget
 
-- Linux or macOS with git, Python 3 and a C compiler; Linux x86_64 or aarch64 with `/dev/kvm` for section 5; Docker, `kind` and `kubectl` for section 6.
+- Linux or macOS with git, Python 3 and a C compiler; Linux x86_64 or aarch64 with `/dev/kvm` for section 5; Docker, `kind` and `kubectl` for section 6; an OpenTelemetry collector for the telemetry row of section 7.
 - Rust 1.90 (`rust-toolchain.toml` pins it), and Rust 1.94 only for section 5.
 - The harnesses you want to test, at the versions [compatibility](compatibility.md) lists as checked against (Claude Code 2.1.283 and codex-cli 0.157.1 for the native drivers). Note any other version you use.
 - A throwaway repository with a fast test command, for example a small crate whose `cargo test` takes seconds. Never your real work: harnesses in local mode run as you.
@@ -170,6 +170,27 @@ The Substrate provider has run only against the in-process fake. On a machine wi
 8. **A harness.** Rebuild the image with a harness installed, recreate the template, then in a throwaway repository: `by run "…" --provider substrate --substrate-endpoint $BY_SUBSTRATE_ENDPOINT --substrate-router "$BY_SUBSTRATE_ROUTER" --substrate-ca ca.pem --substrate-client-cert client.crt --substrate-client-key client.key --substrate-atespace $BY_SUBSTRATE_ATESPACE --substrate-template <it> --substrate-key bridge.key --pass-env ANTHROPIC_API_KEY --yes --budget-usd 1`. The candidate holds the harness's changes, `by merge` works, the actor is gone afterwards (`kubectl ate` or `ListActors`), and a `by send` resumes the session from the carried home. Ask the harness to commit its work in two commits and leave one more change uncommitted: `by log` shows both commits with their messages under the turn's snapshot. Kill `by` mid-turn after the harness has written a file, and check that `by ls` recovers the branch, says in its `recovered` event that the work was brought back, shows the file in the candidate, and deletes the actor.
 
 **Record:** in [Agent Substrate](substrate.md) and [validation](validation.md), with the Substrate revision, the router template, how TLS was served on each hop, the image digest and which tests passed; mark the provider qualified only when all of this passed.
+
+## 7. Provisioning (model calls)
+
+[Provisioning](provisioning.md) writes each harness's native files from Scion's knowledge; none of those paths has been checked against a real harness. In the throwaway repository, with credentials in your environment and not logged in to the harnesses (`--isolated` gives each branch a fresh home):
+
+| Check | Command | Expect |
+|---|---|---|
+| Claude Code, API key | `by run "Say hi" --harness claude-code --isolated --secret ANTHROPIC_API_KEY --model large --yes --budget-usd 0.2` | The turn runs without a login; `by log` shows `provisioned: auth api-key; wrote .claude.json; …`; `.branchyard/homes/<b>/.claude.json` is 0600 and holds the fingerprint and the trusted workspace; the model reported is the one `large` maps to |
+| Claude Code over ACP | the same with `--harness claude-code-acp` | The same; `ANTHROPIC_MODEL` applies to claude-agent-acp |
+| Codex, API key and effort | `by run "Say hi" --harness codex --isolated --secret OPENAI_API_KEY --effort high --yes --budget-usd 0.2` | `~/.codex/auth.json` (0600) is accepted by codex-cli 0.157.1; `config.toml` has `model_reasoning_effort = "high"` at the top level and Codex honors it |
+| Codex auth file | `--secret CODEX_AUTH=@$HOME/.codex/auth.json` after `codex login` | Codex runs with the copied login |
+| Codex over ACP, model | `--harness codex-acp --model <name>` | codex-acp uses the `model` from `config.toml` |
+| Gemini CLI | `--harness gemini-cli --isolated --secret GEMINI_API_KEY --model <name>` | `security.auth.selectedType` and `model.name` in `settings.json` are honored over ACP |
+| Copilot, Hermes, OpenCode | each with its secret (see the table in [provisioning](provisioning.md#harnesses)) | Each authenticates from what was written; record any file the harness does not read |
+| Antigravity MCP | `--harness antigravity --isolated --secret GEMINI_API_KEY --mcp docs=/abs/path/to/an/mcp-server --allow-unapproved-tools` | `agy` loads the server from `~/.gemini/config/mcp_config.json` and the instructions from `~/.gemini/GEMINI.md` |
+| Telemetry | any of the above with `--telemetry http://127.0.0.1:4317` and an OpenTelemetry collector listening there | Metrics or logs arrive; no prompt text in them; `--telemetry off` sends nothing |
+| In a sandbox | the Codex row with `--provider microsandbox` (section 5) and `--provider substrate` (section 6) | The same files, with the same modes, inside the sandbox; after the turn the private home holds them |
+| Secrets stay out | after the rows above, `grep -rF <each key> .branchyard/state.db .branchyard/server by/ 2>/dev/null` and in the worktrees | Found only under `.branchyard/homes/` |
+| Server | `by serve --secret OPENAI_API_KEY --allow-client-commands` with the key in the server's environment, then `by --remote … run "Say hi" --harness codex --isolated --secret OPENAI_API_KEY --yes` | The server's key is used; `--secret OPENAI_API_KEY=X` is refused by `by`; an undefined secret is refused with `secret_not_allowed` |
+
+**Record:** in [validation](validation.md), with the harness versions; correct [provisioning](provisioning.md) for every path or variable a harness does not read, and mark the harness's provisioning unverified until it does.
 
 ## Cleaning up
 

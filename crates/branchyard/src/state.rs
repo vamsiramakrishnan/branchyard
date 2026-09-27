@@ -73,6 +73,9 @@ pub(crate) struct Record {
     /// and denials its parent imposed. `None`: no delegation.
     #[serde(default)]
     pub grant: Option<Grant>,
+    /// What to provision before each turn; secrets by source, never value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<branchyard_provision::Provisioning>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current

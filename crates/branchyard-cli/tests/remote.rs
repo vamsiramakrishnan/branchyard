@@ -820,6 +820,83 @@ fn unapproved_tools_need_the_operators_consent() {
     );
 }
 
+#[test]
+fn remote_secrets_come_from_the_servers_table() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    // Inherited by the server, which reads it; the client never sees it.
+    std::env::set_var("BY_TEST_SERVE_GEMINI", "served-key");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &[
+            "--allow-client-commands",
+            "--secret",
+            "GEMINI_API_KEY=BY_TEST_SERVE_GEMINI",
+        ],
+    );
+    let args = with_agent(&[
+        "run",
+        "SH test ${#GEMINI_API_KEY} -eq 10 && echo key-from-the-server",
+        "--name",
+        "s",
+        "--isolated",
+        "--secret",
+        "GEMINI_API_KEY",
+        "--model",
+        "gemini-served",
+        "--yes",
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = server.by(&dir.0, &args);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("key-from-the-server"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(
+        text(&out.stdout).contains("provisioned: auth api-key"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // A source is the server's to choose.
+    let args = with_agent(&[
+        "run",
+        "x",
+        "--isolated",
+        "--secret",
+        "GEMINI_API_KEY=HOME",
+        "--yes",
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let refused = server.by(&dir.0, &args);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        text(&refused.stderr).contains("secrets come from the server"),
+        "{}",
+        text(&refused.stderr)
+    );
+    // A secret the server does not define.
+    let args = with_agent(&[
+        "run",
+        "x",
+        "--isolated",
+        "--secret",
+        "OPENAI_API_KEY",
+        "--yes",
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let refused = server.by(&dir.0, &args);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        text(&refused.stderr).contains("--secret OPENAI_API_KEY"),
+        "{}",
+        text(&refused.stderr)
+    );
+}
+
 /// `by serve --database`: the same commands with the server's state in
 /// PostgreSQL. Runs with the `postgres` feature when
 /// `BY_TEST_POSTGRES_URL` is set.

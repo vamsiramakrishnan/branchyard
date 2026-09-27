@@ -6,13 +6,13 @@ Branchyard vendors selected control sources rather than copying whole orchestrat
 
 | Project | Files | Selection | Current integration |
 |---|---:|---|---|
-| Scion | 44 | Shared helper and tests; nine provisioners and their adjacent helpers/configuration; six provisioner test files; Claude settings fixture; license and harness overview | Python suites run directly; no production launch path enabled |
+| Scion | 46 | Shared helper and tests; telemetry provisioning tests; nine provisioners and their adjacent helpers/configuration; six provisioner test files; Claude settings fixture; license, harness overview and authoring guide | Python suites run directly; seven provisioners translated into `branchyard-provision`, which the engine runs before every turn; the Python is never executed by Branchyard |
 | Herdr | 25 | 22 detection TOMLs, manifest loader source, resume source, license | Resume logic extracted into the Rust crate; manifests parse through the catalog checker |
 | OpenRig | 6 | Runtime adapter contract, four runtime fragments, license | Design input for projection/readiness handling; TypeScript imports require the upstream application |
 | Agent Substrate | 2 | Public `ateapi.proto` and license | Rust client generated at build time; adapter in `branchyard-substrate`, unqualified |
 | Warp | 7 | Process control, exit escalation, JSON utilities, two test files, two license texts | AGPL reference collection, outside Cargo's build |
 
-The Scion provisioners cover Antigravity, Claude, Codex, Copilot, Gemini CLI, Grok Build, Hermes, Muse Code, and OpenCode. Their local copies of `scion_harness.py` are preserved: the root and adjacent helper files are not all identical at this revision. Do not consolidate them without a compatibility test.
+The Scion provisioners cover Antigravity, Claude, Codex, Copilot, Gemini CLI, Grok Build, Hermes, Muse Code, and OpenCode, pinned at `d9b9e6a` (re-pinned from `54b9387` on 27 September 2026, when the translation was made, so that the vendored files are the ones the Rust follows; at this revision the Claude suite passes against its provisioner). Their local copies of `scion_harness.py` are preserved: the root and adjacent helper files are not all identical at this revision. Do not consolidate them without a compatibility test.
 
 ## Harness identity
 
@@ -24,11 +24,13 @@ A registry entry records naming only. It is not a support claim.
 
 ## Scion: reuse environment projection
 
-The reusable unit is its provisioner bundle: a manifest, staged inputs, a harness-specific translator, and output configuration. Preserve that boundary. Static tools and templates can be baked into images. Dynamic instructions and session-specific MCP configuration are projected into the sandbox before launch. A small Python provisioning step can coexist with a Rust server; rewriting it immediately would duplicate existing behavior.
+The reusable unit is its provisioner bundle: a manifest, staged inputs, a harness-specific translator, and output configuration. Branchyard keeps that boundary in Rust: [`branchyard-provision`](../crates/branchyard-provision/src/lib.rs) plans each harness's native files and variables without I/O, and the engine applies the plan to the branch's private home before launch, on every provider ([provisioning](provisioning.md)). It was translated rather than run as Python so that a harness image needs no interpreter, the planner is testable as data, and secrets never pass through staged files.
 
-Before enabling a bundle, the Branchyard projection adapter must construct trusted inputs from a registered profile. It must reject path escapes, unsupported scope translations, unregistered hook commands, and implicit credential inheritance. Keep any per-run secret-bearing outputs in private ephemeral storage; exclude them from shared image layers and generic artifact capture.
+The translation is a derivative, not a vendored copy. Each derived file names its origin and changes in its header; `patches/scion-provision.json` records the blob ID of every upstream file each one follows, and `tools/verify_derivatives.py` fails when a re-pin changes one. To update: re-pin `vendor/scion` (all files at one revision), run the upstream suites, read the upstream diff of each flagged source, port what applies (with its tests), and record the new blobs.
 
-The upstream Claude and Codex launch configurations include permission-bypass arguments. Those files are examples of Scion's execution assumptions, not defaults for Branchyard. The server creates an explicit launch plan for the chosen protocol and policy. A required approval capability that the driver cannot enforce causes admission to fail.
+The Branchyard adapter constructs trusted inputs from a registered profile. It rejects path escapes and links, keeps MCP servers on the driver's session channel where one exists (so no scope is translated), writes no hook commands, and takes credentials only from secrets the task names. Keep any per-run secret-bearing outputs in private ephemeral storage; exclude them from shared image layers and generic artifact capture.
+
+The upstream Claude and Codex launch configurations include permission-bypass arguments, and Scion's seed files and Hermes provisioner turn approvals off. Those are Scion's execution assumptions, not defaults for Branchyard: none is ported, and a test checks that no provisioning plan contains one. The server creates an explicit launch plan for the chosen protocol and policy. A required approval capability that the driver cannot enforce causes admission to fail.
 
 Some upstream MCP mappings demote project scope to global scope. Branchyard must reject that translation unless the selected profile deliberately uses a private per-run home with equivalent authority. It must never silently broaden access across sessions.
 

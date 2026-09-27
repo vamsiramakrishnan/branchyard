@@ -176,14 +176,14 @@ impl Live {
         Live { console, policy }
     }
 
-    fn options(&self, task: &TaskArgs) -> TaskOptions {
+    fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
         let console = self.console.clone();
         let exe = std::env::current_exe().ok();
         let policy = match (&exe, task.allow_delegation) {
             (Some(by), true) => self.policy.clone().allow_delegation_commands(by),
             _ => self.policy.clone(),
         };
-        TaskOptions {
+        Ok(TaskOptions {
             harness: task.harness.clone(),
             name: task.name.clone(),
             base: task.base.clone(),
@@ -202,7 +202,8 @@ impl Live {
             delegation_cli: exe,
             delegation_server: None,
             unapproved_tools: task.unapproved_tools,
-        }
+            provision: provision(task)?,
+        })
     }
 
     /// Print the closing summary for one branch, once every branch it
@@ -271,7 +272,7 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome
     }
     let yard = open()?;
     let live = Live::start(env, task, task.delegate.is_some(), None);
-    let result = yard.task(prompt).options(live.options(task)).run();
+    let result = yard.task(prompt).options(live.options(task)?).run();
     live.finish(env, result)
 }
 
@@ -288,7 +289,7 @@ pub fn fan(
     let yard = open()?;
     let live = Live::start(env, task, true, None);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
-    let builder = yard.task(prompt).options(live.options(task));
+    let builder = yard.task(prompt).options(live.options(task)?);
     // Knowing the names up front lines the prefixes up from the first line.
     if let Ok(names) = builder.planned_names(&ids) {
         live.console.reserve(&names);
@@ -371,7 +372,7 @@ pub fn send(
     let branch = open()?.branch(branch)?;
     if json {
         let live = Live::start_to(env, task, true, true, branch.provider()?);
-        let result = branch.send(prompt, live.options(task));
+        let result = branch.send(prompt, live.options(task)?);
         live.console.finish();
         let branch = match result {
             Ok(branch) => branch,
@@ -387,7 +388,7 @@ pub fn send(
     }
     let delegating = task.delegate.is_some() || !branch.info().children.is_empty();
     let live = Live::start(env, task, delegating, branch.provider()?);
-    let result = branch.send(prompt, live.options(task));
+    let result = branch.send(prompt, live.options(task)?);
     live.finish(env, result)
 }
 
@@ -404,7 +405,7 @@ pub fn fork(
     }
     let branch = open()?.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
-    let result = branch.fork(prompt, fresh_session, live.options(task));
+    let result = branch.fork(prompt, fresh_session, live.options(task)?);
     live.finish(env, result)
 }
 
@@ -697,7 +698,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
     let result = (|| {
         // One yard, so the wait sees the child's thread.
         let parent = open_yard()?.branch(&parent)?;
-        let delegate = parent.delegate(live.options(task))?;
+        let delegate = parent.delegate(live.options(task)?)?;
         let spawned = delegate.spawn(request)?;
         parent.wait_subtree()?;
         delegate.inspect(&spawned.name)
@@ -852,6 +853,17 @@ fn absolute(path: &str) -> std::path::PathBuf {
 }
 
 /// The SDK provider for `--provider`, if given.
+/// The provisioning flags, with `--instructions` read from its file.
+pub(crate) fn provision(task: &TaskArgs) -> Result<Option<branchyard::Provisioning>, Failure> {
+    let mut spec = task.provision.clone();
+    if let Some(path) = &task.instructions {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Failure::Message(format!("--instructions {path}: {e}")))?;
+        spec.get_or_insert_with(Default::default).instructions = Some(text);
+    }
+    Ok(spec)
+}
+
 pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
     if let Some(substrate) = &task.substrate {
         return Some(Provider::Substrate(SubstrateOptions {

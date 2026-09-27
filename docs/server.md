@@ -31,6 +31,7 @@ Flags (`by serve --help` or `branchyard-server --help`):
 | `--allow-delegation` | Accept delegation envelopes, `allow_delegation` and the spawn endpoint: harnesses get the delegation tools with this server's `by` |
 | `--by-path PATH` | The `by` a delegating harness gets. Default: this executable when it is `by` (as under `by serve`), else `by` beside it, else on `PATH` |
 | `--allow-unapproved-tools` | Accept `unapproved_tools`: profiles whose tools bypass the request's policy (Antigravity, Pi, Amp) |
+| `--secret NAME[=VAR\|=@FILE]` | A secret requests may name in `provision.secrets`, read from this server's variable `NAME` or `VAR`, or from `FILE`, at each turn; repeatable. See [provisioning](provisioning.md#through-a-server) |
 | `--database URL` | Keep branch state and operations in PostgreSQL (`postgres://user@host/db`) instead of SQLite. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
 | `--max-running N` | Operations running at once; more wait queued. Default 8 |
 | `--shutdown-grace SECS` | At shutdown, how long running operations may finish. Default 60 |
@@ -57,6 +58,7 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "allow_delegation": false,
   "by_path": "/usr/local/bin/by",
   "allow_unapproved_tools": false,
+  "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
   "database": "postgres://branchyard@db.internal/branchyard"
 }
 ```
@@ -125,6 +127,8 @@ Only `prompt` is required. Give `harness` for one branch or `harnesses` for one 
 
 `provider` is [`branchyard::Provider`](../crates/branchyard/src/lib.rs)'s serde form, tagged by `kind`: `local`, `microsandbox` or `substrate`, with [the provider's options](providers.md). Anything but `local` is refused (`403 provider_not_allowed`) unless the operator allowed that provider. Everything in it is about the server: `pass_env` names are read from **the server's environment** at each turn, a Substrate `key` must be an absolute path to a file on the server (`400` otherwise), and a Microsandbox provider needs a server built with the `microsandbox` feature on a host with KVM.
 
+`provision` is [`branchyard::Provisioning`](provisioning.md)'s serde form: `secrets` (names only, `[{"name": "ANTHROPIC_API_KEY"}]`; a `from` is refused with `400`, and a name the operator did not define with `403 secret_not_allowed`; values come from the server's table), `auth`, `mcp_servers` (commands the server runs: refused unless it allows client commands), `instructions`, `model`, `effort` and `telemetry`. It is accepted on task, send and fork requests and stored with the branch, with the server's sources.
+
 `delegation` is an [`Envelope`](delegation.md#the-envelope), `{max_depth, max_children, harnesses}`, all three required; with it the harness gets the delegation tools, through the server's `by`, for each of its turns. `allow_delegation` adds the rule that allows the harness's shell commands running that `by` with a delegation subcommand, after the policy's own rules, like `by --allow-delegation`. Either is refused (`403 delegation_not_allowed`) unless the server allows delegation. `unapproved_tools` runs a profile whose driver cannot route tool approvals, like `by --allow-unapproved-tools`, and is refused (`403 unapproved_tools_not_allowed`) unless the server allows it.
 
 `send` takes `prompt`, `budget`, `policy`, `check`, `command`, `delegation`, `allow_delegation` and `unapproved_tools`; the branch keeps its harness, provider, recorded command, environment and envelope. A server that does not allow delegation refuses to send to a branch that was given an envelope, since its harness would get the tools. `fork` takes `prompt`, `name`, `fresh_session`, `harness`, `budget`, `policy`, `check`, `isolated`, `command`, `provider`, `delegation`, `allow_delegation` and `unapproved_tools`; without a provider it keeps its parent's. `merge` takes an optional `target`, defaulting to the branch checked out in the served repository.
@@ -180,7 +184,8 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `invalid_request` | 400 | Malformed JSON, unknown field, empty prompt, bad budget, bad cursor |
 | `unsupported_media_type` | 415 | `POST` body not declared as JSON |
 | `body_too_large` | 413 | Body over `max_body_bytes`; `detail.limit` |
-| `command_not_allowed` | 403 | A request `command` on a server that does not allow them |
+| `command_not_allowed` | 403 | A request `command`, or `provision.mcp_servers`, on a server that does not allow client commands |
+| `secret_not_allowed` | 403 | A `provision.secrets` name the server's operator did not define; `detail.secret` |
 | `provider_not_allowed` | 403 | A provider the server's operator did not allow; `detail.provider` |
 | `delegation_not_allowed` | 403 | A delegation envelope, `allow_delegation`, a spawn, or a send to a branch with an envelope, on a server that does not allow delegation |
 | `unapproved_tools_not_allowed` | 403 | `unapproved_tools` on a server that does not allow them |

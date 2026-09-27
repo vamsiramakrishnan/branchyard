@@ -12,7 +12,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use crate::protocol::{EntryKind, Frame, CHUNK};
@@ -202,9 +202,12 @@ pub fn receive(root: &Path, next: &mut dyn FnMut() -> io::Result<Frame>) -> io::
             }
             EntryKind::File => {
                 clear(&full)?;
+                // Owner-only until the content is in, so a secret is never
+                // readable by others while it arrives; its mode comes after.
                 let mut file = fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
+                    .mode(0o600)
                     .open(&full)?;
                 receive_content(&mut file, next)?;
                 file.set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
@@ -280,6 +283,47 @@ mod tests {
         assert_eq!(
             fs::read_link(to.join("sub/link")).unwrap(),
             Path::new("../plain.txt")
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_is_owner_only_until_its_content_is_in() {
+        let dir = scratch("owner-only");
+        let root = dir.join("root");
+        fs::create_dir_all(&root).unwrap();
+        let mut frames = VecDeque::from([
+            Frame::Entry {
+                kind: EntryKind::File,
+                path: b"open.txt".to_vec(),
+                mode: 0o644,
+                target: Vec::new(),
+            },
+            Frame::Data(b"secret".to_vec()),
+            Frame::End,
+            Frame::End,
+        ]);
+        let mut seen = Vec::new();
+        let path = root.join("open.txt");
+        receive(&root, &mut || {
+            // While its content arrives: before the file's own `End` and
+            // the tree's.
+            if frames.len() >= 2 {
+                if let Ok(meta) = fs::metadata(&path) {
+                    seen.push(meta.permissions().mode() & 0o777);
+                }
+            }
+            frames
+                .pop_front()
+                .ok_or_else(|| invalid("ran out of frames"))
+        })
+        .unwrap();
+        assert!(!seen.is_empty(), "the file existed while it was received");
+        assert!(seen.iter().all(|mode| *mode == 0o600), "{seen:?}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "then it gets its own mode"
         );
         fs::remove_dir_all(&dir).unwrap();
     }

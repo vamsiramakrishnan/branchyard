@@ -12,7 +12,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    Activity, BranchStatus, Envelope, Policy, Provider, SubstrateOptions, TaskOptions, Yard,
+    Activity, BranchStatus, Effort, Envelope, Policy, Provider, Provisioning, SecretSource,
+    SubstrateOptions, TaskOptions, Yard,
 };
 use branchyard_bridge::Signer;
 use branchyard_substrate::fake::FakeCluster;
@@ -199,6 +200,90 @@ fn the_home_and_session_carry_over_between_turns_and_nothing_stays_running() {
     wait_gone(pid);
     assert!(fake.actor_names().is_empty());
     assert_eq!(sent.info().turns, 4);
+}
+
+#[test]
+fn a_provisioned_home_goes_into_the_actor_and_comes_back() {
+    let f = Fixture::new();
+    let (fake, substrate) = cluster(&f);
+    let secret = "sk-proj-substrate-SECRET-0123456789";
+    std::env::set_var("BY_TEST_SUBSTRATE_OPENAI", secret);
+    let branch = f
+        .task(
+            "SH stat -c '%a' \"$HOME/.codex/auth.json\"\n\
+             SH cat \"$HOME/.codex/config.toml\"\n\
+             SH echo \"codex-home=$CODEX_HOME\"",
+        )
+        .options(TaskOptions {
+            harness: Some("codex-acp".into()),
+            provision: Some(Provisioning {
+                secrets: vec![
+                    SecretSource::parse("OPENAI_API_KEY=BY_TEST_SUBSTRATE_OPENAI").unwrap(),
+                ],
+                effort: Some(Effort::Low),
+                ..Provisioning::default()
+            }),
+            ..options(&f, &substrate)
+        })
+        .name("provisioned-actor")
+        .policy(Policy::allow_all())
+        .run()
+        .unwrap();
+    let events = branch.events().unwrap();
+    let said = text(&events);
+    assert!(said.contains("600"), "{said}");
+    assert!(said.contains("model_reasoning_effort = \"low\""), "{said}");
+    assert!(
+        said.contains(&format!("codex-home={}/.codex", substrate.home)),
+        "{said}"
+    );
+    assert!(!serde_json::to_string(&events).unwrap().contains(secret));
+    assert!(fake.actor_names().is_empty());
+    // The home came back with the harness's files, still private.
+    let home = PathBuf::from(
+        stored_record(&f.root, "provisioned-actor")["home"]
+            .as_str()
+            .unwrap(),
+    );
+    let auth = home.join(".codex/auth.json");
+    assert!(std::fs::read_to_string(&auth).unwrap().contains(secret));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&auth).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn a_local_branch_forks_into_an_actor_with_its_secrets() {
+    let f = Fixture::new();
+    let (fake, substrate) = cluster(&f);
+    // A branch that ran with your own home, then a fork into an actor,
+    // which gets a private home of its own for the secret.
+    let parent = f.task("WRITE a.txt=1").name("local").run().unwrap();
+    std::env::set_var(
+        "BY_TEST_SUBSTRATE_FORK_OPENAI",
+        "sk-proj-fork-SECRET-0123456789",
+    );
+    let fork = parent
+        .fork(
+            "SH stat -c '%a' \"$HOME/.codex/auth.json\"",
+            true,
+            TaskOptions {
+                harness: Some("codex-acp".into()),
+                name: Some("in-actor".into()),
+                provision: Some(Provisioning {
+                    secrets: vec![SecretSource::parse(
+                        "OPENAI_API_KEY=BY_TEST_SUBSTRATE_FORK_OPENAI",
+                    )
+                    .unwrap()],
+                    ..Provisioning::default()
+                }),
+                policy: Policy::allow_all(),
+                ..options(&f, &substrate)
+            },
+        )
+        .unwrap();
+    assert!(text(&fork.events().unwrap()).contains("600"));
+    assert!(fake.actor_names().is_empty());
 }
 
 #[test]
