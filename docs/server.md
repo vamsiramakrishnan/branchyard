@@ -17,13 +17,20 @@ branchyard-server token new --tenant acme --scopes read,run --repo app
 # branchyard-server: token (printed once; give it to the client, never store it): <token>
 # {"token_sha256": "…", "tenant": "acme", "name": "token-…", "scopes": ["read","run"], "repos": ["app"]}
 # paste that object into the configuration's "credentials" array
+
+by init server                # or: an interview that writes the configuration, below, with a
+                              # hashed credential per tenant and each token in a 0600 file
+by serve --config .branchyard/server.json --check   # load and validate it; serve nothing
 ```
+
+[`by init server`](setup.md) asks for the listen address and TLS, SQLite or PostgreSQL, tenants and their quotas, scopes, providers, delegation, secrets by reference and a webhook, and checks what it writes with the same loader and validation `--check` runs. `--check` builds the configuration exactly as serving would and exits: it binds nothing, and where serving would create a default token it only says so.
 
 Flags (`by serve --help` or `branchyard-server --help`):
 
 | Flag | Meaning |
 |---|---|
-| `--config FILE` | JSON configuration, below. Flags override it |
+| `--config FILE` | JSON configuration, below. Flags override it. `by serve` without it reads `[serve] config` from `branchyard.toml` ([setup](setup.md#configuration)) |
+| `--check` | Load and validate the configuration and flags as serving would, print warnings, exit; writes nothing |
 | `--listen ADDR` | `IP:port`; default `127.0.0.1:8421`. Port 0 picks one; the server prints `listening on URL` to stdout |
 | `--repo NAME=PATH` | Serve the repository at `PATH` as `NAME` (repeatable). Default: the repository containing the current directory, named after its directory |
 | `--data-dir DIR` | Operation registry and activity feeds. Default: `.branchyard/server` in the first repository |

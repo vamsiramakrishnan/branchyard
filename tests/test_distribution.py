@@ -32,7 +32,7 @@ class ArchiveTests(unittest.TestCase):
     def test_archives_are_reproducible_and_complete(self):
         first = package.build(self.root / "one")
         second = package.build(self.root / "two")
-        self.assertEqual(len(first), 3)
+        self.assertEqual(len(first), 4)
         for a, b in zip(first, second):
             self.assertEqual(a.name, b.name)
             self.assertEqual(a.read_bytes(), b.read_bytes(), f"{a.name} is not reproducible")
@@ -49,14 +49,20 @@ class ArchiveTests(unittest.TestCase):
                     self.assertEqual(hashlib.sha256(archive.read(f"{root_name}/{name}")).hexdigest(), digest)
 
     def test_plugin_archive_bundles_the_same_skill_bytes_as_the_standalone_one(self):
-        plugin, skill, _sdk = package.build(self.root / "dist")
-        with zipfile.ZipFile(plugin) as plugin_zip, zipfile.ZipFile(skill) as skill_zip:
-            for path, data in package.inputs(package.SKILL).items():
-                self.assertEqual(plugin_zip.read(f"branchyard/skills/delegate/{path}"), data)
-                self.assertEqual(skill_zip.read(f"delegate/{path}"), data)
+        plugin, skill, setup_skill, _sdk = package.build(self.root / "dist")
+        with zipfile.ZipFile(plugin) as plugin_zip:
+            for archive, source, name in [(skill, package.SKILL, "delegate"), (setup_skill, package.SETUP_SKILL, "setup")]:
+                with zipfile.ZipFile(archive) as skill_zip:
+                    inputs = package.inputs(source)
+                    self.assertIn("SKILL.md", inputs)
+                    for path, data in inputs.items():
+                        self.assertEqual(plugin_zip.read(f"branchyard/skills/{name}/{path}"), data)
+                        self.assertEqual(skill_zip.read(f"{name}/{path}"), data)
+            # The /branchyard:setup command ships in the plugin.
+            self.assertIn("branchyard/commands/setup.md", plugin_zip.namelist())
 
     def test_sdk_archive_matches_its_source(self):
-        _plugin, _skill, sdk = package.build(self.root / "dist")
+        *_archives, sdk = package.build(self.root / "dist")
         with zipfile.ZipFile(sdk) as sdk_zip:
             for path, data in package.inputs(package.SDK).items():
                 self.assertEqual(sdk_zip.read(f"branchyard-sdk/{path}"), data)
@@ -80,7 +86,7 @@ class InstallerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        plugin, _skill, _sdk = package.build(self.root / "dist")
+        plugin, _skill, _setup_skill, _sdk = package.build(self.root / "dist")
         with zipfile.ZipFile(plugin) as archive:
             archive.extractall(self.root / "extracted")
         self.plugin = self.root / "extracted/branchyard"
@@ -130,6 +136,16 @@ class InstallerTests(unittest.TestCase):
             (package.SKILL / "SKILL.md").read_bytes(),
         )
 
+    def test_installs_the_setup_skill_by_name(self):
+        applied = self.run_installer("--skill", "setup", "--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        installed = self.host / "setup"
+        for path, data in package.inputs(package.SETUP_SKILL).items():
+            self.assertEqual((installed / path).read_bytes(), data)
+        self.assertFalse((self.host / "delegate").exists())
+        unknown = self.run_installer("--skill", "nope")
+        self.assertEqual(unknown.returncode, 2)
+
     def test_refuses_a_non_directory_destination(self):
         self.host.mkdir(parents=True)
         (self.host / "delegate").write_text("not a skill")
@@ -146,7 +162,7 @@ class SdkArchiveRuntimeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        _plugin, _skill, sdk = package.build(self.root / "dist")
+        *_archives, sdk = package.build(self.root / "dist")
         with zipfile.ZipFile(sdk) as archive:
             archive.extractall(self.root / "extracted")
         self.module_path = self.root / "extracted/branchyard-sdk/branchyard.py"

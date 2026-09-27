@@ -175,6 +175,19 @@ A server-only addition: identity, scopes and quotas are meaningful only where mo
 | `GET /v1/operations?idempotency_key=`, `Idempotency-Key` | scoped to the token name | scoped to the principal within its tenant; another tenant's operation is `404 unknown_operation` |
 | `by worker` | needed a token like a server | needs no `tokens` or `credentials`: it runs each operation as the principal recorded when it was admitted |
 
+## Added with setup
+
+Setup and configuration are the CLI's: they write files for `by` and the server to read, so there is no SDK, HTTP or delegation counterpart. A harness sets Branchyard up through `by init --json` like any other `by` command ([setup](setup.md)).
+
+| Surface | Before | Now |
+|---|---|---|
+| `by init [TOPIC]` | none: server JSON, rig TOML, token files and secrets tables were written by hand | a terminal wizard (`cliclack`) over one interview per topic: `project`, `server`, `rig`, `deploy`, `plugin`; refuses without a terminal |
+| `by init TOPIC --json --next`, `--dry-run`, `--apply [--force]` | none | the same interview as a JSON protocol (`schema/setup.protocol.json`): batches of at most four questions, a plan of files with diffs and validator verdicts, writes only valid plans and replaces a differing file only with `--force` |
+| `branchyard.toml`, `~/.config/branchyard/config.toml` | none: every default came from flags and `BRANCHYARD_*` variables | defaults under flags and variables (`schema/branchyard.config.json`): `run` and `fan` take every default, `send`, `fork`, `reincarnate` and `spawn` only `permissions`, `serve` its `--config`, remote commands `[remote]`; not read inside a harness's branch |
+| `by config show`, `path`, `validate`, `schema` | none | the effective configuration with each value's source, where the files are, a strict check, the schema |
+| `by serve --check`, `branchyard-server --check` | none | load and validate a configuration as serving would, without serving or writing anything |
+| The `setup` skill and `/branchyard:setup` | the plugin had the `delegate` skill only | `plugins/branchyard/skills/setup` drives `by init --json` with the harness's own question tool; the Claude plugin's `commands/setup.md` starts it; `install_skill.py --skill setup`; `by init plugin` installs both skills |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |

@@ -2,6 +2,7 @@
 
 | Read | What it answers |
 |---|---|
+| [Setup](setup.md) | How do I set Branchyard up by interview, in a terminal wizard or through my coding harness, and what do `branchyard.toml` and `by init`'s protocol look like? |
 | [Architecture](design.md) | What does the SDK own, where do harnesses run, and how do topology, budgets, storage, recovery, and merging work? |
 | [Harness integration](harness-integration.md) | How do we control sixteen harnesses through ACP and native interfaces? |
 | [Implementation plan](implementation-plan.md) | What do we build next, in what order, and what proves each milestone works? |

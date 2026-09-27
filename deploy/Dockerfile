@@ -9,6 +9,8 @@ FROM rust:1.90.0-bookworm AS build
 WORKDIR /source
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# `by init plugin` embeds the shipped skills (crates/branchyard-setup/src/skills.rs).
+COPY plugins/branchyard/skills ./plugins/branchyard/skills
 # --features postgres: deploy/compose.yaml passes `by serve --database
 # postgres://...`, which needs this build-time feature (docs/server.md).
 RUN cargo build --release --locked --features postgres -p branchyard-cli
