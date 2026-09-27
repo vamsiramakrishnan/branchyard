@@ -166,5 +166,67 @@ class ContractTypesValidateTheirDocumentedExamples(unittest.TestCase):
         validate_as({"ok": True}, "Ack")
 
 
+def _graph_proposal() -> dict:
+    """The proposal in `docs/graph.md`'s first ```json fence."""
+    text = (ROOT / "docs/graph.md").read_text()
+    return json.loads(re.findall(r"```json\n(.*?)\n```", text, re.S)[0])
+
+
+class GraphTypesValidate(unittest.TestCase):
+    def test_the_documented_graph_proposal_validates_as_a_graph_request(self):
+        validate_as(_graph_proposal(), "GraphRequest")
+
+    def test_an_unknown_edit_kind_or_field_is_refused(self):
+        proposal = _graph_proposal()
+        proposal["edits"][0]["kind"] = "rename"
+        with self.assertRaises(ValidationError):
+            validate_as(proposal, "GraphRequest")
+        proposal = _graph_proposal()
+        proposal["edits"][0]["colour"] = 1
+        with self.assertRaises(ValidationError):
+            validate_as(proposal, "GraphRequest")
+
+    def test_a_spawn_that_waits_validates(self):
+        validate_as(
+            {
+                "prompt": "Use the new column",
+                "depends_on": ["schema"],
+                "after": "integrated",
+                "bindings": [{"scratch": "notes", "access": "exclusive_write"}],
+            },
+            "SpawnRequest",
+        )
+        with self.assertRaises(ValidationError):
+            validate_as({"prompt": "p", "after": "eventually"}, "SpawnRequest")
+
+    def test_a_graph_with_waiting_and_blocked_children_validates(self):
+        validate_as(
+            {
+                "branch": "root",
+                "revision": 2,
+                "children": [
+                    {"name": "schema", "status": {"state": "ready"}},
+                    {"name": "api", "status": {"state": "waiting"}, "depends_on": ["schema"]},
+                    {
+                        "name": "docs",
+                        "status": {"state": "blocked", "reason": "its prerequisite lint failed"},
+                        "depends_on": ["lint"],
+                    },
+                ],
+                "dependencies": [
+                    {"dependent": "api", "prerequisite": "schema", "after": "integrated"},
+                    {"dependent": "docs", "prerequisite": "lint"},
+                ],
+            },
+            "Graph",
+        )
+        with self.assertRaises(ValidationError):
+            validate_as(
+                {"branch": "r", "revision": 0, "children": [], "dependencies": [
+                    {"dependent": "a", "prerequisite": "b", "after": "later"}]},
+                "Graph",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

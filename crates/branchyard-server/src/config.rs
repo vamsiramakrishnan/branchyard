@@ -338,6 +338,11 @@ pub struct Config {
     /// How often the feed looks in the repository's store for activity
     /// recorded by other processes.
     pub poll_interval: Duration,
+    /// How often each served repository is recovered: branches whose
+    /// engine stopped, and waiting dependents whose prerequisites settled
+    /// (`Yard::resume_graph`). Every server and `by worker` on a database
+    /// does this; see `docs/graph.md#durable-scheduling`.
+    pub recover_interval: Duration,
     /// Log one line per request to stderr.
     pub log_requests: bool,
     /// Webhook targets notified of every served repository's activity feed.
@@ -374,6 +379,7 @@ impl Config {
             secrets: BTreeMap::new(),
             database: None,
             poll_interval: Duration::from_millis(500),
+            recover_interval: crate::serve::RECOVER_EVERY,
             log_requests: true,
             webhooks: Vec::new(),
             webhook_insecure: false,

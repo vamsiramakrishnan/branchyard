@@ -219,6 +219,8 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         };
     }
     recorder.finish(lease, &record)?;
+    // What waits for it is blocked now, or, if it had settled, may start.
+    crate::graph::settled(yard, &row.branch, None);
     Ok(Some(Recovery {
         branch: row.branch.clone(),
         status: record.info.status,
@@ -286,6 +288,7 @@ fn unowned(yard: &Yard, mut record: Record) -> Result<Option<Recovery>, Error> {
         killed: Vec::new(),
     })?;
     recorder.finish(lease, &record)?;
+    crate::graph::settled(yard, &record.info.name, None);
     Ok(Some(Recovery {
         branch: record.info.name,
         status: record.info.status,

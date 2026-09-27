@@ -787,6 +787,7 @@ fn a_rigs_seats_are_checked_when_its_task_is_submitted() {
         delegates_to: Vec::new(),
         escalates_to: Vec::new(),
         instances: 1,
+        bindings: Vec::new(),
     };
     let seats = branchyard::Seats {
         rig: "team".into(),

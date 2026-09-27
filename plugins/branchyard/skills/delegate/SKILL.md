@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn`, `by inspect`, `by integrate` and the Python module.
+description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by integrate`, the Python module and the MCP tools.
 ---
 
 # Delegating with Branchyard
@@ -68,6 +68,22 @@ exits non-zero with `{"error": {"kind", "message"}}` on refusal. Run `by`
 by name or as `$BRANCHYARD_BY`; call it as a single command without pipes,
 `&&` or substitutions, so a permission policy can recognize it.
 
+## When one child needs another's work
+
+Give it `--depends-on`: it is created waiting and starts by itself once the
+other has finished (`--after integrated`: once you integrated it, so it
+starts from that work). If the other fails, it is `blocked` and never runs.
+
+```sh
+by spawn "Add the schema migration" --name schema
+by spawn "Use the new column in the API" --name api --depends-on schema --after integrated
+by graph show           # your children, what each waits for, and the revision
+```
+
+`by graph apply --edits '[...]' --expected-revision N` creates several
+children and dependencies at once, all or nothing; if it says
+`stale_revision`, run `by graph show` and propose again.
+
 ## In a rig
 
 If your instructions say you fill a seat in a rig, or `by inspect` shows a
@@ -112,5 +128,5 @@ Errors are `DeniedError` (envelope, budget or authority), `RunningError`,
 ## Without a shell
 
 If you cannot run commands, the same operations are MCP tools on the
-`branchyard` server: `spawn`, `inspect`, `events`, `send`,
-`propose_integration`, `cancel` and `children`.
+`branchyard` server: `spawn` (with `depends_on`), `inspect`, `events`, `send`,
+`propose_integration`, `cancel`, `children`, `graph` and `apply_graph`.

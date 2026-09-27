@@ -750,3 +750,255 @@ fn a_worker_runs_another_tenants_operation_as_its_principal_without_leaking_it()
         Some("repo_not_allowed")
     );
 }
+
+// Task graphs under durable dispatch: a spawn that waits is queued work a
+// worker runs, and every server and worker on a database resumes graphs
+// on its recovery tick without starting a dependent twice.
+
+/// A configuration that allows delegation and recovers every 100 ms.
+fn delegating(f: &Fixture, url: &str) -> branchyard_server::Config {
+    let mut config = f.config();
+    config.database = Some(url.to_owned());
+    config.allow_delegation = true;
+    config.by_path = Some("/bin/true".into());
+    config.recover_interval = Duration::from_millis(100);
+    config
+}
+
+/// Admit `work` straight into the database, as a server's admission does,
+/// for whatever worker runs it.
+fn admit(url: &str, work: Work, branches: &[&str], locks: &[&str]) -> Operation {
+    let registry = Registry::open(
+        Box::new(PostgresStore::open(url).unwrap()),
+        Options {
+            exclusive: false,
+            ..Options::new(vec!["app".into()])
+        },
+    )
+    .unwrap();
+    let owned = |names: &[&str]| names.iter().map(|s| (*s).to_owned()).collect();
+    let (op, _) = registry
+        .submit(
+            NewOperation {
+                repo: "app".into(),
+                kind: work.kind(),
+                branches: owned(branches),
+                cursor: 0,
+                locks: owned(locks),
+                idempotency: None,
+                principal: Principal::default_for("tester"),
+                creates: owned(branches),
+                quota: AdmissionQuota::default(),
+            },
+            work.to_value().unwrap(),
+        )
+        .unwrap();
+    op
+}
+
+/// Wait for a queued operation to finish, read from the database: no
+/// server answers here, only the worker runs it.
+fn finished(url: &str, id: &str) -> Operation {
+    let registry = Registry::open(
+        Box::new(PostgresStore::open(url).unwrap()),
+        Options {
+            exclusive: false,
+            ..Options::new(vec!["app".into()])
+        },
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let op = registry.get(id).unwrap().unwrap();
+        if op.state.is_terminal() {
+            return op;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "operation {id} did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_spawn_that_waits_is_queued_run_by_a_worker_and_started_later() {
+    use branchyard::{After, Envelope, Yard};
+    use branchyard_client::api::{PolicySpec, SpawnRequest};
+    let Some(url) = database() else { return };
+    let f = Fixture::new();
+    // Only a worker runs what is queued: no server is started until the
+    // end, and this process never runs an operation.
+    let mut worker = second(&f, &delegating(&f, &url), "worker");
+    worker.worker_only = true;
+    let worker = Server::start(worker);
+
+    let root = admit(
+        &url,
+        Work::Task {
+            request: TaskRequest {
+                delegation: Some(Envelope::default()),
+                ..task("say hi", "root")
+            },
+        },
+        &["root"],
+        &["root"],
+    );
+    assert_eq!(finished(&url, &root.id).state, OperationState::Succeeded);
+    let spawn = |name: &str, prompt: &str, depends_on: &[&str]| Work::Spawn {
+        parent: "root".into(),
+        name: Some(name.into()),
+        request: SpawnRequest {
+            prompt: prompt.into(),
+            name: Some(name.into()),
+            policy: PolicySpec::allow_all(),
+            depends_on: depends_on.iter().map(|s| (*s).to_owned()).collect(),
+            after: After::Integrated,
+            ..SpawnRequest::default()
+        },
+    };
+    let lib = admit(
+        &url,
+        spawn("lib", "WRITE lib.txt=1", &[]),
+        &["lib"],
+        &["lib", "root"],
+    );
+    let lib = finished(&url, &lib.id);
+    assert_eq!(lib.state, OperationState::Succeeded, "{lib:?}");
+    // The description a worker read carried the dependency: the child is
+    // created waiting, and the spawn finishes without starting it.
+    let app = admit(
+        &url,
+        spawn("app", "WRITE app.txt=1", &["lib"]),
+        &["app"],
+        &["app", "root"],
+    );
+    let app = finished(&url, &app.id);
+    assert_eq!(app.state, OperationState::Succeeded, "{app:?}");
+    let result = app.result.unwrap();
+    assert_eq!(result.branches[0].status, BranchStatus::Waiting);
+    let inspection = result.inspection.unwrap();
+    assert_eq!(inspection.status, BranchStatus::Waiting);
+    assert_eq!(inspection.depends_on.len(), 1);
+    assert_eq!(inspection.depends_on[0].prerequisite, "lib");
+    assert_eq!(inspection.depends_on[0].after, After::Integrated);
+    let yard = Yard::open_postgres(&f.root, &url, "app").unwrap();
+    let status = |name: &str| yard.branch(name).unwrap().info().status.clone();
+    assert_eq!(status("app"), BranchStatus::Waiting);
+    assert_eq!(yard.branch("app").unwrap().info().turns, 0);
+    // Several recovery ticks pass: it keeps waiting for the integration.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(status("app"), BranchStatus::Waiting);
+
+    // Integrating lib, also queued work the worker runs, starts app there,
+    // from the parent's branch with lib merged in.
+    let integrated = admit(
+        &url,
+        Work::Integrate {
+            branch: "lib".into(),
+            parent: "root".into(),
+        },
+        &["lib"],
+        &["lib", "root"],
+    );
+    let integrated = finished(&url, &integrated.id);
+    assert_eq!(
+        integrated.state,
+        OperationState::Succeeded,
+        "{integrated:?}"
+    );
+    eventually("app to start and finish", || {
+        status("app") == BranchStatus::Ready
+    });
+    let app = yard.branch("app").unwrap().info().clone();
+    assert_eq!(app.turns, 1);
+    assert!(app.worktree.join("lib.txt").is_file(), "built on lib");
+
+    // A server on the database reads the same.
+    let server = Server::start(delegating(&f, &url));
+    let client = server.client();
+    assert_eq!(prompts(&client, "app"), 1);
+    assert_eq!(
+        client.repo("app").graph("root").unwrap(),
+        yard.graph("root").unwrap()
+    );
+    drop(worker);
+}
+
+#[test]
+fn servers_and_a_worker_resuming_graphs_on_one_database_start_a_dependent_once() {
+    use branchyard::{After, Envelope, GraphEdit, SpawnSpec};
+    use branchyard_client::api::{GraphRequest, PolicySpec};
+    let Some(url) = database() else { return };
+    let f = Fixture::new();
+    let config = delegating(&f, &url);
+    let a = Server::start(config.clone());
+    let b = Server::start(second(&f, &config, "data-b"));
+    let mut worker = second(&f, &config, "worker");
+    worker.worker_only = true;
+    let worker = Server::start(worker);
+    let client = a.client();
+    let repo = client.repo("app");
+
+    let root = run(
+        &client,
+        &TaskRequest {
+            delegation: Some(Envelope::default()),
+            ..task("say hi", "root")
+        },
+    );
+    assert_eq!(root.state, OperationState::Succeeded, "{root:?}");
+    let spawn = |name: &str, prompt: &str, depends_on: &[&str]| {
+        GraphEdit::Spawn(SpawnSpec {
+            prompt: prompt.into(),
+            name: Some(name.into()),
+            depends_on: depends_on.iter().map(|s| (*s).to_owned()).collect(),
+            after: After::Integrated,
+            ..SpawnSpec::default()
+        })
+    };
+    let applied = repo
+        .apply_graph(
+            "root",
+            &GraphRequest {
+                expected_revision: 0,
+                edits: vec![
+                    spawn("first", "WRITE f.txt=1", &[]),
+                    spawn("second", "say done", &["first"]),
+                ],
+                policy: PolicySpec::allow_all(),
+                unapproved_tools: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(applied.spawned[1].status, BranchStatus::Waiting);
+    eventually("first to finish", || {
+        repo.branch("first").unwrap().status == BranchStatus::Ready
+    });
+    // Recovery ticks on all three pass over a dependent still waiting.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(repo.branch("second").unwrap().status, BranchStatus::Waiting);
+    // The state an engine that stopped between settling the prerequisite
+    // and starting the dependent leaves: satisfied, never claimed. Every
+    // process's next tick finds it.
+    let mut db = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let changed = db
+        .execute(
+            "UPDATE by_graph_edges SET after = 'settled' WHERE dependent = 'second'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    eventually("second to start and settle", || {
+        matches!(
+            repo.branch("second").unwrap().status,
+            BranchStatus::Ready | BranchStatus::NoChanges
+        )
+    });
+    // Many more ticks on every process: still one turn.
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(prompts(&client, "second"), 1, "started exactly once");
+    assert_eq!(repo.branch("second").unwrap().turns, 1);
+    assert_eq!(prompts(&b.client(), "second"), 1);
+    drop(worker);
+}

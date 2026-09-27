@@ -22,9 +22,9 @@ use branchyard::{
 };
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, FeedEntry, ForkRequest,
-    HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind, PolicySpec,
-    ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest,
-    TaskRequest,
+    GraphRequest, HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind,
+    PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
+    SteerRequest, TaskRequest,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -566,6 +566,10 @@ pub fn router(app: Shared) -> Router {
             get(event_page),
         )
         .route("/v1/repos/{repo}/branches/{branch}/children", get(children))
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/graph",
+            get(graph).post(post_graph),
+        )
         .route("/v1/repos/{repo}/branches/{branch}/inbox", get(inbox))
         .route(
             "/v1/repos/{repo}/branches/{branch}/ask",
@@ -1398,6 +1402,63 @@ async fn children(
     as_person(&app, &caller, &repo, branch, "read", |d, _| d.children())
         .await
         .map(Json)
+}
+
+async fn graph(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Json<branchyard::Graph>, ApiError> {
+    as_person(&app, &caller, &repo, branch, "read", |d, b| d.graph(b))
+        .await
+        .map(Json)
+}
+
+/// Apply a graph proposal to `parent`'s children with the server's
+/// authority as a person, bounded by the parent's envelope: what
+/// `by graph apply --parent` does. Not an operation: the proposal commits
+/// in one store transaction before this answers, and the children it
+/// starts run on the server's threads, where their siblings' turns start
+/// the rest as they settle. A stale `expected_revision` is
+/// `409 stale_revision` and changes nothing, which also makes a retried
+/// request safe.
+async fn post_graph(
+    State(app): State<Shared>,
+    Path((repo, parent)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(request, _): JsonBody<GraphRequest>,
+) -> Result<Json<branchyard::GraphApplied>, ApiError> {
+    let spawns = request
+        .edits
+        .iter()
+        .any(|edit| matches!(edit, branchyard::GraphEdit::Spawn(_)));
+    if spawns && !app.config.allow_delegation {
+        return Err(delegation_not_allowed(
+            "this server does not offer delegation, so it does not spawn children; its \
+             operator can allow it with --allow-delegation",
+        ));
+    }
+    app.opt_ins(false, false, request.unapproved_tools)?;
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let options = app.options(
+        &repo,
+        Budget::default(),
+        app.policy(&request.policy, false),
+        None,
+        None,
+        None,
+        request.unapproved_tools,
+        None,
+    );
+    let yard = repo.yard.clone();
+    blocking(move || {
+        yard.branch(&parent)?
+            .delegate(options)?
+            .apply_graph(request.edits, request.expected_revision)
+    })
+    .await?
+    .map(Json)
+    .map_err(|e| error::sdk(&e))
 }
 
 async fn inbox(

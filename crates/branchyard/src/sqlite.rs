@@ -22,6 +22,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
 
+use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
     now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
     ReservationRow, SteerRow, StepRow,
@@ -30,7 +31,7 @@ use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
     NewScratch, ScratchArea, ScratchLock, ScratchRow, Share, StorageBackend,
 };
-use crate::{BranchStatus, Error, Message, RecordedEvent, SteerState};
+use crate::{Activity, BranchStatus, Error, Message, RecordedEvent, SteerState};
 
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
@@ -182,6 +183,19 @@ CREATE INDEX IF NOT EXISTS messages_to ON messages (to_branch, id);
 CREATE INDEX IF NOT EXISTS messages_steer ON messages (steer_id);
 CREATE INDEX IF NOT EXISTS messages_from ON messages (from_branch, kind);
 CREATE INDEX IF NOT EXISTS messages_reply ON messages (in_reply_to);
+CREATE TABLE IF NOT EXISTS graph_revisions (
+    parent TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS graph_edges (
+    parent TEXT NOT NULL,
+    dependent TEXT NOT NULL,
+    prerequisite TEXT NOT NULL,
+    after TEXT NOT NULL,
+    PRIMARY KEY (dependent, prerequisite)
+);
+CREATE INDEX IF NOT EXISTS graph_edges_prerequisite ON graph_edges (prerequisite);
+CREATE INDEX IF NOT EXISTS graph_edges_parent ON graph_edges (parent);
 ";
 
 #[derive(Debug)]
@@ -449,6 +463,76 @@ fn upgrade_to_identities(tx: &Transaction<'_>) -> Result<(), Error> {
     )
     .map_err(e)?;
     Ok(())
+}
+
+/// Take `record`'s lease for a new turn and write it, unless a lease on
+/// this incarnation is held: then that lease.
+fn grant(
+    tx: &Transaction<'_>,
+    record: &Record,
+    incarnation: i64,
+    owner: &Owner,
+    ttl: Duration,
+) -> Result<Result<Fence, LeaseRow>, Error> {
+    let name = &record.info.name;
+    let current = lease_row(tx, name)?;
+    if let Some(row) = &current {
+        if row.owner.is_some() && row.incarnation == incarnation {
+            return Ok(Err(row.clone()));
+        }
+    }
+    let generation = current.map_or(1, |row| row.generation + 1);
+    let now = now_ms();
+    tx.execute(
+        "INSERT INTO leases (branch, incarnation, generation, turn, owner, host, pid, \
+         pid_start, acquired_ms, expires_ms, deadline_ms) \
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) \
+         ON CONFLICT (branch) DO UPDATE SET incarnation = ?2, generation = ?3, \
+         turn = ?3, owner = ?4, host = ?5, pid = ?6, pid_start = ?7, \
+         acquired_ms = ?8, expires_ms = ?9, deadline_ms = NULL",
+        params![
+            name,
+            incarnation,
+            int(generation),
+            owner.id,
+            owner.host,
+            owner.pid,
+            owner.start,
+            int(now),
+            int(now + ttl.as_millis() as u64),
+        ],
+    )
+    .map_err(|e| db("acquire", e))?;
+    put(tx, record)?;
+    tx.execute("DELETE FROM reservations WHERE name = ?1", params![name])
+        .map_err(|e| db("acquire", e))?;
+    Ok(Ok(Fence {
+        branch: name.clone(),
+        incarnation,
+        generation,
+        turn: generation,
+    }))
+}
+
+/// Whether a live lease on `name`'s current incarnation is held.
+fn held(tx: &Transaction<'_>, name: &str) -> Result<bool, Error> {
+    let incarnation = incarnation(tx, name)?;
+    Ok(lease_row(tx, name)?
+        .is_some_and(|row| row.owner.is_some() && Some(row.incarnation) == incarnation))
+}
+
+fn after_text(after: After) -> &'static str {
+    match after {
+        After::Settled => "settled",
+        After::Integrated => "integrated",
+    }
+}
+
+fn after_from(text: &str) -> After {
+    match text {
+        "integrated" => After::Integrated,
+        _ => After::Settled,
+    }
 }
 
 /// Append `event` to `name`'s log; returns its sequence number.
@@ -912,6 +996,15 @@ impl Backend for Sqlite {
                 tx.execute(sql, params![incarnation])
                     .map_err(|e| db("delete", e))?;
             }
+            // Its own dependencies and graph go; what depends on it keeps
+            // the row, and is blocked for want of it.
+            for sql in [
+                "DELETE FROM graph_edges WHERE dependent = ?1",
+                "DELETE FROM graph_revisions WHERE parent = ?1",
+            ] {
+                tx.execute(sql, params![name])
+                    .map_err(|e| db("delete", e))?;
+            }
             Ok(())
         })
     }
@@ -936,43 +1029,10 @@ impl Backend for Sqlite {
             if reserver.is_some_and(|reserver| reserver != owner.id) {
                 return Err(Error::BranchExists(name.clone()));
             }
-            let current = lease_row(tx, name)?;
-            if let Some(row) = &current {
-                if row.owner.is_some() && row.incarnation == incarnation {
-                    return Ok(Acquired::Held(row.clone()));
-                }
+            match grant(tx, record, incarnation, owner, ttl)? {
+                Ok(fence) => Ok(Acquired::Granted(fence)),
+                Err(row) => Ok(Acquired::Held(row)),
             }
-            let generation = current.map_or(1, |row| row.generation + 1);
-            let now = now_ms();
-            tx.execute(
-                "INSERT INTO leases (branch, incarnation, generation, turn, owner, host, pid, \
-                 pid_start, acquired_ms, expires_ms, deadline_ms) \
-                 VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) \
-                 ON CONFLICT (branch) DO UPDATE SET incarnation = ?2, generation = ?3, \
-                 turn = ?3, owner = ?4, host = ?5, pid = ?6, pid_start = ?7, \
-                 acquired_ms = ?8, expires_ms = ?9, deadline_ms = NULL",
-                params![
-                    name,
-                    incarnation,
-                    int(generation),
-                    owner.id,
-                    owner.host,
-                    owner.pid,
-                    owner.start,
-                    int(now),
-                    int(now + ttl.as_millis() as u64),
-                ],
-            )
-            .map_err(|e| db("acquire", e))?;
-            put(tx, record)?;
-            tx.execute("DELETE FROM reservations WHERE name = ?1", params![name])
-                .map_err(|e| db("acquire", e))?;
-            Ok(Acquired::Granted(Fence {
-                branch: name.clone(),
-                incarnation,
-                generation,
-                turn: generation,
-            }))
         })
     }
 
@@ -1666,6 +1726,183 @@ impl Backend for Sqlite {
 }
 
 /// Reads one `messages` row.
+fn edges(conn: &Connection, filter: &str, value: &str) -> Result<Vec<Dependency>, Error> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT dependent, prerequisite, after FROM graph_edges WHERE {filter} = ?1 \
+             ORDER BY dependent, prerequisite"
+        ))
+        .map_err(|e| db("dependencies", e))?;
+    let rows = statement
+        .query_map(params![value], |r| {
+            Ok(Dependency {
+                dependent: r.get(0)?,
+                prerequisite: r.get(1)?,
+                after: after_from(&r.get::<_, String>(2)?),
+            })
+        })
+        .map_err(|e| db("dependencies", e))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| db("dependencies", e))
+}
+
+fn graph_revision(conn: &Connection, parent: &str) -> Result<u64, Error> {
+    let revision: Option<i64> = conn
+        .query_row(
+            "SELECT revision FROM graph_revisions WHERE parent = ?1",
+            params![parent],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| db("graph revision", e))?;
+    Ok(revision.map_or(0, uint))
+}
+
+impl GraphBackend for Sqlite {
+    fn graph_revision(&self, parent: &str) -> Result<u64, Error> {
+        self.query(|conn| graph_revision(conn, parent))
+    }
+
+    fn dependencies(&self, parent: &str) -> Result<Vec<Dependency>, Error> {
+        self.query(|conn| edges(conn, "parent", parent))
+    }
+
+    fn prerequisites(&self, dependent: &str) -> Result<Vec<Dependency>, Error> {
+        self.query(|conn| edges(conn, "dependent", dependent))
+    }
+
+    fn dependents(&self, prerequisite: &str) -> Result<Vec<Dependency>, Error> {
+        self.query(|conn| edges(conn, "prerequisite", prerequisite))
+    }
+
+    fn commit_graph(&self, commit: &GraphCommit) -> Result<u64, Error> {
+        let parent = &commit.parent;
+        self.tx(true, |tx| {
+            let current = graph_revision(tx, parent)?;
+            if let Some(expected) = commit.expected.filter(|e| *e != current) {
+                return Err(Error::StaleRevision {
+                    branch: parent.clone(),
+                    expected,
+                    actual: current,
+                });
+            }
+            let mut owner =
+                stored_record(tx, parent)?.ok_or_else(|| Error::UnknownBranch(parent.clone()))?;
+            for record in &commit.create {
+                let name = &record.info.name;
+                if incarnation(tx, name)?.is_some() {
+                    return Err(Error::BranchExists(name.clone()));
+                }
+                put(tx, record)?;
+                if !owner.info.children.contains(name) {
+                    owner.info.children.push(name.clone());
+                }
+            }
+            tx.execute(
+                "UPDATE branches SET record = ?2 WHERE name = ?1",
+                params![parent, encode(parent, &owner)?],
+            )
+            .map_err(|e| db("commit graph", e))?;
+            let created: Vec<&String> = commit.create.iter().map(|r| &r.info.name).collect();
+            let touched: std::collections::BTreeSet<&String> = commit
+                .add
+                .iter()
+                .map(|d| &d.dependent)
+                .chain(commit.remove.iter().map(|d| &d.dependent))
+                .filter(|name| !created.contains(name))
+                .collect();
+            for name in touched {
+                let mut record =
+                    stored_record(tx, name)?.ok_or_else(|| Error::UnknownBranch(name.clone()))?;
+                if !crate::graph::unstarted(&record.info.status) || held(tx, name)? {
+                    return Err(Error::Denied(format!(
+                        "{name} has already started, so its dependencies can no longer change"
+                    )));
+                }
+                if record.info.status != BranchStatus::Waiting {
+                    record.info.status = BranchStatus::Waiting;
+                    put(tx, &record)?;
+                    insert_event(
+                        tx,
+                        name,
+                        &RecordedEvent {
+                            at_ms: now_ms(),
+                            activity: Activity::Status(BranchStatus::Waiting),
+                        },
+                    )?;
+                }
+            }
+            for d in &commit.remove {
+                let removed = tx
+                    .execute(
+                        "DELETE FROM graph_edges WHERE parent = ?1 AND dependent = ?2 \
+                         AND prerequisite = ?3",
+                        params![parent, d.dependent, d.prerequisite],
+                    )
+                    .map_err(|e| db("commit graph", e))?;
+                if removed == 0 {
+                    return Err(Error::Denied(format!(
+                        "{} does not depend on {}",
+                        d.dependent, d.prerequisite
+                    )));
+                }
+            }
+            for d in &commit.add {
+                let inserted = tx
+                    .execute(
+                        "INSERT OR IGNORE INTO graph_edges (parent, dependent, prerequisite, \
+                         after) VALUES (?1, ?2, ?3, ?4)",
+                        params![parent, d.dependent, d.prerequisite, after_text(d.after)],
+                    )
+                    .map_err(|e| db("commit graph", e))?;
+                if inserted == 0 {
+                    return Err(Error::Denied(format!(
+                        "{} already depends on {}",
+                        d.dependent, d.prerequisite
+                    )));
+                }
+            }
+            let next = current + 1;
+            tx.execute(
+                "INSERT INTO graph_revisions (parent, revision) VALUES (?1, ?2) \
+                 ON CONFLICT (parent) DO UPDATE SET revision = ?2",
+                params![parent, int(next)],
+            )
+            .map_err(|e| db("commit graph", e))?;
+            Ok(next)
+        })
+    }
+
+    fn claim(&self, record: &Record, owner: &Owner, ttl: Duration) -> Result<Option<Fence>, Error> {
+        let name = &record.info.name;
+        self.tx(true, |tx| {
+            let waiting = stored_record(tx, name)?
+                .is_some_and(|stored| stored.info.status == BranchStatus::Waiting);
+            let Some(incarnation) = incarnation(tx, name)? else {
+                return Ok(None);
+            };
+            if !waiting {
+                return Ok(None);
+            }
+            Ok(grant(tx, record, incarnation, owner, ttl)?.ok())
+        })
+    }
+
+    fn settle_waiting(&self, record: &Record, event: &RecordedEvent) -> Result<bool, Error> {
+        let name = &record.info.name;
+        self.tx(true, |tx| {
+            let waiting = stored_record(tx, name)?
+                .is_some_and(|stored| stored.info.status == BranchStatus::Waiting);
+            if !waiting || held(tx, name)? {
+                return Ok(false);
+            }
+            put(tx, record)?;
+            insert_event(tx, name, event)?;
+            Ok(true)
+        })
+    }
+}
+
 fn message_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let kind: String = r.get(3)?;
     let kind = kind.parse::<crate::MessageKind>().map_err(|_| {

@@ -89,6 +89,7 @@ A seat:
 | `delegates_to` | The seats below this one | The seats a branch in this seat may spawn |
 | `escalates_to` | Ancestor seats, besides this seat's own parent (always allowed), a branch here may `escalate` to (see [delegation](delegation.md#inbox)) | `Seat::escalates_to`; carried onto the branch's own `Seats` |
 | `instances` | Children of this seat one parent may have, counting finished ones until they are removed. Default 1 | `Seat::instances` and the parent's `max_children` |
+| `bindings` | Scratch areas a child in this seat is bound to, such as `["notes:exclusive_write", "specs:read_only"]` ([task graphs](graph.md#bindings)). Checked when the child is spawned: each area must exist and belong to the parent or one of its ancestors | `Seat::bindings` |
 | `pod` | A pod whose startup files it gets | Instructions |
 | `startup.files` | Its own files | Instructions |
 | `start` | `on_demand` only | — |
@@ -120,7 +121,8 @@ The engine checks the seats again when the root is created (`Seats::validate`: a
 
 A branch in a rig spawns only by seat, and only the seats its own seat delegates to: `by spawn --seat NAME`, `branchyard.spawn(prompt, seat=NAME)`, `Spawn { seat: Some(NAME), .. }`, or the MCP `spawn` tool's `seat`. Outside a harness, `by spawn --parent BRANCH --seat NAME` does the same with your authority, locally and with `--remote`.
 
-- The seat fixes the child's harness, check, delegation harnesses, isolation and provisioning; asking for another harness or check is refused. The request may give a smaller budget, a shallower or narrower envelope and more denials, never more.
+- The seat fixes the child's harness, check, delegation harnesses, isolation, provisioning and [bindings](graph.md#bindings); asking for another harness or check, or another access to a bound scratch area, is refused. The request may give a smaller budget, a shallower or narrower envelope, more denials and more bindings, never more.
+- A seat's child may wait for a sibling like any child: `by spawn --seat reviewer --depends-on feature-implementer "..."`, or a `spawn` edit with `seat` in a graph proposal. Dependencies are runtime decisions of the parent, not fields of the spec ([task graphs](graph.md)).
 - The child's name defaults to `<parent>-<seat>`, then `-2`, `-3`.
 - A parent may have at most `instances` children in a seat, counting finished ones until they are removed.
 - The child's envelope comes from its seat's subtree and is still narrowed by its parent's, so the parent's depth, width, harnesses and remaining budget bound it as they bound any child. A leaf seat gets no delegation tools.

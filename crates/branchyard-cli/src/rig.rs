@@ -128,6 +128,9 @@ pub struct SeatSpec {
     /// `escalate` to.
     pub escalates_to: Vec<String>,
     pub instances: u32,
+    /// Scratch areas a child in this seat is bound to, as
+    /// `NAME:read_only` or `NAME:exclusive_write`.
+    pub bindings: Vec<branchyard::Binding>,
     pub startup: Vec<StartupFile>,
     /// Lines of the seat's table and fields, by dotted field name
     /// relative to the seat (`""` for the seat itself).
@@ -598,6 +601,7 @@ impl Parser<'_> {
             "delegates_to",
             "escalates_to",
             "instances",
+            "bindings",
             "startup",
             "start",
             "restore_policy",
@@ -692,6 +696,20 @@ impl Parser<'_> {
                         .ok()
                         .filter(|n| *n > 0)
                         .ok_or_else(|| error(&path, line, "must be a whole number from 1"))?;
+                }
+                "bindings" => {
+                    for text in strings(item, &path, line)? {
+                        let binding =
+                            branchyard::Binding::parse(&text).map_err(|e| error(&path, line, e))?;
+                        if seat.bindings.iter().any(|b| b.scratch == binding.scratch) {
+                            return Err(error(
+                                &path,
+                                line,
+                                format!("scratch area {} is bound twice", binding.scratch),
+                            ));
+                        }
+                        seat.bindings.push(binding);
+                    }
                 }
                 "startup" => seat.startup = self.startup(item, &path, line)?,
                 "start" => match string(item, &path, line)?.as_str() {
@@ -1190,6 +1208,7 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
                 delegates_to: seat.delegates_to.clone(),
                 escalates_to: seat.escalates_to.clone(),
                 instances: seat.instances,
+                bindings: seat.bindings.clone(),
             },
         );
     }
