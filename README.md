@@ -6,7 +6,7 @@ A meta-harness decides how to divide work, which harnesses to use, when to creat
 
 The topology develops during execution. You define capabilities, budgets, and acceptance rules. The meta-harness creates and revises its collaborators as it discovers work.
 
-> **Early development.** This repository contains the researched design, pinned upstream control sources, and tested Rust crates: harness protocol drivers for Claude Code, Codex, Antigravity, Pi, Amp and ACP agents, a local-mode SDK engine with the `by` command, sandbox capability admission, and an Agent Substrate adapter. None of these is qualified against a live runtime yet. The local engine is tested only against a fake agent. The server is specified but not implemented.
+> **Early development.** This repository contains the researched design, pinned upstream control sources, and tested Rust crates: harness protocol drivers for Claude Code, Codex, Antigravity, Pi, Amp and ACP agents, a local-mode SDK engine with the `by` command, sandbox capability admission, and an Agent Substrate adapter. None of these is qualified against a live runtime yet. The local engine is tested only against a fake agent. A first server exposes the local engine over an authenticated HTTP API ([remote mode](#remote-mode)); it runs harnesses without isolation, and the node service and sandboxed execution are specified but not implemented.
 
 ## What you can build
 
@@ -40,6 +40,39 @@ by rm make-the-flaky-parser-test-deterministic-claude-code
 ```
 
 Every tool permission request reaches Branchyard for profiles that route them (the Antigravity, Pi and Amp profiles do not; see [harness integration](docs/harness-integration.md#implemented-drivers)): `--ask` prompts on the terminal, `--yes` allows each one, and with neither flag and no terminal they are denied. `by log` shows each decision. These commands are tested end to end against a fake ACP agent; they have not yet run against a real harness. Resuming or forking a session in another worktree may fail for harnesses that keep sessions per directory, such as Claude Code; the branch then reports the failure rather than starting over silently.
+
+## Remote mode
+
+`by serve` (or the `branchyard-server` binary) serves repositories over an authenticated HTTP JSON API with Server-Sent Events, running the same engine in-process. `by --remote URL` runs every command against it with the same output; `branchyard-client` is the typed Rust client.
+
+```sh
+cd path/to/your/repo
+by serve                                   # 127.0.0.1:8421; creates .branchyard/server/token
+export BRANCHYARD_REMOTE=http://127.0.0.1:8421
+export BRANCHYARD_TOKEN_FILE=path/to/your/repo/.branchyard/server/token
+by run "Make the flaky parser test deterministic" --check "cargo test" --yes
+by ls
+by merge make-the-flaky-parser-test-deterministic
+```
+
+Work runs on the server: interrupting `by` stops watching, not the turn, and a retried request with the same idempotency key never runs twice. Operation status and the activity feed survive a server restart; a turn still running when the server stops is recorded as interrupted. Plain HTTP binds only to loopback unless TLS is configured or `--insecure-bind` is given. The server still uses the local process provider, so **harnesses run as the server's user with no isolation**, and every token holder can direct them. There is no cancel operation, and no PostgreSQL store yet. See [the server reference](docs/server.md) for the API, authentication, deployment and what is durable.
+
+## Watching branches
+
+`by watch` shows every branch as a tree, forks under their parents, with status, harness, current activity (the tool running, a pending permission request, the last line of the message), turns, cost and age:
+
+```text
+by watch · /src/app · q to quit
+
+BRANCH        HARNESS      STATUS      TURNS   COST  AGE  ACTIVITY
+parser        claude-code  running         2  $0.41   3m  ▸ Bash · Running the parser tests
+└ parser-alt  codex        ready           1  $0.12   1m  Rewrote the tokenizer loop
+docs          gemini-cli   no changes      1      -   9m  The docs already cover this
+
+3 branches, 1 running, $0.53 reported
+```
+
+On a terminal it redraws in place; `q` or Ctrl-C exits and restores the terminal. Piped, it prints one line per change instead, and `--once` prints the tree once. It reads event logs incrementally, and works the same with `--remote`, where it follows the server's event stream.
 
 ## Architecture
 
@@ -86,7 +119,9 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | `branchyard-qualify` | Runs driver qualification scenarios against real harness binaries; see [driver qualification](docs/qualification/README.md) |
 | `branchyard-workspace` | Git worktree branches, candidate commits and validated merges: compare-and-swap on the target, checks in a temporary worktree, conflicts returned for repair; 18 tests |
 | `branchyard-runtime` | Runs a driver against a real harness process: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 12 hermetic tests against a fake ACP agent |
-| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `harnesses`; 42 tests, 5 of them running the built binary against a temporary repository and a fake ACP agent |
+| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log`, `merge`, `rm`, `harnesses`, `watch`, `serve`, each also in remote mode; 53 tests, 9 of them running the built binary against temporary repositories, a spawned server and a fake ACP agent |
+| `branchyard-server` | The server: bearer-token authentication, durable operations with idempotency keys, a resumable SSE activity feed, TLS and graceful shutdown; 26 tests, 8 over real HTTP against a fake ACP agent; see [the server reference](docs/server.md) |
+| `branchyard-client` | The remote SDK: typed blocking client, SSE parsing and reconnect by cursor; 12 tests |
 | `branchyard-sandbox` | Vendor-independent sandbox capabilities and admission checks; unsupported requirements are rejected, never weakened |
 | `branchyard-substrate` | [Agent Substrate](https://github.com/agent-substrate/substrate) provider adapter over a client generated from its unmodified proto; tested against an in-process fake, **unqualified** against a cluster |
 | Scion controls | Nine provisioners, adjacent helpers/configuration, and tests; six suites pass with 239 tests |

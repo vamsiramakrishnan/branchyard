@@ -313,3 +313,79 @@ fn errors_exit_nonzero() {
     assert_eq!(outside.status.code(), Some(1));
     assert!(stderr(&outside).contains("not inside a git work tree"));
 }
+
+#[test]
+fn watch_prints_the_tree_once_or_logs_changes_until_q() {
+    let repo = Repo::new();
+    let empty = repo.by(&["watch", "--once"]);
+    assert!(empty.status.success(), "{}", stderr(&empty));
+    assert!(
+        stdout(&empty).contains("no branches yet"),
+        "{}",
+        stdout(&empty)
+    );
+
+    assert!(repo
+        .by_agent(&["run", "WRITE w.txt=1", "--name", "w", "--yes"])
+        .status
+        .success());
+    let agent = fake_agent().display().to_string();
+    let fork = repo.by(&[
+        "fork",
+        "w",
+        "WRITE v.txt=2",
+        "--name",
+        "w-alt",
+        "--fresh-session",
+        "--yes",
+        "--command",
+        &agent,
+    ]);
+    assert!(fork.status.success(), "{}", stderr(&fork));
+    let once = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["watch", "--once"])
+        .env("COLUMNS", "100")
+        .output()
+        .unwrap();
+    let frame = stdout(&once);
+    assert!(frame.starts_with("by watch · "), "{frame}");
+    assert!(
+        frame.contains("\nw        gemini-cli  ready"),
+        "the root row:\n{frame}"
+    );
+    assert!(
+        frame.contains("\n└ w-alt  gemini-cli  ready"),
+        "the fork indented under it:\n{frame}"
+    );
+    assert!(frame.contains("wrote v.txt"), "{frame}");
+    assert!(frame.lines().all(|l| l.chars().count() <= 100), "{frame}");
+
+    // Without a terminal: one line per change, until `q` on stdin.
+    use std::io::{BufRead, BufReader, Write};
+    let mut child = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["watch", "--interval", "0.1"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = lines.next().unwrap().unwrap();
+    assert!(first.contains("  w  ready  turns 1"), "{first}");
+    let second = lines.next().unwrap().unwrap();
+    assert!(second.contains("  w-alt  ready"), "{second}");
+    child.stdin.take().unwrap().write_all(b"q\n").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("by watch did not exit on q");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}

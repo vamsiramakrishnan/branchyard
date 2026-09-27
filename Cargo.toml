@@ -2,11 +2,13 @@
 members = [
     "crates/branchyard",
     "crates/branchyard-cli",
+    "crates/branchyard-client",
     "crates/branchyard-controls",
     "crates/branchyard-harness",
     "crates/branchyard-qualify",
     "crates/branchyard-runtime",
     "crates/branchyard-sandbox",
+    "crates/branchyard-server",
     "crates/branchyard-substrate",
     "crates/branchyard-workspace",
 ]
