@@ -8,7 +8,7 @@
 //! like a budget limit does.
 //!
 //! The turn runs under its branch's lease (see [`crate::state`]), renewed by
-//! a [`Heartbeat`]; every record write and event append is fenced by it.
+//! while it is held; every record write and event append is fenced by it.
 //! Its steps are journaled, intent before effect and outcome after:
 //! `start` (the harness process and its identity), `submit` (the prompt),
 //! `turn_end` (how the turn ended) and `snapshot` (the candidate). Recovery
@@ -28,7 +28,7 @@ use crate::delegation;
 use crate::placement::Placement;
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
-use crate::state::{now_ms, Begun, Fence, Heartbeat, Lease, ProcessRow, Record, Store};
+use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
 use crate::{
     git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource, Error,
     Event, NativeSession, PermissionDecision, PermissionRequest, Policy, TaskOptions, TurnOutcome,
@@ -135,7 +135,6 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         budget: delegation::effective_budget(&record, &turn.options.budget),
         policy: delegation::effective_policy(&record, &turn.options.policy),
     };
-    let heartbeat = Heartbeat::start(&store, &fence);
     let result = (|| {
         recorder.record(Activity::Status(record.info.status.clone()))?;
         if matches!(record.info.status, BranchStatus::Failed { .. }) {
@@ -149,7 +148,7 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
             record.info.status = BranchStatus::BudgetExceeded { limit };
         } else {
-            let driven = drive(&mut recorder, &turn, &record, &bounds, &fence, &heartbeat)?;
+            let driven = drive(&mut recorder, &turn, &record, &bounds, &lease)?;
             conclude(
                 turn.yard,
                 turn.prompt,
@@ -161,7 +160,6 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         }
         Ok(())
     })();
-    drop(heartbeat);
     let result = match result {
         Ok(()) => recorder.finish(lease, &record),
         Err(error) => Err(error),
@@ -228,9 +226,9 @@ fn drive(
     turn: &Turn<'_>,
     record: &Record,
     bounds: &Bounds,
-    fence: &Fence,
-    heartbeat: &Heartbeat,
+    lease: &Lease,
 ) -> Result<Driven, Error> {
+    let fence = lease.fence();
     let started = Instant::now();
     let store = turn.yard.store();
     let deadline = bounds
@@ -243,9 +241,7 @@ fn drive(
         .max_duration
         .map(|limit| now_ms().saturating_add(limit.as_millis() as u64));
     store.backend().set_deadline(fence, deadline_ms)?;
-    let driven = run(
-        recorder, turn, record, bounds, fence, heartbeat, started, deadline,
-    )?;
+    let driven = run(recorder, turn, record, bounds, lease, started, deadline)?;
     journal(
         &store,
         fence,
@@ -262,11 +258,11 @@ fn run(
     turn: &Turn<'_>,
     record: &Record,
     bounds: &Bounds,
-    fence: &Fence,
-    heartbeat: &Heartbeat,
+    lease: &Lease,
     started: Instant,
     deadline: Option<Instant>,
 ) -> Result<Driven, Error> {
+    let fence = lease.fence();
     let store = turn.yard.store();
     let mut driven = Driven {
         end: End::Failed {
@@ -406,7 +402,7 @@ fn run(
     let end = loop {
         let now = Instant::now();
         let late = deadline.is_some_and(|deadline| now >= deadline);
-        if heartbeat.lost() {
+        if lease.lost() {
             kill = true;
             break End::failed(format!(
                 "this engine lost {}'s lease to another; it stopped the turn",

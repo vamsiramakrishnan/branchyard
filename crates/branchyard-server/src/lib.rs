@@ -20,8 +20,17 @@
 //!   different request is refused.
 //! - Operation status survives a restart. An operation that was queued or
 //!   running when the server stopped is recorded as `interrupted`.
-//! - The activity feed is durable and gap-free: a stream resumed from a
-//!   cursor continues with the next entry.
+//! - Branch state survives a crash: at start, and every 30 seconds, the
+//!   engine recovers branches whose turn's engine stopped (this server's
+//!   previous process, or a local `by`), killing a harness process group
+//!   that outlived it when its pid and start time still match, and ending
+//!   the branch `interrupted` when its outcome is unknown. Nothing is
+//!   submitted again.
+//! - Cancellation is durable: `POST .../branches/{b}/cancel` records a
+//!   request that the engine running the turn observes, in this process or
+//!   another on the same repository.
+//! - The activity feed is the engine's store, read from a cursor: a stream
+//!   resumed from a cursor continues with the next entry, across restarts.
 //! - Plain HTTP binds only to loopback unless TLS is configured or
 //!   `--insecure-bind` is given.
 //!
@@ -30,14 +39,11 @@
 //! - Isolation between callers, or from the server's user. Any token holder
 //!   can make harnesses act as that user; `allow_client_commands` also lets
 //!   them choose executables.
-//! - Cancellation. The SDK has no cancel operation, so neither has the API;
-//!   budgets bound a turn.
-//! - Branch state after a crash. The engine's record of a branch that was
-//!   running when the server died still says `running`, and its harness may
-//!   have outlived the server.
+//! - Resuming a turn after a crash: a recovered turn is interrupted, never
+//!   continued or resubmitted.
 //! - Multiple servers per data directory, or PostgreSQL. Operations persist
-//!   through the [`store::OperationStore`] trait to a JSON-lines file; the
-//!   PostgreSQL and PGMQ store of `docs/design.md` §8 is the next step.
+//!   through the [`store::OperationStore`] trait to SQLite in the data
+//!   directory; the PostgreSQL mapping is in `docs/durability.md`.
 
 pub mod api;
 pub mod auth;

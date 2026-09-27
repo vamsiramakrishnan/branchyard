@@ -26,24 +26,36 @@ use crate::record::{self, Recorder};
 use crate::state::{now_ms, Lease, LeaseRow, Record, Taken, LEASE_TTL};
 use crate::{proc, Activity, BranchStatus, Error, Event, NativeSession, Recovery, Yard};
 
-/// Recover every branch that needs it.
+/// Recover every branch that needs it. A branch that cannot be recovered
+/// does not stop the others; the first such error is returned after all
+/// were tried.
 pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
     let store = yard.store();
     let now = now_ms();
     let mut recovered = Vec::new();
+    let mut failed = None;
     let leases = store.backend().leases()?;
     for row in &leases {
         if let Some(why) = row.stale(now) {
-            recovered.extend(lease(yard, row, &why)?);
+            match lease(yard, row, &why) {
+                Ok(done) => recovered.extend(done),
+                Err(error) => failed = failed.or(Some(error)),
+            }
         }
     }
     let held: BTreeSet<&str> = leases.iter().map(|row| row.branch.as_str()).collect();
     for record in store.list()? {
         if record.info.status == BranchStatus::Running && !held.contains(&*record.info.name) {
-            recovered.extend(unowned(yard, record)?);
+            match unowned(yard, record) {
+                Ok(done) => recovered.extend(done),
+                Err(error) => failed = failed.or(Some(error)),
+            }
         }
     }
-    Ok(recovered)
+    match failed {
+        Some(error) => Err(error),
+        None => Ok(recovered),
+    }
 }
 
 /// Recover `name` first if a stopped engine holds its lease, so a new turn
@@ -170,9 +182,9 @@ fn last_session(yard: &Yard, name: &str) -> Option<NativeSession> {
 /// A `running` record no engine holds a lease for.
 fn unowned(yard: &Yard, mut record: Record) -> Result<Option<Recovery>, Error> {
     let store = yard.store();
-    let reason = "no engine holds this branch's lease: it was running under an earlier version \
-                  of Branchyard, or its engine stopped before taking one. What its last turn did \
-                  is unknown; it was not submitted again"
+    let reason = "its record says running but no engine holds its lease: it ran under an \
+                  earlier version of Branchyard, or its engine failed without settling it. What \
+                  its last turn did is unknown; nothing was submitted again"
         .to_owned();
     record.info.status = BranchStatus::Interrupted;
     if record.info.session.is_none() {

@@ -76,9 +76,10 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/branches/{b}/send` | Continue its session with another prompt | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/fork` | New branch from its candidate | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/merge` | Validated merge of its candidate | `202` operation |
+| `POST /v1/repos/{repo}/branches/{b}/cancel` | Stop its running turn and every running turn delegated below it | `{"cancelled": ["b", …]}` |
 | `DELETE /v1/repos/{repo}/branches/{b}` | Remove worktree and record | `{"removed": "b"}` |
 | `GET /v1/repos/{repo}/branches/{b}/diff` | Candidate diff against the base | `{"diff": "..."}` |
-| `GET /v1/repos/{repo}/branches/{b}/events?cursor=N` | Recorded events after the first `N` (default 0) | `{"events": [RecordedEvent], "cursor": M}`; pass `M` next |
+| `GET /v1/repos/{repo}/branches/{b}/events?cursor=N` | Recorded events after the first `N` (default 0); a branch's events are numbered from 1 | `{"events": [RecordedEvent], "cursor": M}`; pass `M` next |
 | `GET /v1/repos/{repo}/events/stream?cursor=N` | SSE of activity across branches after feed position `N`; without a cursor, from now | `text/event-stream` |
 | `GET /v1/operations/{id}` | An operation's status and result | operation |
 
@@ -103,6 +104,8 @@ POST /v1/repos/app/tasks
 Only `prompt` is required. Give `harness` for one branch or `harnesses` for one branch each (`<name>-<harness>`), not both. `policy.mode` is `allow` or `deny` (the default); rules apply first, in order. There is no remote `ask`: the server has no terminal to ask on. `budget.max_seconds` applies per call, like the SDK's `max_duration`. `command` is refused (`403 command_not_allowed`) unless the server allows client commands; without it, the server uses its `harness_commands` entry for the harness, else the profile's executable on its `PATH`. One task runs one command, so harnesses with different configured commands must be separate tasks.
 
 `send` takes `prompt`, `budget`, `policy`, `check` and `command`; the branch keeps its harness, recorded command and environment. `fork` takes `prompt`, `name`, `fresh_session`, `harness`, `budget`, `policy`, `check`, `isolated` and `command`. `merge` takes an optional `target`, defaulting to the branch checked out in the served repository.
+
+`cancel` takes an empty object, `{}`. It is not an operation: it records a durable cancel request for the branch's running turn and each running turn delegated below it, and answers `200` with the branches that were running (an empty list when none was, and for a repeat). The engine running each turn, in the server or in another process on the repository such as a local `by run`, observes the request within 100 ms, interrupts the harness, and ends the branch `interrupted`; the operation that ran the turn then succeeds with that status. The branch's log records `cancelled by <token name> through the server`. It ignores branch locks, since the branches it is for are the ones an operation holds, and needs no idempotency key.
 
 ### Operations
 
@@ -137,7 +140,7 @@ id: 42
 data: {"seq":42,"branch":"flaky","at_ms":1790000000123,"activity":{"harness":{"type":"tool_started","turn":1,"call_id":"c1","name":"Bash"}}}
 ```
 
-The feed numbers every recorded event of every branch from 1, in the order the server ingested them: per-branch order follows the branch's log; across branches it is ingestion order, not `at_ms`. Reconnecting with the last `id` continues with the next entry, with no gap or repeat. A cursor past the end gets `400 cursor_out_of_range`. The feed also picks up activity recorded by other processes in the same repository (a local `by run`), polled every 500 ms.
+The feed is the repository's own event store (see [durability](durability.md#reading-events-from-a-cursor)): each recorded event of every branch has a position, assigned in commit order, from 1. Per-branch order follows the branch's log; across branches it is the order events were recorded, not `at_ms`. Positions only grow and may skip numbers. Reconnecting with the last `id` continues with the next entry, with no gap or repeat, across server restarts. A cursor past the end gets `400 cursor_out_of_range`. Activity recorded by other processes in the same repository (a local `by run`) appears within the poll interval, 500 ms. Positions from a server of an earlier version, which kept its own copy of the feed, name different events.
 
 ### Errors
 
@@ -159,7 +162,7 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `shutting_down` | 503 | The server is stopping |
 | `interrupted` | (operation) | The server stopped before the operation finished |
 | `internal`, `git_error`, `io_error`, `state_error`, `harness_error`, `not_a_repository` | 500 | Server-side failure |
-| `branch_exists`, `no_candidate`, `target_moved`, `conflict`, `dirty_target`, `already_merged` | 409 | SDK refusals; `target_moved` has `detail.expected`/`actual`, `conflict` has `detail.files` |
+| `branch_exists`, `no_candidate`, `target_moved`, `conflict`, `dirty_target`, `already_merged`, `running`, `fenced` | 409 | SDK refusals; `target_moved` has `detail.expected`/`actual`, `conflict` has `detail.files`. `running`: another engine, such as a local `by`, runs a turn on the branch. `fenced`: the engine lost the branch's lease to another |
 | `invalid_name`, `unknown_harness` | 400 | SDK refusals |
 | `harness_unavailable`, `unsupported`, `check_failed`, `check_timed_out`, `check_not_started`, `invalid_candidate` | 422 | SDK refusals; check failures have `detail.output_tail` |
 
@@ -170,35 +173,35 @@ export BRANCHYARD_REMOTE=https://by.example:8421
 export BRANCHYARD_TOKEN_FILE=~/.config/branchyard/token
 by --repo app run "Make the flaky parser test deterministic" --check "cargo test" --yes
 by fan "..." --harness claude-code,codex --yes
-by ls; by diff flaky; by merge flaky; by watch
+by ls; by diff flaky; by merge flaky; by watch; by cancel flaky
 ```
 
-Global options go before the command: `--remote URL`, `--token-file FILE`, `--repo NAME` (needed when the server serves several), `--ca-file FILE` (extra trust for `https`). Each has an environment variable: `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO`, `BRANCHYARD_CA_FILE`. Output is the local output: the CLI renders the same SDK values with the same code, and a test compares each command's output, `watch` aside, local against remote. Differences: `--ask` is refused (pass `--yes`, or leave requests denied); without `--yes` requests are denied; worktree paths are the server's; `by harnesses` shows the server's `PATH`. Interrupting `by run` stops watching, not the work.
+Global options go before the command: `--remote URL`, `--token-file FILE`, `--repo NAME` (needed when the server serves several), `--ca-file FILE` (extra trust for `https`). Each has an environment variable: `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO`, `BRANCHYARD_CA_FILE`. Output is the local output: the CLI renders the same SDK values with the same code, and a test compares each command's output, `watch` aside, local against remote. Differences: `--ask` is refused (pass `--yes`, or leave requests denied); without `--yes` requests are denied; worktree paths are the server's; `by harnesses` shows the server's `PATH`. Interrupting `by run` stops watching, not the work; `by cancel` stops the work.
 
 ## Deployment notes
 
-- **One server per data directory.** The registry file is not locked against a second process.
+- **One server per data directory.** The registry is not locked against a second server process, which would record the first's running operations as interrupted.
 - **TLS.** Terminate TLS in the server (`--tls-cert`/`--tls-key`, rustls with the ring provider, HTTP/1.1) or in a reverse proxy in front of a loopback bind. A proxy must not buffer `text/event-stream` responses. Clients trust the Mozilla roots plus `--ca-file`.
 - **Harnesses** run as the server's user, with its `PATH`, `HOME` and harness logins. Install and log in the harnesses as that user, or set `harness_commands`.
 - **Limits.** Request bodies are bounded (`max_body_bytes`, default 1 MiB), request heads must arrive within 30 seconds, at most 256 requests are handled at once (more wait), and at most `max_running` operations run at once (more queue). There is no per-request deadline beyond those, and no rate limiting per token.
 - **Health.** `GET /healthz` needs no token. Each request is logged to stderr as `request-id method path status duration`, never with headers or bodies.
-- **Backups.** Branch state is each repository's `.branchyard/`; server state is the data directory: `operations.jsonl` (operations, idempotency keys) and `feeds/<repo>.jsonl`. Both grow without bound for now.
+- **Backups.** Branch state and event logs are each repository's `.branchyard/state.db`, with worktrees under `.branchyard/worktrees/`; server state is `DATA-DIR/state.db` (operations, idempotency keys). Both are SQLite databases in write-ahead-log mode: back them up with `sqlite3 FILE ".backup COPY"` or while the server is stopped, not by copying the file alone. Both grow without bound for now. An `operations.jsonl` from an earlier version is imported on first start and renamed `operations.jsonl.imported`; `DATA-DIR/feeds/` is no longer used.
 
 ## What is durable
 
 | State | Where | Survives a restart |
 |---|---|---|
-| Branches, candidates, event logs | Each repository's `.branchyard/`, written by the SDK | Yes |
-| Operations and idempotency keys | `DATA-DIR/operations.jsonl`, fsynced before `202` and at each state change | Yes; unfinished ones become `interrupted` |
-| Activity feed | `DATA-DIR/feeds/<repo>.jsonl`, fsynced per batch, each entry recording its source offset | Yes, gap-free; a torn final line is dropped |
+| Branches, candidates, event logs, the activity feed | Each repository's `.branchyard/state.db`, written by the engine in transactions | Yes |
+| Operations and idempotency keys | `DATA-DIR/state.db`, committed with `synchronous=FULL` before `202` and at each state change | Yes; unfinished ones become `interrupted` |
+| Cancel requests, `max_duration` deadlines, turn leases, journaled steps, harness process identities | Each repository's `.branchyard/state.db` | Yes |
 | Branch locks | Memory | No; they end with the operations |
-| A turn in progress | The server process and its harness child | No |
+| A turn in progress | The server process and its harness child | No: it is recovered, not continued |
+
+If the server dies mid-turn, the operation becomes `interrupted` at the next start, and opening the repository recovers the branch: the engine kills the harness's process group if its pid and start time still match, ends the branch `interrupted` with a `recovered` event that says whether the prompt had been submitted, and never submits it again. The server also recovers every 30 seconds, which covers a local `by run` on a served repository that was killed. [Durability](durability.md) describes the leases, the journal and the recovery rules, and what is not guaranteed.
 
 Not durable yet:
 
-- **Running turns.** The SDK has no cancel, resume-after-crash or reconcile operation. If the server dies mid-turn, the operation becomes `interrupted` at the next start, but the branch record still says `running`, and a harness that ignores its closed stdin may outlive the server. Remove the branch, or send to it once its session is known to be idle.
-- **Cancellation.** There is no cancel endpoint, because the SDK has none; budgets are the only way to stop a turn.
-- **PostgreSQL.** The design's store is PostgreSQL with PGMQ (see [design §8](design.md#8-durable-execution-using-existing-queues)): accepted operations and their commands committed in one transaction, delivered through a queue with reconciliation. That is the next step. The registry already persists through the `OperationStore` trait in [`store.rs`](../crates/branchyard-server/src/store.rs) (`load`, and a `save` that must be durable before returning), so a SQLx implementation replaces `FileStore` without touching the API. Multiple replicas need that store, with the feed and branch locks moved into the database as well.
+- **PostgreSQL.** The design's store is PostgreSQL with PGMQ (see [design §8](design.md#8-durable-execution-using-existing-queues)): accepted operations and their commands committed in one transaction, delivered through a queue with reconciliation. The engine's `Backend` trait and the registry's `OperationStore` trait in [`store.rs`](../crates/branchyard-server/src/store.rs) (`load`, and a `save` that must be durable before returning) are the seams; [durability](durability.md#postgresql) maps each operation onto PostgreSQL. Multiple replicas need that store, with branch locks moved into the database as well.
 
 ## Security
 

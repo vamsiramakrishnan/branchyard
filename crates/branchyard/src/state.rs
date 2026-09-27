@@ -512,26 +512,41 @@ pub(crate) enum Taken {
     Stale,
 }
 
-/// A held lease. Released when dropped unless finished first, so a turn
-/// that never ran does not keep its branch.
-#[derive(Debug)]
+/// A held lease, renewed by a [`Heartbeat`] while held. Released when
+/// dropped unless finished first, so a turn that never ran does not keep
+/// its branch.
 pub(crate) struct Lease {
     store: Store,
     fence: Fence,
+    heartbeat: Option<Heartbeat>,
     done: bool,
+}
+
+impl fmt::Debug for Lease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Lease").field("fence", &self.fence).finish()
+    }
 }
 
 impl Lease {
     pub fn new(store: Store, fence: Fence) -> Lease {
+        let heartbeat = Heartbeat::start(&store, &fence);
         Lease {
             store,
             fence,
+            heartbeat: Some(heartbeat),
             done: false,
         }
     }
 
     pub fn fence(&self) -> &Fence {
         &self.fence
+    }
+
+    /// Whether a renewal was refused because another engine took the
+    /// lease.
+    pub fn lost(&self) -> bool {
+        self.heartbeat.as_ref().is_some_and(Heartbeat::lost)
     }
 
     /// Write the final record and event and release the lease,
@@ -542,6 +557,7 @@ impl Lease {
         event: Option<&RecordedEvent>,
     ) -> Result<(), Error> {
         self.done = true;
+        self.heartbeat.take();
         self.store.backend.finish(&self.fence, record, event)?;
         if event.is_some() {
             self.store.notify();
@@ -552,6 +568,7 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
+        self.heartbeat.take();
         if !self.done {
             let _ = self.store.backend.finish(&self.fence, None, None);
         }
@@ -578,10 +595,14 @@ impl Heartbeat {
                 let (flag, wake) = &*stopping;
                 let mut stopped = flag.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
-                    stopped = wake
-                        .wait_timeout(stopped, HEARTBEAT)
-                        .unwrap_or_else(|e| e.into_inner())
-                        .0;
+                    let deadline = Instant::now() + HEARTBEAT;
+                    while !*stopped && Instant::now() < deadline {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        stopped = wake
+                            .wait_timeout(stopped, left)
+                            .unwrap_or_else(|e| e.into_inner())
+                            .0;
+                    }
                     if *stopped {
                         return;
                     }

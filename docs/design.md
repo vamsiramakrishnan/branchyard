@@ -293,6 +293,8 @@ For low dispatch latency, send PostgreSQL notification hints after enqueue and r
 
 The server owns domain state transitions; this is not a general workflow engine. There is no replay of arbitrary user code or invented exactly-once process execution.
 
+Local mode implements this model today on an embedded SQLite store: leases with fencing generations, journaled steps, durable cancel requests and deadlines, and startup reconciliation that never replays a model turn. [Durability](durability.md) describes it and maps it onto PostgreSQL.
+
 ## 9. Concurrency and backpressure
 
 Use one Tokio runtime per service process. Thousands of idle sessions must not imply thousands of operating-system threads or open database transactions.
