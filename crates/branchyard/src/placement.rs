@@ -358,6 +358,20 @@ impl Placement {
         }
     }
 
+    /// Take a variable out of the harness's environment; a later
+    /// [`Placement::set_env`] of it still applies.
+    pub fn remove_env(&mut self, name: &str) {
+        match &mut self.kind {
+            Kind::Local(env) => *env = env.clone().remove(name),
+            Kind::Sandbox { env, .. } => {
+                env.remove(std::ffi::OsStr::new(name));
+            }
+            Kind::Substrate(actor) => {
+                actor.env.remove(std::ffi::OsStr::new(name));
+            }
+        }
+    }
+
     /// The harness's working directory, as the harness sees it.
     pub fn cwd(&self) -> String {
         self.cwd.clone()

@@ -314,8 +314,12 @@ fn run(
     // The one path for MCP servers and instructions, the task's and the
     // delegation tools', and for everything else the home needs. Applied
     // before a sandbox exists, so its mount or home transfer carries it.
-    let provisioned = match crate::provisioning::prepare(record, turn.profile, projection.as_ref())
-    {
+    let provisioned = match crate::provisioning::prepare(
+        record,
+        turn.profile,
+        projection.as_ref(),
+        store.dir(),
+    ) {
         Ok(provisioned) => provisioned,
         Err(reason) => {
             driven.end = End::failed(format!("could not provision {}: {reason}", turn.profile.id));
@@ -344,13 +348,22 @@ fn run(
             placement.set_env(name, value);
         }
     }
+    // A secret's source variable is not the harness's: it gets the secret
+    // only as its plan delivers it.
+    for name in &provisioned.scrub {
+        placement.remove_env(name);
+    }
     for var in &provisioned.env {
         placement.set_env(&var.name, &var.value);
     }
+    // A per-turn MCP file lives until this function returns, after the
+    // harness is gone.
+    let _turn_file = provisioned.turn_file;
     let open = Open {
         mcp_servers: provisioned.session.mcp_servers,
         instructions: provisioned.session.instructions,
         model: provisioned.session.model,
+        mcp_config_file: provisioned.mcp_config_file,
         ..Open::new(turn.mode.clone(), placement.cwd())
     };
     let driver = turn.profile.driver_with(turn.command.clone());

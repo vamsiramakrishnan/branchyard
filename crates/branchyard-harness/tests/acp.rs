@@ -28,6 +28,7 @@ fn fresh() -> Open {
         model: None,
         mcp_servers: Vec::new(),
         instructions: None,
+        mcp_config_file: None,
     }
 }
 
@@ -158,6 +159,7 @@ fn fork_and_model_selection_are_rejected_before_launch() {
         model,
         mcp_servers: Vec::new(),
         instructions: None,
+        mcp_config_file: None,
     };
     assert!(matches!(
         driver.open(open(SessionMode::Fork(session("p")), None)),
@@ -356,6 +358,7 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
             model: None,
             mcp_servers: Vec::new(),
             instructions: None,
+            mcp_config_file: None,
         })
         .unwrap();
     let initialize = decode(&opened.frames[0]);
@@ -377,6 +380,7 @@ fn the_claude_acp_profile_keeps_permission_bypass_unavailable() {
             model: None,
             mcp_servers: Vec::new(),
             instructions: None,
+            mcp_config_file: None,
         })
         .unwrap();
     let initialize = decode(&opened.frames[0]);

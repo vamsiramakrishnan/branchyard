@@ -109,6 +109,14 @@ pub struct Open {
     pub mcp_servers: Vec<McpServer>,
     /// Standing instructions that are not part of any prompt.
     pub instructions: Option<Instructions>,
+    /// A file, as the harness sees it, already holding `mcp_servers` in the
+    /// harness's configuration format, for a driver that would otherwise
+    /// pass them on its command line, where every process on the host can
+    /// read them: Claude Code's stream-json driver, whose file is
+    /// [`claude_code::mcp_config`]. The caller writes it, readable only by
+    /// the harness's user. Other drivers pass their servers over stdin and
+    /// ignore it.
+    pub mcp_config_file: Option<String>,
 }
 
 impl Open {
@@ -120,6 +128,7 @@ impl Open {
             model: None,
             mcp_servers: Vec::new(),
             instructions: None,
+            mcp_config_file: None,
         }
     }
 }

@@ -266,6 +266,7 @@ impl Run<'_> {
             model: None,
             mcp_servers: Vec::new(),
             instructions: None,
+            mcp_config_file: None,
         };
         let transcript = self
             .config
@@ -496,6 +497,7 @@ fn scenarios(run: &mut Run) {
                 model: None,
                 mcp_servers: Vec::new(),
                 instructions: None,
+                mcp_config_file: None,
             });
             let result = match rejected {
                 Err(error) => Ok(format!("rejected before launch as declared: {error}")),

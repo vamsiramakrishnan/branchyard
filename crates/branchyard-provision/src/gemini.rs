@@ -22,7 +22,7 @@ use crate::auth::{Method, Spec};
 use crate::edit::{path, Edit, JsonEdit};
 use crate::{
     needs_private_home, pass_session, unsupported, unused, Context, EnvVar, Plan, Provisioner,
-    Refused,
+    Refused, Via,
 };
 
 const SETTINGS: &str = ".gemini/settings.json";
@@ -88,7 +88,9 @@ impl Provisioner for Gemini {
             match resolved.method {
                 "api-key" => {
                     let key = resolved.env_key.expect("an env method has a key");
-                    plan.set_env(EnvVar::secret(key, secret(key)));
+                    // Not verified offline whether Gemini CLI's shell
+                    // tool filters it: assumed to pass it on.
+                    plan.secret_env(key, key, &secret(key), true);
                 }
                 "auth-file" => {
                     let content = secret("GEMINI_OAUTH_CREDS");
@@ -98,15 +100,24 @@ impl Provisioner for Gemini {
                         ));
                     }
                     plan.edit(OAUTH_CREDS, true, Edit::Put(content));
+                    plan.deliver(
+                        "GEMINI_OAUTH_CREDS",
+                        Via::File {
+                            path: OAUTH_CREDS.into(),
+                        },
+                        false,
+                    );
                 }
                 "vertex-ai" => {
-                    plan.set_env(EnvVar::secret(
+                    plan.secret_env(
                         "GOOGLE_CLOUD_PROJECT",
-                        secret("GOOGLE_CLOUD_PROJECT"),
-                    ));
+                        "GOOGLE_CLOUD_PROJECT",
+                        &secret("GOOGLE_CLOUD_PROJECT"),
+                        true,
+                    );
                     for name in ["GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION"] {
                         if let Some(value) = context.secret(name) {
-                            plan.set_env(EnvVar::secret(name, value));
+                            plan.secret_env(name, name, value, true);
                         }
                     }
                 }

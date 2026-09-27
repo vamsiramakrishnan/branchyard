@@ -21,7 +21,7 @@ use crate::auth::{Method, Spec};
 use crate::edit::{apply_all, path, Edit, JsonEdit};
 use crate::{
     needs_private_home, pass_session, unsupported, unused, Context, EnvVar, Plan, Provisioner,
-    Refused,
+    Refused, Via,
 };
 
 const CONFIG: &str = ".copilot/config.json";
@@ -81,7 +81,7 @@ impl Provisioner for Copilot {
                 "api-key" => {
                     let key = resolved.env_key.expect("an env method has a key");
                     let token = context.secret(key).unwrap_or_default();
-                    plan.set_env(EnvVar::secret("COPILOT_GITHUB_TOKEN", token));
+                    plan.secret_env(key, "COPILOT_GITHUB_TOKEN", token, true);
                     plan.edit(CONFIG, false, trust);
                 }
                 "auth-file" => {
@@ -93,6 +93,13 @@ impl Provisioner for Copilot {
                         Refused("the COPILOT_CONFIG secret is not valid JSON".into())
                     })?;
                     plan.edit(CONFIG, true, Edit::Put(trusted.unwrap_or_default()));
+                    plan.deliver(
+                        "COPILOT_CONFIG",
+                        Via::File {
+                            path: CONFIG.into(),
+                        },
+                        false,
+                    );
                 }
                 _ => unreachable!("every method of AUTH is handled"),
             }

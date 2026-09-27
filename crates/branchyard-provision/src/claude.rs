@@ -5,32 +5,57 @@
 // under the Apache License, Version 2.0.
 //
 // Modified for Branchyard: translated from Python to a sans-IO planner.
-// The API-key fingerprint is added to `customApiKeyResponses.approved`
-// instead of replacing it, and the workspace is marked trusted without
-// dropping other projects; a credentials file is written from the
-// CLAUDE_AUTH secret rather than mounted; no model is set unless one is
-// asked for (Scion defaults to "opus"); telemetry goes to the endpoint the
-// task names, without Scion's cloud-provider checks, which belong to its
-// own collector; MCP servers and instructions stay on the driver's session
-// channel (`--mcp-config`, plugin or system prompt, or ACP), so Scion's
-// `.claude.json` MCP merge and CLAUDE.md projection are not used; the
-// version probe (`claude --version`) is dropped, since planning runs no
-// processes. Scion's launch flags (`--dangerously-skip-permissions`) are
-// not ported: Branchyard's drivers route every permission request.
+// An API key is not set in the environment with its fingerprint approved
+// in `.claude.json`, as Scion does: it is written to a 0600 file in the
+// private home that `apiKeyHelper` in `~/.claude/settings.json` prints, so
+// the harness's tool commands do not inherit it. The workspace is marked
+// trusted without dropping other projects; a credentials file is written
+// from the CLAUDE_AUTH secret rather than mounted; no model is set unless
+// one is asked for (Scion defaults to "opus"); telemetry goes to the
+// endpoint the task names, without Scion's cloud-provider checks, which
+// belong to its own collector; MCP servers and instructions stay on the
+// driver's session channel (`--mcp-config` with a 0600 file, plugin or
+// system prompt, or ACP), so Scion's `.claude.json` MCP merge and
+// CLAUDE.md projection are not used; the version probe (`claude
+// --version`) is dropped, since planning runs no processes. Scion's launch
+// flags (`--dangerously-skip-permissions`) are not ported: Branchyard's
+// drivers route every permission request.
 
 //! Claude Code: `claude-code-stream-json` and `claude-code-acp`.
+//!
+//! An API key reaches Claude Code through `apiKeyHelper`, a command in
+//! `~/.claude/settings.json` whose output is the key, here `cat` of a 0600
+//! file in the private home. Claude Code 2.1.283, and the 2.1.280 that
+//! claude-agent-acp 0.81.2 runs (it loads user settings), use a helper from
+//! user settings without the workspace trust or key approval an
+//! environment key needs, and the key never enters the environment its
+//! Bash tool and MCP servers inherit. With a helper,
+//! `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` is not set: 2.1.283 ignores
+//! `apiKeyHelper` when it is. An OAuth token and the Vertex
+//! variables have no such setting and stay in the environment, visible to
+//! tool commands: Claude Code does not filter its Bash tool's environment
+//! unless `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is on, which on Linux needs
+//! bubblewrap and is not set here.
+//!
+//! With the stream-json driver, MCP servers go in a 0600 file passed to
+//! `--mcp-config` by path, never on the command line.
 
 use serde_json::json;
 
 use crate::auth::{Method, Spec};
 use crate::edit::{path, Edit, JsonEdit};
 use crate::{
-    needs_private_home, pass_session, unsupported, unused, Context, EnvVar, Plan, Provisioner,
-    Refused,
+    needs_private_home, pass_session, unsupported, unused, Context, Credential, EnvVar,
+    McpConfigFile, Plan, Protocol, Provisioner, Refused, Via,
 };
 
 const CLAUDE_JSON: &str = ".claude.json";
 const CREDENTIALS: &str = ".claude/.credentials.json";
+const SETTINGS: &str = ".claude/settings.json";
+/// The API key `apiKeyHelper` prints.
+pub(crate) const API_KEY_FILE: &str = ".branchyard/credentials/anthropic-api-key";
+/// The stream-json driver's MCP configuration, in a private home.
+pub(crate) const MCP_CONFIG: &str = ".branchyard/claude-mcp.json";
 
 /// Scion's `model_aliases` for Claude.
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
@@ -127,35 +152,37 @@ impl Provisioner for Claude {
             plan.auth = Some(resolved.method.to_owned());
             match resolved.method {
                 "api-key" => {
-                    let key = secret("ANTHROPIC_API_KEY");
-                    plan.set_env(EnvVar::secret("ANTHROPIC_API_KEY", key.clone()));
-                    needs_private_home(context, "the API key approval")?;
-                    // Claude Code's approval fingerprint: the key's last 20
-                    // characters. It is most of the key, so the file is
-                    // treated as a secret.
-                    let start = key.char_indices().rev().nth(19).map_or(0, |(i, _)| i);
+                    needs_private_home(context, "the API key file")?;
+                    plan.edit(API_KEY_FILE, true, Edit::Put(secret("ANTHROPIC_API_KEY")));
                     plan.edit(
-                        CLAUDE_JSON,
+                        SETTINGS,
                         true,
                         Edit::Json {
-                            edits: vec![
-                                JsonEdit::Push(
-                                    path(&["customApiKeyResponses", "approved"]),
-                                    json!(&key[start..]),
-                                ),
-                                JsonEdit::Default(
-                                    path(&["customApiKeyResponses", "rejected"]),
-                                    json!([]),
-                                ),
-                            ],
+                            edits: vec![JsonEdit::Set(
+                                path(&["apiKeyHelper"]),
+                                json!(helper(context)),
+                            )],
                             comment_lines: false,
                         },
                     );
+                    plan.deliver(
+                        "ANTHROPIC_API_KEY",
+                        Via::Helper {
+                            path: API_KEY_FILE.into(),
+                            setting: format!("apiKeyHelper in {SETTINGS}"),
+                        },
+                        false,
+                    );
                 }
-                "oauth-token" => plan.set_env(EnvVar::secret(
+                // Claude Code has no file or helper for a token from
+                // `claude setup-token`: `.credentials.json` holds a whole
+                // claude.ai login (CLAUDE_AUTH).
+                "oauth-token" => plan.secret_env(
                     "CLAUDE_CODE_OAUTH_TOKEN",
-                    secret("CLAUDE_CODE_OAUTH_TOKEN"),
-                )),
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    &secret("CLAUDE_CODE_OAUTH_TOKEN"),
+                    true,
+                ),
                 "auth-file" => {
                     needs_private_home(context, "the credentials file")?;
                     let content = secret("CLAUDE_AUTH");
@@ -163,25 +190,59 @@ impl Provisioner for Claude {
                         return Err(Refused("the CLAUDE_AUTH secret is not valid JSON".into()));
                     }
                     plan.edit(CREDENTIALS, true, Edit::Put(content));
+                    plan.deliver(
+                        "CLAUDE_AUTH",
+                        Via::File {
+                            path: CREDENTIALS.into(),
+                        },
+                        false,
+                    );
                 }
                 "vertex-ai" => {
                     let region = resolved.env_key.unwrap_or("GOOGLE_CLOUD_REGION");
                     plan.set_env(EnvVar::plain("CLAUDE_CODE_USE_VERTEX", "1"));
-                    plan.set_env(EnvVar::secret(
+                    plan.secret_env(
+                        "GOOGLE_CLOUD_PROJECT",
                         "ANTHROPIC_VERTEX_PROJECT_ID",
-                        secret("GOOGLE_CLOUD_PROJECT"),
-                    ));
-                    plan.set_env(EnvVar::secret("CLOUD_ML_REGION", secret(region)));
+                        &secret("GOOGLE_CLOUD_PROJECT"),
+                        true,
+                    );
+                    plan.secret_env(region, "CLOUD_ML_REGION", &secret(region), true);
                 }
                 _ => unreachable!("every method of AUTH is handled"),
             }
             // Suppress model upgrade and fallback dialogs: the provider is
-            // chosen here.
-            plan.set_env(EnvVar::plain("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "1"));
+            // chosen here. Not with an API key: Claude Code 2.1.283 then
+            // ignores `apiKeyHelper` and reports it is not logged in.
+            if resolved.method != "api-key" {
+                plan.set_env(EnvVar::plain("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "1"));
+            }
             if context.private_home {
                 trust_workspace(context, &mut plan);
             }
         }
+        // An API key an earlier turn wrote, and its helper, go when this
+        // turn authenticates another way (or not at all).
+        let had_key = context
+            .installed
+            .credentials
+            .iter()
+            .any(|c| c.path() == API_KEY_FILE);
+        if had_key && plan.auth.as_deref() != Some("api-key") {
+            plan.edit(API_KEY_FILE, true, Edit::Remove);
+            plan.edit(
+                SETTINGS,
+                false,
+                Edit::Json {
+                    edits: vec![JsonEdit::RemoveIf(
+                        path(&["apiKeyHelper"]),
+                        json!(helper(context)),
+                    )],
+                    comment_lines: false,
+                },
+            );
+        }
+        mcp_config(context, &mut plan);
         plan.unused_secrets = unused(context, &AUTH.names());
         if let Some(telemetry) = &context.telemetry {
             let on = telemetry.enabled;
@@ -206,6 +267,41 @@ impl Provisioner for Claude {
         }
         Ok(plan)
     }
+}
+
+/// The `apiKeyHelper` command: print the key file, as the harness sees it.
+fn helper(context: &Context) -> String {
+    let file = context.home_path(API_KEY_FILE);
+    format!("cat '{}'", file.replace('\'', r"'\''"))
+}
+
+/// The stream-json driver's MCP servers as a 0600 file: in a private home,
+/// written by the plan (and removed when a later turn has none); otherwise
+/// placed by the caller for the turn. Other protocols pass them over stdin.
+fn mcp_config(context: &Context, plan: &mut Plan) {
+    if context.protocol != Protocol::ClaudeStreamJson {
+        return;
+    }
+    let recorded = context
+        .installed
+        .credentials
+        .iter()
+        .any(|c| matches!(c, Credential::File { path } if path == MCP_CONFIG));
+    if context.mcp_servers.is_empty() {
+        if recorded {
+            plan.edit(MCP_CONFIG, true, Edit::Remove);
+        }
+        return;
+    }
+    let content = branchyard_harness::claude_code::mcp_config(&context.mcp_servers);
+    let path = match context.private_home {
+        true => {
+            plan.edit(MCP_CONFIG, true, Edit::Put(content.clone()));
+            Some(context.home_path(MCP_CONFIG))
+        }
+        false => None,
+    };
+    plan.session.mcp_config = Some(McpConfigFile { path, content });
 }
 
 /// Mark the workspace trusted in `.claude.json`, keeping other projects.

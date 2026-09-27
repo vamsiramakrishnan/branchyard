@@ -154,6 +154,7 @@ pub enum Command {
     },
     Rm {
         branch: String,
+        keep_credentials: bool,
     },
     Harnesses {
         json: bool,
@@ -548,6 +549,11 @@ const LIMIT: Flag = Flag {
     value: Some("N"),
     help: "At most N events (default 50, at most 200)",
 };
+const KEEP_CREDENTIALS: Flag = Flag {
+    long: "keep-credentials",
+    value: None,
+    help: "Keep the credential files provisioning wrote in a home a fork still uses",
+};
 const INTO: Flag = Flag {
     long: "into",
     value: Some("TARGET"),
@@ -787,7 +793,7 @@ pub static COMMANDS: &[Spec] = &[
         name: "rm",
         positionals: &["branch"],
         summary: "Remove a branch's worktree and record",
-        flags: &[],
+        flags: &[KEEP_CREDENTIALS],
     },
     Spec {
         name: "harnesses",
@@ -952,7 +958,10 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             branch: next(),
             into: m.value("into").map(str::to_owned),
         },
-        "rm" => Command::Rm { branch: next() },
+        "rm" => Command::Rm {
+            branch: next(),
+            keep_credentials: m.switch("keep-credentials"),
+        },
         "harnesses" => Command::Harnesses {
             json: m.switch("json"),
         },
@@ -1952,7 +1961,17 @@ mod tests {
         );
         assert_eq!(
             parse_str("rm b").unwrap(),
-            Command::Rm { branch: "b".into() }
+            Command::Rm {
+                branch: "b".into(),
+                keep_credentials: false
+            }
+        );
+        assert_eq!(
+            parse_str("rm b --keep-credentials").unwrap(),
+            Command::Rm {
+                branch: "b".into(),
+                keep_credentials: true
+            }
         );
         assert_eq!(err("merge b --into"), "--into needs a value TARGET");
     }
@@ -2147,6 +2166,6 @@ mod tests {
             "by fork <branch> <prompt> [options]"
         );
         assert_eq!(spec("ls").unwrap().usage(), "by ls [options]");
-        assert_eq!(spec("rm").unwrap().usage(), "by rm <branch>");
+        assert_eq!(spec("rm").unwrap().usage(), "by rm <branch> [options]");
     }
 }

@@ -20,10 +20,10 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use branchyard_provision::apply::{apply, installed};
+use branchyard_provision::apply::{apply, installed, remove_credentials};
 use branchyard_provision::{
     for_harness, provisioners, Context, Effort, Instructions, McpServer, Plan, Protocol, Secret,
-    Telemetry, NOT_PORTED,
+    Telemetry, Via, NOT_PORTED,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +105,14 @@ fn env_text(plan: &Plan) -> String {
         plan.auth.as_deref().unwrap_or("none")
     ));
     lines.push(format!("# unused: {}", plan.unused_secrets.join(",")));
+    for delivery in &plan.secrets {
+        lines.push(format!(
+            "# secret {}: {} tool_env={}",
+            delivery.secret,
+            serde_json::to_string(&delivery.via).unwrap(),
+            delivery.tool_env
+        ));
+    }
     lines.join("\n") + "\n"
 }
 
@@ -186,17 +194,304 @@ fn claude_api_key_model_and_telemetry_keep_the_users_claude_json() {
     context.telemetry = telemetry("http://127.0.0.1:14317");
     let plan = provision(&temp, &context);
     golden("claude-api-key", &temp, &plan);
-    assert_eq!(temp.mode(".claude.json"), 0o600);
+    // The key is in a 0600 file that `apiKeyHelper` prints, not in the
+    // environment the harness's tools inherit, and no longer approved by
+    // fingerprint in `.claude.json`.
+    let key_file = ".branchyard/credentials/anthropic-api-key";
+    assert_eq!(temp.read(key_file), ANTHROPIC_KEY);
+    assert_eq!(temp.mode(key_file), 0o600);
+    assert_eq!(temp.mode(".branchyard/credentials"), 0o700);
+    let settings: serde_json::Value =
+        serde_json::from_str(&temp.read(".claude/settings.json")).unwrap();
+    assert_eq!(settings["theme"], "dark");
+    assert_eq!(
+        settings["apiKeyHelper"],
+        "cat '/branchyard/home/.branchyard/credentials/anthropic-api-key'"
+    );
+    assert!(!temp.read(".claude.json").contains(&ANTHROPIC_KEY[20..]));
+    assert!(plan.env.iter().all(|e| !e.value.contains(ANTHROPIC_KEY)));
+    assert!(plan.tool_env_secrets().is_empty());
+    assert_eq!(
+        plan.secrets[0].via,
+        Via::Helper {
+            path: key_file.into(),
+            setting: "apiKeyHelper in .claude/settings.json".into()
+        }
+    );
+
+    // Authenticating another way later removes the key and its helper,
+    // and nothing of the user's.
+    context.installed = installed(&temp.home());
+    context.secrets = secrets(&[("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-token")]);
+    let plan = provision(&temp, &context);
+    assert!(!temp.home().join(key_file).exists());
+    let settings: serde_json::Value =
+        serde_json::from_str(&temp.read(".claude/settings.json")).unwrap();
+    assert_eq!(settings, serde_json::json!({"theme": "dark"}));
+    assert_eq!(plan.tool_env_secrets(), ["CLAUDE_CODE_OAUTH_TOKEN"]);
+    assert!(installed(&temp.home()).credentials.is_empty());
+}
+
+#[test]
+fn a_helper_path_with_a_quote_is_quoted_for_the_shell() {
+    let mut context = Context::new(
+        "claude-code",
+        Protocol::ClaudeStreamJson,
+        "/homes/it's",
+        "/w",
+    );
+    context.private_home = true;
+    context.secrets = secrets(&[("ANTHROPIC_API_KEY", ANTHROPIC_KEY)]);
+    let plan = branchyard_provision::plan(&context).unwrap();
+    let settings = plan
+        .files
+        .iter()
+        .find(|f| f.path == ".claude/settings.json")
+        .unwrap();
+    let text = format!("{:?}", settings.edits);
+    assert!(
+        text.contains(r#"cat '/homes/it'\\''s/.branchyard/credentials/anthropic-api-key'"#),
+        "{text}"
+    );
+}
+
+#[test]
+fn claude_stream_json_mcp_servers_go_in_a_private_file_not_the_command_line() {
+    let temp = Temp::new();
+    let mut context = context("claude-code", Protocol::ClaudeStreamJson);
+    let mut docs = server("docs");
+    docs.env = vec![("DOCS_TOKEN".into(), "mcp-env-secret".into())];
+    context.mcp_servers = vec![docs.clone()];
+    let plan = provision(&temp, &context);
+    let file = plan.session.mcp_config.as_ref().unwrap();
+    assert_eq!(
+        file.path.as_deref(),
+        Some("/branchyard/home/.branchyard/claude-mcp.json")
+    );
+    assert!(!format!("{file:?}").contains("mcp-env-secret"));
+    assert_eq!(
+        temp.read(".branchyard/claude-mcp.json"),
+        branchyard_harness::claude_code::mcp_config(&[docs])
+    );
+    assert_eq!(temp.mode(".branchyard/claude-mcp.json"), 0o600);
+    // The driver still checks the servers.
+    assert_eq!(plan.session.mcp_servers.len(), 1);
+
+    // A later turn without servers removes the file.
+    context.installed = installed(&temp.home());
+    context.mcp_servers.clear();
+    let plan = provision(&temp, &context);
+    assert!(plan.session.mcp_config.is_none());
+    assert!(!temp.home().join(".branchyard/claude-mcp.json").exists());
+
+    // Over ACP they go in `session/new`, on stdin.
+    let mut acp = self::context("claude-code", Protocol::Acp);
+    acp.mcp_servers = vec![server("docs")];
+    let plan = branchyard_provision::plan(&acp).unwrap();
+    assert!(plan.session.mcp_config.is_none() && plan.files.is_empty());
+}
+
+#[test]
+fn every_secret_says_how_it_reaches_the_harness() {
+    // Every method of every translated harness, with the secrets it reads.
+    let cases: &[(&str, Protocol, &[&str])] = &[
+        (
+            "claude-code",
+            Protocol::ClaudeStreamJson,
+            &["ANTHROPIC_API_KEY"],
+        ),
+        ("claude-code", Protocol::Acp, &["CLAUDE_CODE_OAUTH_TOKEN"]),
+        ("claude-code", Protocol::ClaudeStreamJson, &["CLAUDE_AUTH"]),
+        (
+            "claude-code",
+            Protocol::ClaudeStreamJson,
+            &["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"],
+        ),
+        ("codex", Protocol::CodexAppServer, &["CODEX_API_KEY"]),
+        ("codex", Protocol::Acp, &["CODEX_AUTH"]),
+        ("gemini-cli", Protocol::Acp, &["GEMINI_API_KEY"]),
+        ("gemini-cli", Protocol::Acp, &["GEMINI_OAUTH_CREDS"]),
+        (
+            "gemini-cli",
+            Protocol::Acp,
+            &["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"],
+        ),
+        ("opencode", Protocol::Acp, &["OPENAI_API_KEY"]),
+        ("opencode", Protocol::Acp, &["OPENCODE_AUTH"]),
+        ("github-copilot", Protocol::Acp, &["GITHUB_TOKEN"]),
+        ("github-copilot", Protocol::Acp, &["COPILOT_CONFIG"]),
+        ("hermes", Protocol::Acp, &["GOOGLE_API_KEY"]),
+        (
+            "hermes",
+            Protocol::Acp,
+            &["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"],
+        ),
+        (
+            "antigravity",
+            Protocol::AntigravityStreamJson,
+            &["GOOGLE_API_KEY"],
+        ),
+    ];
+    for (harness, protocol, names) in cases {
+        let mut context = context(harness, *protocol);
+        context.secrets = names
+            .iter()
+            .map(|n| Secret::new(*n, format!("{{\"value-of\": \"{n}\"}}")))
+            .collect();
+        let plan = branchyard_provision::plan(&context).unwrap();
+        let case = format!("{harness} {names:?}");
+        assert!(plan.auth.is_some(), "{case}");
+        assert!(!plan.secrets.is_empty(), "{case}");
+        for delivery in &plan.secrets {
+            assert!(names.contains(&delivery.secret.as_str()), "{case}");
+            match &delivery.via {
+                Via::Env { var } => {
+                    assert!(delivery.tool_env, "{case}: {var} in the environment");
+                    assert!(
+                        plan.env.iter().any(|e| &e.name == var && e.secret),
+                        "{case}: {var}"
+                    );
+                }
+                Via::File { path } | Via::Helper { path, .. } => assert!(
+                    plan.files.iter().any(|f| &f.path == path && f.secret),
+                    "{case}: {path}"
+                ),
+                Via::McpServer { .. } => panic!("{case}: no MCP server was given"),
+            }
+        }
+        // Every secret variable is accounted for.
+        for var in plan.env.iter().filter(|e| e.secret) {
+            assert!(
+                plan.secrets.iter().any(|d| d.via
+                    == Via::Env {
+                        var: var.name.clone()
+                    }),
+                "{case}: {} has no delivery",
+                var.name
+            );
+        }
+        // Every secret value is in a secret variable or file, nowhere else.
+        for secret in &context.secrets {
+            let value = &secret.value;
+            let open = format!(
+                "{:?} {:?}",
+                plan.env
+                    .iter()
+                    .filter(|e| !e.secret)
+                    .map(|e| &e.value)
+                    .collect::<Vec<_>>(),
+                plan.files
+                    .iter()
+                    .filter(|f| !f.secret)
+                    .map(|f| &f.edits)
+                    .collect::<Vec<_>>()
+            );
+            assert!(!open.contains(value.as_str()), "{case}");
+        }
+    }
+}
+
+#[test]
+fn a_secret_given_to_an_mcp_server_is_used_and_delivered_with_it() {
+    let mut context = context("codex", Protocol::CodexAppServer);
+    let mut docs = server("docs");
+    docs.env.push(("DOCS_TOKEN".into(), "docs-secret".into()));
+    context.mcp_servers = vec![docs];
+    context.secrets = secrets(&[("DOCS", "docs-secret")]);
+    context.mcp_secrets = vec![branchyard_provision::McpSecret {
+        server: "docs".into(),
+        var: "DOCS_TOKEN".into(),
+        secret: "DOCS".into(),
+    }];
+    let plan = branchyard_provision::plan(&context).unwrap();
+    assert!(plan.unused_secrets.is_empty());
+    assert_eq!(
+        plan.secrets,
+        [branchyard_provision::Delivery {
+            secret: "DOCS".into(),
+            via: Via::McpServer {
+                server: "docs".into(),
+                var: "DOCS_TOKEN".into()
+            },
+            tool_env: false,
+        }]
+    );
+    assert!(plan.env.is_empty() && plan.files.is_empty());
+}
+
+#[test]
+fn removing_credentials_leaves_everything_else() {
+    // Claude: a key file and its helper setting; Hermes: a variable of a
+    // dotenv file; Antigravity: server entries of a JSON file.
+    let temp = Temp::new();
+    temp.seed(".claude/settings.json", "{\"theme\": \"dark\"}\n");
+    temp.seed(".hermes/.env", "# mine\nHERMES_THEME=dark\n");
+    temp.seed(
+        ".gemini/config/mcp_config.json",
+        r#"{"mcpServers": {"users-own": {"command": "/opt/mine"}}}"#,
+    );
+    let mut claude = context("claude-code", Protocol::ClaudeStreamJson);
+    claude.secrets = secrets(&[("ANTHROPIC_API_KEY", ANTHROPIC_KEY)]);
+    claude.mcp_servers = vec![server("docs")];
+    provision(&temp, &claude);
+    let mut hermes = context("hermes", Protocol::Acp);
+    hermes.installed = installed(&temp.home());
+    hermes.secrets = secrets(&[("OPENAI_API_KEY", "sk-hermes-secret")]);
+    provision(&temp, &hermes);
+    let mut antigravity = context("antigravity", Protocol::AntigravityStreamJson);
+    antigravity.installed = installed(&temp.home());
+    antigravity.mcp_servers = vec![server("docs")];
+    provision(&temp, &antigravity);
+    let recorded: Vec<String> = installed(&temp.home())
+        .credentials
+        .iter()
+        .map(|c| c.path().to_owned())
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            ".branchyard/credentials/anthropic-api-key",
+            ".claude/settings.json",
+            ".branchyard/claude-mcp.json",
+            ".hermes/.env",
+            ".gemini/config/mcp_config.json",
+        ]
+    );
+
+    let removed = remove_credentials(&temp.home()).unwrap();
+    assert!(removed
+        .removed
+        .contains(&".branchyard/credentials/anthropic-api-key".to_owned()));
+    assert!(!temp
+        .home()
+        .join(".branchyard/credentials/anthropic-api-key")
+        .exists());
+    assert!(!temp.home().join(".branchyard/claude-mcp.json").exists());
     assert_eq!(
         temp.read(".claude/settings.json"),
-        "{\"theme\": \"dark\"}\n"
+        "{\n  \"theme\": \"dark\"\n}\n"
     );
-    let key = plan
-        .env
-        .iter()
-        .find(|e| e.name == "ANTHROPIC_API_KEY")
-        .unwrap();
-    assert!(key.secret && key.value == ANTHROPIC_KEY);
+    assert_eq!(temp.read(".hermes/.env"), "# mine\nHERMES_THEME=dark\n");
+    let mcp: serde_json::Value =
+        serde_json::from_str(&temp.read(".gemini/config/mcp_config.json")).unwrap();
+    assert_eq!(
+        mcp,
+        serde_json::json!({"mcpServers": {"users-own": {"command": "/opt/mine"}}})
+    );
+    // Forgotten, so a second removal changes nothing; the MCP entries
+    // Branchyard manages are still known.
+    let left = installed(&temp.home());
+    assert!(left.credentials.is_empty());
+    assert_eq!(left.mcp_servers, ["docs"]);
+    let again = remove_credentials(&temp.home()).unwrap();
+    assert!(again.written.is_empty() && again.removed.is_empty());
+    let found = files(&temp.home());
+    for (path, content) in &found {
+        assert!(
+            !content.contains(ANTHROPIC_KEY) && !content.contains("sk-hermes-secret"),
+            "{path}"
+        );
+    }
 }
 
 #[test]
@@ -442,6 +737,10 @@ fn a_home_that_is_yours_gets_no_files_and_no_secrets() {
     let planned = branchyard_provision::plan(&context).unwrap();
     assert!(planned.files.is_empty());
     assert_eq!(planned.session.mcp_servers, context.mcp_servers);
+    // Its MCP file is left to the caller to place for the turn.
+    let file = planned.session.mcp_config.unwrap();
+    assert_eq!(file.path, None);
+    assert!(file.content.contains("/usr/bin/docs-mcp"));
 }
 
 #[test]

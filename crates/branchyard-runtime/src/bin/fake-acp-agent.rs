@@ -44,6 +44,13 @@
 //!
 //! With `FAKE_ACP_SILENT=1` in its environment it never answers
 //! `initialize`, so no prompt is ever submitted to it.
+//!
+//! Started as `fake-acp-agent --record-launch FILE ARG...`, standing in for
+//! a harness a driver launches with its own arguments, it writes to `FILE`
+//! as JSON what another process could see of it and exits: its command
+//! line as `/proc/self/cmdline` shows it, the names (not values) of its
+//! environment, and, for an argument after `--mcp-config` that names a
+//! file, that file's mode and the servers it lists.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -85,7 +92,46 @@ struct Active {
 const PREAMBLE_OPEN: &str = "<branchyard-instructions>";
 const PREAMBLE_CLOSE: &str = "</branchyard-instructions>";
 
+/// Record what the process list shows of this process, and exit.
+fn record_launch(file: &str) {
+    let cmdline = std::fs::read("/proc/self/cmdline").unwrap_or_default();
+    let cmdline: Vec<String> = cmdline
+        .split(|b| *b == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect();
+    let mut env: Vec<String> = std::env::vars_os()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    env.sort();
+    let mcp_config = cmdline
+        .iter()
+        .position(|a| a == "--mcp-config")
+        .and_then(|at| cmdline.get(at + 1))
+        .filter(|path| path.starts_with('/'))
+        .map(|path| {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path)
+                .map(|m| format!("{:o}", m.permissions().mode() & 0o777))
+                .ok();
+            let servers: Vec<String> = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|config| config["mcpServers"].as_object().cloned())
+                .map(|servers| servers.keys().cloned().collect())
+                .unwrap_or_default();
+            json!({"path": path, "mode": mode, "servers": servers})
+        });
+    let record = json!({"cmdline": cmdline, "env": env, "mcp_config": mcp_config});
+    std::fs::write(file, record.to_string()).expect("the launch record is writable");
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--record-launch") {
+        record_launch(args.get(2).expect("--record-launch FILE"));
+        return;
+    }
     let mut instructed = false;
     let mut servers = Value::Null;
     let mut session = "fake-session-1".to_owned();

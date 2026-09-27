@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use branchyard::{
-    Branch, BranchInfo, BranchStatus, Budget, Delegate, Envelope, Policy, Provider, SandboxOptions,
-    Spawn, SubstrateOptions, TaskOptions, Yard, ENV_BRANCH, ENV_TOKEN,
+    Branch, BranchInfo, BranchStatus, Budget, Delegate, Envelope, Policy, Provider, RemoveOptions,
+    SandboxOptions, Spawn, SubstrateOptions, TaskOptions, Yard, ENV_BRANCH, ENV_TOKEN,
 };
 use serde::Serialize;
 
@@ -566,9 +566,15 @@ fn current_branch(root: &Path) -> Result<String, Failure> {
     Ok(name)
 }
 
-pub fn rm(target: &Target, branch: &str) -> Outcome {
+pub fn rm(target: &Target, branch: &str, keep_credentials: bool) -> Outcome {
     match target {
-        Target::Local => open()?.remove(branch)?,
+        Target::Local => open()?.remove_with(branch, &RemoveOptions { keep_credentials })?,
+        // The server decides what stays on its disk.
+        Target::Remote(_) if keep_credentials => {
+            return Err(Failure::Message(
+                "--keep-credentials is for a local yard; a server always removes them".into(),
+            ))
+        }
         Target::Remote(remote) => remote.repo.remove(branch)?,
     }
     print(&format!("removed {branch}\n"))

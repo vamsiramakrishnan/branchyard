@@ -115,7 +115,10 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Diff { branch } => commands::diff(env, target, &branch),
         Command::Log { branch, json } => commands::log(env, target, &branch, json),
         Command::Merge { branch, into } => commands::merge(target, &branch, into.as_deref()),
-        Command::Rm { branch } => commands::rm(target, &branch),
+        Command::Rm {
+            branch,
+            keep_credentials,
+        } => commands::rm(target, &branch, keep_credentials),
         Command::Harnesses { json } => commands::harnesses(env, target, json),
         Command::Watch { interval, once } => watch::run(env, target, interval, once),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),

@@ -127,7 +127,7 @@ pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
 };
 pub use branchyard_provision::{
-    Effort, McpServerSpec, Provisioning, SecretFrom, SecretSource, Telemetry,
+    Delivery, Effort, McpServerSpec, Provisioning, SecretFrom, SecretSource, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
 pub use delegation::{
@@ -265,9 +265,16 @@ impl Yard {
     }
 
     /// Remove a branch's worktree and record; deletes the git branch unless
-    /// it was merged.
+    /// it was merged. Its private home goes too unless a fork shares it,
+    /// and in any case the credential files provisioning wrote there; see
+    /// [`Yard::remove_with`] to keep those.
     pub fn remove(&self, branch: &str) -> Result<(), Error> {
-        ops::remove(self, branch)
+        ops::remove(self, branch, &RemoveOptions::default())
+    }
+
+    /// [`Yard::remove`], with options.
+    pub fn remove_with(&self, branch: &str, options: &RemoveOptions) -> Result<(), Error> {
+        ops::remove(self, branch, options)
     }
 
     /// Known harness profiles, whether their executable is on `PATH`, and
@@ -288,6 +295,17 @@ impl Yard {
     fn store(&self) -> state::Store {
         self.store.clone()
     }
+}
+
+/// How [`Yard::remove_with`] removes a branch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoveOptions {
+    /// Keep the credential files provisioning wrote in the branch's
+    /// private home (API keys, auth files, MCP configurations), recorded in
+    /// the home's `.branchyard/provisioned.json`. Off by default: they are
+    /// removed. It matters only when the home stays because a fork shares
+    /// it; a home no branch uses is deleted whole.
+    pub keep_credentials: bool,
 }
 
 /// Options shared by tasks, sends and forks.
@@ -979,6 +997,10 @@ pub enum Activity {
         files: Vec<String>,
         /// Variables set for the harness.
         env: Vec<String>,
+        /// How each secret the harness reads reaches it, and whether it is
+        /// in the environment of the harness's tool commands.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        secrets: Vec<Delivery>,
         /// Secrets given that this harness does not read.
         unused_secrets: Vec<String>,
     },

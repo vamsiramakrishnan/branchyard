@@ -187,8 +187,15 @@ pub struct McpServerSpec {
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// Stored with the branch like the rest of the request: not for
+    /// secrets. Use [`McpServerSpec::secret_env`] for those.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Variables set from the task's secrets, by variable and secret name.
+    /// Each turn resolves them with the other secrets; only the names are
+    /// stored.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_env: BTreeMap<String, String>,
 }
 
 impl McpServerSpec {
@@ -206,6 +213,7 @@ impl McpServerSpec {
             command,
             args: words.collect(),
             env: BTreeMap::new(),
+            secret_env: BTreeMap::new(),
         };
         spec.check()?;
         Ok(spec)
@@ -232,13 +240,24 @@ impl McpServerSpec {
                 self.name, self.command
             ));
         }
-        for var in self.env.keys() {
+        for var in self.env.keys().chain(self.secret_env.keys()) {
             check_variable_name(var)
                 .map_err(|why| format!("MCP server {} variable {var:?} {why}", self.name))?;
+        }
+        for (var, secret) in &self.secret_env {
+            if self.env.contains_key(var) {
+                return Err(format!(
+                    "MCP server {} sets {var} both plainly and from a secret",
+                    self.name
+                ));
+            }
+            check_variable_name(secret)
+                .map_err(|why| format!("MCP server {} secret {secret:?} {why}", self.name))?;
         }
         Ok(())
     }
 
+    /// The server with its plain variables only.
     pub fn server(&self) -> McpServer {
         McpServer {
             name: self.name.clone(),
@@ -250,6 +269,28 @@ impl McpServerSpec {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         }
+    }
+
+    /// The server with its variables from `secrets` too, and which secret
+    /// each came from. Fails naming a secret that is not given.
+    pub fn resolve(&self, secrets: &[Secret]) -> Result<(McpServer, Vec<McpSecret>), String> {
+        let mut server = self.server();
+        let mut used = Vec::new();
+        for (var, name) in &self.secret_env {
+            let secret = secrets.iter().find(|s| &s.name == name).ok_or_else(|| {
+                format!(
+                    "MCP server {} needs the secret {name}, which the task does not give",
+                    self.name
+                )
+            })?;
+            server.env.push((var.clone(), secret.value.clone()));
+            used.push(McpSecret {
+                server: self.name.clone(),
+                var: var.clone(),
+                secret: name.clone(),
+            });
+        }
+        Ok((server, used))
     }
 }
 
@@ -351,6 +392,14 @@ impl Telemetry {
     }
 }
 
+/// An MCP server variable set from a secret, by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpSecret {
+    pub server: String,
+    pub var: String,
+    pub secret: String,
+}
+
 /// A secret with its value. Never serialized; `Debug` shows only the name.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret {
@@ -392,8 +441,11 @@ pub struct Context {
     pub secrets: Vec<Secret>,
     /// Explicit authentication method.
     pub auth: Option<String>,
-    /// Every MCP server for the turn: the task's and Branchyard's own.
+    /// Every MCP server for the turn: the task's and Branchyard's own,
+    /// with their variables, secrets included.
     pub mcp_servers: Vec<McpServer>,
+    /// Which of those variables hold secrets.
+    pub mcp_secrets: Vec<McpSecret>,
     /// The task's instructions and Branchyard's delegation skill, joined.
     pub instructions: Option<Instructions>,
     pub model: Option<String>,
@@ -422,6 +474,7 @@ impl Context {
             secrets: Vec::new(),
             auth: None,
             mcp_servers: Vec::new(),
+            mcp_secrets: Vec::new(),
             instructions: None,
             model: None,
             effort: None,
@@ -452,13 +505,107 @@ impl Context {
     }
 }
 
-/// Native configuration entries Branchyard installed, recorded in the home
-/// at [`INSTALLED_PATH`] so a later provisioning removes the ones no longer
-/// asked for and nothing else.
+/// What Branchyard installed in a home, recorded there at
+/// [`INSTALLED_PATH`]: native MCP entries, so a later provisioning removes
+/// the ones no longer asked for and nothing else, and the credentials it
+/// wrote, so removing the branch removes them
+/// ([`apply::remove_credentials`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Installed {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<Credential>,
+}
+
+/// A credential Branchyard wrote in a home: a file holding a secret, by
+/// path relative to the home, and which part of it is Branchyard's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Credential {
+    /// The whole file.
+    File { path: String },
+    /// These variables of a dotenv file.
+    Dotenv { path: String, keys: Vec<String> },
+    /// These key paths of a JSON file.
+    Json {
+        path: String,
+        keys: Vec<Vec<String>>,
+    },
+}
+
+impl Credential {
+    pub fn path(&self) -> &str {
+        match self {
+            Credential::File { path }
+            | Credential::Dotenv { path, .. }
+            | Credential::Json { path, .. } => path,
+        }
+    }
+
+    /// What a secret file's edits leave of Branchyard's: `None` when they
+    /// remove it or leave nothing that could be undone.
+    fn of(file: &FileEdit) -> Option<Credential> {
+        let path = file.path.clone();
+        let credential = match file.edits.first()? {
+            Edit::Put(_) => Some(Credential::File { path }),
+            Edit::Dotenv(_) => Some(Credential::Dotenv {
+                path,
+                keys: file
+                    .edits
+                    .iter()
+                    .flat_map(|e| match e {
+                        Edit::Dotenv(pairs) => pairs.iter().map(|(k, _)| k.clone()).collect(),
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+            }),
+            Edit::Json { .. } => Some(Credential::Json {
+                path,
+                keys: file
+                    .edits
+                    .iter()
+                    .flat_map(|e| match e {
+                        Edit::Json { edits, .. } => edits
+                            .iter()
+                            .filter_map(|j| match j {
+                                JsonEdit::Set(key, _) | JsonEdit::Push(key, _) => Some(key.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+            }),
+            _ => None,
+        }?;
+        match &credential {
+            Credential::Dotenv { keys, .. } if keys.is_empty() => None,
+            Credential::Json { keys, .. } if keys.is_empty() => None,
+            _ => Some(credential),
+        }
+    }
+
+    /// This credential and `other`, for the same path, as one.
+    fn merge(&mut self, other: Credential) {
+        match (self, other) {
+            (Credential::Dotenv { keys, .. }, Credential::Dotenv { keys: more, .. }) => {
+                for key in more {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
+            (Credential::Json { keys, .. }, Credential::Json { keys: more, .. }) => {
+                for key in more {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
+            (this, other) => *this = other,
+        }
+    }
 }
 
 /// Where [`Installed`] is kept, relative to the home.
@@ -528,6 +675,65 @@ pub struct Session {
     pub mcp_servers: Vec<McpServer>,
     pub instructions: Option<Instructions>,
     pub model: Option<String>,
+    /// For a driver that would otherwise put the MCP servers on its command
+    /// line (Claude Code's stream-json), the file it is given instead.
+    pub mcp_config: Option<McpConfigFile>,
+}
+
+/// The MCP configuration as a file the harness reads, mode 0600: in the
+/// private home, where the plan also writes it, or, without one, a file
+/// the caller writes for the turn outside the working tree and removes
+/// after it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpConfigFile {
+    /// As the harness sees it, when the plan writes it in the home; `None`
+    /// when the caller must place it.
+    pub path: Option<String>,
+    /// The file's content. Server variables may hold tokens, so `Debug`
+    /// redacts it.
+    pub content: String,
+}
+
+impl fmt::Debug for McpConfigFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("McpConfigFile")
+            .field("path", &self.path)
+            .field("content", &"<redacted>")
+            .finish()
+    }
+}
+
+/// How one secret reaches the harness. Names and paths only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delivery {
+    /// The secret's name, as the task gave it.
+    pub secret: String,
+    #[serde(flatten)]
+    pub via: Via,
+    /// Whether the value is in the harness's own environment, which the
+    /// commands its tools run (its shell, the MCP servers it starts)
+    /// inherit, so any of them sees it without looking for it. A file in
+    /// the home is not, though a tool running as the same user could still
+    /// read it.
+    pub tool_env: bool,
+}
+
+/// Where a secret's value is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "via", rename_all = "snake_case")]
+pub enum Via {
+    /// A variable of the harness process.
+    Env { var: String },
+    /// A file in the home, relative to it, that the harness reads.
+    File { path: String },
+    /// A file in the home that a command named in the harness's settings
+    /// prints when the harness needs it, such as Claude Code's
+    /// `apiKeyHelper`.
+    Helper { path: String, setting: String },
+    /// A variable of an MCP server the harness starts, given in the
+    /// server's configuration: over stdin, or in a 0600 file. Only that
+    /// server's process has it, so `tool_env` is false.
+    McpServer { server: String, var: String },
 }
 
 /// A provisioning plan: data only, applied by [`apply::apply`].
@@ -539,8 +745,13 @@ pub struct Plan {
     pub session: Session,
     /// The authentication method chosen, when secrets chose one.
     pub auth: Option<String>,
+    /// How each secret the harness reads reaches it, one entry per secret.
+    pub secrets: Vec<Delivery>,
     /// Secrets given that this harness does not read.
     pub unused_secrets: Vec<String>,
+    /// The native MCP entries now installed, when the provisioner manages
+    /// them; recorded in the home by [`plan`].
+    pub installed_mcp_servers: Option<Vec<String>>,
 }
 
 impl Plan {
@@ -565,6 +776,32 @@ impl Plan {
     pub fn set_env(&mut self, var: EnvVar) {
         self.env.retain(|e| e.name != var.name);
         self.env.push(var);
+    }
+
+    /// Record how `secret` reaches the harness.
+    pub fn deliver(&mut self, secret: &str, via: Via, tool_env: bool) {
+        self.secrets.retain(|d| d.secret != secret || d.via != via);
+        self.secrets.push(Delivery {
+            secret: secret.to_owned(),
+            via,
+            tool_env,
+        });
+    }
+
+    /// Set `var` from `secret` in the harness's environment, and record it.
+    /// `tool_env`: whether the harness passes it on to its tool commands.
+    pub(crate) fn secret_env(&mut self, secret: &str, var: &str, value: &str, tool_env: bool) {
+        self.set_env(EnvVar::secret(var, value));
+        self.deliver(secret, Via::Env { var: var.into() }, tool_env);
+    }
+
+    /// The secrets in the environment of the harness's tool commands.
+    pub fn tool_env_secrets(&self) -> Vec<String> {
+        self.secrets
+            .iter()
+            .filter(|d| d.tool_env)
+            .map(|d| d.secret.clone())
+            .collect()
     }
 
     /// Whether the plan changes anything outside the session.
@@ -649,7 +886,76 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
     if let Some(telemetry) = &context.telemetry {
         telemetry.check().map_err(Refused)?;
     }
-    for_harness(&context.harness).plan(context)
+    let mut plan = for_harness(&context.harness).plan(context)?;
+    // Secrets given to MCP servers are used, and delivered with them.
+    for used in &context.mcp_secrets {
+        plan.unused_secrets.retain(|name| name != &used.secret);
+        plan.deliver(
+            &used.secret,
+            Via::McpServer {
+                server: used.server.clone(),
+                var: used.var.clone(),
+            },
+            false,
+        );
+    }
+    if context.private_home {
+        record_installed(context, &mut plan);
+    }
+    Ok(plan)
+}
+
+/// Record in the home what the plan installs: its native MCP entries and,
+/// with what earlier turns recorded, every credential file it writes.
+fn record_installed(context: &Context, plan: &mut Plan) {
+    let mut credentials = context.installed.credentials.clone();
+    for file in &plan.files {
+        if file.edits.iter().any(|e| matches!(e, Edit::Remove)) {
+            credentials.retain(|c| c.path() != file.path);
+            continue;
+        }
+        // Keys this plan removes are no longer Branchyard's.
+        for edit in &file.edits {
+            for credential in credentials.iter_mut().filter(|c| c.path() == file.path) {
+                match (credential, edit) {
+                    (Credential::Json { keys, .. }, Edit::Json { edits, .. }) => {
+                        keys.retain(|key| {
+                            !edits.iter().any(|e| {
+                                matches!(e, JsonEdit::Remove(k) | JsonEdit::RemoveIf(k, _) if k == key)
+                            })
+                        })
+                    }
+                    (Credential::Dotenv { keys, .. }, Edit::DotenvUnset(names)) => {
+                        keys.retain(|key| !names.contains(key))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        credentials.retain(|c| match c {
+            Credential::File { .. } => true,
+            Credential::Dotenv { keys, .. } => !keys.is_empty(),
+            Credential::Json { keys, .. } => !keys.is_empty(),
+        });
+        let Some(credential) = file.secret.then(|| Credential::of(file)).flatten() else {
+            continue;
+        };
+        match credentials.iter_mut().find(|c| c.path() == file.path) {
+            Some(existing) => existing.merge(credential),
+            None => credentials.push(credential),
+        }
+    }
+    let installed = Installed {
+        mcp_servers: plan
+            .installed_mcp_servers
+            .clone()
+            .unwrap_or_else(|| context.installed.mcp_servers.clone()),
+        credentials,
+    };
+    if installed != context.installed || plan.installed_mcp_servers.is_some() {
+        let record = serde_json::to_value(&installed).expect("serializes");
+        plan.edit(INSTALLED_PATH, false, Edit::Put(json_text(&record)));
+    }
 }
 
 // Shared by the provisioners.

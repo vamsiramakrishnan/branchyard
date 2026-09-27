@@ -152,12 +152,14 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             auth,
             files,
             env,
+            secrets,
             unused_secrets,
         } => json!({
             "activity": "provisioned",
             "auth": auth,
             "files": files,
             "env": env,
+            "secrets": secrets,
             "unused_secrets": unused_secrets,
         }),
         Activity::Recovered { reason, killed } => json!({

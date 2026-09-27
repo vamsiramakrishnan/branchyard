@@ -16,9 +16,20 @@
 //! process's environment or files: on a server, the server's. They reach
 //! only the harness's environment and files in its private home. Refusals
 //! and the recorded [`Activity::Provisioned`] name secrets, never their
-//! values.
+//! values; the activity also says how each secret was delivered and
+//! whether the harness's tool commands inherit it.
+//!
+//! Nothing that may hold a secret goes on a command line, which every
+//! process on the host can read. The Claude Code stream-json driver would
+//! put its MCP servers there; they go in a 0600 file instead: in the
+//! private home when there is one (the plan writes it), otherwise in a
+//! directory of the state directory, outside the worktree, made for the
+//! turn and removed when it ends ([`TurnFile`]).
 
-use std::path::Path;
+use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 use branchyard_provision::apply::{self, Applied};
 use branchyard_provision::{
@@ -34,8 +45,69 @@ use crate::{Activity, Error};
 pub(crate) struct Provisioned {
     pub env: Vec<EnvVar>,
     pub session: Session,
+    /// The MCP configuration file for a driver that reads one, as the
+    /// harness sees it.
+    pub mcp_config_file: Option<String>,
+    /// That file when it was made for this turn alone; removed on drop, so
+    /// it is kept until the harness is gone.
+    pub turn_file: Option<TurnFile>,
+    /// The variables secrets were read from, which the harness would
+    /// otherwise inherit from this process: taken out of its environment
+    /// before `env` is set.
+    pub scrub: Vec<String>,
     /// What to record, if anything was provisioned.
     pub activity: Option<Activity>,
+}
+
+/// Where per-turn files go, under the state directory.
+const TURNS: &str = "turns";
+
+/// A 0600 file in a 0700 directory made for one turn under the state
+/// directory's `turns/`, removed with its directory when dropped.
+pub(crate) struct TurnFile {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl TurnFile {
+    fn create(state: &Path, name: &str, content: &str) -> Result<TurnFile, String> {
+        let fail = |e: std::io::Error| format!("could not write its {name} for the turn: {e}");
+        let turns = state.join(TURNS);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&turns)
+            .map_err(fail)?;
+        fs::set_permissions(&turns, fs::Permissions::from_mode(0o700)).map_err(fail)?;
+        let id = crate::projection::new_token().map_err(|e| e.to_string())?;
+        let dir = turns.join(&id[..32]);
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(fail)?;
+        let turn = TurnFile {
+            path: dir.join(name),
+            dir,
+        };
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&turn.path)
+            .map_err(fail)?;
+        file.write_all(content.as_bytes()).map_err(fail)?;
+        Ok(turn)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TurnFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
 }
 
 /// Refuse a provisioning request before anything is created: servers the
@@ -58,6 +130,17 @@ pub(crate) fn check(spec: Option<&Provisioning>, private_home: bool) -> Result<(
             .any(|s| s.name == server.name)
         {
             return refuse(format!("MCP server {} is listed twice", server.name));
+        }
+        if let Some(missing) = server
+            .secret_env
+            .values()
+            .find(|name| !spec.secrets.iter().any(|s| &s.name == *name))
+        {
+            return refuse(format!(
+                "MCP server {} takes the secret {missing}, which the task does not give \
+                 (--secret {missing})",
+                server.name
+            ));
         }
     }
     for (index, secret) in spec.secrets.iter().enumerate() {
@@ -137,15 +220,20 @@ pub(crate) fn prepare(
     record: &Record,
     profile: &branchyard_harness::profiles::Profile,
     projection: Option<&Projection>,
+    state: &Path,
 ) -> Result<Provisioned, String> {
     let spec = record.provision.clone().unwrap_or_default();
     let (workspace, home) = placement::guest_paths(record);
-    // Branchyard's own server first, then the task's.
-    let mcp_servers: Vec<_> = projection
-        .map(|p| p.server.clone())
-        .into_iter()
-        .chain(spec.mcp_servers.iter().map(|s| s.server()))
-        .collect();
+    let secrets = resolve(&spec.secrets)?;
+    // Branchyard's own server first, then the task's, with the variables
+    // they take from secrets.
+    let mut mcp_servers: Vec<_> = projection.map(|p| p.server.clone()).into_iter().collect();
+    let mut mcp_secrets = Vec::new();
+    for spec in &spec.mcp_servers {
+        let (server, used) = spec.resolve(&secrets)?;
+        mcp_servers.push(server);
+        mcp_secrets.extend(used);
+    }
     let private = record.home.as_deref();
     let context = Context {
         harness: profile.harness.to_owned(),
@@ -154,9 +242,10 @@ pub(crate) fn prepare(
         workspace,
         private_home: private.is_some(),
         sandbox: placement::sandboxed(record.provider.as_ref()),
-        secrets: resolve(&spec.secrets)?,
+        secrets,
         auth: spec.auth.clone(),
         mcp_servers,
+        mcp_secrets,
         instructions: instructions(
             spec.instructions.as_deref(),
             projection.map(|p| &p.instructions),
@@ -173,6 +262,17 @@ pub(crate) fn prepare(
             .map_err(|e| format!("could not prepare its home: {e}"))?,
         (None, false) => return Err("its provisioning writes files but it has no home".into()),
     };
+    let (mcp_config_file, turn_file) = match &plan.session.mcp_config {
+        None => (None, None),
+        Some(file) => match (&file.path, private) {
+            (Some(path), _) => (Some(path.clone()), None),
+            (None, None) if !context.sandbox => {
+                let turn = TurnFile::create(Path::new(state), "mcp-config.json", &file.content)?;
+                (Some(turn.path().display().to_string()), Some(turn))
+            }
+            (None, _) => return Err("its MCP configuration has nowhere to go".into()),
+        },
+    };
     let files: Vec<String> = applied.written.into_iter().chain(applied.removed).collect();
     let env: Vec<String> = plan.env.iter().map(|e| e.name.clone()).collect();
     let activity = (plan.auth.is_some()
@@ -183,11 +283,24 @@ pub(crate) fn prepare(
         auth: plan.auth.clone(),
         files,
         env,
+        secrets: plan.secrets.clone(),
         unused_secrets: plan.unused_secrets.clone(),
     });
+    let scrub = spec
+        .secrets
+        .iter()
+        .filter_map(|source| match &source.from {
+            None => Some(source.name.clone()),
+            Some(SecretFrom::Env { var }) => Some(var.clone()),
+            Some(SecretFrom::File { .. }) => None,
+        })
+        .collect();
     Ok(Provisioned {
         env: plan.env,
         session: plan.session,
+        mcp_config_file,
+        turn_file,
+        scrub,
         activity,
     })
 }
@@ -240,6 +353,20 @@ mod tests {
             ]
         });
         assert!(check(Some(&twice), true).is_err());
+        // An MCP server's variable from a secret the task does not give.
+        let mut docs = branchyard_provision::McpServerSpec::parse("docs=/bin/x").unwrap();
+        docs.secret_env.insert("TOKEN".into(), "DOCS".into());
+        let missing = Provisioning {
+            mcp_servers: vec![docs],
+            ..Provisioning::default()
+        };
+        let refused = check(Some(&missing), true).unwrap_err().to_string();
+        assert!(refused.contains("DOCS"), "{refused}");
+        let given = Provisioning {
+            secrets: vec![SecretSource::parse("DOCS").unwrap()],
+            ..missing
+        };
+        assert!(check(Some(&given), true).is_ok());
     }
 
     #[test]

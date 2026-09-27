@@ -1,4 +1,16 @@
 {
+  "credentials": [
+    {
+      "keys": [
+        [
+          "mcpServers",
+          "docs"
+        ]
+      ],
+      "kind": "json",
+      "path": ".gemini/config/mcp_config.json"
+    }
+  ],
   "mcp_servers": [
     "docs"
   ]
