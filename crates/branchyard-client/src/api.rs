@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use branchyard::{
     Activity, BranchInfo, Budget, Envelope, HarnessInfo, Inspection, Merged, Policy, Provider,
-    RecordedEvent,
+    Provisioning, RecordedEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -157,6 +157,13 @@ pub struct TaskRequest {
     /// provider. Paths and `pass_env` names are the server's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// What to provision in the harness's home, like
+    /// [`branchyard::TaskOptions::provision`]. Secrets are named only: the
+    /// server's operator decides where each comes from, and one the server
+    /// does not define is refused. MCP servers are commands the server
+    /// runs, refused unless it allows client commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<Provisioning>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -191,6 +198,13 @@ pub struct SendRequest {
     /// server allows unapproved tools.
     #[serde(default, skip_serializing_if = "is_false")]
     pub unapproved_tools: bool,
+    /// What to provision in the harness's home, like
+    /// [`branchyard::TaskOptions::provision`]. Secrets are named only: the
+    /// server's operator decides where each comes from, and one the server
+    /// does not define is refused. MCP servers are commands the server
+    /// runs, refused unless it allows client commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<Provisioning>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/fork`.
@@ -232,6 +246,13 @@ pub struct ForkRequest {
     /// Without one, the fork keeps its parent's provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// What to provision in the harness's home, like
+    /// [`branchyard::TaskOptions::provision`]. Secrets are named only: the
+    /// server's operator decides where each comes from, and one the server
+    /// does not define is refused. MCP servers are commands the server
+    /// runs, refused unless it allows client commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<Provisioning>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/merge`. Without a target, the

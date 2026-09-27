@@ -61,7 +61,7 @@ Structured print mode remains useful for bounded batch runs, but its existence d
 
 ### Antigravity
 
-The documented streaming CLI accepts NDJSON user events and emits a result for each turn. Wait for that result before submitting the next prompt. Use the exact conversation ID for continuation. Its schema uses `event`; Claude-style control request/response frames are not supported. Usage fields can be cumulative, so billing observations require deltas rather than summing every result. Headless authentication must be provisioned before launch. [Headless contract](https://antigravity.google/docs/cli/headless/)
+The documented streaming CLI accepts NDJSON user events and emits a result for each turn. Wait for that result before submitting the next prompt. Use the exact conversation ID for continuation. Its schema uses `event`; Claude-style control request/response frames are not supported. Usage fields can be cumulative, so billing observations require deltas rather than summing every result. Headless authentication must be provisioned before launch; [provisioning](provisioning.md) sets `GEMINI_API_KEY` or `GOOGLE_API_KEY` from `--secret`, and does not yet cover `AGY_TOKEN` or Vertex AI. [Headless contract](https://antigravity.google/docs/cli/headless/)
 
 Branchyard must record which policy controls this mode actually supports. If a task requires per-tool decisions that the selected mode cannot expose, reject that profile for the task or use a separately qualified SDK profile. Streaming JSON alone is not a permission boundary.
 
@@ -152,6 +152,10 @@ The drivers enforce the contract rather than trusting the harness:
 `claude-code-stream-json` and `claude-code-acp` have passed live protocol qualification against Claude Code 2.1.283 and claude-agent-acp 0.81.2: turns, permission denial and approval, interrupts during a permission wait and during a tool, clean close, resume, fork and a lost connection. See [driver qualification](qualification/README.md) for the reports and findings. That run used local processes, not a Branchyard sandbox. Every profile remains unqualified for isolation, credentials and recovery, and the Codex and remaining ACP profiles have not run live.
 
 `antigravity-stream-json`, `pi-rpc` and `amp-stream-json` are unqualified: none has completed a model turn. The Antigravity and Pi transcripts prove framing, handshake, session identity and error turns against the real binaries with model endpoints pointed at a closed local port; Amp has no recording at all. `branchyard-qualify` assumes per-invocation approvals, and cancellation for its interrupt scenarios; it does not skip them for profiles that declare neither, so qualifying these profiles needs scenarios for configuration-based permissions first.
+
+## Provisioning a harness's home
+
+Before each turn, on every provider, the harness's provisioner prepares its home and environment: credentials from `--secret`, MCP servers, instructions, model, reasoning effort and telemetry, translated from Scion's per-harness provisioners into [`branchyard-provision`](../crates/branchyard-provision/src/lib.rs). It is also the one path by which Branchyard's delegation server and skill reach a harness. MCP servers and instructions stay on the driver's session channel where it has one (Claude Code, Codex, every ACP profile); a driver without one gets them in the harness's native configuration in a private home, which is how the Antigravity profile now takes MCP servers and instructions it used to refuse. Pi and Amp still refuse them: Scion has no provisioner for either, and their configuration formats are unverified here. [Provisioning](provisioning.md) gives the per-harness mapping, what was not ported and why, and the security rules; none of it has run against a real harness.
 
 ## Transport and callback placement
 

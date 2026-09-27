@@ -278,18 +278,12 @@ fn run(
         session: None,
         cost: None,
     };
-    // Declared before the session so a sandbox outlives it.
-    let mut placement = match Placement::prepare(turn.yard, record, fence) {
-        Ok(placement) => placement,
-        Err(reason) => {
-            driven.end = End::failed(reason);
-            return Ok(driven);
-        }
-    };
-    // Revoked when this function returns, after the harness is gone. The
-    // delegation tools reach the engine over a host socket with the host's
-    // `by`, so a sandboxed harness does not get them yet.
-    let projection = match placement.is_sandbox() {
+    let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
+    // Revoked when this function returns, after the harness and its
+    // sandbox are gone. The delegation tools reach the engine over a host
+    // socket with the host's `by`, so a sandboxed harness does not get them
+    // yet.
+    let projection = match sandboxed {
         true => Err(Error::Unsupported(
             "delegation is not yet available to a sandboxed harness".into(),
         )),
@@ -317,6 +311,28 @@ fn run(
         }
         Err(_) => None,
     };
+    // The one path for MCP servers and instructions, the task's and the
+    // delegation tools', and for everything else the home needs. Applied
+    // before a sandbox exists, so its mount or home transfer carries it.
+    let provisioned = match crate::provisioning::prepare(record, turn.profile, projection.as_ref())
+    {
+        Ok(provisioned) => provisioned,
+        Err(reason) => {
+            driven.end = End::failed(format!("could not provision {}: {reason}", turn.profile.id));
+            return Ok(driven);
+        }
+    };
+    if let Some(activity) = provisioned.activity {
+        recorder.record(activity)?;
+    }
+    // Declared before the session so a sandbox outlives it.
+    let mut placement = match Placement::prepare(turn.yard, record, fence) {
+        Ok(placement) => placement,
+        Err(reason) => {
+            driven.end = End::failed(reason);
+            return Ok(driven);
+        }
+    };
     // Every local harness learns which branch it is on, so `by` inside it
     // never mistakes it for a person; only a delegating one gets a token.
     if !placement.is_sandbox() {
@@ -328,9 +344,13 @@ fn run(
             placement.set_env(name, value);
         }
     }
+    for var in &provisioned.env {
+        placement.set_env(&var.name, &var.value);
+    }
     let open = Open {
-        mcp_servers: projection.iter().map(|p| p.server.clone()).collect(),
-        instructions: projection.as_ref().map(|p| p.instructions.clone()),
+        mcp_servers: provisioned.session.mcp_servers,
+        instructions: provisioned.session.instructions,
+        model: provisioned.session.model,
         ..Open::new(turn.mode.clone(), placement.cwd())
     };
     let driver = turn.profile.driver_with(turn.command.clone());

@@ -17,7 +17,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use branchyard::{
-    Branch, BranchEvent, Budget, Envelope, Observer, Policy, Provider, Spawn, TaskOptions, Yard,
+    Branch, BranchEvent, Budget, Envelope, Observer, Policy, Provider, Provisioning, Spawn,
+    TaskOptions, Yard,
 };
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, ErrorBody, FeedEntry, ForkRequest,
@@ -147,6 +148,49 @@ impl App {
             }
         }
         Ok(Some(provider))
+    }
+
+    /// The request's provisioning, with this server's source for each
+    /// secret: a request names secrets and never chooses where they come
+    /// from. MCP servers are commands this server runs, so they need
+    /// client commands allowed.
+    fn provision(&self, requested: Option<Provisioning>) -> Result<Option<Provisioning>, ApiError> {
+        let Some(mut spec) = requested else {
+            return Ok(None);
+        };
+        for secret in &mut spec.secrets {
+            if secret.from.is_some() {
+                return Err(ApiError::bad_request(format!(
+                    "secret {} names a source; a request names only the secret, and this \
+                     server's operator decides where it comes from",
+                    secret.name
+                )));
+            }
+            match self.config.secrets.get(&secret.name) {
+                Some(source) => *secret = source.clone(),
+                None => {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "secret_not_allowed",
+                        format!(
+                            "this server has no secret {name}; its operator can define one \
+                             with --secret {name}[=VAR|=@FILE]",
+                            name = secret.name
+                        ),
+                    )
+                    .detail(serde_json::json!({ "secret": secret.name })))
+                }
+            }
+        }
+        if !spec.mcp_servers.is_empty() && !self.config.allow_client_commands {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "command_not_allowed",
+                "MCP servers are commands this server runs; its operator can accept a \
+                 request's own commands with allow_client_commands",
+            ));
+        }
+        Ok(Some(spec))
     }
 
     /// Refuse delegation and unapproved tools unless this server allows
@@ -589,6 +633,7 @@ async fn post_task(
         name: request.name.clone(),
         base: request.base.clone(),
         isolated: request.isolated,
+        provision: app.provision(request.provision.clone())?,
         ..app.options(
             &repo,
             budget,
@@ -700,16 +745,19 @@ async fn post_send(
             )));
         }
     }
-    let options = app.options(
-        &repo,
-        budget,
-        app.policy(&request.policy, request.allow_delegation),
-        request.check.clone(),
-        command,
-        request.delegation.clone(),
-        request.unapproved_tools,
-        None,
-    );
+    let options = TaskOptions {
+        provision: app.provision(request.provision.clone())?,
+        ..app.options(
+            &repo,
+            budget,
+            app.policy(&request.policy, request.allow_delegation),
+            request.check.clone(),
+            command,
+            request.delegation.clone(),
+            request.unapproved_tools,
+            None,
+        )
+    };
     let cursor = sync_feed(&repo.feed).await?;
     let prompt = request.prompt.clone();
     let work = job(repo.feed.clone(), move || {
@@ -769,6 +817,7 @@ async fn post_fork(
         harness: request.harness.clone(),
         name: request.name.clone(),
         isolated: request.isolated,
+        provision: app.provision(request.provision.clone())?,
         ..app.options(
             &repo,
             budget,

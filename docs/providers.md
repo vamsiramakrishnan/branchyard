@@ -86,7 +86,8 @@ Each turn gets a fresh microVM, destroyed when the turn ends:
 - The branch's worktree is mounted read-write at `/workspace`, and the harness runs there; the driver's `cwd` is `/workspace`.
 - The branch's private home, `.branchyard/homes/<name>`, is mounted at `/branchyard/home` and is `HOME`. Harness sessions persist there across sends; a forked session shares its parent's home, as under `--isolated`.
 - The repository's git directory is mounted **read-only** at its host path, so `git log` and `git diff` work in the sandbox but the harness cannot move refs. Candidates are still snapshotted on the host.
-- The harness gets `HOME` and the variables named by `--pass-env`, copied from your environment at each turn. Nothing else from your environment crosses: not your login, not `PATH`. The names are stored with the branch; the values are not. A named variable that is unset fails the turn.
+- The harness gets `HOME`, the variables named by `--pass-env`, copied from your environment at each turn, and the variables its [provisioning](provisioning.md) sets. Nothing else from your environment crosses: not your login, not `PATH`. The names are stored with the branch; the values are not. A named variable that is unset fails the turn.
+- Before the sandbox is created, [provisioning](provisioning.md) writes the harness's native files into the private home on the host (credentials from `--secret` at mode 0600, settings, MCP configuration where the driver cannot pass it), so the mount carries them in.
 
 The image must contain the harness executable on its `PATH` (or pass its guest path with `--command`), `sh` for teardown, and whatever the harness needs to authenticate from the passed variables. The engine does not look for the harness on the host.
 
@@ -135,9 +136,22 @@ It guarantees, beyond the contract:
 - The bridge reaps every orphan and stops cleanly on the runtime's `SIGTERM`, so it can be the container's process 1.
 - Commits the harness makes in the actor come back as commits on the branch (a history rewritten below the commit sent is refused), with its uncommitted changes as working-tree changes on top.
 
-It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree. It cannot tell a harness's tool call from an idle harness, and it is tested only against an in-process fake cluster. It declares `exec` for a template that runs the bridge, `ingress`, and checkpoint and branch with the template's commit scope, crash consistency and portability.
+It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree, with file modes. [Provisioning](provisioning.md) runs before the copy, so the harness's credential and configuration files go in with the home and come back with it. It cannot tell a harness's tool call from an idle harness, and it is tested only against an in-process fake cluster. It declares `exec` for a template that runs the bridge, `ingress`, and checkpoint and branch with the template's commit scope, crash consistency and portability.
 
 `TaskOptions::provider` selects it with `Provider::Substrate(SubstrateOptions)`; the CLI flags are `--provider substrate --substrate-endpoint URL --substrate-router URL --substrate-template NAME --substrate-key FILE [--substrate-atespace NAME] [--substrate-workdir PATH] [--substrate-home PATH] [--substrate-ca FILE] [--substrate-client-cert FILE --substrate-client-key FILE] [--substrate-router-ca FILE] [--substrate-insecure] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. [Agent Substrate](substrate.md) documents the bridge protocol, the credentials, the transfer, the template and what remains unqualified; [live testing](testing-live.md#6-agent-substrate-cluster) says how to run it on a kind cluster.
+
+## Provisioning a harness's home
+
+Every provider runs the same [provisioning](provisioning.md) before the harness starts: the harness's provisioner plans its native files, variables and session items from the task's secrets, MCP servers, instructions, model, reasoning effort and telemetry, and the engine applies the files to the branch's private home on the host. Where the home is, and so whether files may be written at all, depends on the provider:
+
+| Provider | `HOME` as the harness sees it | Files written | How they reach the harness |
+|---|---|---|---|
+| Local | your `HOME` | none: a plan that needs a file, or any secret, is refused | variables only; MCP servers and instructions through the driver |
+| Local, `--isolated` | `.branchyard/homes/<name>` | yes | it is the harness's `HOME` |
+| Microsandbox | `/branchyard/home` | yes, in `.branchyard/homes/<name>` on the host | the home is mounted read-write |
+| Substrate | `SubstrateOptions::home` (default `/branchyard/home`) | yes, on the host | the home transfer into the actor, and back when the turn ends |
+
+`--secret` is the way to give a sandboxed harness credentials: unlike `--pass-env`, it also writes the files a harness authenticates from (Codex's `auth.json`, Claude Code's `.credentials.json`) and records which method it chose. Both remain available.
 
 ## Through a server
 
@@ -149,5 +163,6 @@ Everything a provider names is the server's:
 - `--substrate-key`, and the TLS files `--substrate-ca`, `--substrate-client-cert`, `--substrate-client-key` and `--substrate-router-ca`, are paths on the server and must be absolute; `by --remote` refuses a relative key rather than resolve it against the caller's directory.
 - The Microsandbox provider needs a server built with the `microsandbox` feature, on a host with KVM.
 - The Substrate endpoint and router must be reachable from the server.
+- `--secret` names are resolved from the server's own table (`by serve --secret NAME[=VAR|=@FILE]`), never from a source the caller names; see [provisioning](provisioning.md#through-a-server).
 
 `by --remote run --provider substrate` is tested against the fake cluster with a spawned `by serve`; the refusal without `--allow-provider` is tested too.

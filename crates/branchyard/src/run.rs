@@ -17,7 +17,7 @@ use crate::recover;
 use crate::state::{now_ms, Lease, Record, Taken};
 use crate::{
     git, harness, names, Branch, BranchInfo, BranchStatus, Error, NativeSession, Provider,
-    TaskOptions, Yard,
+    Provisioning, TaskOptions, Yard,
 };
 
 pub(crate) fn planned_names(
@@ -81,6 +81,7 @@ pub(crate) struct NewBranch<'a> {
     pub provider: Option<Provider>,
     pub grant: Option<Grant>,
     pub depth: u32,
+    pub provision: Option<Provisioning>,
 }
 
 /// The journaled step that creates a branch's worktree.
@@ -121,6 +122,7 @@ pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<(Record, Lease),
         cost_baseline: new.cost_baseline,
         provider: new.provider,
         grant: new.grant,
+        provision: new.provision,
     };
     let lease = match store.acquire(&record)? {
         Taken::Granted(lease) => lease,
@@ -182,6 +184,11 @@ pub(crate) fn isolated_home(yard: &Yard, options: &TaskOptions, name: &str) -> O
     options.isolated.then(|| yard.store().home(name))
 }
 
+/// Whether a new branch with `options` gets a home of its own.
+fn new_home_private(options: &TaskOptions) -> bool {
+    options.isolated || placement::sandboxed(options.provider.as_ref())
+}
+
 /// The grant for a branch the caller starts: the envelope, with nothing
 /// imposed by a parent. Checks that the MCP server can be found first.
 fn root_grant(options: &TaskOptions) -> Result<Option<Grant>, Error> {
@@ -200,6 +207,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
         options.unapproved_tools,
     )?;
     let grant = root_grant(options)?;
+    crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let name = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
@@ -218,6 +226,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             provider: options.provider.clone(),
             grant,
             depth: 0,
+            provision: options.provision.clone(),
         },
     );
     let (record, lease) = record.inspect_err(|_| store.release(&name))?;
@@ -258,6 +267,7 @@ pub(crate) fn run_on(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let grant = root_grant(options)?;
+    crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let reserved = names::reserve(
@@ -284,6 +294,7 @@ pub(crate) fn run_on(
                 provider: options.provider.clone(),
                 grant: grant.clone(),
                 depth: 0,
+                provision: options.provision.clone(),
             },
         );
         match record {
@@ -444,6 +455,10 @@ pub(crate) fn prepare_send(
     if options.check.is_some() {
         record.check = options.check.clone();
     }
+    if options.provision.is_some() {
+        record.provision = options.provision.clone();
+    }
+    crate::provisioning::check(record.provision.as_ref(), record.home.is_some())?;
     // A delegated child keeps the envelope its parent gave it.
     if let (Some(envelope), 0) = (&options.delegation, record.info.depth) {
         crate::projection::tools(options)?;
@@ -541,6 +556,8 @@ pub(crate) fn fork(
         _ if options.isolated || parent.home.is_some() => Some(store.home(&reserved)),
         _ => None,
     };
+    let provision = options.provision.clone().or(parent.provision.clone());
+    crate::provisioning::check(provision.as_ref(), home.is_some())?;
     let cost_baseline = match (forking, parent.info.cost_usd, parent.cost_baseline) {
         (false, _, _) | (true, None, None) => None,
         (true, own, baseline) => Some(own.unwrap_or(0.0) + baseline.unwrap_or(0.0)),
@@ -560,6 +577,7 @@ pub(crate) fn fork(
             provider,
             grant,
             depth: 0,
+            provision,
         },
     )
     .inspect_err(|_| store.release(&reserved))?;

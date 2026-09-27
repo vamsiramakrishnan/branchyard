@@ -108,6 +108,7 @@ mod placement;
 mod policy;
 mod proc;
 mod projection;
+mod provisioning;
 mod record;
 mod recover;
 mod run;
@@ -124,6 +125,9 @@ pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
 pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
+};
+pub use branchyard_provision::{
+    Effort, McpServerSpec, Provisioning, SecretFrom, SecretSource, Telemetry,
 };
 use branchyard_workspace::Repository;
 pub use delegation::{
@@ -344,6 +348,14 @@ pub struct TaskOptions {
     /// and keeps a branch's own provider for its sends and forks. Stored
     /// with the branch.
     pub provider: Option<Provider>,
+    /// What to prepare in the harness's home and environment before each
+    /// turn: secrets, MCP servers, instructions, model, reasoning effort,
+    /// telemetry. See `docs/provisioning.md`. Stored with the branch, with
+    /// where each secret comes from but never its value; a send or fork
+    /// without one keeps the branch's, and a delegated child inherits its
+    /// parent's. Secrets need a home private to the branch:
+    /// [`TaskOptions::isolated`] or a sandbox provider.
+    pub provision: Option<Provisioning>,
 }
 
 /// Where a branch's harness runs.
@@ -539,6 +551,12 @@ impl TaskBuilder {
         S: Into<String>,
     {
         self.options.command = Some(argv.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// See [`TaskOptions::provision`].
+    pub fn provision(mut self, provision: Provisioning) -> Self {
+        self.options.provision = Some(provision);
         self
     }
 
@@ -951,6 +969,18 @@ pub enum Activity {
         /// What happened, or why it was refused.
         outcome: String,
         refused: bool,
+    },
+    /// The harness's home and environment were prepared before it started;
+    /// see [`TaskOptions::provision`]. Names only, never a secret's value.
+    Provisioned {
+        /// The authentication method the secrets chose, if any.
+        auth: Option<String>,
+        /// Files written or removed in the harness's home, relative to it.
+        files: Vec<String>,
+        /// Variables set for the harness.
+        env: Vec<String>,
+        /// Secrets given that this harness does not read.
+        unused_secrets: Vec<String>,
     },
     /// Recovery took over a turn whose engine stopped; see
     /// [`Yard::recover`].

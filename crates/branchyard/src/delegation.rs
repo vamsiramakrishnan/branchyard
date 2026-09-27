@@ -940,6 +940,7 @@ impl Local {
                 provider: caller.provider.clone(),
                 grant: Some(child_grant),
                 depth: caller.info.depth + 1,
+                provision: caller.provision.clone(),
             },
         )
         .inspect_err(|_| store.release(&name))?;
@@ -1417,6 +1418,7 @@ mod tests {
             home: None,
             cost_baseline: None,
             provider: None,
+            provision: None,
             grant: Some(Grant {
                 envelope: Envelope::default(),
                 deny: Vec::new(),

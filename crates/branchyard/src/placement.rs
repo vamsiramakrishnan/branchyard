@@ -98,6 +98,25 @@ fn check_substrate(options: &SubstrateOptions) -> Result<(), Error> {
         .or_else(|e| refuse(format!("cannot use its bridge key: {e}")))
 }
 
+/// The harness's working directory and `HOME` as the harness will see
+/// them, before anything is created: a local harness's `HOME` is its
+/// private home, or this process's own.
+pub(crate) fn guest_paths(record: &Record) -> (String, String) {
+    match &record.provider {
+        None | Some(Provider::Local) => (
+            record.info.worktree.display().to_string(),
+            record.home.as_ref().map_or_else(
+                || std::env::var("HOME").unwrap_or_default(),
+                |home| home.display().to_string(),
+            ),
+        ),
+        Some(Provider::Microsandbox(_)) => (WORKSPACE.into(), HOME.into()),
+        Some(Provider::Substrate(options)) => {
+            (options.workdir().to_owned(), options.home().to_owned())
+        }
+    }
+}
+
 /// A turn's harness location. A sandbox is destroyed by
 /// [`Placement::release`], or on drop.
 pub(crate) struct Placement {

@@ -290,6 +290,25 @@ fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operatio
     }
 }
 
+/// The provisioning flags for the server. `--instructions` is read here
+/// and sent as text; a secret is sent by name only, because the server's
+/// operator decides where each comes from.
+fn provision(task: &TaskArgs) -> Result<Option<branchyard::Provisioning>, Failure> {
+    let spec = commands::provision(task)?;
+    if let Some(secret) = spec
+        .iter()
+        .flat_map(|s| &s.secrets)
+        .find(|s| s.from.is_some())
+    {
+        return Err(Failure::Message(format!(
+            "--secret {name}=...: with --remote, secrets come from the server, whose operator \
+             decides where each is read; pass --secret {name}",
+            name = secret.name
+        )));
+    }
+    Ok(spec)
+}
+
 pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome {
     let (policy, notice) = permissions(task)?;
     let provider = provider(task)?;
@@ -308,6 +327,7 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         allow_delegation: task.allow_delegation,
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
+        provision: provision(task)?,
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -362,6 +382,7 @@ pub fn fan(
         allow_delegation: task.allow_delegation,
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
+        provision: provision(task)?,
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -393,6 +414,7 @@ fn send_request(
             delegation: task.delegate.map(Envelope::depth),
             allow_delegation: task.allow_delegation,
             unapproved_tools: task.unapproved_tools,
+            provision: provision(task)?,
         },
         notice,
     ))
@@ -469,6 +491,7 @@ pub fn fork(
         allow_delegation: task.allow_delegation,
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
+        provision: provision(task)?,
     };
     let op = remote.repo.fork(branch, &request, &new_key())?;
     announce(remote, notice, provider.as_ref());

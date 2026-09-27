@@ -21,7 +21,7 @@ jobs:
       - run: python tools/check_catalog.py
       - run: python tools/check_docs.py
       - run: python tools/test_scion.py --qualified
-      - name: Verify recorded upstream Claude incompatibility
+      - name: Verify the recorded upstream Claude compatibility
         run: python tools/check_scion_compatibility.py
       - run: cargo fmt --all -- --check
       # Resolve crates from Cargo.lock once; every later cargo step runs offline.

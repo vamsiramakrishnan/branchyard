@@ -1,0 +1,105 @@
+{
+  "upstream": "https://github.com/GoogleCloudPlatform/scion",
+  "commit": "d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338",
+  "vendor": "vendor/scion",
+  "note": "Translations from Python to Rust, so no line patch: each derived file lists the vendored sources it follows and their Git blob IDs at review. tools/verify_derivatives.py fails when a source changes; review the upstream change, port what applies, and record the new blob.",
+  "derivatives": [
+    {
+      "path": "crates/branchyard-provision/src/lib.rs",
+      "from": {
+        "harnesses/authoring-guide.md": "f97c8430114f7376e957989a282674dedaad85e1",
+        "harnesses/scion_harness.py": "fa39f10306f5776c8f868a4b8193d91fec981cbc",
+        "harnesses/codex/provision.py": "8d7da87e3412365cd08b3805d0aab5ef9dea9305"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/edit.rs",
+      "from": {
+        "harnesses/scion_harness.py": "fa39f10306f5776c8f868a4b8193d91fec981cbc",
+        "harnesses/scion_harness_test.py": "79d22aaf4e894af674781273b80c46ba0b35b5b6"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/toml.rs",
+      "from": {
+        "harnesses/scion_harness.py": "fa39f10306f5776c8f868a4b8193d91fec981cbc",
+        "harnesses/codex/provision.py": "8d7da87e3412365cd08b3805d0aab5ef9dea9305",
+        "harnesses/scion_harness_test.py": "79d22aaf4e894af674781273b80c46ba0b35b5b6",
+        "harnesses/codex/provision_test.py": "b58d0ec4b27ccdeed2ebee330499e8fccdec91b4"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/instructions.rs",
+      "from": {
+        "harnesses/scion_harness.py": "fa39f10306f5776c8f868a4b8193d91fec981cbc",
+        "harnesses/scion_harness_test.py": "79d22aaf4e894af674781273b80c46ba0b35b5b6",
+        "harnesses/codex/provision_test.py": "b58d0ec4b27ccdeed2ebee330499e8fccdec91b4",
+        "harnesses/hermes/provision_test.py": "38e7b9b0c2ef4484bc5fbbf0c3b49067a14bfece"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/auth.rs",
+      "from": {
+        "harnesses/scion_harness.py": "fa39f10306f5776c8f868a4b8193d91fec981cbc",
+        "harnesses/scion_harness_test.py": "79d22aaf4e894af674781273b80c46ba0b35b5b6"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/claude.rs",
+      "from": {
+        "harnesses/claude/provision.py": "fc156911c60f664630c93fbc8b37d1e9ad77d1b5",
+        "harnesses/claude/config.yaml": "ae91ecb7dcab0c2dc8dc28879c0bf871deb37a85",
+        "harnesses/claude/provision_test.py": "ccfa87274d8b06cf79b85182a02c402c835e0000"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/codex.rs",
+      "from": {
+        "harnesses/codex/provision.py": "8d7da87e3412365cd08b3805d0aab5ef9dea9305",
+        "harnesses/codex/config.yaml": "d3ebf9cdbd93ed1729ecd8ae3b2495d65bf75379",
+        "harnesses/codex/provision_test.py": "b58d0ec4b27ccdeed2ebee330499e8fccdec91b4"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/gemini.rs",
+      "from": {
+        "harnesses/gemini-cli/provision.py": "623abe54612f9b4989f849db11b69f2fb289f850"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/opencode.rs",
+      "from": {
+        "harnesses/opencode/provision.py": "309e21d53241d6ee0177db17d44462f783354481"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/copilot.rs",
+      "from": {
+        "harnesses/copilot/provision.py": "26f25bf698838e6768bc91cbe2efb8b71d692bbc"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/hermes.rs",
+      "from": {
+        "harnesses/hermes/provision.py": "344556bad84e9cb88e749a2c1f86686e1dbd4bd2",
+        "harnesses/hermes/provision_test.py": "38e7b9b0c2ef4484bc5fbbf0c3b49067a14bfece"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/src/antigravity.rs",
+      "from": {
+        "harnesses/antigravity/provision.py": "eb06e11d3786bffff2603285ccbe053bf926e421",
+        "harnesses/antigravity/config.yaml": "395c01525e0da5bb1890d0b7684affab7973776a",
+        "harnesses/scion_harness.py": "fa39f10306f5776c8f868a4b8193d91fec981cbc"
+      }
+    },
+    {
+      "path": "crates/branchyard-provision/tests/provision.rs",
+      "from": {
+        "harnesses/claude/provision_test.py": "ccfa87274d8b06cf79b85182a02c402c835e0000",
+        "harnesses/codex/provision_test.py": "b58d0ec4b27ccdeed2ebee330499e8fccdec91b4",
+        "harnesses/telemetry_provision_test.py": "74f9f5d243ab5faf086e9d49fef231c8d058d7ca"
+      }
+    }
+  ]
+}
