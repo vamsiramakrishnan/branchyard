@@ -997,13 +997,8 @@ fn acting_branch(
 
 pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
     let json = args.json;
-    if matches!(target, Target::Remote(_)) {
-        return fail(
-            json,
-            &branchyard::Error::Unsupported(
-                "by artifact does not yet reach a server over --remote".into(),
-            ),
-        );
+    if let Target::Remote(remote) = target {
+        return remote_artifact(remote, args);
     }
     let delegate = harness_delegate(json)?;
     let branch = match acting_branch(&delegate, &args.branch, "artifact") {
@@ -1071,15 +1066,124 @@ struct Ack {
     ok: bool,
 }
 
+/// `--branch`, required in remote mode: there is no harness to delegate
+/// as (a harness reaching the server acts through the delegation surfaces,
+/// not `by --remote`), so a person must always be named explicitly.
+fn remote_branch(
+    json: bool,
+    args_branch: &Option<String>,
+    command: &str,
+) -> Result<String, Outcome> {
+    match args_branch {
+        Some(branch) => Ok(branch.clone()),
+        None => Err(fail(
+            json,
+            &branchyard::Error::Denied(format!(
+                "--remote {command} needs --branch: there is no harness here to delegate as"
+            )),
+        )),
+    }
+}
+
+/// `by --remote artifact …`: the same JSON as local mode, over
+/// `branchyard_client`, acting with the server's authority as the named
+/// `--branch`. A path here (`publish`'s file, `get`'s `--out`) is always
+/// the caller's own local file: the bytes cross the wire, unlike a
+/// `--substrate-key`-style path, which names a file on the server.
+fn remote_artifact(server: &remote::Remote, args: &ArtifactArgs) -> Outcome {
+    let json = args.json;
+    let branch = match remote_branch(json, &args.branch, "artifact") {
+        Ok(branch) => branch,
+        Err(outcome) => return outcome,
+    };
+    match args.action.as_str() {
+        "publish" => {
+            let path = absolute(args.arg.as_deref().expect("checked in args"));
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return fail(
+                        json,
+                        &branchyard::Error::State(format!("read {}: {error}", path.display())),
+                    )
+                }
+            };
+            let result = server
+                .repo
+                .publish_artifact(
+                    &branch,
+                    &bytes,
+                    args.name.as_deref(),
+                    args.media_type.as_deref(),
+                    &args.labels,
+                    &branchyard_client::new_key(),
+                )
+                .map_err(remote::sdk_error);
+            emit(json, result, |a| {
+                format!(
+                    "published {} as {} ({} bytes, {})\n",
+                    a.name, a.id, a.size, a.digest
+                )
+            })
+        }
+        "list" => {
+            let result = server.repo.artifacts(&branch).map_err(remote::sdk_error);
+            emit(json, result, |list: &Vec<branchyard::ArtifactRef>| {
+                if list.is_empty() {
+                    return "no readable artifacts\n".into();
+                }
+                list.iter()
+                    .map(|a| {
+                        format!(
+                            "{} {} {} ({} bytes)\n",
+                            a.id, a.name, a.publisher_branch, a.size
+                        )
+                    })
+                    .collect()
+            })
+        }
+        "get" => {
+            let id = args.arg.clone().expect("checked in args");
+            let out = absolute(args.out.as_deref().expect("checked in args"));
+            let result = server
+                .repo
+                .read_artifact(&branch, &id)
+                .map_err(remote::sdk_error)
+                .and_then(|(a, bytes)| {
+                    if let Some(dir) = out.parent() {
+                        if !dir.as_os_str().is_empty() {
+                            std::fs::create_dir_all(dir).map_err(|e| {
+                                branchyard::Error::State(format!("create {}: {e}", dir.display()))
+                            })?;
+                        }
+                    }
+                    std::fs::write(&out, &bytes).map_err(|e| {
+                        branchyard::Error::State(format!("write {}: {e}", out.display()))
+                    })?;
+                    Ok(a)
+                });
+            emit(json, result, |a| {
+                format!("wrote {} bytes of {} to {}\n", a.size, a.id, out.display())
+            })
+        }
+        "share" => {
+            let id = args.arg.clone().expect("checked in args");
+            let to = args.to.clone().expect("checked in args");
+            let result = server
+                .repo
+                .share_artifact(&branch, &id, &to, &branchyard_client::new_key())
+                .map_err(remote::sdk_error)
+                .map(|()| Ack { ok: true });
+            emit(json, result, |_| format!("shared {id} with {to}\n"))
+        }
+        other => unreachable!("artifact action {other} was validated in args"),
+    }
+}
+
 pub fn scratch(target: &Target, args: &ScratchArgs) -> Outcome {
     let json = args.json;
-    if matches!(target, Target::Remote(_)) {
-        return fail(
-            json,
-            &branchyard::Error::Unsupported(
-                "by scratch does not yet reach a server over --remote".into(),
-            ),
-        );
+    if let Target::Remote(remote) = target {
+        return remote_scratch(remote, args);
     }
     let delegate = harness_delegate(json)?;
     let branch = match acting_branch(&delegate, &args.branch, "scratch") {
@@ -1127,6 +1231,76 @@ pub fn scratch(target: &Target, args: &ScratchArgs) -> Outcome {
             let name = args.name.clone().expect("checked in args");
             let to = args.to.clone().expect("checked in args");
             let result = act.share_scratch(&name, &to).map(|()| Ack { ok: true });
+            emit(json, result, |_| format!("shared {name} with {to}\n"))
+        }
+        other => unreachable!("scratch action {other} was validated in args"),
+    }
+}
+
+/// `by --remote scratch …`: the same JSON as local mode, acting with the
+/// server's authority as the named `--branch`. The scratch directory
+/// lives on the server host; a remote caller reaches it only through
+/// `lock`/`unlock` (which fence honest callers going through the server,
+/// same as local mode) and whatever harnesses the server runs, never by
+/// reading or writing the directory itself.
+fn remote_scratch(server: &remote::Remote, args: &ScratchArgs) -> Outcome {
+    let json = args.json;
+    let branch = match remote_branch(json, &args.branch, "scratch") {
+        Ok(branch) => branch,
+        Err(outcome) => return outcome,
+    };
+    match args.action.as_str() {
+        "create" => {
+            let name = args.name.as_deref().expect("checked in args");
+            let result = server
+                .repo
+                .create_scratch(&branch, name, &branchyard_client::new_key())
+                .map_err(remote::sdk_error);
+            emit(json, result, |a| {
+                format!("created scratch area {}\n", a.name)
+            })
+        }
+        "list" => {
+            let result = server
+                .repo
+                .scratch_areas(&branch)
+                .map_err(remote::sdk_error);
+            emit(json, result, |list: &Vec<branchyard::ScratchArea>| {
+                if list.is_empty() {
+                    return "no reachable scratch areas\n".into();
+                }
+                list.iter()
+                    .map(|a| format!("{} {}\n", a.name, a.owner_branch))
+                    .collect()
+            })
+        }
+        "lock" => {
+            let name = args.name.as_deref().expect("checked in args");
+            let result = server
+                .repo
+                .lock_scratch(&branch, name, &branchyard_client::new_key())
+                .map_err(remote::sdk_error);
+            emit(json, result, |l| {
+                format!("{} holds {}\n", l.holder_branch, l.name)
+            })
+        }
+        "unlock" => {
+            let name = args.name.as_deref().expect("checked in args");
+            let result = server
+                .repo
+                .unlock_scratch(&branch, name, &branchyard_client::new_key())
+                .map_err(remote::sdk_error)
+                .map(|()| Ack { ok: true });
+            emit(json, result, |_| "unlocked\n".to_owned())
+        }
+        "share" => {
+            let name = args.name.clone().expect("checked in args");
+            let to = args.to.clone().expect("checked in args");
+            let result = server
+                .repo
+                .share_scratch(&branch, &name, &to, &branchyard_client::new_key())
+                .map_err(remote::sdk_error)
+                .map(|()| Ack { ok: true });
             emit(json, result, |_| format!("shared {name} with {to}\n"))
         }
         other => unreachable!("scratch action {other} was validated in args"),

@@ -185,6 +185,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         tokens: Tokens::new(config.tokens.clone()),
         config,
         shutdown: shutdown_rx.clone(),
+        storage_idem: crate::storage_routes::StorageIdem::default(),
     });
     let router = api::router(app);
     let accept = tokio::spawn(accept_loop(listener, tls.clone(), router, shutdown_rx));

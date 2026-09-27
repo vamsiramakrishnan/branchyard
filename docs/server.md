@@ -33,6 +33,7 @@ Flags (`by serve --help` or `branchyard-server --help`):
 | `--allow-unapproved-tools` | Accept `unapproved_tools`: profiles whose tools bypass the request's policy (Antigravity, Pi, Amp) |
 | `--secret NAME[=VAR\|=@FILE]` | A secret requests may name in `provision.secrets`, read from this server's variable `NAME` or `VAR`, or from `FILE`, at each turn; repeatable. See [provisioning](provisioning.md#through-a-server) |
 | `--database URL` | Keep branch state and operations in PostgreSQL (`postgres://user@host/db`) instead of SQLite. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
+| `--max-artifact-bytes N` | Largest artifact a `POST .../artifacts` upload may publish, in bytes. Default 268435456 (256 MiB) |
 | `--max-running N` | Operations running at once; more wait queued. Default 8 |
 | `--shutdown-grace SECS` | At shutdown, how long running operations may finish. Default 60 |
 | `--quiet` | Do not log requests |
@@ -50,6 +51,7 @@ Configuration file (relative paths resolve against the file's directory; unknown
   ],
   "tls": { "cert": "/etc/branchyard/cert.pem", "key": "/etc/branchyard/key.pem" },
   "max_body_bytes": 1048576,
+  "max_artifact_bytes": 268435456,
   "max_running": 8,
   "shutdown_grace_seconds": 60,
   "harness_commands": { "codex": ["/opt/codex/bin/codex"] },
@@ -100,6 +102,17 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `GET /v1/repos/{repo}/branches/{b}/children` | Every branch `b` delegated to, directly or below, as `by children b --json` | `Children` |
 | `GET /v1/repos/{repo}/events/stream?cursor=N` | SSE of activity across branches after feed position `N`; without a cursor, from now | `text/event-stream` |
 | `GET /v1/operations/{id}` | An operation's status and result | operation |
+| `POST /v1/repos/{repo}/branches/{b}/artifacts` | Publish the body's bytes as a new artifact of `b`, acting with the server's authority as a person, like `by artifact publish --branch`. `name`, `media_type`, repeated `label` are query parameters; refused over `--max-artifact-bytes` | `201` `ArtifactRef` |
+| `GET /v1/repos/{repo}/branches/{b}/artifacts` | Every artifact `b` may read | `{"artifacts": [ArtifactRef]}` |
+| `GET /v1/repos/{repo}/branches/{b}/artifacts/{id}` | Artifact `id`'s provenance, checked against `b`'s grant | `ArtifactRef` |
+| `GET /v1/repos/{repo}/branches/{b}/artifacts/{id}/content` | Its bytes, with a digest header | streamed bytes |
+| `POST /v1/repos/{repo}/branches/{b}/artifacts/{id}/share` | Share it with `{"to": "BRANCH"}` | `{"ok": true}` |
+| `POST /v1/repos/{repo}/branches/{b}/scratch` | Create `{"name": "NAME"}`, owned by `b` | `ScratchArea` |
+| `GET /v1/repos/{repo}/branches/{b}/scratch` | Every scratch area `b` may reach | `{"areas": [ScratchArea]}` |
+| `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/share` | Share it with `{"to": "BRANCH"}` | `{"ok": true}` |
+| `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/lock` | Acquire its writer lock for `b` | `ScratchLock`, or `409 running` |
+| `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/unlock` | Release it if `b` holds it | `{"ok": true}` |
+| `GET /v1/repos/{repo}/scratch/{name}/lock` | Its current holder, if any (not access controlled) | `{"lock": ScratchLock?}` |
 
 ### Requests
 
@@ -186,7 +199,7 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `unknown_repo`, `unknown_branch`, `unknown_operation` | 404 | No such thing |
 | `invalid_request` | 400 | Malformed JSON, unknown field, empty prompt, bad budget, bad cursor |
 | `unsupported_media_type` | 415 | `POST` body not declared as JSON |
-| `body_too_large` | 413 | Body over `max_body_bytes`; `detail.limit` |
+| `body_too_large` | 413 | Body over `max_body_bytes`, or an artifact upload over `max_artifact_bytes`; `detail.limit` |
 | `command_not_allowed` | 403 | A request `command`, or `provision.mcp_servers`, on a server that does not allow client commands |
 | `secret_not_allowed` | 403 | A `provision.secrets` name the server's operator did not define; `detail.secret` |
 | `provider_not_allowed` | 403 | A provider the server's operator did not allow; `detail.provider` |
@@ -263,7 +276,6 @@ What it is not yet:
 - **Shared with local `by`.** A local `by` on a served repository opens its SQLite `state.db` and sees none of the server's branches; use `by --remote`. Nothing is imported from an existing `state.db` when a repository moves to the database.
 - **TLS to the database.** Connections are plain; keep the database on a trusted network or a Unix socket.
 - **Waits** poll every 100 ms, as SQLite's do across processes; nothing listens for `NOTIFY`.
-- **[Artifacts and scratch areas](storage.md) over HTTP or `by --remote`.** Both are built in local mode and over delegation (a harness's own tools, whether the turn runs locally or on this server); the API has no routes for them yet, so `by --remote artifact` and `by --remote scratch` refuse with `unsupported` rather than pretending to reach the server.
 
 ## Security
 
@@ -280,7 +292,7 @@ What it is not yet:
 
 | Crate | Contents |
 |---|---|
-| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown. Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs) |
+| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown; [`storage_routes.rs`](../crates/branchyard-server/src/storage_routes.rs) for artifacts and scratch areas. Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs), [`storage.rs`](../crates/branchyard-server/tests/storage.rs) |
 | [`branchyard-client`](../crates/branchyard-client/src/lib.rs) | Wire types, a blocking HTTP/1.1 client over rustls, an SSE parser, and a reconnecting event stream |
 | [`branchyard-cli`](../crates/branchyard-cli/src/main.rs) | `by serve`, remote mode and `by watch` |
 | [`branchyard-herdr`](../crates/branchyard-herdr/src/main.rs) | The Herdr plugin's binary: the bridge, the branch pane, and the merge, cancel and send actions. Tests: [`bridge.rs`](../crates/branchyard-herdr/tests/bridge.rs) (against `by serve` and a fake `herdr`), [`manifest.rs`](../crates/branchyard-herdr/tests/manifest.rs) |

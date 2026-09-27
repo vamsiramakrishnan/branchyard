@@ -44,6 +44,7 @@ Options:
                             variable NAME or VAR, or from FILE; repeatable
   --database URL            Keep branch state and operations in PostgreSQL
                             (postgres://...); needs a build with the postgres feature
+  --max-artifact-bytes N    Largest artifact a publish may upload (default: 268435456)
   --max-running N           Operations running at once (default: 8)
   --shutdown-grace SECS     At shutdown, wait this long for running operations (default: 60)
   --quiet                   Do not log requests
@@ -73,6 +74,7 @@ struct Flags {
     allow_unapproved_tools: bool,
     secrets: Vec<branchyard::SecretSource>,
     database: Option<String>,
+    max_artifact_bytes: Option<u64>,
     max_running: Option<usize>,
     shutdown_grace: Option<Duration>,
     quiet: bool,
@@ -167,6 +169,14 @@ fn parse(args: &[String]) -> Result<Flags, String> {
                     return Err(format!("--harness-command needs HARNESS=CMD, not {text:?}"));
                 }
                 flags.harness_commands.push((harness.to_owned(), argv));
+            }
+            "--max-artifact-bytes" => {
+                once(flags.max_artifact_bytes.is_some())?;
+                let text = value("N")?;
+                let n = text.parse::<u64>().ok().filter(|n| *n >= 1024).ok_or_else(|| {
+                    format!("--max-artifact-bytes needs a number of bytes, at least 1024, not {text:?}")
+                })?;
+                flags.max_artifact_bytes = Some(n);
             }
             "--max-running" => {
                 once(flags.max_running.is_some())?;
@@ -287,6 +297,10 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     if let Some(bytes) = partial.max_body_bytes {
         config.max_body_bytes = bytes;
     }
+    config.max_artifact_bytes = flags
+        .max_artifact_bytes
+        .or(partial.max_artifact_bytes)
+        .unwrap_or(config.max_artifact_bytes);
     config.max_running = flags
         .max_running
         .or(partial.max_running)

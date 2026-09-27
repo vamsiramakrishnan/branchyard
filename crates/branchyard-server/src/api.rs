@@ -48,6 +48,10 @@ pub struct App {
     pub tokens: Tokens,
     pub config: Config,
     pub shutdown: watch::Receiver<bool>,
+    /// Idempotency cache for the storage routes (artifacts, scratch
+    /// areas): quick, synchronous calls, unlike the operation registry's
+    /// durable one for long operations. See `storage_routes`.
+    pub storage_idem: crate::storage_routes::StorageIdem,
 }
 
 #[derive(Clone)]
@@ -59,14 +63,14 @@ pub struct RepoState {
     pub wake: Arc<Notify>,
 }
 
-type Shared = Arc<App>;
+pub(crate) type Shared = Arc<App>;
 
 /// The authenticated caller: its token's configured name.
 #[derive(Clone)]
 pub struct Caller(pub String);
 
 impl App {
-    fn repo(&self, name: &str) -> Result<&RepoState, ApiError> {
+    pub(crate) fn repo(&self, name: &str) -> Result<&RepoState, ApiError> {
         self.repos.get(name).ok_or_else(|| {
             ApiError::new(
                 StatusCode::NOT_FOUND,
@@ -342,7 +346,11 @@ pub fn router(app: Shared) -> Router {
         .route("/v1/repos/{repo}/branches/{branch}/children", get(children))
         .route("/v1/repos/{repo}/branches/{branch}/diff", get(diff))
         .route("/v1/repos/{repo}/branches/{branch}/events", get(events))
-        .route("/v1/repos/{repo}/events/stream", get(stream_events));
+        .route("/v1/repos/{repo}/events/stream", get(stream_events))
+        // Artifacts and scratch areas: see `storage_routes`, kept separate
+        // so this feature's routes are easy to merge alongside unrelated
+        // work on this router (inbox messages, branch lifecycle).
+        .merge(crate::storage_routes::router());
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -461,7 +469,7 @@ impl<T: DeserializeOwned + Serialize> FromRequest<Shared> for JsonBody<T> {
     }
 }
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(work)

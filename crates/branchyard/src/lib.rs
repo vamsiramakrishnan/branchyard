@@ -355,6 +355,34 @@ impl Yard {
         storage::get(self, reader, id, out.as_ref())
     }
 
+    /// Publish `bytes` (already in memory) as a new immutable artifact of
+    /// `branch`, like [`Yard::publish_artifact`] but without reading them
+    /// from a file first. The server's HTTP API uses this for a streamed
+    /// upload whose bytes it already holds, bounded by its configured size
+    /// limit.
+    pub fn publish_artifact_bytes(
+        &self,
+        branch: &str,
+        bytes: &[u8],
+        name: Option<String>,
+        media_type: Option<String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<ArtifactRef, Error> {
+        storage::publish_bytes(self, branch, bytes, name, media_type, labels)
+    }
+
+    /// Artifact `id`'s bytes in memory for `reader`, checked against its
+    /// recorded digest, alongside its provenance. [`Yard::read_artifact`]
+    /// writes them to a file; the server's HTTP API streams them to a
+    /// download response instead.
+    pub fn read_artifact_bytes(
+        &self,
+        reader: &str,
+        id: &str,
+    ) -> Result<(ArtifactRef, Vec<u8>), Error> {
+        storage::get_bytes(self, reader, id)
+    }
+
     /// Share artifact `id` (published, or already shared, to `actor`) with
     /// `to`: the explicit grant a sibling of the publisher needs.
     pub fn share_artifact(&self, actor: &str, id: &str, to: &str) -> Result<(), Error> {

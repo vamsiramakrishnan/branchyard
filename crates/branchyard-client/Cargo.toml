@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Blocking Rust client for the Branchyard server API: the remote SDK"
 
 [dependencies]
+blake3 = "1"
 branchyard = { path = "../branchyard" }
 httparse = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

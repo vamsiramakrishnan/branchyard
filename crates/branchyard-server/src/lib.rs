@@ -59,6 +59,7 @@ pub mod error;
 pub mod feed;
 pub mod ops;
 pub mod serve;
+pub mod storage_routes;
 pub mod store;
 
 pub use config::Config;

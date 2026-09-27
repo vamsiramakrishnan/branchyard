@@ -268,7 +268,7 @@ fn json(bytes: &[u8], root: &Path) -> Value {
         match value {
             Value::Object(map) => {
                 for (key, v) in map.iter_mut() {
-                    if matches!(key.as_str(), "created_at" | "at_ms") {
+                    if matches!(key.as_str(), "created_at" | "at_ms" | "acquired_at") {
                         *v = Value::from(0);
                     } else {
                         scrub(v);
@@ -1107,4 +1107,194 @@ fn rig_runs_print_what_local_ones_do() {
     assert_eq!(refused.status.code(), Some(1));
     let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(refused["error"]["kind"], "secret_not_allowed", "{refused}");
+}
+
+/// `by artifact` and `by scratch` against `--remote`: the same JSON as
+/// local mode. Artifact ids are per-repository sequence numbers
+/// (`art1`, `art2`, …), so running the same sequence of commands against
+/// two freshly created, identical repositories gives identical ids too;
+/// nothing needs to be scrubbed beyond what `json()` already normalizes.
+#[test]
+fn artifact_and_scratch_commands_print_what_local_ones_do() {
+    let dir = Dir::new();
+    let here = dir.repo("here");
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+
+    // A branch to act as, created identically in both repositories, plus
+    // an unrelated one to stand in for a sibling that needs an explicit
+    // share.
+    for name in ["hello", "buddy"] {
+        let args = ["run", "WRITE hello.txt=hi", "--name", name, "--yes"];
+        let l = local(&here, &args);
+        assert!(l.status.success(), "{}", text(&l.stderr));
+        let r = server.by(
+            &dir.0,
+            &with_agent(&args)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        assert!(r.status.success(), "{}", text(&r.stderr));
+    }
+
+    let payload = dir.0.join("payload.txt");
+    fs::write(&payload, "shared artifact bytes\n").unwrap();
+    let payload = payload.display().to_string();
+    let out_local = dir.0.join("out-local.bin");
+    let out_remote = dir.0.join("out-remote.bin");
+    let out_local2 = dir.0.join("out-local-2.bin");
+    let out_remote2 = dir.0.join("out-remote-2.bin");
+
+    let both =
+        |args: &[&str]| -> (Output, Output) { (local(&here, args), server.by(&dir.0, args)) };
+    let same_json = |args: &[&str]| -> (Value, Value) {
+        let (l, r) = both(args);
+        assert!(
+            l.status.success() && r.status.success(),
+            "{args:?}\nlocal: {}\nremote: {}",
+            text(&l.stderr),
+            text(&r.stderr)
+        );
+        let (lj, rj) = (json(&l.stdout, &here), json(&r.stdout, &there));
+        assert_eq!(lj, rj, "{args:?}");
+        (lj, rj)
+    };
+
+    let (_, published) = same_json(&[
+        "artifact",
+        "publish",
+        &payload,
+        "--name",
+        "greeting.txt",
+        "--label",
+        "k=v",
+        "--branch",
+        "hello",
+        "--json",
+    ]);
+    let id = published["id"].as_str().unwrap().to_owned();
+    same_json(&["artifact", "list", "--branch", "hello", "--json"]);
+
+    let l = local(
+        &here,
+        &[
+            "artifact",
+            "get",
+            &id,
+            "--out",
+            out_local.to_str().unwrap(),
+            "--branch",
+            "hello",
+        ],
+    );
+    let r = server.by(
+        &dir.0,
+        &[
+            "artifact",
+            "get",
+            &id,
+            "--out",
+            out_remote.to_str().unwrap(),
+            "--branch",
+            "hello",
+        ],
+    );
+    assert!(
+        l.status.success() && r.status.success(),
+        "{}",
+        text(&r.stderr)
+    );
+    assert_eq!(
+        text(&l.stdout).split(" to ").next(),
+        text(&r.stdout).split(" to ").next()
+    );
+    assert_eq!(fs::read(&out_local).unwrap(), fs::read(&payload).unwrap());
+    assert_eq!(fs::read(&out_remote).unwrap(), fs::read(&payload).unwrap());
+
+    // Refused for the unrelated branch until shared; the same error kind
+    // either way.
+    let denied_local = local(
+        &here,
+        &[
+            "artifact",
+            "get",
+            &id,
+            "--out",
+            out_local2.to_str().unwrap(),
+            "--branch",
+            "buddy",
+            "--json",
+        ],
+    );
+    let denied_remote = server.by(
+        &dir.0,
+        &[
+            "artifact",
+            "get",
+            &id,
+            "--out",
+            out_remote2.to_str().unwrap(),
+            "--branch",
+            "buddy",
+            "--json",
+        ],
+    );
+    assert_eq!(denied_local.status.code(), Some(1));
+    assert_eq!(denied_remote.status.code(), Some(1));
+    let (lj, rj): (Value, Value) = (
+        serde_json::from_slice(&denied_local.stdout).unwrap(),
+        serde_json::from_slice(&denied_remote.stdout).unwrap(),
+    );
+    assert_eq!(lj["error"]["kind"], rj["error"]["kind"]);
+
+    same_json(&[
+        "artifact", "share", &id, "--to", "buddy", "--branch", "hello", "--json",
+    ]);
+    let l = local(
+        &here,
+        &[
+            "artifact",
+            "get",
+            &id,
+            "--out",
+            out_local2.to_str().unwrap(),
+            "--branch",
+            "buddy",
+        ],
+    );
+    let r = server.by(
+        &dir.0,
+        &[
+            "artifact",
+            "get",
+            &id,
+            "--out",
+            out_remote2.to_str().unwrap(),
+            "--branch",
+            "buddy",
+        ],
+    );
+    assert!(
+        l.status.success() && r.status.success(),
+        "{}",
+        text(&r.stderr)
+    );
+
+    // Scratch areas: create, list, lock, unlock, share.
+    same_json(&["scratch", "create", "cache", "--branch", "hello", "--json"]);
+    same_json(&["scratch", "list", "--branch", "hello", "--json"]);
+    same_json(&["scratch", "lock", "cache", "--branch", "hello", "--json"]);
+    same_json(&["scratch", "unlock", "cache", "--branch", "hello", "--json"]);
+    same_json(&[
+        "scratch", "share", "cache", "--to", "buddy", "--branch", "hello", "--json",
+    ]);
+    same_json(&["scratch", "list", "--branch", "buddy", "--json"]);
+
+    // Outside a harness, both modes need --branch; the messages differ (no
+    // harness to delegate as, in either mode) but both refuse the same way.
+    let l = local(&here, &["artifact", "list"]);
+    let r = server.by(&dir.0, &["artifact", "list"]);
+    assert_eq!(l.status.code(), Some(1));
+    assert_eq!(r.status.code(), Some(1));
 }
