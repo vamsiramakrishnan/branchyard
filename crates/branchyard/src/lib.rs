@@ -95,6 +95,7 @@
 //! stops honest mistakes, not a hostile harness.
 
 mod broker;
+mod bundle;
 #[cfg(test)]
 mod conformance;
 mod delegation;
@@ -120,6 +121,7 @@ mod sqlite;
 mod state;
 mod steer;
 mod storage;
+mod tarball;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -137,6 +139,7 @@ pub use branchyard_provision::{
     SecretSource, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
+pub use bundle::BundleEntry;
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
@@ -408,6 +411,36 @@ impl Yard {
     /// `to`: the explicit grant a sibling of the publisher needs.
     pub fn share_artifact(&self, actor: &str, id: &str, to: &str) -> Result<(), Error> {
         storage::share_artifact(self, actor, id, to)
+    }
+
+    /// Export every artifact in `ids` that `reader` may read into a
+    /// portable, deterministic tar bundle at `out`: the same artifacts
+    /// always produce byte-identical bytes, and each member is checked
+    /// against its own recorded digest before being written. See
+    /// [`Yard::import_artifacts`] and `docs/storage.md` "Portable
+    /// bundles".
+    pub fn export_artifacts(
+        &self,
+        reader: &str,
+        ids: &[String],
+        out: impl AsRef<Path>,
+    ) -> Result<Vec<BundleEntry>, Error> {
+        bundle::export_artifacts(self, reader, ids, out.as_ref())
+    }
+
+    /// Import a bundle written by [`Yard::export_artifacts`], publishing
+    /// each member as a new artifact owned by `branch`. Every member is
+    /// verified against the bundle's index and its own content digest; a
+    /// tampered, missing or unindexed extra member refuses the whole
+    /// import, before anything is published. Each imported artifact's
+    /// labels record its original provenance (`bundle.origin_id`,
+    /// `bundle.origin_publisher`, `bundle.origin_created_at`).
+    pub fn import_artifacts(
+        &self,
+        branch: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<Vec<ArtifactRef>, Error> {
+        bundle::import_artifacts(self, branch, path.as_ref())
     }
 
     /// Create scratch area `name`, a shared directory owned by `owner`,
@@ -958,6 +991,22 @@ impl Branch {
         self.yard.read_artifact(&self.info.name, id, out)
     }
 
+    /// Export artifacts this branch may read into a portable bundle; see
+    /// [`Yard::export_artifacts`].
+    pub fn export_artifacts(
+        &self,
+        ids: &[String],
+        out: impl AsRef<Path>,
+    ) -> Result<Vec<BundleEntry>, Error> {
+        self.yard.export_artifacts(&self.info.name, ids, out)
+    }
+
+    /// Import a bundle, owned by this branch; see
+    /// [`Yard::import_artifacts`].
+    pub fn import_artifacts(&self, path: impl AsRef<Path>) -> Result<Vec<ArtifactRef>, Error> {
+        self.yard.import_artifacts(&self.info.name, path)
+    }
+
     /// Wait until no descendant of this branch is running a turn, then
     /// return the descendants' records. Descendants on threads of this
     /// process are joined; one another process drives is waited for through
@@ -1338,15 +1387,40 @@ pub enum Activity {
 }
 
 /// How [`Activity::MessagesDelivered`] messages reached a turn. Serialized
-/// as an object tagged by `path`, such as `{"path": "steer", "steer": 3}`.
+/// as an object tagged by `path`, such as
+/// `{"path": "steer", "steer": 3, "boundary": "codex_turn_steer"}`.
+///
+/// `boundary` names the protocol boundary the message actually landed at,
+/// per harness (Straitjacket's relay names an equivalent boundary for its
+/// own capsules; see `docs/comparison.md`): `"turn_start"` for every
+/// profile's turn start, or a driver-specific name such as
+/// `"claude_next_model_call"`, `"codex_turn_steer"`, `"pi_steer"` or
+/// `"acp_session_steering"` for a steer, from
+/// [`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before
+/// this field existed deserialize with `"not_recorded"`, never a guess.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "path", rename_all = "snake_case")]
 pub enum DeliveredVia {
     /// Prepended to the prompt at the start of the turn.
-    TurnStart,
+    TurnStart {
+        #[serde(default = "boundary_turn_start")]
+        boundary: String,
+    },
     /// Steered into the running turn as input `steer` ([`Steer::id`]).
-    Steer { steer: u64 },
+    Steer {
+        steer: u64,
+        #[serde(default = "boundary_not_recorded")]
+        boundary: String,
+    },
+}
+
+fn boundary_turn_start() -> String {
+    "turn_start".to_owned()
+}
+
+fn boundary_not_recorded() -> String {
+    "not_recorded".to_owned()
 }
 
 /// Input for a branch's running turn, and what became of it; see
