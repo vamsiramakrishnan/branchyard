@@ -12,7 +12,7 @@ use branchyard::{
     Activity, BranchEvent, BranchStatus, Budget, DecisionSource, Error, Event, PermissionDecision,
     Policy, RecordedEvent, TaskOptions, TurnOutcome, Yard,
 };
-use common::{fake_agent, text, Fixture};
+use common::{edit_record, fake_agent, text, Fixture};
 
 fn status_of(fixture: &Fixture, name: &str) -> BranchStatus {
     fixture.yard.branch(name).unwrap().info().status.clone()
@@ -679,12 +679,12 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
 #[test]
 fn harnesses_inherit_the_environment_without_nested_session_markers() {
     let f = Fixture::new();
-    let prompt = "ENV CLAUDECODE BRANCHYARD_TEST_VISIBLE";
+    let prompt = "ENV CLAUDECODE BRANCHYARD_REMOTE BY_TEST_VISIBLE";
     let shared = f.task(prompt).name("shared").run().unwrap();
     let home = std::env::var("HOME").unwrap();
     assert_eq!(
         text(&shared.events().unwrap()),
-        format!("HOME={home}\nCLAUDECODE unset\nBRANCHYARD_TEST_VISIBLE=yes\n")
+        format!("HOME={home}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n")
     );
 
     let isolated = f
@@ -698,7 +698,7 @@ fn harnesses_inherit_the_environment_without_nested_session_markers() {
     assert_eq!(
         text(&isolated.events().unwrap()),
         format!(
-            "HOME={}\nCLAUDECODE unset\nBRANCHYARD_TEST_VISIBLE=yes\n",
+            "HOME={}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n",
             private.display()
         )
     );
@@ -712,11 +712,9 @@ fn a_session_the_harness_cannot_find_fails_precisely() {
     let f = Fixture::new();
     let branch = f.task("WHOAMI").name("lost").run().unwrap();
     // Stand in for a harness that no longer has the session.
-    let path = f.root.join(".branchyard/branches/lost.json");
-    let mut record: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    record["info"]["session"] = "missing-1".into();
-    fs::write(&path, record.to_string()).unwrap();
+    edit_record(&f.root, "lost", |record| {
+        record["info"]["session"] = "missing-1".into()
+    });
 
     let sent = branch.send("WHOAMI", f.options()).unwrap();
     let info = sent.info();
@@ -732,4 +730,94 @@ fn a_session_the_harness_cannot_find_fails_precisely() {
     }
     assert_eq!(info.turns, 1, "no turn was submitted");
     assert_eq!(info.session.as_deref(), Some("missing-1"));
+}
+
+#[test]
+fn profiles_that_route_no_tool_approvals_need_an_explicit_opt_in() {
+    let f = Fixture::new();
+    for profile in ["antigravity-stream-json", "pi-rpc", "amp-stream-json"] {
+        let refused = f.task("go").harness(profile).run();
+        assert!(
+            matches!(&refused, Err(Error::Unsupported(why))
+                if why.contains("does not route tool permission requests")),
+            "{profile}: {refused:?}"
+        );
+        // With the opt-in it gets as far as looking for the executable.
+        let admitted = f
+            .task("go")
+            .harness(profile)
+            .unapproved_tools(true)
+            .command(["/nonexistent/branchyard-harness"])
+            .run();
+        assert!(
+            matches!(&admitted, Err(Error::HarnessUnavailable { .. })),
+            "{profile}: {admitted:?}"
+        );
+    }
+    let fan = f.task("go").run_on(&["gemini-cli", "pi"]);
+    assert!(matches!(fan, Err(Error::Unsupported(_))), "{fan:?}");
+    assert!(f.yard.branches().unwrap().is_empty(), "nothing was created");
+}
+
+#[test]
+fn a_branch_cancelled_before_its_harness_opened_a_session_starts_a_fresh_one_on_send() {
+    let f = Fixture::new();
+    // A harness that never answers its handshake.
+    let silent = TaskOptions {
+        command: Some(vec!["sh".into(), "-c".into(), "exec sleep 60".into()]),
+        ..f.options()
+    };
+    let task = f
+        .yard
+        .task("WRITE never.txt=1")
+        .options(silent)
+        .name("unopened");
+    let turn = std::thread::spawn(move || task.run());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let db = f.root.join(".branchyard/state.db");
+    let started = || {
+        rusqlite::Connection::open(&db)
+            .and_then(|c| c.query_row("SELECT COUNT(*) FROM processes", [], |r| r.get(0)))
+            .is_ok_and(|n: i64| n == 1)
+    };
+    while !started() {
+        assert!(Instant::now() < deadline, "the harness never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while f.yard.cancel("unopened").map_or(true, |c| c.is_empty()) {
+        assert!(Instant::now() < deadline, "the turn never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let cancelled = turn.join().unwrap().unwrap();
+    assert_eq!(cancelled.info().status, BranchStatus::Interrupted);
+    assert_eq!(cancelled.info().session, None);
+    assert_eq!(cancelled.info().turns, 0);
+
+    // No conversation exists to continue, so a send starts one, and says
+    // so; the first prompt is not sent with it.
+    let sent = cancelled.send("WRITE fresh.txt=1", f.options()).unwrap();
+    assert_eq!(sent.info().status, BranchStatus::Ready);
+    assert_eq!(sent.info().turns, 1);
+    let log = sent.events().unwrap();
+    assert!(
+        log.iter()
+            .any(|e| matches!(&e.activity, Activity::Warning(w)
+            if w.contains("no earlier turn submitted a prompt; this turn starts a fresh session"))),
+        "{log:?}"
+    );
+    let worktree = &sent.info().worktree;
+    assert!(worktree.join("fresh.txt").is_file());
+    assert!(!worktree.join("never.txt").exists());
+    // From then on, sends resume that session.
+    let again = sent.send("WHOAMI", f.options()).unwrap();
+    assert!(text(&again.events().unwrap()).contains("resumed=true"));
+
+    // A branch that ran a prompt but has no session is still refused.
+    edit_record(&f.root, "unopened", |record| {
+        record["info"]["session"] = serde_json::Value::Null;
+    });
+    assert!(matches!(
+        again.send("WHOAMI", f.options()),
+        Err(Error::Unsupported(why)) if why.contains("no harness session to resume")
+    ));
 }

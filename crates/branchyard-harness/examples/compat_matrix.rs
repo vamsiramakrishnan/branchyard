@@ -69,6 +69,9 @@ fn protocol(protocol: Protocol) -> &'static str {
         Protocol::ClaudeStreamJson => "Claude stream-json",
         Protocol::CodexAppServer => "Codex App Server",
         Protocol::Acp => "ACP v1",
+        Protocol::AntigravityStreamJson => "Antigravity stream-json",
+        Protocol::PiRpc => "Pi RPC",
+        Protocol::AmpStreamJson => "Amp stream-json",
     }
 }
 

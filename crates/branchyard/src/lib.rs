@@ -5,7 +5,10 @@
 //! in-process, harnesses run as local processes, and every branch is a git
 //! worktree of your repository. State lives in `.branchyard/` at the
 //! repository root. Local mode provides no isolation beyond your operating
-//! system user; see `docs/design.md` §4.
+//! system user; see `docs/design.md` §4. [`TaskOptions::provider`] runs a
+//! branch's harness in a Microsandbox microVM instead, with the worktree
+//! mounted into it, or in an Agent Substrate actor, with the worktree
+//! carried in and out as git bundles; see `docs/providers.md`.
 //!
 //! ```no_run
 //! use branchyard::{Budget, Policy, Yard};
@@ -33,12 +36,25 @@
 //!
 //! What the engine guarantees:
 //!
-//! - Every harness event, permission decision, candidate snapshot, status
-//!   change and warning is appended to `.branchyard/events/<name>.jsonl`
-//!   before the observer sees it. Every permission request reaches the
-//!   [`Policy`]; nothing runs with a permission bypass.
-//! - Branch records are written atomically, and branch names are reserved
-//!   with an exclusive create, so parallel branches never share a name.
+//! - State is durable in `.branchyard/state.db` (SQLite, write-ahead log),
+//!   written in transactions. Every harness event, permission decision,
+//!   candidate snapshot, status change and warning is appended to the
+//!   branch's event log before the observer sees it, and can be read back
+//!   from a cursor ([`Branch::events_since`], [`Yard::events_since`]).
+//!   Every permission request reaches the [`Policy`]; nothing runs with a
+//!   permission bypass.
+//! - Branch names are reserved in a transaction, so parallel branches never
+//!   share a name.
+//! - A turn runs under its branch's lease, with a fencing generation that
+//!   every write of the turn checks: two engines, in one process or two,
+//!   never drive one branch at once. Its steps are journaled. When an
+//!   engine stops mid-turn, [`Yard::open`] recovers the branch: it kills the
+//!   harness's process group if pid and start time still match, and sets a
+//!   truthful status, [`BranchStatus::Interrupted`] when the turn's outcome
+//!   is unknown. A submitted prompt is never submitted again. See
+//!   `docs/durability.md`.
+//! - Cancellation is durable: [`Yard::cancel`] records a request that the
+//!   engine running the turn, in any process, observes.
 //! - A turn over budget is interrupted and waited for, never abandoned; the
 //!   harness's process group is torn down when each call returns, and
 //!   descendants that outlived it are named in the event log.
@@ -55,23 +71,47 @@
 //!   under its parent session's identity. [`TaskOptions::isolated`]
 //!   gives it a scrubbed environment and a private home instead, which
 //!   usually means it is not logged in.
-//! - Coordination between processes beyond name reservation: two processes
-//!   sending to the same branch at once race on its record.
+//! - Recovery of a turn whose engine runs on another host: its lease has to
+//!   expire first, and its processes there are not killed.
 //! - Resume and fork across working directories. Some harnesses keep
 //!   sessions per directory (Claude Code keys them by project path), so a
 //!   fork, which runs in a new worktree, may not find its parent's session.
 //!   The engine reports that failure as the branch's status; it never
 //!   substitutes a fresh session.
 //! - Cost limits for harnesses that report no cumulative cost estimate.
+//!
+//! # Delegation
+//!
+//! With [`TaskOptions::delegation`], a harness can spawn, inspect, message,
+//! integrate and cancel child branches within an [`Envelope`], through `by`
+//! in its shell, the Python module, or Branchyard's MCP tools; SDK code does
+//! the same through a [`Delegate`]. Children run on threads of the process
+//! that runs their parent; a process must call [`Branch::wait_subtree`]
+//! before it exits, or it abandons them to recovery, which ends them
+//! `interrupted`. `docs/delegation.md` describes the
+//! surfaces, the envelope and the authority model, which in local mode
+//! stops honest mistakes, not a hostile harness.
 
+mod broker;
+#[cfg(test)]
+mod conformance;
+mod delegation;
 mod engine;
 mod git;
 mod harness;
+mod lock;
 mod names;
 mod ops;
+#[cfg(feature = "postgres")]
+mod pg;
+mod placement;
 mod policy;
+mod proc;
+mod projection;
 mod record;
+mod recover;
 mod run;
+mod sqlite;
 mod state;
 
 use std::fmt;
@@ -79,10 +119,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use lock::DirLock;
+pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
+
 pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
 };
 use branchyard_workspace::Repository;
+pub use delegation::{
+    Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inspection, Sent, Spawn,
+    Spawned,
+};
+pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 use serde::{Deserialize, Serialize};
 
 /// A repository with Branchyard state. Cheap to clone; clones share state.
@@ -90,14 +138,86 @@ use serde::{Deserialize, Serialize};
 pub struct Yard {
     root: PathBuf,
     repo: Repository,
+    store: state::Store,
+    /// Delegation contexts, running children and the broker, shared by
+    /// clones.
+    hub: Arc<projection::Hub>,
 }
 
 impl Yard {
     /// Open the git repository containing `path`, creating `.branchyard/`
     /// and excluding it from git through the repository's `info/exclude`.
-    /// Never touches `.gitignore`.
+    /// Never touches `.gitignore`. Imports state left by earlier versions,
+    /// then recovers every branch whose engine stopped mid-turn, as
+    /// [`Yard::recover`] does.
     pub fn open(path: impl AsRef<Path>) -> Result<Yard, Error> {
         ops::open(path.as_ref())
+    }
+
+    /// [`Yard::open`], with the repository's state in the PostgreSQL
+    /// database at `url` (`postgres://user@host/db`) instead of
+    /// `.branchyard/state.db`, under `scope`, a name that separates
+    /// repositories sharing a database. Worktrees, private homes and
+    /// delegation tokens stay in `.branchyard/`. The tables are created in
+    /// the connection's `search_path` schema when missing. Nothing is
+    /// imported from `state.db`, and `by` on the same repository without
+    /// the database sees none of this state. Needs the `postgres` feature;
+    /// see `docs/durability.md`.
+    #[cfg(feature = "postgres")]
+    pub fn open_postgres(path: impl AsRef<Path>, url: &str, scope: &str) -> Result<Yard, Error> {
+        ops::open_with(path.as_ref(), |root| {
+            state::Store::open_postgres(root, url, scope)
+        })
+    }
+
+    /// Recover every branch whose turn's engine stopped: on this host, a
+    /// process that is gone; anywhere, a lease that expired. Kills the
+    /// turn's recorded harness process group when its pid and start time
+    /// still match, settles the branch's status from its journal, records
+    /// [`Activity::Recovered`], and never submits a prompt again. Returns
+    /// what was recovered. [`Yard::open`] already does this; call it again
+    /// to reconcile a long-lived yard, as the server does.
+    pub fn recover(&self) -> Result<Vec<Recovery>, Error> {
+        recover::all(self)
+    }
+
+    /// Ask `branch`'s running turn, and every running turn delegated below
+    /// it, to stop; each ends `interrupted`. The request is durable and is
+    /// observed by the engine running the turn in any process using this
+    /// repository. Returns the branches that were running.
+    pub fn cancel(&self, branch: &str) -> Result<Vec<String>, Error> {
+        self.cancel_as(branch, "the SDK caller")
+    }
+
+    /// [`Yard::cancel`] on behalf of `by`, whom each cancelled branch's
+    /// event log names.
+    pub fn cancel_as(&self, branch: &str, by: &str) -> Result<Vec<String>, Error> {
+        delegation::cancel_tree(&self.store(), branch, by)
+    }
+
+    /// Up to `limit` recorded events of every branch after feed position
+    /// `cursor`, in the order they were recorded. Positions start at 1 and
+    /// only grow; pass the page's `next_cursor` back to continue. Events
+    /// of removed branches stay in the feed.
+    pub fn events_since(&self, cursor: u64, limit: usize) -> Result<FeedPage, Error> {
+        record::feed(&self.store(), cursor, limit)
+    }
+
+    /// [`Yard::events_since`], waiting up to `timeout` for an event when
+    /// there is none yet. Wakes at once for events recorded in this
+    /// process, and within 100 ms for another process's.
+    pub fn wait_for_events(
+        &self,
+        cursor: u64,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<FeedPage, Error> {
+        record::wait_feed(&self.store(), cursor, limit, timeout)
+    }
+
+    /// The feed position of the last recorded event; 0 when there is none.
+    pub fn events_head(&self) -> Result<u64, Error> {
+        self.store().backend().head()
     }
 
     /// Repository root.
@@ -152,8 +272,17 @@ impl Yard {
         harness::list()
     }
 
+    /// Act as the branch whose running turn was issued `token`. The token
+    /// is the authority and names the branch: it is issued when a
+    /// delegating turn starts and revoked when it ends. Works in the
+    /// process that runs the turn and, through its broker, in any other.
+    /// Fails with [`Error::Denied`] for any other token.
+    pub fn as_branch(&self, token: &str) -> Result<Delegate, Error> {
+        delegation::as_branch(self, token)
+    }
+
     fn store(&self) -> state::Store {
-        state::Store::new(&self.root)
+        self.store.clone()
     }
 }
 
@@ -188,6 +317,151 @@ pub struct TaskOptions {
     /// driver still appends its protocol arguments. Stored with the branch
     /// for later sends and forks.
     pub command: Option<Vec<String>>,
+    /// Let the harness create and coordinate child branches within this
+    /// envelope, through Branchyard's MCP tools. Stored with the branch; a
+    /// send without one keeps the branch's. A delegated child's envelope
+    /// is fixed by its parent and not changed here.
+    pub delegation: Option<Envelope>,
+    /// The `by` executable a delegating harness gets: its directory goes
+    /// first on the harness's `PATH`, its path in [`ENV_BY`], and `by mcp`
+    /// is the harness's MCP server. Defaults to the running executable when
+    /// it is `by`, else `by` beside it, else on `PATH`. Without one, the
+    /// harness gets only the MCP server and the Python module cannot work.
+    /// Children use their parent's.
+    pub delegation_cli: Option<PathBuf>,
+    /// The command that starts Branchyard's MCP server, when it is not
+    /// `by mcp`: for example `["/opt/branchyard/bin/branchyard-mcp"]`. The
+    /// engine appends `--root <root> --branch <name>` and passes the token
+    /// in [`ENV_TOKEN`]. Children use their parent's.
+    pub delegation_server: Option<Vec<String>>,
+    /// Run a profile whose driver cannot route tool permission requests
+    /// to Branchyard, such as the Antigravity, Pi and Amp profiles. Its
+    /// tools then run under the harness's own configuration, and
+    /// [`TaskOptions::policy`] never sees them. Off by default: such a
+    /// profile is refused, for every run, send, fork and delegated spawn.
+    pub unapproved_tools: bool,
+    /// Where the harness runs. `None` runs a new branch as a local process
+    /// and keeps a branch's own provider for its sends and forks. Stored
+    /// with the branch.
+    pub provider: Option<Provider>,
+}
+
+/// Where a branch's harness runs.
+///
+/// Serialized as an object tagged by `kind`, such as `{"kind": "local"}` or
+/// `{"kind": "microsandbox", "image": "...", ...}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+// One per branch, built once per command: the size does not matter, and
+// boxing would change how every caller constructs a provider.
+#[allow(clippy::large_enum_variant)]
+pub enum Provider {
+    /// A local process as your user; no isolation. The default.
+    Local,
+    /// A Microsandbox microVM per turn, booted from an image that has the
+    /// harness installed. Needs a build with the `microsandbox` feature and
+    /// a Linux host with KVM.
+    Microsandbox(SandboxOptions),
+    /// An Agent Substrate actor per turn, from a template that runs the
+    /// Branchyard bridge and has the harness installed. Unqualified: see
+    /// `docs/substrate.md`.
+    Substrate(SubstrateOptions),
+}
+
+/// A sandboxed harness's image, limits and credentials.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SandboxOptions {
+    /// OCI image reference. The harness executable must be installed in it
+    /// and on its `PATH`, or named by an absolute guest path in
+    /// [`TaskOptions::command`].
+    pub image: String,
+    pub cpus: Option<u8>,
+    pub memory_mib: Option<u32>,
+    /// Variables copied by name from this process into the sandbox, such as
+    /// `ANTHROPIC_API_KEY`. Nothing else is: not your login, not your
+    /// `HOME`. Names are stored with the branch; values are not.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+}
+
+/// Where an Agent Substrate cluster is and how a harness runs in it.
+///
+/// Each turn creates an actor from [`SubstrateOptions::template`], copies the
+/// worktree into it at [`SubstrateOptions::workdir`] and the branch's private
+/// home to [`SubstrateOptions::home`], runs the harness there through the
+/// bridge, copies both back and deletes the actor. See `docs/substrate.md`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubstrateOptions {
+    /// The `Control` API, as `https://host:port`, or `http://host:port` on
+    /// loopback or with [`SubstrateOptions::insecure`].
+    pub endpoint: String,
+    /// The router URL of an actor's bridge, with `{atespace}` and `{actor}`
+    /// in place of the names: `https://` or `wss://`, or `http://` or
+    /// `ws://` on loopback or with [`SubstrateOptions::insecure`].
+    pub router: String,
+    /// The atespace actors are created in. Empty means `default`.
+    #[serde(default)]
+    pub atespace: String,
+    /// An actor template that runs `branchyard-bridge` with the public half
+    /// of [`SubstrateOptions::key`], with git and the harness installed.
+    pub template: String,
+    /// The host's bridge signing key, from `branchyard-bridge keygen`. The
+    /// path is stored with the branch; the key is not.
+    pub key: PathBuf,
+    /// Where the worktree is placed in the actor. Empty means `/workspace`.
+    #[serde(default)]
+    pub workdir: String,
+    /// The harness's `HOME` in the actor. Empty means `/branchyard/home`.
+    #[serde(default)]
+    pub home: String,
+    /// Variables copied by name from this process into the actor, such as
+    /// `ANTHROPIC_API_KEY`. Names are stored with the branch; values are
+    /// not.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+    /// PEM certificate authorities for a TLS `Control` API, and for the
+    /// router unless [`SubstrateOptions::router_ca`] is set. Unset trusts
+    /// the public roots bundled at build time.
+    #[serde(default)]
+    pub ca: Option<PathBuf>,
+    /// A PEM client certificate and key for the `Control` API (mutual TLS).
+    #[serde(default)]
+    pub client_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub client_key: Option<PathBuf>,
+    /// PEM certificate authorities for a TLS router.
+    #[serde(default)]
+    pub router_ca: Option<PathBuf>,
+    /// Allow a `Control` endpoint or router in the clear to a host other
+    /// than loopback, sending credentials and code unencrypted.
+    #[serde(default)]
+    pub insecure: bool,
+}
+
+impl SubstrateOptions {
+    /// [`SubstrateOptions::atespace`], defaulted.
+    pub fn atespace(&self) -> &str {
+        match self.atespace.is_empty() {
+            true => "default",
+            false => &self.atespace,
+        }
+    }
+
+    /// [`SubstrateOptions::workdir`], defaulted.
+    pub fn workdir(&self) -> &str {
+        match self.workdir.is_empty() {
+            true => placement::WORKSPACE,
+            false => &self.workdir,
+        }
+    }
+
+    /// [`SubstrateOptions::home`], defaulted.
+    pub fn home(&self) -> &str {
+        match self.home.is_empty() {
+            true => placement::HOME,
+            false => &self.home,
+        }
+    }
 }
 
 /// Receives every activity as it is recorded, from any branch's thread.
@@ -246,6 +520,18 @@ impl TaskBuilder {
         self
     }
 
+    /// See [`TaskOptions::unapproved_tools`].
+    pub fn unapproved_tools(mut self, allowed: bool) -> Self {
+        self.options.unapproved_tools = allowed;
+        self
+    }
+
+    /// See [`TaskOptions::provider`].
+    pub fn provider(mut self, provider: Provider) -> Self {
+        self.options.provider = Some(provider);
+        self
+    }
+
     /// See [`TaskOptions::command`].
     pub fn command<I, S>(mut self, argv: I) -> Self
     where
@@ -253,6 +539,13 @@ impl TaskBuilder {
         S: Into<String>,
     {
         self.options.command = Some(argv.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Let the harness delegate within `envelope`; see
+    /// [`TaskOptions::delegation`].
+    pub fn delegate(mut self, envelope: Envelope) -> Self {
+        self.options.delegation = Some(envelope);
         self
     }
 
@@ -331,9 +624,63 @@ impl Branch {
         }
     }
 
+    /// Where this branch's harness runs; `None` is a local process.
+    pub fn provider(&self) -> Result<Option<Provider>, Error> {
+        Ok(self.yard.store().read(&self.info.name)?.provider)
+    }
+
     /// Recorded activity, oldest first.
     pub fn events(&self) -> Result<Vec<RecordedEvent>, Error> {
         record::read(&self.yard.store(), &self.info.name)
+    }
+
+    /// Up to `limit` recorded events after the first `cursor`, oldest
+    /// first. Events are numbered from 1 in each branch; pass the page's
+    /// `next_cursor` back to continue.
+    pub fn events_since(&self, cursor: u64, limit: usize) -> Result<Page, Error> {
+        record::since(&self.yard.store(), &self.info.name, cursor, limit)
+    }
+
+    /// [`Branch::events_since`], waiting up to `timeout` for an event when
+    /// there is none yet.
+    pub fn wait_for_events(
+        &self,
+        cursor: u64,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Page, Error> {
+        record::wait(&self.yard.store(), &self.info.name, cursor, limit, timeout)
+    }
+
+    /// Act as this branch with your own authority: the same operations its
+    /// harness gets, bounded by the envelope it was given, with no token.
+    /// A branch without delegation can still inspect itself but cannot
+    /// spawn. `options` supplies the policy, observer and tools for its
+    /// children's turns; their limits come from the envelope and from
+    /// `options.budget`, which bounds this branch.
+    pub fn delegate(&self, options: TaskOptions) -> Result<Delegate, Error> {
+        delegation::trusted(&self.yard, &self.info.name, options)
+    }
+
+    /// Every branch this one delegated to, directly or through its
+    /// children, oldest first.
+    pub fn descendants(&self) -> Result<Vec<BranchInfo>, Error> {
+        delegation::descendants(&self.yard.store(), &self.info.name)
+    }
+
+    /// Ask this branch's running turn, and every running turn delegated
+    /// below it, to stop; see [`Yard::cancel`].
+    pub fn cancel(&self) -> Result<Vec<String>, Error> {
+        self.yard.cancel(&self.info.name)
+    }
+
+    /// Wait until no descendant of this branch is running a turn, then
+    /// return the descendants' records. Descendants on threads of this
+    /// process are joined; one another process drives is waited for through
+    /// its durable status, and one whose engine stopped is recovered first,
+    /// as [`Yard::recover`] would.
+    pub fn wait_subtree(&self) -> Result<Vec<BranchInfo>, Error> {
+        delegation::wait_subtree(&self.yard, &self.info.name)
     }
 }
 
@@ -349,8 +696,16 @@ pub struct BranchInfo {
     pub profile: String,
     /// Native harness session, once known.
     pub session: Option<String>,
-    /// Branch this one was forked from.
+    /// Branch this one was forked from, or that delegated it.
     pub parent: Option<String>,
+    /// Branches this one delegated to, oldest first. Forks are not
+    /// children.
+    #[serde(default)]
+    pub children: Vec<String>,
+    /// Delegation depth: 0 for a branch you started, one more than its
+    /// parent's for a delegated child.
+    #[serde(default)]
+    pub depth: u32,
     /// The commit the branch started from.
     pub base: String,
     pub candidate: Option<CandidateInfo>,
@@ -446,6 +801,20 @@ enum Fallback {
 pub struct Rule {
     pub tool: String,
     pub allow: bool,
+    /// When set, the rule also requires the request to be a shell command
+    /// that runs exactly this `by` (or `by` by name) with a delegation
+    /// subcommand; see [`Policy::allow_delegation_commands`].
+    pub delegation_by: Option<PathBuf>,
+}
+
+impl Rule {
+    pub(crate) fn deny(tool: impl Into<String>) -> Rule {
+        Rule {
+            tool: tool.into(),
+            allow: false,
+            delegation_by: None,
+        }
+    }
 }
 
 impl Default for Policy {
@@ -484,14 +853,33 @@ impl Policy {
         self.rules.push(Rule {
             tool: tool.into(),
             allow: true,
+            delegation_by: None,
         });
         self
     }
 
     pub fn deny(mut self, tool: impl Into<String>) -> Self {
+        self.rules.push(Rule::deny(tool));
+        self
+    }
+
+    /// Allow exactly the harness's shell commands that run `by` with a
+    /// delegation subcommand (`spawn`, `inspect`, `events`, `send`,
+    /// `integrate`, `cancel`, `children`), and nothing else. The command
+    /// must be a single simple command: plain or quoted words, no
+    /// variables, substitutions, globs, redirections, pipes or command
+    /// lists. Its program must be `by_path` itself or `by` by name, which
+    /// a delegating harness finds first on its `PATH`. One `sh -c` or
+    /// `bash -lc` wrapper, as Codex reports commands, is looked through.
+    ///
+    /// Opt-in, and ordered like any rule: an earlier deny rule, such as one
+    /// a delegating parent imposed, still wins. The subcommands act within
+    /// the branch's envelope, so allowing them grants no other authority.
+    pub fn allow_delegation_commands(mut self, by_path: impl Into<PathBuf>) -> Self {
         self.rules.push(Rule {
-            tool: tool.into(),
-            allow: false,
+            tool: "*".into(),
+            allow: true,
+            delegation_by: Some(by_path.into()),
         });
         self
     }
@@ -552,6 +940,26 @@ pub enum Activity {
     /// Something the engine noticed, such as descendants that outlived the
     /// harness.
     Warning(String),
+    /// A delegation operation this branch asked for, recorded on the
+    /// asking branch whether it was carried out or refused.
+    Delegation {
+        /// The tool: `spawn`, `send`, `propose_integration` or `cancel`.
+        tool: String,
+        /// The branch it acted on; for a refused spawn, the requested name
+        /// or empty.
+        branch: String,
+        /// What happened, or why it was refused.
+        outcome: String,
+        refused: bool,
+    },
+    /// Recovery took over a turn whose engine stopped; see
+    /// [`Yard::recover`].
+    Recovered {
+        /// What was known about the turn, and what recovery concluded.
+        reason: String,
+        /// Harness processes that were still running and were killed.
+        killed: Vec<u32>,
+    },
 }
 
 /// Activity from a named branch.
@@ -569,7 +977,45 @@ pub struct RecordedEvent {
     pub activity: Activity,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// A page of one branch's events; see [`Branch::events_since`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Page {
+    pub events: Vec<RecordedEvent>,
+    /// The number of the last event returned, or the cursor asked for when
+    /// none were.
+    pub next_cursor: u64,
+}
+
+/// A page of the repository's feed; see [`Yard::events_since`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeedPage {
+    pub events: Vec<FeedEvent>,
+    /// The position of the last event returned, or the cursor asked for
+    /// when none were.
+    pub next_cursor: u64,
+}
+
+/// One event in the repository's feed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeedEvent {
+    /// Position in the feed, from 1.
+    pub position: u64,
+    pub branch: String,
+    pub event: RecordedEvent,
+}
+
+/// A branch [`Yard::recover`] took over.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Recovery {
+    pub branch: String,
+    /// The status recovery settled on.
+    pub status: BranchStatus,
+    pub reason: String,
+    /// Harness processes that were killed.
+    pub killed: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Merged {
     pub branch: String,
     pub target: String,
@@ -578,7 +1024,7 @@ pub struct Merged {
 }
 
 /// Known harness profile and local availability.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub harness: String,
     pub profile: String,
@@ -637,6 +1083,19 @@ pub enum Error {
     },
     /// The recorded candidate is not a valid commit descending from its base.
     InvalidCandidate(String),
+    /// Refused by a delegation envelope or authority check.
+    Denied(String),
+    /// The branch is running a turn, and the operation needs it idle.
+    Running(String),
+    /// This engine lost the branch's lease to another, which recovered or
+    /// took over the branch; its writes are refused.
+    Fenced(String),
+    /// An error the engine running a delegating turn returned through its
+    /// broker, with the [`Error::kind`] it had there.
+    Remote {
+        kind: String,
+        message: String,
+    },
     Git(String),
     Harness(String),
     Io(std::io::Error),
@@ -687,10 +1146,48 @@ impl fmt::Display for Error {
                 write!(f, "the candidate is already contained in {target}")
             }
             Error::InvalidCandidate(message) => write!(f, "invalid candidate: {message}"),
+            Error::Denied(why) => write!(f, "denied: {why}"),
+            Error::Running(name) => write!(f, "branch {name} is running a turn"),
+            Error::Fenced(why) => write!(f, "fenced: {why}"),
+            Error::Remote { message, .. } => f.write_str(message),
             Error::Git(message) => write!(f, "git: {message}"),
             Error::Harness(message) => write!(f, "harness: {message}"),
             Error::Io(error) => write!(f, "{error}"),
             Error::State(message) => write!(f, "state: {message}"),
+        }
+    }
+}
+
+impl Error {
+    /// A stable name for the error's variant, as `by --json` and the broker
+    /// report it: `denied`, `running`, `unknown_branch`, `no_candidate`,
+    /// `conflict`, `check_failed`, `target_moved`, `unsupported`, and so on.
+    pub fn kind(&self) -> &str {
+        match self {
+            Error::NotARepository(_) => "not_a_repository",
+            Error::UnknownBranch(_) => "unknown_branch",
+            Error::BranchExists(_) => "branch_exists",
+            Error::InvalidName { .. } => "invalid_name",
+            Error::UnknownHarness(_) => "unknown_harness",
+            Error::HarnessUnavailable { .. } => "harness_unavailable",
+            Error::Unsupported(_) => "unsupported",
+            Error::NoCandidate(_) => "no_candidate",
+            Error::TargetMoved { .. } => "target_moved",
+            Error::Conflict { .. } => "conflict",
+            Error::CheckFailed { .. } => "check_failed",
+            Error::CheckTimedOut { .. } => "check_timed_out",
+            Error::CheckNotStarted(_) => "check_not_started",
+            Error::DirtyTarget(_) => "dirty_target",
+            Error::AlreadyMerged { .. } => "already_merged",
+            Error::InvalidCandidate(_) => "invalid_candidate",
+            Error::Denied(_) => "denied",
+            Error::Running(_) => "running",
+            Error::Fenced(_) => "fenced",
+            Error::Remote { kind, .. } => kind,
+            Error::Git(_) => "git",
+            Error::Harness(_) => "harness",
+            Error::Io(_) => "io",
+            Error::State(_) => "state",
         }
     }
 }

@@ -1,6 +1,7 @@
-//! Machine-readable output for `--json`. The shapes are spelled out here
-//! rather than taken from the SDK's serde forms: they are the CLI's
-//! contract and must not change when the SDK's do.
+//! Machine-readable output for `--json`. Branches, statuses, candidates
+//! and harness profiles use the SDK's serde forms, the same values the
+//! server returns. A recorded event's shape is spelled out here: it
+//! flattens the activity, unlike the SDK's form, and is the CLI's contract.
 
 use branchyard::{
     Activity, BranchInfo, BranchStatus, CandidateInfo, DecisionSource, Event, HarnessInfo,
@@ -8,58 +9,27 @@ use branchyard::{
 };
 use serde_json::{json, Value};
 
+/// The SDK's own serde form, which is the CLI's contract for these types:
+/// a branch, its status and candidate, and a harness profile print the same
+/// JSON from `by`, `by --remote` and the server.
+fn serde(value: &impl serde::Serialize) -> Value {
+    serde_json::to_value(value).expect("SDK values serialize")
+}
+
 pub fn status(status: &BranchStatus) -> Value {
-    match status {
-        BranchStatus::Running => json!({ "state": "running" }),
-        BranchStatus::Ready => json!({ "state": "ready" }),
-        BranchStatus::NoChanges => json!({ "state": "no_changes" }),
-        BranchStatus::Interrupted => json!({ "state": "interrupted" }),
-        BranchStatus::BudgetExceeded { limit } => {
-            json!({ "state": "budget_exceeded", "limit": limit })
-        }
-        BranchStatus::Failed { reason } => json!({ "state": "failed", "reason": reason }),
-        BranchStatus::Merged { target, commit } => {
-            json!({ "state": "merged", "target": target, "commit": commit })
-        }
-    }
+    serde(status)
 }
 
 fn candidate(c: &CandidateInfo) -> Value {
-    json!({
-        "commit": c.commit,
-        "files_changed": c.files_changed,
-        "insertions": c.insertions,
-        "deletions": c.deletions,
-    })
+    serde(c)
 }
 
 pub fn branch(info: &BranchInfo) -> Value {
-    json!({
-        "name": info.name,
-        "git_branch": info.git_branch,
-        "worktree": info.worktree.display().to_string(),
-        "prompt": info.prompt,
-        "harness": info.harness,
-        "profile": info.profile,
-        "session": info.session,
-        "parent": info.parent,
-        "base": info.base,
-        "candidate": info.candidate.as_ref().map(candidate),
-        "status": status(&info.status),
-        "turns": info.turns,
-        "cost_usd": info.cost_usd,
-        "created_at": info.created_at,
-    })
+    serde(info)
 }
 
 pub fn harness(info: &HarnessInfo) -> Value {
-    json!({
-        "harness": info.harness,
-        "profile": info.profile,
-        "default": info.default,
-        "available": info.available,
-        "qualification": info.qualification,
-    })
+    serde(info)
 }
 
 fn outcome(outcome: &TurnOutcome) -> Value {
@@ -166,6 +136,23 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
         Activity::Snapshot(c) => json!({ "activity": "snapshot", "candidate": candidate(c) }),
         Activity::Status(s) => json!({ "activity": "status", "status": status(s) }),
         Activity::Warning(message) => json!({ "activity": "warning", "message": message }),
+        Activity::Delegation {
+            tool,
+            branch,
+            outcome,
+            refused,
+        } => json!({
+            "activity": "delegation",
+            "tool": tool,
+            "branch": branch,
+            "outcome": outcome,
+            "refused": refused,
+        }),
+        Activity::Recovered { reason, killed } => json!({
+            "activity": "recovered",
+            "reason": reason,
+            "killed": killed,
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value
@@ -195,6 +182,8 @@ mod tests {
             profile: "codex-app-server".into(),
             session: Some("s".into()),
             parent: None,
+            children: vec!["kid".into()],
+            depth: 0,
             base: "base".into(),
             candidate: Some(CandidateInfo {
                 commit: "c".into(),
@@ -213,6 +202,64 @@ mod tests {
         assert_eq!(value["parent"], Value::Null);
         assert_eq!(value["cost_usd"], Value::Null);
         assert_eq!(value["worktree"], "/w");
+        assert_eq!(value["children"], json!(["kid"]));
+        assert_eq!(value["depth"], 0);
+        // The order `by --json` has always printed.
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "name",
+                "git_branch",
+                "worktree",
+                "prompt",
+                "harness",
+                "profile",
+                "session",
+                "parent",
+                "children",
+                "depth",
+                "base",
+                "candidate",
+                "status",
+                "turns",
+                "cost_usd",
+                "created_at"
+            ]
+        );
+        let harness = harness(&HarnessInfo {
+            harness: "codex".into(),
+            profile: "codex-app-server".into(),
+            default: true,
+            available: false,
+            qualification: None,
+        });
+        assert_eq!(
+            harness,
+            json!({"harness": "codex", "profile": "codex-app-server", "default": true,
+                   "available": false, "qualification": null})
+        );
+        let keys: Vec<&str> = harness
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "harness",
+                "profile",
+                "default",
+                "available",
+                "qualification"
+            ]
+        );
     }
 
     #[test]

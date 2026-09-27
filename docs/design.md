@@ -103,7 +103,7 @@ Provide a fake backend implementing the public contract for deterministic tests.
 
 Microsandbox documents Rust APIs, OCI support and snapshot/branch operations; its repository labels the software beta. Its advertised sub-100 ms boot figure is an M1 guest-boot measurement, not evidence of our Linux server latency. Select it as the implementation to qualify, pin a tested SDK/runtime pair, and use conformance results to decide which capabilities ship. [Microsandbox repository](https://github.com/superradcompany/microsandbox)
 
-[Agent Substrate](substrate.md) is a second provider candidate for operators who already run Kubernetes. It suspends idle sandboxes to object storage and resumes them onto warm workers, which suits trees of mostly waiting harnesses. It has no exec API, so it cannot satisfy M2's independent-pipes gate as written; a Substrate profile reaches its harness through routed ingress. It stays optional: Kubernetes remains outside the default per-spawn path (§4).
+[Agent Substrate](substrate.md) is a second provider candidate for operators who already run Kubernetes. It suspends idle sandboxes to object storage and resumes them onto warm workers, which suits trees of mostly waiting harnesses. It has no exec API; Branchyard's bridge, run as the actor's entry point, provides exec with independent pipes over routed ingress, and code crosses as git bundles because actors have no host mounts. That path is unqualified. It stays optional: Kubernetes remains outside the default per-spawn path (§4).
 
 The supporting primitives already exist: [Tokio synchronization](https://docs.rs/tokio/latest/tokio/sync/index.html), [Tower limits](https://docs.rs/tower/latest/tower/limit/index.html), [SQLx](https://docs.rs/sqlx/latest/sqlx/), [PGMQ](https://github.com/pgmq/pgmq), [OpenDAL](https://github.com/apache/opendal), [Cedar](https://github.com/cedar-policy/cedar), [Tonic](https://docs.rs/tonic/latest/tonic/), and [BLAKE3](https://github.com/BLAKE3-team/BLAKE3).
 
@@ -292,6 +292,8 @@ Process short control steps through the queue. Do not hold a message invisibly f
 For low dispatch latency, send PostgreSQL notification hints after enqueue and retain bounded polling as the recovery path. Notifications are not the durable source. Use a bounded number of queue consumers and database connections, never one connection per sandbox or subscriber.
 
 The server owns domain state transitions; this is not a general workflow engine. There is no replay of arbitrary user code or invented exactly-once process execution.
+
+Local mode implements this model today on an embedded SQLite store: leases with fencing generations, journaled steps, durable cancel requests and deadlines, and startup reconciliation that never replays a model turn. [Durability](durability.md) describes it and maps it onto PostgreSQL.
 
 ## 9. Concurrency and backpressure
 

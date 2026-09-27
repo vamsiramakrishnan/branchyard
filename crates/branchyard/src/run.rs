@@ -8,11 +8,16 @@ use std::path::PathBuf;
 use branchyard_harness::profiles::{self, Profile};
 use branchyard_harness::SessionMode;
 use branchyard_workspace::Commit;
+use serde_json::json;
 
+use crate::delegation::Grant;
 use crate::engine::{self, Turn};
-use crate::state::{now_ms, Record};
+use crate::placement;
+use crate::recover;
+use crate::state::{now_ms, Lease, Record, Taken};
 use crate::{
-    git, harness, names, Branch, BranchInfo, BranchStatus, Error, NativeSession, TaskOptions, Yard,
+    git, harness, names, Branch, BranchInfo, BranchStatus, Error, NativeSession, Provider,
+    TaskOptions, Yard,
 };
 
 pub(crate) fn planned_names(
@@ -31,19 +36,30 @@ pub(crate) fn planned_names(
 }
 
 /// A resolved profile and the command that will launch it.
-struct Launch {
-    profile: &'static Profile,
-    command: Vec<String>,
+pub(crate) struct Launch {
+    pub profile: &'static Profile,
+    pub command: Vec<String>,
 }
 
-fn launch(id: Option<&str>, command: Option<&[String]>) -> Result<Launch, Error> {
+/// The executable is looked for on this host only when the harness runs
+/// here; a sandbox's image must provide it.
+pub(crate) fn launch(
+    id: Option<&str>,
+    command: Option<&[String]>,
+    provider: Option<&Provider>,
+    unapproved_tools: bool,
+) -> Result<Launch, Error> {
     let profile = harness::select(id)?;
+    harness::check_approvals(profile, unapproved_tools)?;
     let command = harness::command(profile, command);
-    harness::check_available(id.unwrap_or(profile.harness), &command)?;
+    placement::check(provider)?;
+    if !placement::sandboxed(provider) {
+        harness::check_available(id.unwrap_or(profile.harness), &command)?;
+    }
     Ok(Launch { profile, command })
 }
 
-fn resolve_base(yard: &Yard, rev: Option<&str>) -> Result<String, Error> {
+pub(crate) fn resolve_base(yard: &Yard, rev: Option<&str>) -> Result<String, Error> {
     let rev = rev.unwrap_or("HEAD");
     yard.repo
         .resolve(rev)
@@ -52,21 +68,28 @@ fn resolve_base(yard: &Yard, rev: Option<&str>) -> Result<String, Error> {
 }
 
 /// What a new branch starts from.
-struct NewBranch<'a> {
-    name: &'a str,
-    prompt: &'a str,
-    profile: &'static Profile,
-    base: String,
-    parent: Option<String>,
-    check: Option<Vec<String>>,
-    command: Option<Vec<String>>,
-    home: Option<PathBuf>,
-    cost_baseline: Option<f64>,
+pub(crate) struct NewBranch<'a> {
+    pub name: &'a str,
+    pub prompt: &'a str,
+    pub profile: &'static Profile,
+    pub base: String,
+    pub parent: Option<String>,
+    pub check: Option<Vec<String>>,
+    pub command: Option<Vec<String>>,
+    pub home: Option<PathBuf>,
+    pub cost_baseline: Option<f64>,
+    pub provider: Option<Provider>,
+    pub grant: Option<Grant>,
+    pub depth: u32,
 }
 
-/// Write the record for a reserved name and create its worktree. A
-/// worktree that cannot be created leaves the branch `Failed`.
-fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
+/// The journaled step that creates a branch's worktree.
+const STEP_CREATE: &str = "create";
+
+/// Write the record for a reserved name, take its lease for the first
+/// turn, and create its worktree as a journaled step. A worktree that
+/// cannot be created leaves the branch `Failed`.
+pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<(Record, Lease), Error> {
     let store = yard.store();
     let branch = names::validate(new.name)?;
     let created_ms = now_ms();
@@ -80,6 +103,8 @@ fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
             profile: new.profile.id.to_owned(),
             session: None,
             parent: new.parent,
+            children: Vec::new(),
+            depth: new.depth,
             base: new.base.clone(),
             candidate: None,
             status: BranchStatus::Running,
@@ -90,35 +115,91 @@ fn create(yard: &Yard, new: NewBranch<'_>) -> Result<Record, Error> {
         created_ms,
         check: new.check,
         command: new.command,
-        home: new.home,
+        home: new
+            .home
+            .or_else(|| placement::private_home(new.provider.as_ref(), &store, new.name)),
         cost_baseline: new.cost_baseline,
+        provider: new.provider,
+        grant: new.grant,
     };
-    let created = {
-        let _lock = git::lock();
-        yard.repo
-            .create_branch(&branch, &Commit(new.base), &record.info.worktree)
+    let lease = match store.acquire(&record)? {
+        Taken::Granted(lease) => lease,
+        Taken::Stale => return Err(Error::Running(new.name.to_owned())),
     };
-    match created {
-        Ok(workspace) => record.info.worktree = workspace.path,
+    let fence = lease.fence().clone();
+    let settled = (|| {
+        let intent = json!({ "base": new.base, "worktree": record.info.worktree });
+        store
+            .backend()
+            .begin_step(&fence, fence.turn, STEP_CREATE, &intent)?;
+        let created = {
+            let _lock = git::lock();
+            yard.repo
+                .create_branch(&branch, &Commit(new.base), &record.info.worktree)
+        };
+        let outcome = match created {
+            Ok(workspace) => {
+                record.info.worktree = workspace.path;
+                json!({ "worktree": record.info.worktree })
+            }
+            Err(error) => {
+                let reason = format!("could not create the worktree: {error}");
+                record.info.status = BranchStatus::Failed {
+                    reason: reason.clone(),
+                };
+                json!({ "error": reason })
+            }
+        };
+        if let Some(home) = &record.home {
+            std::fs::create_dir_all(home)?;
+        }
+        store.write_fenced(&record, &fence)?;
+        store
+            .backend()
+            .finish_step(&fence, fence.turn, STEP_CREATE, &outcome)
+    })();
+    match settled {
+        Ok(()) => Ok((record, lease)),
         Err(error) => {
             record.info.status = BranchStatus::Failed {
-                reason: format!("could not create the worktree: {error}"),
-            }
+                reason: format!("could not create the branch: {error}"),
+            };
+            let _ = lease.finish(Some(&record), None);
+            Err(error)
         }
     }
-    if let Some(home) = &record.home {
-        std::fs::create_dir_all(home)?;
-    }
-    store.write(&record)?;
-    Ok(record)
 }
 
-fn isolated_home(yard: &Yard, options: &TaskOptions, name: &str) -> Option<PathBuf> {
+/// Settle a branch that was created but whose turn will not run.
+pub(crate) fn abandon(lease: Lease, mut record: Record, why: &Error) {
+    record.info.status = BranchStatus::Failed {
+        reason: format!("its turn did not start: {why}"),
+    };
+    let _ = lease.finish(Some(&record), None);
+}
+
+pub(crate) fn isolated_home(yard: &Yard, options: &TaskOptions, name: &str) -> Option<PathBuf> {
     options.isolated.then(|| yard.store().home(name))
 }
 
+/// The grant for a branch the caller starts: the envelope, with nothing
+/// imposed by a parent. Checks that the MCP server can be found first.
+fn root_grant(options: &TaskOptions) -> Result<Option<Grant>, Error> {
+    let Some(envelope) = &options.delegation else {
+        return Ok(None);
+    };
+    crate::projection::tools(options)?;
+    Ok(Some(Grant::root(envelope.clone())))
+}
+
 pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Branch, Error> {
-    let launch = launch(options.harness.as_deref(), options.command.as_deref())?;
+    let launch = launch(
+        options.harness.as_deref(),
+        options.command.as_deref(),
+        options.provider.as_ref(),
+        options.unapproved_tools,
+    )?;
+    let grant = root_grant(options)?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let name = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
@@ -134,19 +215,26 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             command: options.command.clone(),
             home: isolated_home(yard, options, &name),
             cost_baseline: None,
+            provider: options.provider.clone(),
+            grant,
+            depth: 0,
         },
     );
-    let record = record.inspect_err(|_| store.release(&name))?;
-    engine::execute(Turn {
-        yard,
-        record,
-        profile: launch.profile,
-        command: launch.command,
-        mode: SessionMode::Fresh,
-        prompt,
-        options,
-        fork_source: None,
-    })
+    let (record, lease) = record.inspect_err(|_| store.release(&name))?;
+    engine::execute(
+        Turn {
+            yard,
+            record,
+            profile: launch.profile,
+            command: launch.command,
+            mode: SessionMode::Fresh,
+            prompt,
+            options,
+            fork_source: None,
+            note: None,
+        },
+        lease,
+    )
 }
 
 pub(crate) fn run_on(
@@ -160,8 +248,16 @@ pub(crate) fn run_on(
     }
     let launches = harnesses
         .iter()
-        .map(|id| launch(Some(id), options.command.as_deref()))
+        .map(|id| {
+            launch(
+                Some(id),
+                options.command.as_deref(),
+                options.provider.as_ref(),
+                options.unapproved_tools,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
+    let grant = root_grant(options)?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let reserved = names::reserve(
@@ -185,22 +281,32 @@ pub(crate) fn run_on(
                 command: options.command.clone(),
                 home: isolated_home(yard, options, name),
                 cost_baseline: None,
+                provider: options.provider.clone(),
+                grant: grant.clone(),
+                depth: 0,
             },
         );
         match record {
-            Ok(record) => turns.push(Turn {
-                yard,
-                record,
-                profile: launch.profile,
-                command: launch.command,
-                mode: SessionMode::Fresh,
-                prompt,
-                options,
-                fork_source: None,
-            }),
+            Ok((record, lease)) => turns.push((
+                Turn {
+                    yard,
+                    record,
+                    profile: launch.profile,
+                    command: launch.command,
+                    mode: SessionMode::Fresh,
+                    prompt,
+                    options,
+                    fork_source: None,
+                    note: None,
+                },
+                lease,
+            )),
             Err(error) => {
                 for name in &reserved[index..] {
                     store.release(name);
+                }
+                for (turn, lease) in turns {
+                    abandon(lease, turn.record, &error);
                 }
                 return Err(error);
             }
@@ -209,7 +315,7 @@ pub(crate) fn run_on(
     let results: Vec<Result<Branch, Error>> = std::thread::scope(|scope| {
         let handles: Vec<_> = turns
             .into_iter()
-            .map(|turn| scope.spawn(move || engine::execute(turn)))
+            .map(|(turn, lease)| scope.spawn(move || engine::execute(turn, lease)))
             .collect();
         handles
             .into_iter()
@@ -228,8 +334,55 @@ pub(crate) fn send(
     prompt: &str,
     options: &TaskOptions,
 ) -> Result<Branch, Error> {
+    let prepared = prepare_send(yard, name, options, false)?;
+    engine::execute(
+        Turn {
+            yard,
+            record: prepared.record,
+            profile: prepared.profile,
+            command: prepared.command,
+            mode: prepared.mode,
+            prompt,
+            options,
+            fork_source: None,
+            note: prepared.note,
+        },
+        prepared.lease,
+    )
+}
+
+/// A send checked and recorded as running under its lease, ready to
+/// execute.
+pub(crate) struct Prepared {
+    pub record: Record,
+    pub lease: Lease,
+    pub profile: &'static Profile,
+    pub command: Vec<String>,
+    pub mode: SessionMode,
+    /// Recorded as a warning when the turn starts.
+    pub note: Option<String>,
+}
+
+/// Check that `name` can continue its session, and mark it running under
+/// a new lease. Refused while an engine runs a turn on it; a turn left by
+/// an engine that stopped is recovered first. `idle` also refuses a branch
+/// whose status says it is running a turn.
+pub(crate) fn prepare_send(
+    yard: &Yard,
+    name: &str,
+    options: &TaskOptions,
+    idle: bool,
+) -> Result<Prepared, Error> {
     let store = yard.store();
+    recover::stale(yard, name)?;
     let mut record = store.read(name)?;
+    // What is still held after recovery belongs to a live engine.
+    if store.backend().leases()?.iter().any(|l| l.branch == name) {
+        return Err(Error::Running(name.to_owned()));
+    }
+    if idle && record.info.status == BranchStatus::Running {
+        return Err(Error::Running(name.to_owned()));
+    }
     let profile = profiles::by_id(&record.info.profile)
         .ok_or_else(|| Error::UnknownHarness(record.info.profile.clone()))?;
     if let Some(id) = &options.harness {
@@ -240,23 +393,48 @@ pub(crate) fn send(
             )));
         }
     }
-    if !profile.driver().capabilities().resume {
-        return Err(Error::Unsupported(format!(
-            "{} cannot resume a session",
-            profile.id
-        )));
-    }
-    let session = record
-        .info
-        .session
-        .as_deref()
-        .and_then(NativeSession::new)
-        .ok_or_else(|| Error::Unsupported(format!("{name} has no harness session to resume")))?;
+    // A branch none of whose turns submitted a prompt has no conversation
+    // to continue, such as one cancelled before its harness opened a
+    // session: it starts a fresh one, and says so.
+    let (mode, note) = match record.info.session.as_deref().and_then(NativeSession::new) {
+        Some(session) => {
+            if !profile.driver().capabilities().resume {
+                return Err(Error::Unsupported(format!(
+                    "{} cannot resume a session",
+                    profile.id
+                )));
+            }
+            (SessionMode::Resume(session), None)
+        }
+        None if record.info.turns == 0 => (
+            SessionMode::Fresh,
+            Some(format!(
+                "{name} has no harness session to resume, and no earlier turn submitted a \
+                 prompt; this turn starts a fresh session with only this prompt"
+            )),
+        ),
+        None => {
+            return Err(Error::Unsupported(format!(
+                "{name} has no harness session to resume"
+            )))
+        }
+    };
     if options.command.is_some() {
         record.command = options.command.clone();
     }
+    if options.provider.is_some() {
+        record.provider = options.provider.clone();
+    }
+    harness::check_approvals(profile, options.unapproved_tools)?;
     let command = harness::command(profile, record.command.as_deref());
-    harness::check_available(profile.harness, &command)?;
+    placement::check(record.provider.as_ref())?;
+    if !placement::sandboxed(record.provider.as_ref()) {
+        harness::check_available(profile.harness, &command)?;
+    } else if record.home.is_none() {
+        let home = store.home(name);
+        std::fs::create_dir_all(&home)?;
+        record.home = Some(home);
+    }
     if !record.info.worktree.is_dir() {
         return Err(Error::State(format!(
             "{name}'s worktree {} is missing",
@@ -266,17 +444,31 @@ pub(crate) fn send(
     if options.check.is_some() {
         record.check = options.check.clone();
     }
+    // A delegated child keeps the envelope its parent gave it.
+    if let (Some(envelope), 0) = (&options.delegation, record.info.depth) {
+        crate::projection::tools(options)?;
+        record.grant = Some(match record.grant.take() {
+            Some(grant) => Grant {
+                envelope: envelope.clone(),
+                ..grant
+            },
+            None => Grant::root(envelope.clone()),
+        });
+    }
     record.info.status = BranchStatus::Running;
-    store.write(&record)?;
-    engine::execute(Turn {
-        yard,
+    // A cancel is bound to the turn it was asked of, so one meant for an
+    // earlier turn cannot stop this one.
+    let lease = match store.acquire(&record)? {
+        Taken::Granted(lease) => lease,
+        Taken::Stale => return Err(Error::Running(name.to_owned())),
+    };
+    Ok(Prepared {
         record,
+        lease,
         profile,
         command,
-        mode: SessionMode::Resume(session),
-        prompt,
-        options,
-        fork_source: None,
+        mode,
+        note,
     })
 }
 
@@ -330,11 +522,17 @@ pub(crate) fn fork(
         (None, true) => parent.command.clone(),
         (None, false) => None,
     };
+    harness::check_approvals(profile, options.unapproved_tools)?;
     let launch_command = harness::command(profile, command.as_deref());
-    harness::check_available(
-        options.harness.as_deref().unwrap_or(profile.harness),
-        &launch_command,
-    )?;
+    let provider = options.provider.clone().or(parent.provider.clone());
+    placement::check(provider.as_ref())?;
+    if !placement::sandboxed(provider.as_ref()) {
+        harness::check_available(
+            options.harness.as_deref().unwrap_or(profile.harness),
+            &launch_command,
+        )?;
+    }
+    let grant = root_grant(options)?;
     let reserved =
         names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
     // A forked session lives in the parent's home when it ran isolated.
@@ -359,17 +557,25 @@ pub(crate) fn fork(
             command,
             home,
             cost_baseline,
+            provider,
+            grant,
+            depth: 0,
         },
     )
     .inspect_err(|_| store.release(&reserved))?;
-    engine::execute(Turn {
-        yard,
-        record,
-        profile,
-        command: launch_command,
-        mode,
-        prompt,
-        options,
-        fork_source: forking.then(|| parent.info.worktree.clone()),
-    })
+    let (record, lease) = record;
+    engine::execute(
+        Turn {
+            yard,
+            record,
+            profile,
+            command: launch_command,
+            mode,
+            prompt,
+            options,
+            fork_source: forking.then(|| parent.info.worktree.clone()),
+            note: None,
+        },
+        lease,
+    )
 }

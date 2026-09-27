@@ -18,7 +18,7 @@
 //! let transcript = Transcript::load("tests/fixtures/codex-0.157.1-unauthenticated-turn.jsonl");
 //! let mut driver = Codex::new(vec!["codex".into()]);
 //! let opened = driver
-//!     .open(Open { mode: SessionMode::Fresh, cwd: "/workspace".into(), model: None })
+//!     .open(Open::new(SessionMode::Fresh, "/workspace"))
 //!     .unwrap();
 //! let replayed = Replay::new(&transcript)
 //!     .prompt("Say hello.")
@@ -221,6 +221,22 @@ pub fn assert_contract(
     open: Open,
     answer: impl FnMut(&Value) -> Vec<Value>,
 ) {
+    assert_contract_greeted(driver, open, &[], answer);
+}
+
+/// [`assert_contract`] for a harness that speaks first: after the open,
+/// `greeting` (the messages the harness prints unprompted, such as an
+/// `init` line) is fed before the handshake frames are answered.
+///
+/// # Panics
+///
+/// On the first rule the driver breaks.
+pub fn assert_contract_greeted(
+    driver: &mut dyn Driver,
+    open: Open,
+    greeting: &[Value],
+    answer: impl FnMut(&Value) -> Vec<Value>,
+) {
     let opened = driver
         .open(open)
         .unwrap_or_else(|e| panic!("open rejected: {e}"));
@@ -229,7 +245,14 @@ pub fn assert_contract(
         Some(Rejected::NotReady),
         "submitting before the handshake completes must be rejected"
     );
-    let events = handshake(driver, &opened.frames, answer);
+    let mut frames = opened.frames.clone();
+    let mut events = Vec::new();
+    for message in greeting {
+        let output = driver.receive(&line(message));
+        events.extend(output.events);
+        frames.extend(output.frames);
+    }
+    events.extend(handshake(driver, &frames, answer));
     assert!(
         events.contains(&Event::Ready),
         "the handshake did not produce Ready: {events:?}"

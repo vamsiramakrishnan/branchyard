@@ -8,6 +8,16 @@
 //! messages out, and `control_request`/`control_response` frames for the
 //! handshake, interrupts and `can_use_tool` permission prompts.
 //!
+//! MCP servers go in one `--mcp-config` argument as the JSON the Agent SDK
+//! builds from its `mcpServers` option (`{"mcpServers": {name: {"type":
+//! "stdio", command, args, env}}}`). Claude Code adds them to the servers it
+//! already loads; it is not given `--strict-mcp-config`. The argument is
+//! visible to other processes of the same user, environment included.
+//!
+//! Instructions arrive as a plugin (`--plugin-dir`), whose skills Claude Code
+//! 2.1.283 lists in its `initialize` response as `<plugin>:<skill>`, or
+//! else through `--append-system-prompt`. Neither touches the working tree.
+//!
 //! Resume passes `--resume <id>`; fork adds `--fork-session`. The session ID
 //! arrives on `system/init` and is checked: a resume that comes back under a
 //! different ID, or a fork that keeps the parent's, is a protocol violation,
@@ -18,9 +28,9 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use crate::{
-    frame, parse, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open, Opened,
-    Output, PermissionDecision, PermissionKey, PermissionRequest, Rejected, SessionMode, Submitted,
-    TurnOutcome, Turns, Usage, Value,
+    frame, parse, Capabilities, Driver, Event, Frame, Instructions, LaunchSpec, McpServer,
+    NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
+    Rejected, SessionMode, Submitted, TurnOutcome, Turns, Usage, Value,
 };
 
 #[derive(Debug)]
@@ -328,6 +338,29 @@ fn outcome(message: &Value, interrupted: bool) -> TurnOutcome {
     }
 }
 
+/// `--mcp-config` JSON: `{"mcpServers": {<name>: <McpStdioServerConfig>}}`,
+/// the value the Agent SDK passes for its `mcpServers` option.
+fn mcp_config(servers: &[McpServer]) -> String {
+    let servers: serde_json::Map<String, Value> = servers
+        .iter()
+        .map(|server| {
+            let env: serde_json::Map<String, Value> = server
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), json!(value)))
+                .collect();
+            let config = json!({
+                "type": "stdio",
+                "command": server.command,
+                "args": server.args,
+                "env": env,
+            });
+            (server.name.clone(), config)
+        })
+        .collect();
+    json!({ "mcpServers": servers }).to_string()
+}
+
 /// A random version 4 UUID from the standard library's seeded hasher.
 fn uuid_v4() -> String {
     use std::collections::hash_map::RandomState;
@@ -392,6 +425,20 @@ impl Driver for ClaudeCode {
         );
         if let Some(model) = &open.model {
             argv.extend(["--model".into(), model.clone()]);
+        }
+        crate::check_mcp_servers(&open.mcp_servers)?;
+        if !open.mcp_servers.is_empty() {
+            argv.extend(["--mcp-config".into(), mcp_config(&open.mcp_servers)]);
+        }
+        match &open.instructions {
+            Some(Instructions {
+                plugin_dir: Some(dir),
+                ..
+            }) => argv.extend(["--plugin-dir".into(), dir.clone()]),
+            Some(instructions) => {
+                argv.extend(["--append-system-prompt".into(), instructions.text.clone()])
+            }
+            None => {}
         }
         match &open.mode {
             SessionMode::Fresh => {}

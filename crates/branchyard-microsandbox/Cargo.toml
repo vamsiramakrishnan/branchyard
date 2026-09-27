@@ -1,0 +1,20 @@
+[package]
+name = "branchyard-microsandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A Branchyard sandbox provider on the Microsandbox microVM runtime"
+
+[features]
+# The Microsandbox SDK. Off by default: microsandbox 0.7.3 needs Rust 1.94
+# (through sea-orm 2 and sqlx 0.9) and the workspace pins 1.90. See
+# docs/providers.md.
+microsandbox = ["dep:microsandbox", "dep:tokio"]
+
+[dependencies]
+branchyard-sandbox = { path = "../branchyard-sandbox" }
+# The local runtime and the network type surface only: no cloud backend, no
+# build-time runtime download, no keyring.
+microsandbox = { version = "=0.7.3", default-features = false, features = ["local", "net"], optional = true }
+tokio = { version = "1.52", features = ["rt-multi-thread"], optional = true }

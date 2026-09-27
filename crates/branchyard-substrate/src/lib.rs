@@ -1,21 +1,30 @@
 //! Agent Substrate as a Branchyard sandbox provider.
 //!
 //! The gRPC client is generated at build time from Substrate's `ateapi.proto`,
-//! vendored unmodified under `vendor/substrate/`. This crate maps that API onto
-//! the vendor-independent types in `branchyard-sandbox`; no Substrate source is
-//! translated.
+//! vendored unmodified under `vendor/substrate/`. [`Actors`] maps that API's
+//! actor lifecycle; no Substrate source is translated.
 //!
-//! This profile is **unqualified**. It has been exercised only against an
-//! in-process fake of the `Control` service, not against a Substrate cluster.
-//! Substrate has no exec API: a harness in a Substrate actor is reached through
-//! routed network ingress, so profiles that require process pipes are rejected
-//! at admission.
+//! Substrate has no exec API. [`SubstrateProvider`] therefore reaches a
+//! harness through the Branchyard bridge (`branchyard-bridge`), which the
+//! actor template runs ([`template`]) and the router forwards to, with a
+//! per-attempt credential the host signs. An actor has no host mounts, so
+//! code crosses by git bundle and directory tree ([`transfer`]).
+//!
+//! This profile is **unqualified**. It has been exercised only against the
+//! in-process fake in [`fake`] (feature `fake`), not against a Substrate
+//! cluster; see `docs/substrate.md`.
 
+mod actors;
 mod capabilities;
+#[cfg(feature = "fake")]
+pub mod fake;
 mod provider;
+pub mod template;
+pub mod transfer;
 
-pub use capabilities::{capabilities, state, TemplateError};
-pub use provider::{ActorHandle, CheckpointRef, Error, SubstrateProvider};
+pub use actors::{ActorHandle, Actors, CheckpointRef, Error};
+pub use capabilities::{capabilities, runs_bridge, state, TemplateError};
+pub use provider::{Config, Quiesce, SubstrateProvider};
 
 /// Types and client generated from the vendored `ateapi.proto`.
 #[allow(clippy::all, missing_docs)]

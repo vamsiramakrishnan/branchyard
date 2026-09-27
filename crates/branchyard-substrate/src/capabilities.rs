@@ -37,12 +37,16 @@ impl std::error::Error for TemplateError {}
 /// Branching creates a new actor from such a tag. Substrate captures without
 /// the workload's cooperation, so consistency is declared as crash-level.
 ///
+/// Exec is declared only when the template runs the Branchyard bridge (a
+/// container sets [`branchyard_bridge::KEY_ENV`], see [`runs_bridge`]): the
+/// `Control` API itself has no exec or attach call.
+///
 /// Restore to an arbitrary checkpoint is not declared: `RevertActor` only
-/// returns an actor to its latest suspend, which [`SubstrateProvider::revert`]
+/// returns an actor to its latest suspend, which [`Actors::revert`]
 /// exposes under its own name. Pause snapshots are node-local and unnamed, so
 /// they are not offered as checkpoints.
 ///
-/// [`SubstrateProvider::revert`]: crate::SubstrateProvider::revert
+/// [`Actors::revert`]: crate::Actors::revert
 pub fn capabilities(template: &pb::ActorTemplate) -> Result<Capabilities, TemplateError> {
     let config = template
         .snapshot_config
@@ -54,12 +58,24 @@ pub fn capabilities(template: &pb::ActorTemplate) -> Result<Capabilities, Templa
         locality: Locality::Portable,
     };
     Ok(Capabilities {
-        exec: false,
+        exec: runs_bridge(template),
         ingress: true,
         checkpoint: vec![committed],
         restore: Vec::new(),
         branch: vec![committed],
         share: false,
+    })
+}
+
+/// Whether a container of `template` runs the Branchyard bridge, judged by
+/// the verifying key it is given. [`crate::template::bridge_template`] builds
+/// such a template.
+pub fn runs_bridge(template: &pb::ActorTemplate) -> bool {
+    template.containers.iter().any(|container| {
+        container
+            .env
+            .iter()
+            .any(|var| var.name == branchyard_bridge::KEY_ENV && !var.value.is_empty())
     })
 }
 
@@ -156,6 +172,28 @@ mod tests {
             .map(|m| m.operation)
             .collect();
         assert_eq!(operations, vec![Operation::Exec, Operation::Checkpoint]);
+    }
+
+    #[test]
+    fn a_template_that_runs_the_bridge_declares_exec() {
+        let mut bridged = template(pb::SnapshotContentScope::Full);
+        bridged.containers.push(pb::Container {
+            env: vec![pb::EnvVar {
+                name: branchyard_bridge::KEY_ENV.into(),
+                value: "00".repeat(32),
+            }],
+            ..Default::default()
+        });
+        let caps = capabilities(&bridged).unwrap();
+        assert!(caps.exec && caps.ingress);
+        assert!(admit(
+            &Requirements {
+                exec: true,
+                ..Requirements::default()
+            },
+            &caps
+        )
+        .is_ok());
     }
 
     #[test]

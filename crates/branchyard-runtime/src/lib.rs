@@ -1,11 +1,14 @@
-//! Run a harness [`Driver`] against a local harness process.
+//! Run a harness [`Driver`] against a harness process, local or inside a
+//! sandbox.
 //!
 //! [`branchyard_harness`] drivers are sans-IO: they build a launch and frames
 //! and consume the lines the harness prints. A [`Session`] supplies the I/O:
-//! it spawns the launch argument vector without a shell in its own process
-//! group, feeds each stdout line to the driver, writes the frames it produces,
-//! keeps stderr as diagnostics and optionally writes a JSONL transcript of
-//! both directions.
+//! it starts the launch argument vector without a shell through a
+//! [`SandboxProvider`]'s exec ([`Session::start_in`]) or, by default, as a
+//! local process in its own process group ([`Session::start`], through
+//! [`LocalProvider`]). It feeds each stdout line to the driver, writes the
+//! frames it produces, keeps stderr as diagnostics and optionally writes a
+//! JSONL transcript of both directions.
 //!
 //! What it guarantees:
 //!
@@ -16,34 +19,39 @@
 //! - When stdout closes, the driver is told once, so a turn in flight ends
 //!   as [`Event::OutcomeUnknown`]. [`Session::kill`] tells it even if the
 //!   pipe stays open.
-//! - [`Session::close`] and [`Session::kill`] signal the whole process
-//!   group, and `close` names the descendants that outlived the harness.
-//!   Dropping a session without either kills the group too.
+//! - [`Session::close`] and [`Session::kill`] tear down every process the
+//!   exec started ([`Process::teardown`]: the local process group, or the
+//!   provider's equivalent), and `close` names the descendants that
+//!   outlived the harness. Dropping a session without either tears it down
+//!   too.
 //!
 //! What it does not guarantee:
 //!
-//! - Isolation. This is a local process with a scrubbed environment and a
-//!   private `HOME` ([`Environment`]), standing in for `SandboxProvider.exec`.
-//!   Proxy and system variables pass through, and the process sees the host
-//!   filesystem. A descendant that leaves the process group escapes teardown.
+//! - Isolation. [`Session::start`] runs a local process with a scrubbed
+//!   environment and a private `HOME` ([`Environment`]); proxy and system
+//!   variables pass through, and the process sees the host filesystem. A
+//!   descendant that leaves the process group escapes teardown. Under
+//!   [`Session::start_in`], isolation is whatever the provider documents.
 //! - Bounded frames. Lines are not size-limited; the reader applies
 //!   backpressure to the harness through a bounded queue.
-//! - Portability. It is Unix-only: process groups, and `ps` and `kill` on
-//!   `PATH` for naming and signalling the group. On other targets the crate
-//!   is empty.
+//! - Portability. It is Unix-only: the local provider uses process groups,
+//!   and `ps` and `kill` on `PATH` for naming and signalling the group. On
+//!   other targets the crate is empty.
 //!
 //! The `fake-acp-agent` binary in this crate is a test fixture speaking just
 //! enough ACP v1 for the crate's tests; it is not a harness.
 
 #![cfg(unix)]
 
+mod local;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -54,7 +62,10 @@ use branchyard_harness::{
     Capabilities, Driver, Event, Frame, NativeSession, Open, PermissionDecision, PermissionKey,
     PermissionRequest, Rejected, TurnOutcome, Usage,
 };
+use branchyard_sandbox::{ExecSpec, Process, SandboxProvider};
 use serde_json::json;
+
+pub use local::{LocalProcess, LocalProvider};
 
 /// Lines buffered between the stdout reader and the session. When full, the
 /// reader stops reading and the harness blocks on its own writes.
@@ -152,22 +163,32 @@ impl Environment {
         &self.home
     }
 
-    /// Apply this environment to `command`.
-    pub fn apply(&self, command: &mut Command) {
-        for (name, _) in std::env::vars_os() {
-            let Some(name) = name.to_str() else { continue };
-            let upper = name.to_ascii_uppercase();
-            let stripped = self.strip.iter().any(|p| upper.starts_with(p.as_str()));
-            if (stripped && !self.keep.contains(name)) || self.remove.contains(name) {
-                command.env_remove(name);
-            }
-        }
+    /// The complete environment this describes, read from this process's
+    /// environment now. Variables whose names are not UTF-8 are kept as
+    /// inherited; no rule can name them.
+    pub fn resolve(&self) -> BTreeMap<OsString, OsString> {
+        let mut env: BTreeMap<OsString, OsString> = std::env::vars_os()
+            .filter(|(name, _)| {
+                let Some(name) = name.to_str() else {
+                    return true;
+                };
+                let upper = name.to_ascii_uppercase();
+                let stripped = self.strip.iter().any(|p| upper.starts_with(p.as_str()));
+                !((stripped && !self.keep.contains(name)) || self.remove.contains(name))
+            })
+            .collect();
         if !self.inherit_home {
-            command.env("HOME", &self.home);
+            env.insert("HOME".into(), self.home.clone().into_os_string());
         }
         for (name, value) in &self.set {
-            command.env(name, value);
+            env.insert(name.into(), value.into());
         }
+        env
+    }
+
+    /// Replace `command`'s environment with this one.
+    pub fn apply(&self, command: &mut Command) {
+        command.env_clear().envs(self.resolve());
     }
 }
 
@@ -261,8 +282,8 @@ struct Stderr {
 /// A running harness process wired to its driver.
 pub struct Session {
     driver: Box<dyn Driver>,
-    child: Child,
-    stdin: Option<ChildStdin>,
+    process: Box<dyn Process>,
+    stdin: Option<Box<dyn Write + Send>>,
     lines: Receiver<Vec<u8>>,
     stderr: Arc<Stderr>,
     transcript: Option<File>,
@@ -272,14 +293,14 @@ pub struct Session {
     transport_closed: bool,
     session: Option<NativeSession>,
     cost_usd: Option<f64>,
-    /// The process group has been torn down; `Drop` has nothing to do.
+    /// The process has been torn down; `Drop` has nothing to do.
     finished: bool,
 }
 
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
-            .field("pid", &self.child.id())
+            .field("process", &self.process.id())
             .field("session", &self.session)
             .field("events", &self.events.len())
             .field("transport_closed", &self.transport_closed)
@@ -288,14 +309,42 @@ impl fmt::Debug for Session {
 }
 
 impl Session {
-    /// Open the driver, spawn the launch argument vector (no shell) in its own
-    /// process group, and write the open frames. Does not wait for the
-    /// handshake; see [`Session::wait_ready`].
+    /// Open the driver, spawn the launch argument vector (no shell) as a
+    /// local process in its own process group, and write the open frames.
+    /// Does not wait for the handshake; see [`Session::wait_ready`].
     pub fn start(
-        mut driver: Box<dyn Driver>,
+        driver: Box<dyn Driver>,
         open: Open,
         env: &Environment,
         transcript: Option<&Path>,
+    ) -> Result<Session, RuntimeError> {
+        Session::launch(driver, open, env.resolve(), transcript, |spec| {
+            LocalProvider::spawn(spec).map(|p| Box::new(p) as Box<dyn Process>)
+        })
+    }
+
+    /// Like [`Session::start`], but exec the launch inside `sandbox` through
+    /// `provider`, with `env` added to the provider's base environment. The
+    /// driver's launch directory, from [`Open::cwd`], is a sandbox path.
+    pub fn start_in(
+        driver: Box<dyn Driver>,
+        open: Open,
+        provider: &dyn SandboxProvider,
+        sandbox: &str,
+        env: BTreeMap<OsString, OsString>,
+        transcript: Option<&Path>,
+    ) -> Result<Session, RuntimeError> {
+        Session::launch(driver, open, env, transcript, |spec| {
+            provider.exec(sandbox, spec).map_err(io::Error::from)
+        })
+    }
+
+    fn launch(
+        mut driver: Box<dyn Driver>,
+        open: Open,
+        env: BTreeMap<OsString, OsString>,
+        transcript: Option<&Path>,
+        exec: impl FnOnce(&ExecSpec) -> io::Result<Box<dyn Process>>,
     ) -> Result<Session, RuntimeError> {
         let opened = driver.open(open)?;
         let transcript =
@@ -306,30 +355,39 @@ impl Session {
                     context: "transcript",
                     source,
                 })?;
-        let argv = opened.launch.argv;
-        let Some((program, args)) = argv.split_first() else {
+        let spec = ExecSpec {
+            argv: opened.launch.argv,
+            cwd: PathBuf::from(&opened.launch.cwd),
+            env,
+        };
+        if spec.argv.is_empty() {
             return Err(RuntimeError::Spawn {
-                argv,
+                argv: spec.argv,
                 source: io::Error::new(io::ErrorKind::InvalidInput, "empty argument vector"),
             });
+        }
+        let mut process = match exec(&spec) {
+            Ok(process) => process,
+            Err(source) => {
+                return Err(RuntimeError::Spawn {
+                    argv: spec.argv,
+                    source,
+                })
+            }
         };
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .current_dir(&opened.launch.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // Its own process group, so teardown reaches every descendant.
-            .process_group(0);
-        env.apply(&mut command);
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(source) => return Err(RuntimeError::Spawn { argv, source }),
+        let piped = |what: &str| RuntimeError::Io {
+            context: "exec",
+            source: io::Error::other(format!("the provider did not pipe {what}")),
+        };
+        let (Some(stdin), Some(stdout), Some(mut pipe)) = (
+            process.take_stdin(),
+            process.take_stdout(),
+            process.take_stderr(),
+        ) else {
+            return Err(piped("stdin, stdout and stderr"));
         };
 
         let (sender, lines) = mpsc::sync_channel(LINE_QUEUE);
-        let stdout = child.stdout.take().expect("stdout is piped");
         thread::spawn(move || {
             for line in BufReader::new(stdout).split(b'\n') {
                 let Ok(line) = line else { break };
@@ -340,7 +398,6 @@ impl Session {
         });
         let stderr = Arc::new(Stderr::default());
         let sink = stderr.clone();
-        let mut pipe = child.stderr.take().expect("stderr is piped");
         thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             while let Ok(n) = pipe.read(&mut chunk) {
@@ -357,8 +414,8 @@ impl Session {
 
         let mut session = Session {
             driver,
-            stdin: child.stdin.take(),
-            child,
+            stdin: Some(stdin),
+            process,
             lines,
             stderr,
             transcript,
@@ -371,6 +428,12 @@ impl Session {
         };
         session.write(&opened.frames)?;
         Ok(session)
+    }
+
+    /// The provider's identifier for the harness process: its pid for a
+    /// local process, which also leads its own process group.
+    pub fn process_id(&self) -> String {
+        self.process.id()
     }
 
     /// Wait for the handshake: `Ok` on [`Event::Ready`], an error on
@@ -511,8 +574,9 @@ impl Session {
     }
 
     /// Close stdin and wait up to `grace` for the harness to exit, killing it
-    /// if it does not. Then kill what remains of its process group, naming
-    /// it, and let the driver see the transport close.
+    /// if it does not. Then tear down what remains of its process group (or
+    /// the provider's equivalent), naming it, and let the driver see the
+    /// transport close.
     ///
     /// The wait ends when the harness process exits, not when stdout closes,
     /// so a descendant holding the pipe open does not stall it.
@@ -522,13 +586,13 @@ impl Session {
         let deadline = Deadline::after(grace);
         let mut forced = false;
         loop {
-            if self.child.try_wait().map_err(io_error("wait"))?.is_some() {
+            if self.process.try_wait().map_err(io_error("wait"))?.is_some() {
                 break;
             }
             let remaining = deadline.remaining();
             if remaining.is_zero() {
                 forced = true;
-                let _ = self.child.kill();
+                let _ = self.process.kill();
                 break;
             }
             let slice = remaining.min(Duration::from_millis(50));
@@ -540,7 +604,7 @@ impl Session {
                 self.receive_line(slice)?;
             }
         }
-        self.child.wait().map_err(io_error("wait"))?;
+        self.process.wait().map_err(io_error("wait"))?;
         let survivors = self.teardown();
         self.drain();
         Ok(Closed {
@@ -551,14 +615,14 @@ impl Session {
         })
     }
 
-    /// Kill the process group now and return the events the driver produced
-    /// as the transport closed, such as [`Event::OutcomeUnknown`] for a turn
-    /// in flight.
+    /// Tear down the process and its group now and return the events the
+    /// driver produced as the transport closed, such as
+    /// [`Event::OutcomeUnknown`] for a turn in flight.
     pub fn kill(mut self) -> Result<Vec<Event>, RuntimeError> {
         let start = self.events.len();
-        signal_group(self.child.id());
-        let _ = self.child.kill();
-        self.child.wait().map_err(io_error("wait"))?;
+        self.process.teardown();
+        let _ = self.process.kill();
+        self.process.wait().map_err(io_error("wait"))?;
         self.teardown();
         self.drain();
         Ok(self.events[start..].to_vec())
@@ -671,11 +735,9 @@ impl Session {
         stdin.flush().map_err(io_error("flush"))
     }
 
-    /// Name the process group's live members, then kill the group.
+    /// Name the exec's live processes, then kill them all.
     fn teardown(&mut self) -> Vec<String> {
-        let pgid = self.child.id();
-        let survivors = group_members(pgid);
-        signal_group(pgid);
+        let survivors = self.process.teardown();
         self.finished = true;
         survivors
     }
@@ -684,9 +746,9 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         if !self.finished {
-            signal_group(self.child.id());
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            self.process.teardown();
+            let _ = self.process.kill();
+            let _ = self.process.wait();
         }
     }
 }
@@ -703,38 +765,6 @@ fn text(events: &[Event], turn: u64) -> String {
 
 fn io_error(context: &'static str) -> impl Fn(io::Error) -> RuntimeError {
     move |source| RuntimeError::Io { context, source }
-}
-
-/// Command names of the live (non-zombie) members of process group `pgid`.
-/// Empty when `ps` is unavailable.
-fn group_members(pgid: u32) -> Vec<String> {
-    let Ok(listing) = Command::new("ps")
-        .args(["-A", "-o", "pgid=", "-o", "stat=", "-o", "comm="])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return Vec::new();
-    };
-    let pgid = pgid.to_string();
-    String::from_utf8_lossy(&listing.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let (group, stat) = (fields.next()?, fields.next()?);
-            let name = fields.collect::<Vec<_>>().join(" ");
-            (group == pgid && !stat.starts_with('Z') && !name.is_empty()).then_some(name)
-        })
-        .collect()
-}
-
-fn signal_group(pgid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pgid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 /// A deadline that tolerates `Duration::MAX`.

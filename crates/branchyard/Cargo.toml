@@ -6,9 +6,28 @@ license.workspace = true
 publish.workspace = true
 description = "Delegate coding work to agent harnesses on git branches, and merge only validated results"
 
+[features]
+# Run harnesses in Microsandbox microVMs. Needs Rust 1.94 or newer; see
+# docs/providers.md.
+microsandbox = ["branchyard-microsandbox/microsandbox"]
+# Keep a repository's state in PostgreSQL (Yard::open_postgres) as well as
+# SQLite; see docs/durability.md.
+postgres = ["dep:postgres", "dep:tokio"]
+
 [dependencies]
+branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-harness = { path = "../branchyard-harness" }
+branchyard-microsandbox = { path = "../branchyard-microsandbox" }
 branchyard-runtime = { path = "../branchyard-runtime" }
+branchyard-sandbox = { path = "../branchyard-sandbox" }
+branchyard-substrate = { path = "../branchyard-substrate" }
 branchyard-workspace = { path = "../branchyard-workspace" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
+postgres = { version = "0.19", optional = true }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }
+
+[dev-dependencies]
+branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }

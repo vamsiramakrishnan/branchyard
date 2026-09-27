@@ -2,7 +2,7 @@
 
 use branchyard_harness::claude_code::ClaudeCode;
 use branchyard_harness::conformance::{
-    assert_contract, check_frame, Direction, Replay, Transcript,
+    assert_contract_greeted, check_frame, Direction, Replay, Transcript,
 };
 use branchyard_harness::profiles::{Protocol, PROFILES};
 use branchyard_harness::{Driver, Event, Open, PermissionDecision, SessionMode, TurnOutcome};
@@ -13,6 +13,8 @@ fn fresh() -> Open {
         mode: SessionMode::Fresh,
         cwd: "/workspace".into(),
         model: None,
+        mcp_servers: Vec::new(),
+        instructions: None,
     }
 }
 
@@ -29,6 +31,12 @@ fn answer(protocol: Protocol) -> impl Fn(&Value) -> Vec<Value> {
             (Protocol::CodexAppServer, Some("thread/start")) => json!({"thread": {"id": "t1"}}),
             (Protocol::Acp, Some("initialize")) => json!({"protocolVersion": 1}),
             (Protocol::Acp, Some("session/new")) => json!({"sessionId": "s1"}),
+            (Protocol::PiRpc, _) if frame["type"] == "get_state" => {
+                return vec![
+                    json!({"id": frame["id"], "type": "response", "command": "get_state",
+                    "success": true, "data": {"sessionId": "s1"}}),
+                ]
+            }
             _ => return Vec::new(),
         };
         let mut reply = json!({"id": id, "result": result});
@@ -39,11 +47,31 @@ fn answer(protocol: Protocol) -> impl Fn(&Value) -> Vec<Value> {
     }
 }
 
+/// What `protocol`'s harness prints before reading anything.
+fn greeting(protocol: Protocol) -> Vec<Value> {
+    match protocol {
+        Protocol::AntigravityStreamJson => {
+            vec![json!({"event": "init", "conversation_id": "c1", "init": {"cwd": "/workspace"}})]
+        }
+        Protocol::AmpStreamJson => {
+            vec![
+                json!({"type": "system", "subtype": "init", "session_id": "T-1", "cwd": "/workspace"}),
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[test]
 fn every_profile_follows_the_driver_contract() {
     for profile in PROFILES {
         let mut driver = profile.driver();
-        assert_contract(driver.as_mut(), fresh(), answer(profile.protocol));
+        assert_contract_greeted(
+            driver.as_mut(),
+            fresh(),
+            &greeting(profile.protocol),
+            answer(profile.protocol),
+        );
     }
 }
 
@@ -184,4 +212,49 @@ fn replay_rejects_a_recorded_frame_the_driver_never_writes() {
     Replay::new(&transcript)
         .alias("/request_id")
         .run(&mut driver, &opened);
+}
+
+#[test]
+fn drivers_without_a_verified_projection_refuse_servers_and_instructions() {
+    let server = branchyard_harness::McpServer {
+        name: "branchyard".into(),
+        command: "/usr/local/bin/by".into(),
+        args: vec!["mcp".into()],
+        env: Vec::new(),
+    };
+    let instructions = branchyard_harness::Instructions {
+        text: "Delegate with by spawn.".into(),
+        plugin_dir: None,
+    };
+    let unprojected = [
+        Protocol::AntigravityStreamJson,
+        Protocol::PiRpc,
+        Protocol::AmpStreamJson,
+    ];
+    let mut checked = 0;
+    for profile in PROFILES
+        .iter()
+        .filter(|p| unprojected.contains(&p.protocol))
+    {
+        for open in [
+            Open {
+                mcp_servers: vec![server.clone()],
+                ..fresh()
+            },
+            Open {
+                instructions: Some(instructions.clone()),
+                ..fresh()
+            },
+        ] {
+            let refused = profile.driver().open(open).err();
+            assert!(
+                matches!(refused, Some(branchyard_harness::Rejected::Unsupported(_))),
+                "{} must refuse, not drop, what it cannot pass: {refused:?}",
+                profile.id
+            );
+        }
+        profile.driver().open(fresh()).expect("a plain open works");
+        checked += 1;
+    }
+    assert_eq!(checked, 3);
 }

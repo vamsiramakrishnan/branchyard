@@ -7,12 +7,15 @@
 //! exec with stdin/stdout as protocol pipes. Nothing here spawns a process,
 //! touches the host filesystem or holds credentials.
 //!
-//! Three driver families cover the integration matrix's protocol profiles:
+//! Six driver families cover the integration matrix's protocol profiles:
 //!
 //! - [`claude_code::ClaudeCode`]: Claude Code print mode with stream-json
 //!   input and output and permission prompts over stdio.
 //! - [`codex::Codex`]: Codex App Server JSON-RPC.
 //! - [`acp::Acp`]: Agent Client Protocol v1, for every ACP profile.
+//! - [`antigravity::Antigravity`], [`pi::Pi`] and [`amp::Amp`]: those
+//!   harnesses' native streaming protocols. None routes tool approvals to
+//!   Branchyard; see each module.
 //!
 //! [`profiles`] maps harness IDs to a driver and launch command. A profile is
 //! implemented, not qualified: support needs the runtime gates in
@@ -23,9 +26,12 @@
 //! `docs/writing-a-driver.md` describes the process.
 
 pub mod acp;
+pub mod amp;
+pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod conformance;
+pub mod pi;
 pub mod profiles;
 
 use std::fmt;
@@ -97,6 +103,125 @@ pub struct Open {
     pub cwd: String,
     /// Harness-specific model name, when the task pins one.
     pub model: Option<String>,
+    /// MCP servers the harness starts for this session, in its native
+    /// configuration shape. Resumes and forks pass them again: harnesses do
+    /// not keep them with the session.
+    pub mcp_servers: Vec<McpServer>,
+    /// Standing instructions that are not part of any prompt.
+    pub instructions: Option<Instructions>,
+}
+
+impl Open {
+    /// A session in `cwd` with no model pinned and no MCP servers.
+    pub fn new(mode: SessionMode, cwd: impl Into<String>) -> Open {
+        Open {
+            mode,
+            cwd: cwd.into(),
+            model: None,
+            mcp_servers: Vec::new(),
+            instructions: None,
+        }
+    }
+}
+
+/// Standing instructions for a session, such as how to use Branchyard's
+/// delegation tools. Each driver puts them where its harness reads
+/// instructions, never in the working tree:
+///
+/// - Claude Code loads `plugin_dir` with `--plugin-dir`, so the text
+///   arrives as a skill; without one, it appends `text` to the system
+///   prompt.
+/// - Codex sends `text` as the thread's `developerInstructions`.
+/// - ACP has no instructions field; the first prompt the driver submits
+///   starts with `text` between `<branchyard-instructions>` tags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Instructions {
+    pub text: String,
+    /// A Claude Code plugin directory (`.claude-plugin/plugin.json` and
+    /// `skills/<name>/SKILL.md`) carrying the same instructions.
+    pub plugin_dir: Option<String>,
+}
+
+/// Opening tag of the ACP instructions preamble.
+pub const PREAMBLE_OPEN: &str = "<branchyard-instructions>";
+/// Closing tag of the ACP instructions preamble; the prompt follows after a
+/// blank line.
+pub const PREAMBLE_CLOSE: &str = "</branchyard-instructions>";
+
+/// A stdio MCP server for the harness to start, such as Branchyard's own
+/// tools. The harness launches it, so it runs with the harness's identity
+/// and inside the harness's sandbox; nothing here grants it authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServer {
+    /// The harness's name for the server: `[A-Za-z0-9_-]`, at most 64
+    /// bytes. Claude Code names its tools `mcp__<name>__<tool>`.
+    pub name: String,
+    /// Executable. ACP requires an absolute path; the drivers require one
+    /// everywhere so a server never resolves differently per harness.
+    pub command: String,
+    pub args: Vec<String>,
+    /// Variables set for the server process, in addition to whatever the
+    /// harness passes through.
+    pub env: Vec<(String, String)>,
+}
+
+/// Refuse MCP servers and standing instructions for a driver that has no
+/// verified way to pass them, rather than dropping them silently.
+pub(crate) fn refuse_projection(open: &Open, harness: &str) -> Result<(), Rejected> {
+    if !open.mcp_servers.is_empty() {
+        return Err(Rejected::Unsupported(format!(
+            "Branchyard cannot yet give {harness} MCP servers"
+        )));
+    }
+    if open.instructions.is_some() {
+        return Err(Rejected::Unsupported(format!(
+            "Branchyard cannot yet give {harness} standing instructions"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject server lists a harness could misread: bad or repeated names,
+/// relative commands, or unusable variable names.
+pub(crate) fn check_mcp_servers(servers: &[McpServer]) -> Result<(), Rejected> {
+    let invalid = |why: String| Err(Rejected::InvalidOpen(why));
+    for (index, server) in servers.iter().enumerate() {
+        let name_ok = !server.name.is_empty()
+            && server.name.len() <= 64
+            && server
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !name_ok {
+            return invalid(format!(
+                "MCP server name {:?} is not [A-Za-z0-9_-]{{1,64}}",
+                server.name
+            ));
+        }
+        if servers[..index]
+            .iter()
+            .any(|other| other.name == server.name)
+        {
+            return invalid(format!("MCP server {} is listed twice", server.name));
+        }
+        if !server.command.starts_with('/') {
+            return invalid(format!(
+                "MCP server {} needs an absolute command, not {:?}",
+                server.name, server.command
+            ));
+        }
+        if let Some((var, _)) = server
+            .env
+            .iter()
+            .find(|(var, _)| var.is_empty() || var.contains(['=', '\0']))
+        {
+            return invalid(format!(
+                "MCP server {} sets an invalid variable {var:?}",
+                server.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The process to start inside the sandbox.

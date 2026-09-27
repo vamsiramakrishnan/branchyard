@@ -1,6 +1,19 @@
 //! One turn on one branch: start the harness in the branch's worktree,
 //! submit the prompt, answer and record everything until the turn ends,
 //! enforce the budget, snapshot the candidate and close the harness.
+//!
+//! A delegating branch's turn also gets Branchyard's MCP server and a token
+//! that lives exactly as long as the turn. Its cost limit counts what its
+//! children reserved, and a cancel request from an ancestor interrupts it
+//! like a budget limit does.
+//!
+//! The turn runs under its branch's lease (see [`crate::state`]), renewed by
+//! while it is held; every record write and event append is fenced by it.
+//! Its steps are journaled, intent before effect and outcome after:
+//! `start` (the harness process and its identity), `submit` (the prompt),
+//! `turn_end` (how the turn ended) and `snapshot` (the candidate). Recovery
+//! reads them to say truthfully what a turn whose engine stopped did; a
+//! submitted prompt is never submitted again.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -8,12 +21,18 @@ use std::time::{Duration, Instant};
 use branchyard_harness::profiles::Profile;
 use branchyard_harness::{Open, SessionMode};
 use branchyard_runtime::{RuntimeError, Session};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
+use crate::delegation;
+use crate::placement::Placement;
+use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
-use crate::state::Record;
+use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
 use crate::{
-    git, harness, names, Activity, Branch, BranchStatus, CandidateInfo, DecisionSource, Error,
-    Event, NativeSession, PermissionDecision, PermissionRequest, TaskOptions, TurnOutcome, Yard,
+    git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource, Error,
+    Event, NativeSession, PermissionDecision, PermissionRequest, Policy, TaskOptions, TurnOutcome,
+    Yard,
 };
 
 /// How long a harness may take to complete its handshake.
@@ -38,22 +57,56 @@ pub(crate) struct Turn<'a> {
     pub options: &'a TaskOptions,
     /// For a forked session: the parent's worktree, where its session began.
     pub fork_source: Option<PathBuf>,
+    /// Recorded as a warning when the turn starts, such as why it starts a
+    /// fresh session.
+    pub note: Option<String>,
 }
 
-/// How a turn ended, before the snapshot.
-enum End {
-    Outcome(TurnOutcome),
+/// How a turn ended, before the snapshot. Journaled as the `turn_end`
+/// step's outcome.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "end", rename_all = "snake_case")]
+pub(crate) enum End {
+    Outcome {
+        outcome: TurnOutcome,
+    },
     /// Stopped by the engine at this budget limit.
-    Budget(String),
-    Failed(String),
+    Budget {
+        limit: String,
+    },
+    /// Stopped at the request of this ancestor.
+    Cancelled {
+        by: String,
+    },
+    Failed {
+        reason: String,
+    },
+    /// Its engine stopped before the turn's outcome was recorded; recovery
+    /// says what is known.
+    Lost {
+        reason: String,
+    },
 }
 
-struct Driven {
-    end: End,
-    submitted: bool,
-    session: Option<NativeSession>,
+/// The journaled steps of a turn.
+pub(crate) const STEP_START: &str = "start";
+pub(crate) const STEP_SUBMIT: &str = "submit";
+pub(crate) const STEP_TURN_END: &str = "turn_end";
+pub(crate) const STEP_SNAPSHOT: &str = "snapshot";
+
+/// The limits and policy a turn actually runs under: the caller's, narrowed
+/// by whatever a delegating parent imposed on the branch.
+struct Bounds {
+    budget: Budget,
+    policy: Policy,
+}
+
+pub(crate) struct Driven {
+    pub end: End,
+    pub submitted: bool,
+    pub session: Option<NativeSession>,
     /// The harness's latest cumulative cost estimate.
-    cost: Option<f64>,
+    pub cost: Option<f64>,
 }
 
 enum Phase {
@@ -68,52 +121,101 @@ enum Phase {
 
 enum Stop {
     Limit(&'static str),
+    Cancelled(String),
     Failure(String),
 }
 
-/// Run the turn and record its result. Harness failures become the
-/// branch's status; errors are state errors, after which the record says
-/// `Failed` if it could still be written.
-pub(crate) fn execute(turn: Turn<'_>) -> Result<Branch, Error> {
+/// Run the turn under `lease` and record its result. Harness failures
+/// become the branch's status; errors are state errors, after which the
+/// record says `Failed` if it could still be written. A lost lease is
+/// [`Error::Fenced`], and nothing more is written.
+pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     let store = turn.yard.store();
+    let fence = lease.fence().clone();
     let mut record = turn.record.clone();
-    let name = record.info.name.clone();
-    let mut recorder = Recorder::open(&store, &name, turn.options.observer.clone())?;
+    let mut recorder = Recorder::fenced(&store, &fence, turn.options.observer.clone());
+    let bounds = Bounds {
+        budget: delegation::effective_budget(&record, &turn.options.budget),
+        policy: delegation::effective_policy(&record, &turn.options.policy),
+    };
     let result = (|| {
         recorder.record(Activity::Status(record.info.status.clone()))?;
+        if let Some(note) = &turn.note {
+            recorder.record(Activity::Warning(note.clone()))?;
+        }
         if matches!(record.info.status, BranchStatus::Failed { .. }) {
             return Ok(());
         }
-        if let Some(limit) = exhausted(&record, turn.options) {
+        if let Some(by) = store.backend().cancel_requested(&fence)? {
+            recorder.record(Activity::Warning(format!(
+                "cancelled by {by} before the turn started"
+            )))?;
+            record.info.status = BranchStatus::Interrupted;
+        } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
             record.info.status = BranchStatus::BudgetExceeded { limit };
         } else {
-            let driven = drive(&mut recorder, &turn, &record)?;
-            conclude(&turn, &mut record, &mut recorder, driven)?;
+            let driven = drive(&mut recorder, &turn, &record, &bounds, &lease)?;
+            conclude(
+                turn.yard,
+                turn.prompt,
+                &fence,
+                &mut record,
+                &mut recorder,
+                driven,
+            )?;
         }
-        store.write(&record)?;
-        recorder.record(Activity::Status(record.info.status.clone()))
+        Ok(())
     })();
-    if let Err(error) = result {
-        record.info.status = BranchStatus::Failed {
-            reason: error.to_string(),
-        };
-        let _ = store.write(&record);
-        return Err(error);
+    let result = match result {
+        Ok(()) => recorder.finish(lease, &record),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(()) => Ok(Branch {
+            yard: turn.yard.clone(),
+            info: record.info,
+        }),
+        Err(error @ Error::Fenced(_)) => Err(error),
+        Err(error) => {
+            record.info.status = BranchStatus::Failed {
+                reason: error.to_string(),
+            };
+            let _ = store.backend().finish(&fence, Some(&record), None);
+            Err(error)
+        }
     }
-    Ok(Branch {
-        yard: turn.yard.clone(),
-        info: record.info,
-    })
 }
 
-/// A limit already used up before the turn starts.
-fn exhausted(record: &Record, options: &TaskOptions) -> Option<String> {
-    let budget = &options.budget;
+/// Journal a step whose intent and outcome are recorded together, after
+/// the fact.
+fn journal(
+    store: &Store,
+    fence: &Fence,
+    step: &str,
+    intent: Value,
+    outcome: &Value,
+) -> Result<(), Error> {
+    store
+        .backend()
+        .begin_step(fence, fence.turn, step, &intent)?;
+    store
+        .backend()
+        .finish_step(fence, fence.turn, step, outcome)
+}
+
+fn to_value<T: Serialize>(value: &T) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// A limit already used up before the turn starts. Cost counts what the
+/// branch's children reserved.
+fn exhausted(store: &crate::state::Store, record: &Record, budget: &Budget) -> Option<String> {
     if budget.max_turns.is_some_and(|max| record.info.turns >= max) {
         return Some("max_turns".into());
     }
-    if let (Some(max), Some(spent)) = (budget.max_usd, record.info.cost_usd) {
-        if spent >= max {
+    if let Some(max) = budget.max_usd {
+        let own = record.info.cost_usd.unwrap_or(0.0);
+        if own + delegation::reserved(store, record) >= max {
             return Some("max_usd".into());
         }
     }
@@ -125,46 +227,184 @@ fn spent(reported: f64, baseline: Option<f64>) -> f64 {
     (reported - baseline.unwrap_or(0.0)).max(0.0)
 }
 
-fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Driven, Error> {
+fn drive(
+    recorder: &mut Recorder,
+    turn: &Turn<'_>,
+    record: &Record,
+    bounds: &Bounds,
+    lease: &Lease,
+) -> Result<Driven, Error> {
+    let fence = lease.fence();
     let started = Instant::now();
-    let deadline = turn
-        .options
+    let store = turn.yard.store();
+    let deadline = bounds
         .budget
         .max_duration
         .and_then(|limit| started.checked_add(limit));
-    let env = harness::environment(record.home.as_deref());
-    let open = Open {
-        mode: turn.mode.clone(),
-        cwd: record.info.worktree.display().to_string(),
-        model: None,
-    };
+    // The deadline is durable, so recovery can say whether it had passed.
+    let deadline_ms = bounds
+        .budget
+        .max_duration
+        .map(|limit| now_ms().saturating_add(limit.as_millis() as u64));
+    store.backend().set_deadline(fence, deadline_ms)?;
+    let driven = run(recorder, turn, record, bounds, lease, started, deadline)?;
+    journal(
+        &store,
+        fence,
+        STEP_TURN_END,
+        json!({ "submitted": driven.submitted }),
+        &to_value(&driven.end),
+    )?;
+    Ok(driven)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run(
+    recorder: &mut Recorder,
+    turn: &Turn<'_>,
+    record: &Record,
+    bounds: &Bounds,
+    lease: &Lease,
+    started: Instant,
+    deadline: Option<Instant>,
+) -> Result<Driven, Error> {
+    let fence = lease.fence();
+    let store = turn.yard.store();
     let mut driven = Driven {
-        end: End::Failed(String::new()),
+        end: End::Failed {
+            reason: String::new(),
+        },
         submitted: false,
         session: None,
         cost: None,
     };
+    // Declared before the session so a sandbox outlives it.
+    let mut placement = match Placement::prepare(turn.yard, record, fence) {
+        Ok(placement) => placement,
+        Err(reason) => {
+            driven.end = End::failed(reason);
+            return Ok(driven);
+        }
+    };
+    // Revoked when this function returns, after the harness is gone. The
+    // delegation tools reach the engine over a host socket with the host's
+    // `by`, so a sandboxed harness does not get them yet.
+    let projection = match placement.is_sandbox() {
+        true => Err(Error::Unsupported(
+            "delegation is not yet available to a sandboxed harness".into(),
+        )),
+        false => crate::projection::project(
+            turn.yard,
+            record,
+            turn.options,
+            bounds.budget.clone(),
+            bounds.policy.clone(),
+        ),
+    };
+    let projection = match projection {
+        Ok(projection) => projection,
+        // Asked for now: the turn cannot run as asked.
+        Err(error) if turn.options.delegation.is_some() => {
+            driven.end = End::failed(format!("could not offer delegation: {error}"));
+            return Ok(driven);
+        }
+        // Kept from an earlier turn: run without the tools, and say so.
+        Err(error) if record.grant.is_some() => {
+            recorder.record(Activity::Warning(format!(
+                "this turn runs without delegation tools: {error}"
+            )))?;
+            None
+        }
+        Err(_) => None,
+    };
+    // Every local harness learns which branch it is on, so `by` inside it
+    // never mistakes it for a person; only a delegating one gets a token.
+    if !placement.is_sandbox() {
+        placement.set_env(ENV_ROOT, &turn.yard.root.display().to_string());
+        placement.set_env(ENV_BRANCH, &record.info.name);
+    }
+    if let Some(projection) = &projection {
+        for (name, value) in &projection.env {
+            placement.set_env(name, value);
+        }
+    }
+    let open = Open {
+        mcp_servers: projection.iter().map(|p| p.server.clone()).collect(),
+        instructions: projection.as_ref().map(|p| p.instructions.clone()),
+        ..Open::new(turn.mode.clone(), placement.cwd())
+    };
     let driver = turn.profile.driver_with(turn.command.clone());
-    let mut session = match Session::start(driver, open, &env, None) {
+    // Journaled before the spawn: every process of a local harness carries
+    // this marker, so recovery finds them even if this engine stops before
+    // the harness's pid is recorded below.
+    let spawn = (!placement.is_sandbox()).then(|| {
+        format!(
+            "{}-{}-{}",
+            store.owner().id,
+            fence.incarnation,
+            fence.generation
+        )
+    });
+    if let Some(spawn) = &spawn {
+        placement.set_env(crate::proc::ENV_SPAWN, spawn);
+    }
+    let intent = json!({
+        "command": turn.command,
+        "sandbox": placement.is_sandbox(),
+        "spawn": spawn,
+        "host": crate::proc::host(),
+    });
+    store
+        .backend()
+        .begin_step(fence, fence.turn, STEP_START, &intent)?;
+    let mut session = match placement.start(driver, open) {
         Ok(session) => session,
         Err(error) => {
-            driven.end = End::Failed(match error {
+            let reason = match error {
                 RuntimeError::Spawn { argv, source } => {
                     format!("could not start {}: {source}", argv.join(" "))
                 }
                 RuntimeError::Rejected(rejected) => format!("the driver refused: {rejected}"),
                 other => other.to_string(),
-            });
+            };
+            let outcome = json!({ "error": reason });
+            store
+                .backend()
+                .finish_step(fence, fence.turn, STEP_START, &outcome)?;
+            driven.end = End::failed(reason);
             return Ok(driven);
         }
     };
+    // A local harness leads its own process group; recovery kills that
+    // group if this engine stops, when pid and start time still match.
+    let identity = match placement.is_sandbox() {
+        true => None,
+        false => session.process_id().parse::<u32>().ok().and_then(|pid| {
+            Some(ProcessRow {
+                pid,
+                pgid: pid,
+                start: crate::proc::start_time(pid)?,
+                host: crate::proc::host().to_owned(),
+            })
+        }),
+    };
+    if let Some(process) = &identity {
+        store.backend().record_process(fence, process)?;
+    }
+    let outcome = match &identity {
+        Some(p) => json!({ "pid": p.pid, "pgid": p.pgid, "start": p.start }),
+        None => json!({ "process": session.process_id() }),
+    };
+    store
+        .backend()
+        .finish_step(fence, fence.turn, STEP_START, &outcome)?;
     let mut phase = Phase::Opening;
     // Whether the harness has named the session it runs. Until it has, a
     // resume or fork may have landed somewhere else.
     let mut confirmed = false;
     let mut kill = false;
     let fail = |confirmed: bool, detail: String| -> End {
-        End::Failed(match (&turn.mode, confirmed) {
+        End::failed(match (&turn.mode, confirmed) {
             (SessionMode::Fresh, _) | (_, true) => detail,
             (SessionMode::Resume(session), false) => format!(
                 "could not resume session {session} in {}: {detail}",
@@ -187,10 +427,41 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
     let end = loop {
         let now = Instant::now();
         let late = deadline.is_some_and(|deadline| now >= deadline);
+        if lease.lost() {
+            kill = true;
+            break End::failed(format!(
+                "this engine lost {}'s lease to another; it stopped the turn",
+                record.info.name
+            ));
+        }
+        let cancelled = match phase {
+            Phase::Stopping { .. } => None,
+            _ => store.backend().cancel_requested(fence).unwrap_or(None),
+        };
+        match (&phase, cancelled) {
+            (Phase::Opening, Some(by)) => {
+                kill = true;
+                break End::cancelled(by);
+            }
+            (Phase::Running(n), Some(by)) => {
+                let n = *n;
+                if let Err(error) = session.interrupt() {
+                    recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                    kill = true;
+                    break End::cancelled(by);
+                }
+                phase = Phase::Stopping {
+                    turn: n,
+                    why: Stop::Cancelled(by),
+                    since: now,
+                };
+            }
+            _ => {}
+        }
         match &phase {
             Phase::Opening if late => {
                 kill = true;
-                break End::Budget("max_duration".into());
+                break End::budget("max_duration");
             }
             Phase::Opening if now.duration_since(started) >= READY_TIMEOUT => {
                 kill = true;
@@ -204,7 +475,7 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
                 if let Err(error) = session.interrupt() {
                     recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                     kill = true;
-                    break End::Budget("max_duration".into());
+                    break End::budget("max_duration");
                 }
                 phase = Phase::Stopping {
                     turn: n,
@@ -219,8 +490,9 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
                 )))?;
                 kill = true;
                 break match why {
-                    Stop::Limit(limit) => End::Budget((*limit).into()),
-                    Stop::Failure(reason) => End::Failed(reason.clone()),
+                    Stop::Limit(limit) => End::budget(*limit),
+                    Stop::Cancelled(by) => End::cancelled(by.clone()),
+                    Stop::Failure(reason) => End::failed(reason.clone()),
                 };
             }
             _ => {}
@@ -242,9 +514,21 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
         match event {
             Event::Ready if matches!(phase, Phase::Opening) => {
                 recorder.record(Activity::Prompt(turn.prompt.to_owned()))?;
+                // Journaled first: from here the prompt may have reached the
+                // harness, and recovery must never submit it again.
+                let intent = json!({ "prompt": turn.prompt });
+                store
+                    .backend()
+                    .begin_step(fence, fence.turn, STEP_SUBMIT, &intent)?;
                 match session.submit(turn.prompt) {
                     Ok(n) => {
                         driven.submitted = true;
+                        store.backend().finish_step(
+                            fence,
+                            fence.turn,
+                            STEP_SUBMIT,
+                            &json!({ "turn": n }),
+                        )?;
                         phase = Phase::Running(n);
                     }
                     Err(error) => break fail(confirmed, format!("submit failed: {error}")),
@@ -267,11 +551,18 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
             }
             Event::PermissionRequested { request, .. } => {
                 let stopping = matches!(phase, Phase::Stopping { .. });
-                if let Some(reason) = answer(recorder, &mut session, turn, &request, stopping)? {
+                if let Some(reason) = answer(
+                    recorder,
+                    &mut session,
+                    turn,
+                    &bounds.policy,
+                    &request,
+                    stopping,
+                )? {
                     if let Phase::Running(n) = phase {
                         if session.interrupt().is_err() {
                             kill = true;
-                            break End::Failed(reason);
+                            break End::failed(reason);
                         }
                         phase = Phase::Stopping {
                             turn: n,
@@ -284,17 +575,18 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
             Event::UsageObserved { usage, .. } if usage.cumulative => {
                 let Some(cost) = usage.cost_usd else { continue };
                 driven.cost = Some(driven.cost.map_or(cost, |c: f64| c.max(cost)));
-                let over = turn
-                    .options
-                    .budget
-                    .max_usd
-                    .is_some_and(|max| spent(cost, record.cost_baseline) > max);
+                if let Some(projection) = &projection {
+                    projection.observe_cost(spent(cost, record.cost_baseline));
+                }
+                let over = bounds.budget.max_usd.is_some_and(|max| {
+                    spent(cost, record.cost_baseline) + delegation::reserved(&store, record) > max
+                });
                 if let (true, Phase::Running(n)) = (over, &phase) {
                     let n = *n;
                     if let Err(error) = session.interrupt() {
                         recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                         kill = true;
-                        break End::Budget("max_usd".into());
+                        break End::budget("max_usd");
                     }
                     phase = Phase::Stopping {
                         turn: n,
@@ -308,12 +600,16 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
                     Phase::Stopping {
                         why: Stop::Limit(limit),
                         ..
-                    } => End::Budget(limit.into()),
+                    } => End::budget(limit),
+                    Phase::Stopping {
+                        why: Stop::Cancelled(by),
+                        ..
+                    } => End::cancelled(by),
                     Phase::Stopping {
                         why: Stop::Failure(reason),
                         ..
-                    } => End::Failed(reason),
-                    _ => End::Outcome(outcome),
+                    } => End::failed(reason),
+                    _ => End::Outcome { outcome },
                 };
             }
             Event::OutcomeUnknown { turn: n, reason } if phase_turn(&phase) == Some(n) => {
@@ -348,6 +644,9 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
             }
             Err(error) => recorder.record(Activity::Warning(format!("kill failed: {error}")))?,
         }
+        if let Some(warning) = placement.release() {
+            recorder.record(Activity::Warning(warning))?;
+        }
         return Ok(driven);
     }
     match session.close(CLOSE_GRACE) {
@@ -373,6 +672,9 @@ fn drive(recorder: &mut Recorder, turn: &Turn<'_>, record: &Record) -> Result<Dr
         }
         Err(error) => recorder.record(Activity::Warning(format!("close failed: {error}")))?,
     }
+    if let Some(warning) = placement.release() {
+        recorder.record(Activity::Warning(warning))?;
+    }
     Ok(driven)
 }
 
@@ -390,6 +692,7 @@ fn answer(
     recorder: &mut Recorder,
     session: &mut Session,
     turn: &Turn<'_>,
+    policy: &Policy,
     request: &PermissionRequest,
     stopping: bool,
 ) -> Result<Option<String>, Error> {
@@ -399,9 +702,7 @@ fn answer(
         };
         (decision, DecisionSource::Engine)
     } else {
-        turn.options
-            .policy
-            .decide_with_source(&turn.record.info.name, request)
+        policy.decide_with_source(&turn.record.info.name, request)
     };
     let (allowed, message) = match &decision {
         PermissionDecision::Allow => (true, None),
@@ -433,13 +734,25 @@ fn answer(
     }
 }
 
+/// What the `snapshot` step recorded.
+#[derive(Serialize, Deserialize)]
+struct Snapshotted {
+    candidate: Option<CandidateInfo>,
+    error: Option<String>,
+}
+
 /// Snapshot the candidate and settle the branch's record after the turn.
-fn conclude(
-    turn: &Turn<'_>,
+/// The snapshot is a journaled step: when an earlier attempt of this turn
+/// recorded it, its outcome is used and nothing is committed again.
+pub(crate) fn conclude(
+    yard: &Yard,
+    prompt: &str,
+    fence: &Fence,
     record: &mut Record,
     recorder: &mut Recorder,
     driven: Driven,
 ) -> Result<(), Error> {
+    let store = yard.store();
     let info = &mut record.info;
     if driven.submitted {
         info.turns += 1;
@@ -450,55 +763,95 @@ fn conclude(
     if let Some(cost) = driven.cost {
         info.cost_usd = Some(spent(cost, record.cost_baseline));
     }
-    let message = format!(
-        "{}: turn {}\n\n{}\n",
-        info.git_branch, info.turns, turn.prompt
-    );
-    let snapshot = {
-        let _lock = git::lock();
-        let branch = names::validate(&info.name)?;
-        match turn.yard.repo.workspace(&branch) {
-            Ok(Some(workspace)) => workspace.snapshot(&message).map_err(|e| e.to_string()),
-            Ok(None) => Err(format!("no worktree has {} checked out", info.git_branch)),
-            Err(error) => Err(error.to_string()),
-        }
-    };
+    let message = format!("{}: turn {}\n\n{}\n", info.git_branch, info.turns, prompt);
     let previous = info.candidate.as_ref().map(|c| c.commit.clone());
-    let mut changed = false;
-    let snapshot_error = match snapshot {
-        Ok(candidate) => {
-            let candidate = candidate.map(|c| CandidateInfo {
-                commit: c.head.0,
-                files_changed: c.stat.files_changed as u32,
-                insertions: c.stat.insertions as u32,
-                deletions: c.stat.deletions as u32,
-            });
-            changed = candidate.as_ref().map(|c| &c.commit) != previous.as_ref();
-            if let (true, Some(candidate)) = (changed, &candidate) {
-                recorder.record(Activity::Snapshot(candidate.clone()))?;
-            }
-            info.candidate = candidate;
-            None
-        }
-        Err(error) => Some(format!("snapshot failed: {error}")),
+    let intent = json!({ "message": message });
+    let recorded = match store
+        .backend()
+        .begin_step(fence, fence.turn, STEP_SNAPSHOT, &intent)?
+    {
+        Begun::Done(outcome) => serde_json::from_value::<Snapshotted>(outcome).ok(),
+        Begun::Fresh | Begun::Pending(_) => None,
     };
-    info.status = match driven.end {
-        End::Outcome(TurnOutcome::Completed) if changed && info.candidate.is_some() => {
-            BranchStatus::Ready
+    let replayed = recorded.is_some();
+    let snapshotted = match recorded {
+        Some(snapshotted) => snapshotted,
+        None => {
+            let snapshot = {
+                let _lock = git::lock();
+                let branch = names::validate(&info.name)?;
+                match yard.repo.workspace(&branch) {
+                    Ok(Some(workspace)) => workspace.snapshot(&message).map_err(|e| e.to_string()),
+                    Ok(None) => Err(format!("no worktree has {} checked out", info.git_branch)),
+                    Err(error) => Err(error.to_string()),
+                }
+            };
+            match snapshot {
+                Ok(candidate) => Snapshotted {
+                    candidate: candidate.map(|c| CandidateInfo {
+                        commit: c.head.0,
+                        files_changed: c.stat.files_changed as u32,
+                        insertions: c.stat.insertions as u32,
+                        deletions: c.stat.deletions as u32,
+                    }),
+                    error: None,
+                },
+                Err(error) => Snapshotted {
+                    candidate: None,
+                    error: Some(format!("snapshot failed: {error}")),
+                },
+            }
         }
-        End::Outcome(TurnOutcome::Completed) => BranchStatus::NoChanges,
-        End::Outcome(TurnOutcome::Interrupted) => BranchStatus::Interrupted,
-        End::Outcome(TurnOutcome::Failed { message }) => BranchStatus::Failed { reason: message },
-        End::Outcome(TurnOutcome::LimitReached { limit }) => BranchStatus::BudgetExceeded {
+    };
+    let mut changed = false;
+    if snapshotted.error.is_none() {
+        let candidate = snapshotted.candidate.clone();
+        changed = candidate.as_ref().map(|c| &c.commit) != previous.as_ref();
+        if let (true, false, Some(candidate)) = (changed, replayed, &candidate) {
+            recorder.record(Activity::Snapshot(candidate.clone()))?;
+        }
+        info.candidate = candidate;
+    }
+    if !replayed {
+        store
+            .backend()
+            .finish_step(fence, fence.turn, STEP_SNAPSHOT, &to_value(&snapshotted))?;
+    }
+    info.status = match driven.end {
+        End::Outcome {
+            outcome: TurnOutcome::Completed,
+        } if changed && info.candidate.is_some() => BranchStatus::Ready,
+        End::Outcome {
+            outcome: TurnOutcome::Completed,
+        } => BranchStatus::NoChanges,
+        End::Outcome {
+            outcome: TurnOutcome::Interrupted,
+        } => BranchStatus::Interrupted,
+        End::Outcome {
+            outcome: TurnOutcome::Failed { message },
+        } => BranchStatus::Failed { reason: message },
+        End::Outcome {
+            outcome: TurnOutcome::LimitReached { limit },
+        } => BranchStatus::BudgetExceeded {
             limit: format!("harness {limit}"),
         },
-        End::Outcome(TurnOutcome::Refused) => BranchStatus::Failed {
+        End::Outcome {
+            outcome: TurnOutcome::Refused,
+        } => BranchStatus::Failed {
             reason: "the model refused to continue".into(),
         },
-        End::Budget(limit) => BranchStatus::BudgetExceeded { limit },
-        End::Failed(reason) => BranchStatus::Failed { reason },
+        End::Budget { limit } => BranchStatus::BudgetExceeded { limit },
+        End::Cancelled { by } => {
+            recorder.record(Activity::Warning(format!("cancelled by {by}")))?;
+            BranchStatus::Interrupted
+        }
+        End::Failed { reason } => BranchStatus::Failed { reason },
+        End::Lost { reason } => {
+            recorder.record(Activity::Warning(reason))?;
+            BranchStatus::Interrupted
+        }
     };
-    if let Some(error) = snapshot_error {
+    if let Some(error) = snapshotted.error {
         info.status = match &info.status {
             BranchStatus::Failed { reason } => BranchStatus::Failed {
                 reason: format!("{reason}; {error}"),
@@ -507,6 +860,24 @@ fn conclude(
         };
     }
     Ok(())
+}
+
+impl End {
+    fn failed(reason: impl Into<String>) -> End {
+        End::Failed {
+            reason: reason.into(),
+        }
+    }
+
+    fn budget(limit: impl Into<String>) -> End {
+        End::Budget {
+            limit: limit.into(),
+        }
+    }
+
+    fn cancelled(by: impl Into<String>) -> End {
+        End::Cancelled { by: by.into() }
+    }
 }
 
 #[cfg(test)]

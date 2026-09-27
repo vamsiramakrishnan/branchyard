@@ -1,12 +1,17 @@
 [workspace]
 members = [
     "crates/branchyard",
+    "crates/branchyard-bridge",
     "crates/branchyard-cli",
+    "crates/branchyard-client",
     "crates/branchyard-controls",
     "crates/branchyard-harness",
+    "crates/branchyard-microsandbox",
+    "crates/branchyard-mcp",
     "crates/branchyard-qualify",
     "crates/branchyard-runtime",
     "crates/branchyard-sandbox",
+    "crates/branchyard-server",
     "crates/branchyard-substrate",
     "crates/branchyard-workspace",
 ]

@@ -1,0 +1,18 @@
+[package]
+name = "branchyard-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The in-sandbox exec bridge for sandboxes without an exec API, and its host-side client"
+
+[dependencies]
+branchyard-sandbox = { path = "../branchyard-sandbox" }
+libc = "0.2"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }

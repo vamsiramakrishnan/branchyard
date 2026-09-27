@@ -10,6 +10,21 @@ description = "The by command: delegate coding work to agent harnesses on git br
 name = "by"
 path = "src/main.rs"
 
+[features]
+# Accept --provider microsandbox. Needs Rust 1.94 or newer; see
+# docs/providers.md.
+microsandbox = ["branchyard/microsandbox"]
+# `by serve --database postgres://...`; see docs/server.md.
+postgres = ["branchyard-server/postgres"]
+
 [dependencies]
 branchyard = { path = "../branchyard" }
+branchyard-client = { path = "../branchyard-client" }
+branchyard-server = { path = "../branchyard-server" }
+branchyard-mcp = { path = "../branchyard-mcp" }
+serde = "1"
 serde_json = "1"
+
+[dev-dependencies]
+branchyard-bridge = { path = "../branchyard-bridge" }
+branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
