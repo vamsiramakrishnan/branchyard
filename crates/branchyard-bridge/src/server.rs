@@ -588,8 +588,19 @@ impl Bridge {
                 let _ = stream.set_nodelay(true);
                 let stream = match &tls {
                     None => Stream::Tcp(stream),
-                    Some(tls) => match tls::accept(stream, tls, HEAD_TIMEOUT) {
-                        Ok(stream) => stream,
+                    // A TLS client starts with a handshake record (0x16).
+                    // Anything else is plain HTTP, which a TLS bridge
+                    // answers only for the health check: Substrate's
+                    // wakeup probe cannot speak TLS.
+                    Some(tls) => match starts_tls(&stream) {
+                        Ok(true) => match tls::accept(stream, tls, HEAD_TIMEOUT) {
+                            Ok(stream) => stream,
+                            Err(_) => return,
+                        },
+                        Ok(false) => {
+                            let _ = health_only(stream);
+                            return;
+                        }
                         Err(_) => return,
                     },
                 };
@@ -597,6 +608,37 @@ impl Bridge {
             });
         }
         Ok(())
+    }
+}
+
+/// Whether the client's first byte opens a TLS handshake.
+fn starts_tls(stream: &std::net::TcpStream) -> io::Result<bool> {
+    stream.set_read_timeout(Some(HEAD_TIMEOUT))?;
+    let mut first = [0u8; 1];
+    let seen = stream.peek(&mut first)?;
+    Ok(seen == 1 && first[0] == 0x16)
+}
+
+/// Answer a plain-HTTP request to a bridge that serves TLS: the health
+/// check, and a refusal for anything else, which must not cross in the
+/// clear.
+fn health_only(stream: std::net::TcpStream) -> io::Result<()> {
+    let mut stream = Stream::Tcp(stream);
+    let head = ws::read_head(&mut stream)?;
+    let mut start = head.start.split_whitespace();
+    let (method, path) = (start.next().unwrap_or(""), start.next().unwrap_or(""));
+    let path = path.split('?').next().unwrap_or(path);
+    match (
+        method,
+        path.ends_with("/healthz"),
+        head.lists("upgrade", "websocket"),
+    ) {
+        ("GET", true, false) => ws::respond(&mut stream, "200 OK", "ok\n"),
+        _ => ws::respond(
+            &mut stream,
+            "403 Forbidden",
+            "this bridge takes requests over TLS only\n",
+        ),
     }
 }
 

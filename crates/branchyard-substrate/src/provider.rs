@@ -138,6 +138,23 @@ impl Config {
         Ok(())
     }
 
+    /// A lazily connecting channel to the `Control` API, with TLS as
+    /// configured. Must be called inside a Tokio runtime.
+    pub fn channel(&self) -> Result<Channel, ProviderError> {
+        let invalid = |e: String| {
+            ProviderError::Invalid(format!("Substrate endpoint {:?}: {e}", self.endpoint))
+        };
+        let mut endpoint = Channel::from_shared(self.endpoint.clone())
+            .map_err(|e| invalid(e.to_string()))?
+            .connect_timeout(Duration::from_secs(30));
+        if let Some(tls) = self.control_tls()? {
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|e| invalid(e.to_string()))?;
+        }
+        Ok(endpoint.connect_lazy())
+    }
+
     /// The TLS settings for the `Control` channel, or `None` in the clear.
     fn control_tls(&self) -> Result<Option<ClientTlsConfig>, ProviderError> {
         let invalid = |why: String| ProviderError::Invalid(format!("Substrate endpoint: {why}"));
@@ -326,7 +343,6 @@ fn unix_now() -> Duration {
 impl SubstrateProvider {
     /// Prepare a provider. Nothing is contacted until the first call.
     pub fn connect(config: Config) -> Result<SubstrateProvider, ProviderError> {
-        let control_tls = config.control_tls()?;
         let router_tls = config.router_tls()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -335,18 +351,7 @@ impl SubstrateProvider {
             .build()?;
         let channel = {
             let _entered = runtime.enter();
-            let invalid = |e: tonic::transport::Error| {
-                ProviderError::Invalid(format!("Substrate endpoint {:?}: {e}", config.endpoint))
-            };
-            let mut endpoint = Channel::from_shared(config.endpoint.clone())
-                .map_err(|e| {
-                    ProviderError::Invalid(format!("Substrate endpoint {:?}: {e}", config.endpoint))
-                })?
-                .connect_timeout(Duration::from_secs(30));
-            if let Some(tls) = control_tls {
-                endpoint = endpoint.tls_config(tls).map_err(invalid)?;
-            }
-            endpoint.connect_lazy()
+            config.channel()?
         };
         Ok(SubstrateProvider {
             runtime,

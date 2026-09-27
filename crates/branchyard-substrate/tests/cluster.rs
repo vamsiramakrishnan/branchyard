@@ -3,7 +3,8 @@
 //! reads its target from the environment and panics naming the first
 //! variable that is missing:
 //!
-//! - `BY_SUBSTRATE_ENDPOINT`: the `Control` API, `http://host:port`.
+//! - `BY_SUBSTRATE_ENDPOINT`: the `Control` API, `https://host:port` (or
+//!   `http://` on loopback, such as a port-forward).
 //! - `BY_SUBSTRATE_ROUTER`: the router URL template with `{atespace}` and
 //!   `{actor}`.
 //! - `BY_SUBSTRATE_ATESPACE`: an existing atespace.
@@ -12,9 +13,16 @@
 //! - `BY_SUBSTRATE_WORKDIR`: a writable directory in the actor, for the
 //!   conformance checks and the worktree (for example `/workspace`).
 //!
+//! Optional: `BY_SUBSTRATE_CA`, `BY_SUBSTRATE_CLIENT_CERT`,
+//! `BY_SUBSTRATE_CLIENT_KEY` and `BY_SUBSTRATE_ROUTER_CA` (PEM files, as the
+//! `--substrate-*` flags of the same names), and `BY_SUBSTRATE_INSECURE=1`.
+//!
 //! `create_bridge_template` also reads `BY_SUBSTRATE_IMAGE` (pinned by
 //! digest), `BY_SUBSTRATE_BRIDGE` (the bridge's path in the image),
-//! `BY_SUBSTRATE_SANDBOX_CONFIG` and `BY_SUBSTRATE_STORAGE`.
+//! `BY_SUBSTRATE_SANDBOX_CONFIG` and `BY_SUBSTRATE_STORAGE`, and optionally
+//! `BY_SUBSTRATE_RUN_AS` (`UID:GID` for execs) and
+//! `BY_SUBSTRATE_BRIDGE_TLS_CERT` and `BY_SUBSTRATE_BRIDGE_TLS_KEY` (paths
+//! in the image, for a router that passes TLS through).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,14 +31,18 @@ use std::time::Duration;
 use branchyard_bridge::Signer;
 use branchyard_sandbox::conformance::{self, Setup};
 use branchyard_sandbox::{ExecSpec, Process, SandboxProvider, SandboxSpec};
-use branchyard_substrate::template::{bridge_template, BridgeTemplate};
+use branchyard_substrate::template::{bridge_template_with, BridgeOptions, BridgeTemplate};
 use branchyard_substrate::{pb, transfer, Config, SubstrateProvider};
 
 fn var(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("set {name}; see docs/testing-live.md"))
 }
 
-fn provider() -> SubstrateProvider {
+fn optional(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+fn config() -> Config {
     let mut config = Config::new(
         var("BY_SUBSTRATE_ENDPOINT"),
         var("BY_SUBSTRATE_ATESPACE"),
@@ -39,7 +51,16 @@ fn provider() -> SubstrateProvider {
     )
     .signer(Signer::read(Path::new(&var("BY_SUBSTRATE_KEY"))).unwrap());
     config.ready_timeout = Duration::from_secs(300);
-    SubstrateProvider::connect(config).unwrap()
+    config.ca = optional("BY_SUBSTRATE_CA").map(PathBuf::from);
+    config.client_cert = optional("BY_SUBSTRATE_CLIENT_CERT").map(PathBuf::from);
+    config.client_key = optional("BY_SUBSTRATE_CLIENT_KEY").map(PathBuf::from);
+    config.router_ca = optional("BY_SUBSTRATE_ROUTER_CA").map(PathBuf::from);
+    config.insecure = optional("BY_SUBSTRATE_INSECURE").as_deref() == Some("1");
+    config
+}
+
+fn provider() -> SubstrateProvider {
+    SubstrateProvider::connect(config()).unwrap()
 }
 
 fn unique(what: &str) -> String {
@@ -56,7 +77,15 @@ fn unique(what: &str) -> String {
 #[ignore = "creates an actor template on a real cluster"]
 fn create_bridge_template() {
     let signer = Signer::read(Path::new(&var("BY_SUBSTRATE_KEY"))).unwrap();
-    let template = bridge_template(
+    let run_as = optional("BY_SUBSTRATE_RUN_AS").map(|text| {
+        let (uid, gid) = text
+            .split_once(':')
+            .expect("BY_SUBSTRATE_RUN_AS is UID:GID");
+        (uid.parse().unwrap(), gid.parse().unwrap())
+    });
+    let tls = optional("BY_SUBSTRATE_BRIDGE_TLS_CERT")
+        .map(|cert| (cert, var("BY_SUBSTRATE_BRIDGE_TLS_KEY")));
+    let template = bridge_template_with(
         &var("BY_SUBSTRATE_ATESPACE"),
         &BridgeTemplate {
             name: var("BY_SUBSTRATE_TEMPLATE"),
@@ -67,11 +96,11 @@ fn create_bridge_template() {
             sandbox_config: var("BY_SUBSTRATE_SANDBOX_CONFIG"),
             storage_location: var("BY_SUBSTRATE_STORAGE"),
         },
+        &BridgeOptions { tls, run_as },
     );
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let created = runtime.block_on(async {
-        let mut client =
-            pb::control_client::ControlClient::connect(var("BY_SUBSTRATE_ENDPOINT")).await?;
+        let mut client = pb::control_client::ControlClient::new(config().channel()?);
         client
             .create_actor_template(pb::CreateActorTemplateRequest {
                 actor_template: Some(template),

@@ -533,9 +533,21 @@ fn the_bridge_serves_tls_and_a_client_trusting_another_authority_is_refused() {
     endpoint.get_file(&file, &mut back).unwrap();
     assert_eq!(back, content);
 
-    // Nothing in the clear.
-    let plain = Endpoint::new(&bridge.url.replacen("https", "http", 1), "").unwrap();
-    assert!(!plain.healthy());
+    // Nothing in the clear but the health check, which Substrate's wakeup
+    // probe makes in plain HTTP.
+    let plain_url = bridge.url.replacen("https", "http", 1);
+    let plain = Endpoint::new(&plain_url, "").unwrap();
+    assert!(plain.healthy());
+    let in_clear =
+        Endpoint::new(&plain_url, bridge.signer.sign(&bridge.claims(1)).unwrap()).unwrap();
+    match in_clear.exec(&sh(&bridge.work(), "true")) {
+        Err(ProviderError::Io(error)) => {
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            assert!(error.to_string().contains("TLS only"), "{error}");
+        }
+        Err(other) => panic!("expected a refusal, got {other}"),
+        Ok(_) => panic!("an exec was accepted in the clear"),
+    }
 
     // A client that trusts another authority, or the public roots, refuses
     // the bridge before sending anything.
