@@ -1,0 +1,276 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0,
+      "description": "The file format's version; `1`."
+    },
+    "defaults": {
+      "$ref": "#/$defs/Defaults",
+      "description": "Defaults for new branches (`by run`, `by fan`); `permissions` also\napplies to `send`, `fork`, `reincarnate` and `spawn`."
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Secrets a new branch's harness is given, by name: `\"VAR\"` reads the\nvariable VAR, `\"@path\"` a file. Never the value itself. Applied only\nto isolated or sandboxed branches, which have a private home."
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Stdio MCP servers for a new branch's harness: `NAME = \"/absolute/command args\"`."
+    },
+    "remote": {
+      "$ref": "#/$defs/Remote",
+      "description": "Where commands run: a Branchyard server instead of this machine."
+    },
+    "serve": {
+      "$ref": "#/$defs/Serve",
+      "description": "`by serve` defaults."
+    },
+    "microsandbox": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Microsandbox"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Options for `provider = \"microsandbox\"`."
+    }
+  },
+  "title": "Branchyard configuration",
+  "description": "Defaults for `by`: branchyard.toml at a repository root, or ~/.config/branchyard/config.toml. The project file overrides the user file, BRANCHYARD_* variables override both, flags override everything. Never holds a secret's value. See docs/setup.md.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Harness or profile ID, such as `claude-code` or `codex`."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A model name, or a size alias (`small`, `medium`, `large`, `extra-large`)."
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Reasoning effort: `low`, `medium`, `high`, `xhigh`, or 0-100."
+        },
+        "auth": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The authentication method when the secrets allow several:\n`api-key`, `oauth-token`, `auth-file`, `vertex-ai`."
+        },
+        "budget_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "Stop once the harness's own cost estimate exceeds this many dollars.",
+          "minimum": 0.0
+        },
+        "max_turns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Stop after this many turns."
+        },
+        "max_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "Interrupt a turn after this many minutes.",
+          "minimum": 0.0
+        },
+        "permissions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionsMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How tool permission requests are answered: `ask` on the terminal,\nor `yes` to allow each one. Unset: decided by whether a terminal is\nattached."
+        },
+        "isolated": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "A scrubbed environment and a private HOME for the harness."
+        },
+        "check": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The check a candidate must pass before merging, such as `cargo test`."
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the harness runs."
+        },
+        "instructions": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A file of standing instructions for the harness."
+        }
+      },
+      "description": "Task defaults."
+    },
+    "PermissionsMode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "ask",
+          "description": "Ask on the terminal for each request (`--ask`)."
+        },
+        {
+          "type": "string",
+          "const": "yes",
+          "description": "Allow every request (`--yes`)."
+        }
+      ]
+    },
+    "ProviderKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "local",
+          "description": "A local process in its own worktree (the default)."
+        },
+        {
+          "type": "string",
+          "const": "microsandbox",
+          "description": "A microVM per turn; needs `[microsandbox]` and a build with the\n`microsandbox` feature."
+        }
+      ]
+    },
+    "Remote": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The server's URL, as `--remote`."
+        },
+        "token_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A file holding the bearer token, as `--token-file`."
+        },
+        "ca_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Extra CA certificates for `https`, as `--ca-file`."
+        },
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The repository's name on the server, as `--repo`."
+        }
+      },
+      "description": "A Branchyard server to run commands against."
+    },
+    "Serve": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The server configuration `by serve` reads when given no `--config`."
+        }
+      }
+    },
+    "Microsandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "OCI image with the harness installed."
+        },
+        "cpus": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "memory_mib": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
+        },
+        "pass_env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Variables to copy into the sandbox, by name."
+        }
+      },
+      "required": [
+        "image"
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"
+}

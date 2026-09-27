@@ -1,0 +1,176 @@
+{
+  "protocol": "branchyard.setup/v1",
+  "topic": "server",
+  "done": false,
+  "facts": [
+    {
+      "id": "repository",
+      "label": "Repository",
+      "value": "/src/app (default branch main)"
+    },
+    {
+      "id": "harnesses",
+      "label": "Harnesses",
+      "value": "claude-code 2.1.283 (Claude Code), codex codex-cli 0.157.1"
+    },
+    {
+      "id": "credentials",
+      "label": "Credential variables set",
+      "value": "ANTHROPIC_API_KEY"
+    },
+    {
+      "id": "tools",
+      "label": "Tools",
+      "value": "docker 27.1.1, git 2.45.2"
+    },
+    {
+      "id": "platform",
+      "label": "Platform",
+      "value": "linux, no KVM"
+    },
+    {
+      "id": "check",
+      "label": "Suggested check",
+      "value": "cargo test"
+    },
+    {
+      "id": "config",
+      "label": "Configuration",
+      "value": "project branchyard.toml not found; user /home/dev/.config/branchyard/config.toml not found"
+    }
+  ],
+  "answers": {
+    "database": "postgres",
+    "listen": "0.0.0.0:8421",
+    "path": ".branchyard/server.json",
+    "tenancy": "multi"
+  },
+  "errors": [],
+  "questions": [
+    {
+      "id": "tls",
+      "kind": "confirm",
+      "header": "TLS",
+      "prompt": "Should the server serve HTTPS with its own certificate?",
+      "why": "Required off loopback, unless a proxy terminates TLS and you pass --insecure-bind.",
+      "choices": [
+        {
+          "value": true,
+          "label": "Yes",
+          "description": "give a PEM certificate chain and key",
+          "recommended": true
+        },
+        {
+          "value": false,
+          "label": "No",
+          "description": "plain HTTP (loopback only)"
+        }
+      ],
+      "allow_other": false,
+      "default": true,
+      "optional": false,
+      "when": {
+        "truthy": {
+          "id": "listen"
+        }
+      }
+    },
+    {
+      "id": "database.url",
+      "kind": "text",
+      "header": "Postgres URL",
+      "prompt": "Which PostgreSQL database?",
+      "why": "Stored in the configuration, so it must not hold a password: use a .pgpass file.",
+      "choices": [
+        {
+          "value": "postgres://branchyard@localhost/branchyard",
+          "label": "Local database",
+          "description": "user branchyard on localhost",
+          "recommended": true
+        }
+      ],
+      "allow_other": true,
+      "default": "postgres://branchyard@localhost/branchyard",
+      "optional": false,
+      "when": {
+        "equals": {
+          "id": "database",
+          "value": "postgres"
+        }
+      },
+      "rules": [
+        {
+          "rule": "postgres_url"
+        }
+      ]
+    },
+    {
+      "id": "tenants",
+      "kind": "text",
+      "header": "Tenant names",
+      "prompt": "Which tenants, comma-separated?",
+      "why": "Each gets a credential named TENANT-admin and a token file.",
+      "choices": [
+        {
+          "value": "team-a, team-b",
+          "label": "team-a and team-b",
+          "description": "two example teams",
+          "recommended": true
+        }
+      ],
+      "allow_other": true,
+      "default": "team-a, team-b",
+      "optional": false,
+      "when": {
+        "equals": {
+          "id": "tenancy",
+          "value": "multi"
+        }
+      },
+      "rules": [
+        {
+          "rule": "name_list",
+          "max": 64
+        }
+      ]
+    },
+    {
+      "id": "scopes",
+      "kind": "multiselect",
+      "header": "Scopes",
+      "prompt": "What may the generated credentials do?",
+      "why": "read covers every GET; run starts and steers turns; merge merges; admin removes branches.",
+      "choices": [
+        {
+          "value": "read",
+          "label": "read",
+          "description": "list and watch branches"
+        },
+        {
+          "value": "run",
+          "label": "run",
+          "description": "start, send, fork, spawn, cancel, steer"
+        },
+        {
+          "value": "merge",
+          "label": "merge",
+          "description": "merge and integrate"
+        },
+        {
+          "value": "admin",
+          "label": "admin",
+          "description": "remove branches"
+        }
+      ],
+      "allow_other": false,
+      "default": [
+        "read",
+        "run",
+        "merge",
+        "admin"
+      ],
+      "optional": false
+    }
+  ],
+  "remaining": 11
+}
