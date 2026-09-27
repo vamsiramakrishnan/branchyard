@@ -2,7 +2,7 @@
 
 use branchyard_harness::claude_code::ClaudeCode;
 use branchyard_harness::conformance::{
-    assert_contract, check_frame, Direction, Replay, Transcript,
+    assert_contract_greeted, check_frame, Direction, Replay, Transcript,
 };
 use branchyard_harness::profiles::{Protocol, PROFILES};
 use branchyard_harness::{Driver, Event, Open, PermissionDecision, SessionMode, TurnOutcome};
@@ -29,6 +29,12 @@ fn answer(protocol: Protocol) -> impl Fn(&Value) -> Vec<Value> {
             (Protocol::CodexAppServer, Some("thread/start")) => json!({"thread": {"id": "t1"}}),
             (Protocol::Acp, Some("initialize")) => json!({"protocolVersion": 1}),
             (Protocol::Acp, Some("session/new")) => json!({"sessionId": "s1"}),
+            (Protocol::PiRpc, _) if frame["type"] == "get_state" => {
+                return vec![
+                    json!({"id": frame["id"], "type": "response", "command": "get_state",
+                    "success": true, "data": {"sessionId": "s1"}}),
+                ]
+            }
             _ => return Vec::new(),
         };
         let mut reply = json!({"id": id, "result": result});
@@ -39,11 +45,31 @@ fn answer(protocol: Protocol) -> impl Fn(&Value) -> Vec<Value> {
     }
 }
 
+/// What `protocol`'s harness prints before reading anything.
+fn greeting(protocol: Protocol) -> Vec<Value> {
+    match protocol {
+        Protocol::AntigravityStreamJson => {
+            vec![json!({"event": "init", "conversation_id": "c1", "init": {"cwd": "/workspace"}})]
+        }
+        Protocol::AmpStreamJson => {
+            vec![
+                json!({"type": "system", "subtype": "init", "session_id": "T-1", "cwd": "/workspace"}),
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[test]
 fn every_profile_follows_the_driver_contract() {
     for profile in PROFILES {
         let mut driver = profile.driver();
-        assert_contract(driver.as_mut(), fresh(), answer(profile.protocol));
+        assert_contract_greeted(
+            driver.as_mut(),
+            fresh(),
+            &greeting(profile.protocol),
+            answer(profile.protocol),
+        );
     }
 }
 

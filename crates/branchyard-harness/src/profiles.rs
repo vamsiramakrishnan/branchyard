@@ -9,8 +9,11 @@
 //! tests, not that the profile has passed runtime qualification.
 
 use crate::acp::Acp;
+use crate::amp::Amp;
+use crate::antigravity::Antigravity;
 use crate::claude_code::ClaudeCode;
 use crate::codex::Codex;
+use crate::pi::Pi;
 use crate::Driver;
 
 /// The wire protocol a profile uses.
@@ -22,6 +25,12 @@ pub enum Protocol {
     CodexAppServer,
     /// Agent Client Protocol v1.
     Acp,
+    /// Antigravity CLI headless NDJSON (`event`-framed stream-json).
+    AntigravityStreamJson,
+    /// Pi RPC mode.
+    PiRpc,
+    /// Amp execute mode with streaming JSON input and output.
+    AmpStreamJson,
 }
 
 /// One way to drive one harness.
@@ -35,7 +44,8 @@ pub struct Profile {
     /// Executable and fixed arguments. Drivers append protocol arguments.
     pub command: &'static [&'static str],
     /// Harness version whose protocol the driver was checked against, when a
-    /// real transcript or generated schema exists for it.
+    /// real transcript or generated schema exists for it; otherwise the
+    /// evidence the driver rests on, named as such.
     pub checked_against: Option<&'static str>,
     /// ACP `_meta` for session requests, as JSON.
     pub acp_session_meta: Option<&'static str>,
@@ -53,6 +63,9 @@ impl Profile {
         match self.protocol {
             Protocol::ClaudeStreamJson => Box::new(ClaudeCode::new(command)),
             Protocol::CodexAppServer => Box::new(Codex::new(command)),
+            Protocol::AntigravityStreamJson => Box::new(Antigravity::new(command)),
+            Protocol::PiRpc => Box::new(Pi::new(command)),
+            Protocol::AmpStreamJson => Box::new(Amp::new(command)),
             Protocol::Acp => {
                 let driver = Acp::new(command);
                 Box::new(match self.acp_session_meta {
@@ -106,6 +119,14 @@ pub const PROFILES: &[Profile] = &[
         acp_session_meta: None,
     },
     acp("codex-acp", "codex", &["codex-acp"]),
+    Profile {
+        id: "antigravity-stream-json",
+        harness: "antigravity",
+        protocol: Protocol::AntigravityStreamJson,
+        command: &["agy"],
+        checked_against: Some("Antigravity CLI 1.2.11"),
+        acp_session_meta: None,
+    },
     acp("oh-my-pi-acp", "oh-my-pi", &["omp", "acp"]),
     acp(
         "deepseek-harness-acp",
@@ -118,6 +139,14 @@ pub const PROFILES: &[Profile] = &[
         &["gemini", "--experimental-acp"],
     ),
     acp("opencode-acp", "opencode", &["opencode", "acp"]),
+    Profile {
+        id: "pi-rpc",
+        harness: "pi",
+        protocol: Protocol::PiRpc,
+        command: &["pi"],
+        checked_against: Some("pi 0.87.1"),
+        acp_session_meta: None,
+    },
     acp("goose-acp", "goose", &["goose", "acp"]),
     acp("cursor-acp", "cursor", &["agent", "acp"]),
     acp(
@@ -125,21 +154,24 @@ pub const PROFILES: &[Profile] = &[
         "github-copilot",
         &["copilot", "--acp"],
     ),
+    Profile {
+        id: "amp-stream-json",
+        harness: "amp",
+        protocol: Protocol::AmpStreamJson,
+        command: &["amp"],
+        checked_against: Some("documentation only, not recorded"),
+        acp_session_meta: None,
+    },
     acp("qwen-code-acp", "qwen-code", &["qwen", "--acp"]),
     acp("kimi-cli-acp", "kimi-cli", &["kimi", "acp"]),
     acp("hermes-acp", "hermes", &["hermes", "acp"]),
 ];
 
 /// Integration targets without a driver yet, and why.
-pub const NOT_IMPLEMENTED: &[(&str, &str)] = &[
-    (
-        "antigravity",
-        "native NDJSON streaming CLI; needs its own driver",
-    ),
-    ("pi", "native RPC mode; needs its own driver"),
-    ("amp", "native NDJSON streaming CLI; needs its own driver"),
-    ("aider", "batch process without a persistent protocol"),
-];
+pub const NOT_IMPLEMENTED: &[(&str, &str)] = &[(
+    "aider",
+    "batch process without a persistent protocol; needs a separate batch profile, not a session driver",
+)];
 
 /// The default profile for a harness.
 pub fn default_for(harness: &str) -> Option<&'static Profile> {
@@ -208,6 +240,17 @@ mod tests {
             Protocol::CodexAppServer
         );
         assert!(by_id("claude-code-acp").is_some() && by_id("codex-acp").is_some());
+    }
+
+    #[test]
+    fn native_targets_default_to_their_native_drivers() {
+        for (harness, protocol) in [
+            ("antigravity", Protocol::AntigravityStreamJson),
+            ("pi", Protocol::PiRpc),
+            ("amp", Protocol::AmpStreamJson),
+        ] {
+            assert_eq!(default_for(harness).unwrap().protocol, protocol);
+        }
     }
 
     #[test]

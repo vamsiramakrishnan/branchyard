@@ -7,12 +7,15 @@
 //! exec with stdin/stdout as protocol pipes. Nothing here spawns a process,
 //! touches the host filesystem or holds credentials.
 //!
-//! Three driver families cover the integration matrix's protocol profiles:
+//! Six driver families cover the integration matrix's protocol profiles:
 //!
 //! - [`claude_code::ClaudeCode`]: Claude Code print mode with stream-json
 //!   input and output and permission prompts over stdio.
 //! - [`codex::Codex`]: Codex App Server JSON-RPC.
 //! - [`acp::Acp`]: Agent Client Protocol v1, for every ACP profile.
+//! - [`antigravity::Antigravity`], [`pi::Pi`] and [`amp::Amp`]: those
+//!   harnesses' native streaming protocols. None routes tool approvals to
+//!   Branchyard; see each module.
 //!
 //! [`profiles`] maps harness IDs to a driver and launch command. A profile is
 //! implemented, not qualified: support needs the runtime gates in
@@ -23,9 +26,12 @@
 //! `docs/writing-a-driver.md` describes the process.
 
 pub mod acp;
+pub mod amp;
+pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod conformance;
+pub mod pi;
 pub mod profiles;
 
 use std::fmt;

@@ -28,17 +28,17 @@ Commands describe upstream entry points, not ready-to-run deployment recipes. Au
 |---|---|---|---|
 | Claude Code | Existing ACP adapter; native SDK helper for deeper controls | [Claude Agent ACP](https://github.com/agentclientprotocol/claude-agent-acp), built on the [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview) | Permission callbacks, hooks, explicit resume/fork, helper and CLI version pairing |
 | Codex | Native App Server | [`codex app-server`](https://developers.openai.com/codex/app-server/); existing [Codex ACP adapter](https://github.com/zed-industries/codex-acp) as an alternate profile | Bidirectional approvals, thread/turn IDs, cancellation, reconnect |
-| Antigravity | Native NDJSON or official SDK | [`agy --input-format stream-json --output-format stream-json`](https://antigravity.google/docs/cli/headless/) | `event`-based frames, cumulative usage, cached authentication, headless permission behavior |
+| Antigravity | Native NDJSON (`antigravity-stream-json`, implemented, unqualified) or official SDK | [`agy --input-format stream-json --output-format stream-json`](https://antigravity.google/docs/cli/headless/) | `event`-based frames, cumulative usage, cached authentication, headless permission behavior |
 | Oh My Pi | ACP; native RPC when required | [`omp acp` / `omp --mode rpc`](https://github.com/can1357/oh-my-pi) | RPC completion versus command acknowledgment; extension interaction; resume syntax |
 | DeepSeek Harness | ACP | [`dsh --profile acp`](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/acp-app/README.md) | Trusted profile composition, stdout purity, session persistence, startup-only configuration |
 | Gemini CLI | ACP | [`gemini --experimental-acp`](https://geminicli.com/docs/cli/cli-reference/) | Experimental mode/version pairing, auth and policy configuration |
 | OpenCode | ACP | [`opencode acp`](https://opencode.ai/docs/acp/) | Optional methods, cwd, MCP, cancellation; keep native server API as a separate profile |
-| Pi | Native RPC | [`pi --mode rpc`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md) | Prompt acknowledgments versus agent completion; confined session-file references |
+| Pi | Native RPC (`pi-rpc`, implemented, unqualified) | [`pi --mode rpc`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md) | Prompt acknowledgments versus agent completion; confined session-file references |
 | Goose | ACP | [`goose acp`](https://goose-docs.ai/docs/gdk/acp/) | Stdout transport, provider identity, permission and tool callbacks |
 | Aider | Batch process | [Scripted `--message` execution](https://aider.chat/docs/scripting.html) | Exit/result mapping and artifact validation; no assumed persistent RPC or native fork |
 | Cursor CLI | ACP | [`agent acp`](https://cursor.com/docs/cli/acp) | Authentication and executable aliases; permission handling in unattended operation |
 | GitHub Copilot CLI | ACP | [`copilot --acp`](https://github.blog/changelog/2026-01-28-acp-support-in-copilot-cli-is-now-in-public-preview/) | Protocol/version qualification; SDK backend is a distinct alternate interface |
-| Amp | Native NDJSON | [`amp --execute --stream-json`](https://ampcode.com/docs/cli/streaming-json), with documented stream input mode when needed | Keep execution in our sandbox; turn boundaries and server-compatible credentials |
+| Amp | Native NDJSON (`amp-stream-json`, implemented from documentation, unqualified) | [`amp --execute --stream-json`](https://ampcode.com/docs/cli/streaming-json), with documented stream input mode when needed | Keep execution in our sandbox; turn boundaries and server-compatible credentials |
 | Qwen Code | ACP | [`qwen --acp`](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/) | ACP package version, scope projection, approvals, optional session methods |
 | Kimi CLI | ACP | [`kimi acp`](https://github.com/MoonshotAI/kimi-cli) | Pin the legacy CLI or separately qualify its successor; do not silently migrate saved sessions |
 | Hermes | ACP | [`hermes acp`](https://hermes-agent.nousresearch.com/docs/user-guide/features/acp) | Install ACP extra; isolate persistent home; qualify resume and approval scopes |
@@ -65,11 +65,19 @@ The documented streaming CLI accepts NDJSON user events and emits a result for e
 
 Branchyard must record which policy controls this mode actually supports. If a task requires per-tool decisions that the selected mode cannot expose, reject that profile for the task or use a separately qualified SDK profile. Streaming JSON alone is not a permission boundary.
 
+Checked against Antigravity CLI 1.2.11 without a model call ([fixtures](../crates/branchyard-harness/tests/fixtures)): `init` arrives at startup, before any prompt, so it is the handshake. A `--conversation` ID the CLI does not know starts a new conversation with only a stderr warning; the driver fails the open when the `init` ID differs. Without credentials the CLI prints one `ERROR` result and no `init`. A prompt such as `/model` ends the session unless `--disable-slash-commands` is passed, which the driver always does. The stream has no permission requests and no cancellation (SIGINT ends the process), so the profile declares neither; Branchyard must write `permissions.allow` rules into the private `~/.gemini/antigravity-cli/settings.json` and never pass `--dangerously-skip-permissions`. There is no fork.
+
 ### Pi and Oh My Pi
 
 Treat these as separate versioned profiles. Both expose machine interfaces, but their resume syntax and extensions differ. Herdr's selected recipes use `pi --session <value>` and `omp --resume=<value>`. Those are resume recipes, not proof of protocol startup flags for every version. [Vendored recipes](../vendor/herdr/src/agent_resume.rs)
 
 RPC commands can be acknowledged before the agent finishes. Track the documented terminal event rather than marking success on the request response. If a mode emits interactive extension requests, the profile must declare and implement their responses; otherwise fail explicitly. Never let a session file path choose a host file outside the sandbox's authorized store.
+
+The `pi-rpc` profile follows [Pi's RPC documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md) and `rpc-mode.js` from `@earendil-works/pi-coding-agent` 0.87.1, and replays transcripts recorded from that version without a model call. RPC mode has no greeting, so `get_state` is the handshake and names the session. A `prompt` response is the acknowledgment; the turn ends at `agent_settled`, after retries, and the `abort` response arrives only after that. Resume uses `--session <id>`, fork `--fork <id>`; since `--session` also matches ID prefixes, the returned ID is checked. References that Pi would read as file paths (a path separator or `.jsonl`) are refused before launch. Pi has no approval step, so the profile declares no tool approvals: restrict tools with `--tools` and confine the process with the sandbox. Extension dialogs are answered as cancelled. Prompts starting with `/` are refused, because an extension command can consume one without an agent run and never settle. A `--session` ID found only in another project makes Pi print a fork question on stdout; the driver reports it as a protocol violation.
+
+### Amp
+
+The `amp-stream-json` profile rests on the [streaming JSON documentation](https://ampcode.com/docs/cli/streaming-json) alone. amp 0.0.1790467310-ge147a9 installs from npm, but without an account it prints a device login on stdout, and with a placeholder key it exits before printing a protocol line, so its fixtures are derived from documentation, not recorded. With `--stream-json-input`, `result` arrives once, after stdin closes, so the driver ends a turn at the first top-level assistant message with a terminal `stop_reason` (`end_turn`, `stop_sequence`, `max_tokens`, `refusal`), or at an error. It assumes `init` arrives before the first message; if it does not, the open never becomes ready. Amp does not ask before running tools and has no cancellation message, fork or model flag: restrict tools in the private settings file (`amp.tools.disable`, `amp.mcpPermissions` or a plugin), never set `amp.dangerouslyAllowAll`, and never pass `-ox` or `--executor`, which run the thread off Branchyard's sandbox.
 
 ### DeepSeek Harness
 
@@ -124,10 +132,13 @@ Transient display deltas may be coalesced under load. Permission requests, termi
 | Claude Code stream-json | `claude-code-stream-json` (default for Claude Code) | Live protocol qualification, 9 of 9 scenarios, against Claude Code 2.1.283; replay of a recorded session; frames follow Agent SDK 0.3.283 types |
 | Codex App Server | `codex-app-server` (default for Codex) | Replay of a recorded codex-cli 0.157.1 session; every outgoing frame equals one the binary accepted; shapes from `codex app-server generate-json-schema` |
 | ACP v1 | `claude-code-acp` (live protocol qualification, 9 of 9, against claude-agent-acp 0.81.2), `codex-acp`, Oh My Pi, DeepSeek Harness, Gemini CLI, OpenCode, Goose, Cursor CLI, GitHub Copilot CLI, Qwen Code, Kimi CLI, Hermes | Recorded claude-agent-acp 0.81.2 `initialize`; every outgoing frame deserializes as the `agent-client-protocol-schema` type |
+| Antigravity stream-json | `antigravity-stream-json` (default for Antigravity) | Replay of Antigravity CLI 1.2.11 transcripts recorded without a model call: a failed turn, resume, resume of an unknown ID, missing credentials; shapes from the [headless documentation](https://antigravity.google/docs/cli/headless/) |
+| Pi RPC | `pi-rpc` (default for Pi) | Replay of pi 0.87.1 transcripts recorded without a model call: a retried failed turn, abort, resume, fork, missing credentials; shapes from Pi's RPC documentation and `rpc-mode.js` |
+| Amp stream-json | `amp-stream-json` (default for Amp) | Documentation only: fixtures derived from the [streaming JSON documentation](https://ampcode.com/docs/cli/streaming-json), not recorded |
 
 The drivers implement `open`, `submit`, `observe` (as `receive`), `interrupt` and permission answers. `probe` and `prepare` are not implemented yet, and `close` is process termination through the sandbox provider, reported as `SessionClosed`.
 
-Twelve of the sixteen targets have a default profile. Antigravity, Pi and Amp need native drivers; Aider has no persistent protocol. A test fails if a target is neither implemented nor listed with its reason.
+Fifteen of the sixteen targets have a default profile. Aider has no persistent protocol; it needs a separate batch profile, not a session driver. A test fails if a target is neither implemented nor listed with its reason.
 
 The drivers enforce the contract rather than trusting the harness:
 
@@ -135,9 +146,12 @@ The drivers enforce the contract rather than trusting the harness:
 - ACP fork is rejected because `session/fork` is unstable. ACP resume uses `session/resume` or `session/load` only when the agent advertises it; history replayed by `session/load` is not reported as a new turn.
 - Permission requests surface as events and are answered per invocation. ACP answers select only `allow_once` or `reject_once`, never a standing rule. Requests a profile does not implement (Claude hook callbacks, Codex user-input prompts, ACP filesystem and terminal callbacks) are answered with an error immediately.
 - Cancellation distinguishes acknowledgment from the turn's terminal state. ACP cancel also answers outstanding permission requests as cancelled, as the protocol requires.
-- Usage is reported as cumulative session totals where the harness reports it, and as unknown where it does not. A closed connection during a turn yields `OutcomeUnknown`.
+- Usage is reported as cumulative session totals where the harness reports it (Antigravity's `result.usage` too), per model response where that is all it reports (Pi, Amp), and as unknown where it does not. A closed connection during a turn yields `OutcomeUnknown`.
+- Antigravity, Pi and Amp route no tool approvals and declare `tool_approvals: false`; Antigravity and Amp also declare no cancellation. `admit` rejects them for a task that requires either. Their permission boundary is the harness's own configuration, which Branchyard must write into the private home, plus the sandbox; none of them is ever launched with a bypass flag or setting. The local engine (`by`) does not call `admit` yet, so selecting one of these profiles there runs tools without Branchyard's answers.
 
 `claude-code-stream-json` and `claude-code-acp` have passed live protocol qualification against Claude Code 2.1.283 and claude-agent-acp 0.81.2: turns, permission denial and approval, interrupts during a permission wait and during a tool, clean close, resume, fork and a lost connection. See [driver qualification](qualification/README.md) for the reports and findings. That run used local processes, not a Branchyard sandbox. Every profile remains unqualified for isolation, credentials and recovery, and the Codex and remaining ACP profiles have not run live.
+
+`antigravity-stream-json`, `pi-rpc` and `amp-stream-json` are unqualified: none has completed a model turn. The Antigravity and Pi transcripts prove framing, handshake, session identity and error turns against the real binaries with model endpoints pointed at a closed local port; Amp has no recording at all. `branchyard-qualify` assumes per-invocation approvals, and cancellation for its interrupt scenarios; it does not skip them for profiles that declare neither, so qualifying these profiles needs scenarios for configuration-based permissions first.
 
 ## Transport and callback placement
 
