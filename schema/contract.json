@@ -5496,6 +5496,10 @@
             {
               "type": "object",
               "properties": {
+                "boundary": {
+                  "type": "string",
+                  "default": "turn_start"
+                },
                 "path": {
                   "type": "string",
                   "const": "turn_start"
@@ -5514,6 +5518,10 @@
                   "format": "uint64",
                   "minimum": 0
                 },
+                "boundary": {
+                  "type": "string",
+                  "default": "not_recorded"
+                },
                 "path": {
                   "type": "string",
                   "const": "steer"
@@ -5526,7 +5534,7 @@
               "description": "Steered into the running turn as input `steer` ([`Steer::id`])."
             }
           ],
-          "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as `{\"path\": \"steer\", \"steer\": 3}`."
+          "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
         }
       }
     },
@@ -6830,6 +6838,10 @@
             {
               "type": "object",
               "properties": {
+                "boundary": {
+                  "type": "string",
+                  "default": "turn_start"
+                },
                 "path": {
                   "type": "string",
                   "const": "turn_start"
@@ -6848,6 +6860,10 @@
                   "format": "uint64",
                   "minimum": 0
                 },
+                "boundary": {
+                  "type": "string",
+                  "default": "not_recorded"
+                },
                 "path": {
                   "type": "string",
                   "const": "steer"
@@ -6860,7 +6876,7 @@
               "description": "Steered into the running turn as input `steer` ([`Steer::id`])."
             }
           ],
-          "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as `{\"path\": \"steer\", \"steer\": 3}`."
+          "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
         }
       }
     },
