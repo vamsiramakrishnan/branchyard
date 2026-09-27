@@ -45,6 +45,15 @@ Options:
   --database URL            Keep branch state and operations in PostgreSQL
                             (postgres://...); needs a build with the postgres feature
   --max-artifact-bytes N    Largest artifact a publish may upload (default: 268435456)
+  --webhook URL             Notify URL of every served repository's activity
+                            (branch status changes, stalls, permission requests);
+                            https:// only unless loopback or --webhook-insecure
+  --webhook-secret FILE     HMAC-SHA256 key for the most recent --webhook, signing
+                            each delivery's body (X-Branchyard-Signature)
+  --webhook-events KINDS    Only these comma-separated kinds for the most recent
+                            --webhook: status, stall, permission_wait, merge,
+                            failure (default: every kind)
+  --webhook-insecure        Allow a --webhook URL that is plain http:// off loopback
   --max-running N           Operations running at once (default: 8)
   --shutdown-grace SECS     At shutdown, wait this long for running operations (default: 60)
   --quiet                   Do not log requests
@@ -77,8 +86,19 @@ struct Flags {
     max_artifact_bytes: Option<u64>,
     max_running: Option<usize>,
     shutdown_grace: Option<Duration>,
+    webhooks: Vec<FlagWebhook>,
+    webhook_insecure: bool,
     quiet: bool,
     help: bool,
+}
+
+/// One `--webhook`, with the `--webhook-secret` and `--webhook-events` that
+/// follow it before the next `--webhook`.
+#[derive(Debug, Default, PartialEq)]
+struct FlagWebhook {
+    url: String,
+    secret_file: Option<PathBuf>,
+    events: Vec<String>,
 }
 
 fn parse(args: &[String]) -> Result<Flags, String> {
@@ -190,6 +210,35 @@ fn parse(args: &[String]) -> Result<Flags, String> {
                     })?;
                 flags.max_running = Some(n);
             }
+            "--webhook" => {
+                flags.webhooks.push(FlagWebhook {
+                    url: value("URL")?,
+                    secret_file: None,
+                    events: Vec::new(),
+                });
+            }
+            "--webhook-secret" => {
+                let path: PathBuf = value("FILE")?.into();
+                let webhook = flags
+                    .webhooks
+                    .last_mut()
+                    .ok_or("--webhook-secret needs a --webhook before it")?;
+                once(webhook.secret_file.is_some())?;
+                webhook.secret_file = Some(path);
+            }
+            "--webhook-events" => {
+                let text = value("KINDS")?;
+                let webhook = flags
+                    .webhooks
+                    .last_mut()
+                    .ok_or("--webhook-events needs a --webhook before it")?;
+                once(!webhook.events.is_empty())?;
+                for kind in text.split(',').map(str::trim).filter(|k| !k.is_empty()) {
+                    config::check_webhook_event_kind(kind)?;
+                    webhook.events.push(kind.to_owned());
+                }
+            }
+            "--webhook-insecure" if inline.is_none() => flags.webhook_insecure = true,
             "--shutdown-grace" => {
                 once(flags.shutdown_grace.is_some())?;
                 let text = value("SECS")?;
@@ -212,6 +261,15 @@ fn parse(args: &[String]) -> Result<Flags, String> {
 /// A token file's contents, created with a fresh random token and mode 600
 /// when missing.
 fn default_token(path: &Path) -> Result<(), String> {
+    default_secret(
+        path,
+        "created a token in {path}; clients pass --token-file with it",
+    )
+}
+
+/// A file's contents, created with a fresh random secret and mode 600 when
+/// missing. `message` names the file with `{path}`.
+fn default_secret(path: &Path, message: &str) -> Result<(), String> {
     if path.exists() {
         return Ok(());
     }
@@ -235,8 +293,8 @@ fn default_token(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("token file {}: {e}", path.display()))?;
     writeln!(file, "{token}").map_err(|e| format!("token file {}: {e}", path.display()))?;
     eprintln!(
-        "branchyard-server: created a token in {}; clients pass --token-file with it",
-        path.display()
+        "branchyard-server: {}",
+        message.replace("{path}", &path.display().to_string())
     );
     Ok(())
 }
@@ -326,6 +384,31 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         .extend(flags.secrets.into_iter().map(|s| (s.name.clone(), s)));
     config.database = flags.database.or(partial.database);
     config.log_requests = !flags.quiet;
+    config.webhooks = partial.webhooks;
+    for (i, webhook) in flags.webhooks.into_iter().enumerate() {
+        let secret = match webhook.secret_file {
+            Some(path) => config::read_token_file(&path, &mut warnings)?,
+            None => {
+                let path = config.data_dir.join(format!("webhook-{i}.secret"));
+                default_secret(
+                    &path,
+                    "created a webhook secret in {path}; give it to the receiver to verify \
+                     X-Branchyard-Signature",
+                )?;
+                config::read_token_file(&path, &mut warnings)?
+            }
+        };
+        for kind in &webhook.events {
+            config::check_webhook_event_kind(kind)?;
+        }
+        config.webhooks.push(config::WebhookConfig {
+            id: webhook.url.clone(),
+            url: webhook.url,
+            secret,
+            events: webhook.events.into_iter().collect(),
+        });
+    }
+    config.webhook_insecure = partial.webhook_insecure || flags.webhook_insecure;
     Ok((config, warnings))
 }
 
@@ -485,6 +568,43 @@ mod tests {
                 "unknown option --allow-delegation",
             ),
             ("extra", "unexpected argument"),
+        ] {
+            let got = parse(&args(line)).unwrap_err();
+            assert!(got.contains(error), "{line}: {got}");
+        }
+    }
+
+    #[test]
+    fn webhook_flags_group_by_the_preceding_webhook() {
+        let flags = parse(&args(
+            "--webhook https://a.example/hook --webhook-secret sfile \
+             --webhook-events stall,merge --webhook https://b.example/hook \
+             --webhook-insecure",
+        ))
+        .unwrap();
+        assert_eq!(
+            flags.webhooks,
+            [
+                FlagWebhook {
+                    url: "https://a.example/hook".into(),
+                    secret_file: Some("sfile".into()),
+                    events: vec!["stall".into(), "merge".into()],
+                },
+                FlagWebhook {
+                    url: "https://b.example/hook".into(),
+                    secret_file: None,
+                    events: Vec::new(),
+                },
+            ]
+        );
+        assert!(flags.webhook_insecure);
+        for (line, error) in [
+            ("--webhook-secret f", "needs a --webhook before it"),
+            ("--webhook-events stall", "needs a --webhook before it"),
+            (
+                "--webhook https://a.example --webhook-events bogus",
+                "not a webhook event kind",
+            ),
         ] {
             let got = parse(&args(line)).unwrap_err();
             assert!(got.contains(error), "{line}: {got}");

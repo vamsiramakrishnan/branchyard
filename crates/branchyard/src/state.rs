@@ -33,7 +33,7 @@ use serde_json::Value;
 
 use crate::delegation::Grant;
 use crate::storage::StorageBackend;
-use crate::{proc, BranchInfo, Error, Provider, RecordedEvent, SteerState};
+use crate::{proc, BranchInfo, Error, Message, Provider, RecordedEvent, SteerState};
 
 pub(crate) const DIR: &str = ".branchyard";
 
@@ -248,6 +248,13 @@ pub(crate) struct SteerRow {
     pub text: String,
     pub requested_ms: u64,
     pub state: SteerState,
+    /// The inbox message this input carries, when a message is being
+    /// delivered into the running turn by steering
+    /// ([`crate::inbox::SteerDelivery`]).
+    pub message: Option<u64>,
+    /// Whether that message is already delivered, by this input or, when
+    /// it raced the turn's start, in the turn's prompt.
+    pub message_delivered: bool,
 }
 
 impl SteerState {
@@ -368,13 +375,32 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
 
     /// Queue `text` from `by` for the branch's running turn, bound to that
     /// turn as a cancel is; its ID, or `None` when no turn holds the
-    /// branch's lease.
-    fn request_steer(&self, name: &str, by: &str, text: &str) -> Result<Option<u64>, Error>;
+    /// branch's lease. With `message`, the input carries that inbox
+    /// message, linked to it in the same transaction; it fails with
+    /// [`Error::Denied`], queueing nothing, when the message is unknown or
+    /// already delivered.
+    fn request_steer(
+        &self,
+        name: &str,
+        by: &str,
+        text: &str,
+        message: Option<u64>,
+    ) -> Result<Option<u64>, Error>;
     /// The fenced turn's steered input still [`SteerState::Pending`],
     /// oldest first.
     fn pending_steers(&self, fence: &Fence) -> Result<Vec<SteerRow>, Error>;
-    /// Record what became of the fenced turn's steered input `id`.
-    fn settle_steer(&self, fence: &Fence, id: u64, state: &SteerState) -> Result<(), Error>;
+    /// Record what became of the fenced turn's steered input `id`. When it
+    /// carries an inbox message, the message's delivery moves in the same
+    /// transaction: [`SteerState::Delivered`] or [`SteerState::Accepted`]
+    /// marks it delivered, and returns its id if this call did so;
+    /// [`SteerState::Refused`] returns a message this input had delivered
+    /// to pending, unlinked, for the recipient's next turn start.
+    fn settle_steer(
+        &self,
+        fence: &Fence,
+        id: u64,
+        state: &SteerState,
+    ) -> Result<Option<u64>, Error>;
     /// One steered input of the branch's current incarnation.
     fn steer(&self, name: &str, id: u64) -> Result<Option<SteerRow>, Error>;
 
@@ -401,6 +427,32 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn feed_since(&self, after: u64, limit: usize) -> Result<Vec<FeedRow>, Error>;
     /// The last feed position; 0 when empty.
     fn head(&self) -> Result<u64, Error>;
+
+    /// Store a harness-to-harness message: assigns its id (counting from 1
+    /// across the repository) and `at_ms`, and returns the stored copy.
+    fn send_message(&self, message: &Message) -> Result<Message, Error>;
+    /// One message by id, if it exists.
+    fn message(&self, id: u64) -> Result<Option<Message>, Error>;
+    /// Every message addressed to `to`, oldest first.
+    fn inbox(&self, to: &str) -> Result<Vec<Message>, Error>;
+    /// Mark these messages delivered; already-delivered and unknown ids are
+    /// ignored. Steered input still queued with a message marked here
+    /// finds it delivered ([`SteerRow::message_delivered`]) and is refused
+    /// unwritten.
+    fn mark_delivered(&self, ids: &[u64]) -> Result<(), Error>;
+    /// The first message that answers the question `question_id`, if one
+    /// has arrived.
+    fn answer_to(&self, question_id: u64) -> Result<Option<Message>, Error>;
+    /// The steered input carrying message `id`, if one was queued for it
+    /// (see [`Backend::request_steer`]) and has not been refused.
+    fn message_steer(&self, id: u64) -> Result<Option<u64>, Error>;
+    /// Record that a waiter is blocked for an answer to question `id` until
+    /// `until_ms` (milliseconds since the Unix epoch), or, with `None`,
+    /// that it stopped waiting.
+    fn set_awaiting(&self, id: u64, until_ms: Option<u64>) -> Result<(), Error>;
+    /// Whether `from` sent a question that has no answer yet and a waiter
+    /// whose deadline is after `now_ms`.
+    fn awaiting_answer(&self, from: &str, now_ms: u64) -> Result<bool, Error>;
 }
 
 /// Wakes readers in this process when events are appended to a store.

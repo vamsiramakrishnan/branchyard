@@ -296,53 +296,6 @@ pub(crate) fn publish(
     Ok(row.artifact)
 }
 
-/// Publish `bytes` (already in memory) as a new artifact of `branch`, like
-/// [`publish`] but without reading them from a file first: the server's
-/// HTTP API uses this for a streamed upload, whose bytes it already holds
-/// bounded by its configured size limit.
-pub(crate) fn publish_bytes(
-    yard: &Yard,
-    branch: &str,
-    bytes: &[u8],
-    name: Option<String>,
-    media_type: Option<String>,
-    labels: BTreeMap<String, String>,
-) -> Result<ArtifactRef, Error> {
-    let store = yard.store();
-    let record = store.read(branch)?;
-    let digest = blake3::hash(bytes).to_hex().to_string();
-    let size = bytes.len() as u64;
-    let dest = blob_path(store.dir(), &digest);
-    if !dest.exists() {
-        let dir = dest.parent().expect("blob_path has a parent");
-        std::fs::create_dir_all(dir)
-            .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
-        let temp = dir.join(format!(".{digest}.{}.tmp", now_ms()));
-        std::fs::write(&temp, bytes)
-            .map_err(|e| Error::State(format!("write {}: {e}", temp.display())))?;
-        // Immutable once written: never opened for writing again.
-        let mut perms = std::fs::metadata(&temp)
-            .map_err(|e| Error::State(format!("stat {}: {e}", temp.display())))?
-            .permissions();
-        perms.set_readonly(true);
-        let _ = std::fs::set_permissions(&temp, perms);
-        std::fs::rename(&temp, &dest)
-            .map_err(|e| Error::State(format!("install {}: {e}", dest.display())))?;
-    }
-    let name = name.unwrap_or_else(|| digest.clone());
-    let row = store.storage().create_artifact(&NewArtifact {
-        digest,
-        size,
-        name,
-        media_type: media_type.unwrap_or_else(|| "application/octet-stream".into()),
-        publisher_branch: branch.to_owned(),
-        turn: record.info.turns as u64,
-        labels,
-        ancestry: ancestry_of(&store, branch),
-    })?;
-    Ok(row.artifact)
-}
-
 /// Every artifact `reader` may read: what it published, what its ancestors
 /// or descendants published, and what was explicitly shared to it.
 pub(crate) fn list(yard: &Yard, reader: &str) -> Result<Vec<ArtifactRef>, Error> {
@@ -369,29 +322,6 @@ pub(crate) fn list(yard: &Yard, reader: &str) -> Result<Vec<ArtifactRef>, Error>
 /// recorded digest, and return its provenance. Refused unless `reader` may
 /// read it.
 pub(crate) fn get(yard: &Yard, reader: &str, id: &str, out: &Path) -> Result<ArtifactRef, Error> {
-    let (artifact, bytes) = get_bytes(yard, reader, id)?;
-    if let Some(dir) = out.parent() {
-        if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
-        }
-    }
-    let mut file = std::fs::File::create(out)
-        .map_err(|e| Error::State(format!("create {}: {e}", out.display())))?;
-    file.write_all(&bytes)
-        .map_err(|e| Error::State(format!("write {}: {e}", out.display())))?;
-    Ok(artifact)
-}
-
-/// Artifact `id`'s bytes in memory for `reader`, checked against the
-/// recorded digest, alongside its provenance. [`get`] writes them to a
-/// file; the server's HTTP API streams them to a download response
-/// instead, through [`crate::Yard::read_artifact_bytes`].
-pub(crate) fn get_bytes(
-    yard: &Yard,
-    reader: &str,
-    id: &str,
-) -> Result<(ArtifactRef, Vec<u8>), Error> {
     let store = yard.store();
     store.read(reader)?;
     let storage = store.storage();
@@ -423,7 +353,17 @@ pub(crate) fn get_bytes(
             "artifact {id}'s stored bytes no longer match its recorded digest"
         )));
     }
-    Ok((row.artifact, bytes))
+    if let Some(dir) = out.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
+        }
+    }
+    let mut file = std::fs::File::create(out)
+        .map_err(|e| Error::State(format!("create {}: {e}", out.display())))?;
+    file.write_all(&bytes)
+        .map_err(|e| Error::State(format!("write {}: {e}", out.display())))?;
+    Ok(row.artifact)
 }
 
 /// Share artifact `id`, published or already shared to `actor`, with
@@ -690,6 +630,8 @@ mod tests {
                 turns: 1,
                 cost_usd: None,
                 created_at: 0,
+                stalled: false,
+                superseded_by: None,
             },
             created_ms: 0,
             check: None,

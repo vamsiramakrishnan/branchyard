@@ -690,6 +690,120 @@ fn artifacts_and_scratch_reach_the_python_module() {
 }
 
 #[test]
+fn a_child_messages_its_parent_with_the_python_module_and_is_delivered_next_turn() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "run",
+        "WRITE root.txt=r",
+        "--name",
+        "root",
+        "--delegate=2",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+
+    // The child's own turn reports, asks and reads its inbox through the
+    // Python module, which shells out to `by` exactly as a harness would.
+    let script = "import branchyard as b; r = b.report('tests pass'); \
+                  print('reported', r.id, r.kind); \
+                  a = b.ask('should I rename the module?'); \
+                  print('asked', a.message.id, a.answer); \
+                  i = b.inbox(); print('inbox', len(i.messages))";
+    let kid_prompt = format!("SH python3 -c \"{script}\"");
+    let kid = repo.json(&[
+        "spawn",
+        &kid_prompt,
+        "--parent",
+        "root",
+        "--name",
+        "kid",
+        "--wait",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(kid["status"]["state"], "no_changes", "{kid}");
+    let said = reply(&repo, "kid");
+    assert!(said.contains("reported"), "{said}");
+    assert!(said.contains("asked"), "{said}");
+    assert!(
+        said.contains("inbox 0"),
+        "no messages delivered yet: {said}"
+    );
+
+    // Both a report and a question reach the parent's inbox, unread, and
+    // are recorded on both event logs.
+    let root_inbox = repo.json(&["inbox", "--as", "root", "--json"]);
+    let messages = root_inbox["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "{root_inbox}");
+    assert!(
+        messages.iter().all(|m| m["delivered"] == false),
+        "{root_inbox}"
+    );
+    let report_id = messages.iter().find(|m| m["kind"] == "report").unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    let question_id = messages.iter().find(|m| m["kind"] == "question").unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    let kid_log = repo.json(&["log", "kid", "--json"]);
+    let kid_log = kid_log.as_array().unwrap();
+    assert!(
+        kid_log
+            .iter()
+            .any(|e| e["activity"] == "message" && e["message"]["id"] == report_id),
+        "{kid_log:?}"
+    );
+
+    // Authority: a branch answers only its own descendants.
+    let refused = repo.by(&[
+        "answer",
+        &question_id.to_string(),
+        "no",
+        "--as",
+        "kid",
+        "--json",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["kind"], "denied");
+
+    let answer = repo.json(&[
+        "answer",
+        &question_id.to_string(),
+        "yes, rename it",
+        "--as",
+        "root",
+        "--json",
+    ]);
+    assert_eq!(answer["to"], "kid");
+    assert_eq!(answer["in_reply_to"], question_id);
+
+    // Delivered at kid's next turn, prepended to the prompt it actually
+    // ran, and acknowledged so it is not delivered twice.
+    let sent = repo.json(&["send", "kid", "WHOAMI", "--wait", "--json"]);
+    assert_eq!(sent["status"]["state"], "no_changes", "{sent}");
+    let kid_log = repo.json(&["log", "kid", "--json"]);
+    let prompt = kid_log
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|e| e["activity"] == "prompt")
+        .unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(prompt.contains("<branchyard-inbox>"), "{prompt}");
+    assert!(prompt.contains("yes, rename it"), "{prompt}");
+    assert!(prompt.ends_with("WHOAMI"), "{prompt}");
+
+    let kid_inbox = repo.json(&["inbox", "--as", "kid", "--json"]);
+    let messages = kid_inbox["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{kid_inbox}");
+    assert_eq!(messages[0]["delivered"], true, "{kid_inbox}");
+}
+
+#[test]
 fn the_same_commands_act_with_your_authority_outside_a_harness() {
     let repo = Repo::new();
     let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate=2", "--yes"]);

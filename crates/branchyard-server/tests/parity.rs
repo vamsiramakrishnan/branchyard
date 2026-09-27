@@ -241,6 +241,22 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         local.events("kid", None, 50).unwrap()
     );
 
+    // Messaging: the same values and authority the SDK gives locally.
+    let reported = repo.report("kid", "tests pass").unwrap();
+    assert_eq!(
+        (reported.from.as_str(), reported.to.as_str()),
+        ("kid", "root")
+    );
+    assert_eq!(reported.kind, branchyard::MessageKind::Report);
+    assert_eq!(repo.inbox("root").unwrap(), local.inbox().unwrap());
+    let answer = repo.answer("root", reported.id, "thanks").unwrap();
+    assert_eq!((answer.from.as_str(), answer.to.as_str()), ("root", "kid"));
+    assert_eq!(answer.in_reply_to, Some(reported.id));
+    let asked = repo.ask("kid", "should I rename it?", None).unwrap();
+    assert!(asked.answer.is_none());
+    let no_parent = repo.report("root", "root has no parent").unwrap_err();
+    assert_eq!(no_parent.code(), Some("denied"));
+
     let op = wait(&client, &repo.integrate("kid", &new_key()).unwrap().id);
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     assert_eq!(op.kind, OperationKind::Integrate);

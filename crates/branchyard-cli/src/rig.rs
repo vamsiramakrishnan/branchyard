@@ -124,6 +124,9 @@ pub struct SeatSpec {
     pub check: Option<Vec<String>>,
     pub policy: PolicySpec,
     pub delegates_to: Vec<String>,
+    /// Ancestor seats, besides its parent (always allowed), this seat may
+    /// `escalate` to.
+    pub escalates_to: Vec<String>,
     pub instances: u32,
     pub startup: Vec<StartupFile>,
     /// Lines of the seat's table and fields, by dotted field name
@@ -246,10 +249,6 @@ const REFUSED_SEAT: &[(&str, &str)] = &[
     (
         "collaborates_with",
         "Branchyard has no messaging between branches; a branch acts only on its descendants",
-    ),
-    (
-        "escalates_to",
-        "Branchyard has no messaging between branches; a parent inspects its children instead",
     ),
     (
         "can_observe",
@@ -597,6 +596,7 @@ impl Parser<'_> {
             "check",
             "policy",
             "delegates_to",
+            "escalates_to",
             "instances",
             "startup",
             "start",
@@ -685,6 +685,7 @@ impl Parser<'_> {
                         }
                     }
                 }
+                "escalates_to" => seat.escalates_to = strings(item, &path, line)?,
                 "instances" => {
                     let n = integer(item, &path, line)?;
                     seat.instances = u32::try_from(n)
@@ -1014,6 +1015,46 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
         }
     }
 
+    // A seat may escalate only to an ancestor seat, besides its parent
+    // (always allowed, and not named here). The root has no ancestor seat
+    // at all.
+    if !root.escalates_to.is_empty() {
+        return Err(root.error(
+            "escalates_to",
+            "the root seat has no ancestor seat to escalate to",
+        ));
+    }
+    for seat in &spec.seats {
+        if seat.name == spec.root {
+            continue;
+        }
+        for target in &seat.escalates_to {
+            if !by_name.contains_key(target.as_str()) {
+                return Err(seat.error("escalates_to", format!("{target} is not a seat")));
+            }
+            // The immediate parent is always allowed and is not what
+            // escalates_to is for; only a seat further up counts.
+            let mut ancestors = BTreeSet::new();
+            let mut walk = parent
+                .get(seat.name.as_str())
+                .and_then(|p| parent.get(*p))
+                .copied();
+            while let Some(next) = walk {
+                ancestors.insert(next);
+                walk = parent.get(next).copied();
+            }
+            if !ancestors.contains(target.as_str()) {
+                return Err(seat.error(
+                    "escalates_to",
+                    format!(
+                        "{target} is not an ancestor of seat {} beyond its parent",
+                        seat.name
+                    ),
+                ));
+            }
+        }
+    }
+
     // Harnesses: a child defaults to its parent's.
     let mut harness: BTreeMap<&str, String> = BTreeMap::new();
     let mut unapproved = Vec::new();
@@ -1147,6 +1188,7 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
                 isolated: seat.isolated,
                 provision: Some(provision(spec, seat, &by_name, &harness, &mut skipped)),
                 delegates_to: seat.delegates_to.clone(),
+                escalates_to: seat.escalates_to.clone(),
                 instances: seat.instances,
             },
         );
@@ -1155,6 +1197,7 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
         rig: spec.name.clone(),
         seat: root.name.clone(),
         delegates_to: root.delegates_to.clone(),
+        escalates_to: Vec::new(),
         table,
     });
     let root_harness = harness[root.name.as_str()].clone();
@@ -1499,6 +1542,44 @@ delegates_to = ["worker"]
     }
 
     #[test]
+    fn escalates_to_reaches_an_ancestor_seat_beyond_the_parent() {
+        const THREE_LEVELS: &str = r#"
+version = 1
+name = "team"
+root = "lead"
+
+[seats.lead]
+harness = "gemini-cli"
+delegates_to = ["mid"]
+
+[seats.mid]
+delegates_to = ["leaf"]
+
+[seats.leaf]
+escalates_to = ["lead"]
+"#;
+        let plan = plan(&parse(THREE_LEVELS).unwrap()).unwrap();
+        let seats = plan.seats.unwrap();
+        assert_eq!(seats.table["leaf"].escalates_to, ["lead"]);
+
+        refused(
+            &THREE_LEVELS.replace("escalates_to = [\"lead\"]", "escalates_to = [\"mid\"]"),
+            "seats.leaf.escalates_to",
+            "not an ancestor",
+        );
+        refused(
+            &THREE_LEVELS.replace("escalates_to = [\"lead\"]", "escalates_to = [\"gone\"]"),
+            "seats.leaf.escalates_to",
+            "is not a seat",
+        );
+        refused(
+            &THREE_LEVELS.replace("[seats.lead]", "[seats.lead]\nescalates_to = [\"mid\"]"),
+            "seats.lead.escalates_to",
+            "no ancestor seat",
+        );
+    }
+
+    #[test]
     fn fields_are_checked_by_name_type_and_value() {
         refused(
             &MINIMAL.replace("name = \"team\"", "name = 1"),
@@ -1623,7 +1704,6 @@ delegates_to = ["worker"]
                 "collaborates_with = [\"lead\"]",
                 "no messaging between branches",
             ),
-            ("escalates_to = \"lead\"", "no messaging between branches"),
             ("can_observe = [\"lead\"]", "no read grant"),
             ("spawned_by = \"lead\"", "seats.<parent>.delegates_to"),
             ("continuity_policy = {}", "does not rebuild a conversation"),

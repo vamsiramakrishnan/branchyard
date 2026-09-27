@@ -87,6 +87,7 @@ A seat:
 | `check` | `"cargo test"` (split like `--check`) or `["cargo", "test"]`. A child without one keeps its parent's | `check` |
 | `policy` | The root's: `default` (`allow`, `deny` or `ask`; default `deny`), `deny`, `allow`, `delegation_commands`. A child's: `deny` only | The root's `Policy`; a child's denials |
 | `delegates_to` | The seats below this one | The seats a branch in this seat may spawn |
+| `escalates_to` | Ancestor seats, besides this seat's own parent (always allowed), a branch here may `escalate` to (see [delegation](delegation.md#inbox)) | `Seat::escalates_to`; carried onto the branch's own `Seats` |
 | `instances` | Children of this seat one parent may have, counting finished ones until they are removed. Default 1 | `Seat::instances` and the parent's `max_children` |
 | `pod` | A pod whose startup files it gets | Instructions |
 | `startup.files` | Its own files | Instructions |
@@ -111,8 +112,9 @@ Planning checks, before anything starts:
 - Under a parent with a cost limit, every child seat has one, and the children's limits times their instances fit in it. A child's turns and minutes are at most its parent's.
 - A child seat's policy only adds denials: `default`, `allow` and `delegation_commands` are refused on it.
 - Secrets have a private home: `isolated` on the seat or above it.
+- `escalates_to` names a seat, and one that is an ancestor of the seat that declares it, beyond its own parent (always allowed, so redundant there); the root seat, having no ancestor, may not declare it at all.
 
-The engine checks the seats again when the root is created (`Seats::validate`: a tree, known harnesses, positive limits; each seat's provisioning), so the SDK and the server refuse a malformed table the planner would have.
+The engine checks the seats again when the root is created (`Seats::validate`: a tree, known harnesses, positive limits, `escalates_to` an ancestor seat; each seat's provisioning), so the SDK and the server refuse a malformed table the planner would have.
 
 ## Spawning by seat
 
@@ -139,7 +141,7 @@ A branch in a rig spawns only by seat, and only the seats its own seat delegates
 
 | Field | Why |
 |---|---|
-| `collaborates_with`, `escalates_to` | Branchyard has no messaging between branches; a parent inspects its descendants |
+| `collaborates_with` | Branchyard has no messaging between siblings; a branch may message only its own parent (and, with `escalates_to`, an ancestor further up) and its own descendants |
 | `can_observe`, `observes` | A branch reads only its own descendants; there is no read grant for peers yet |
 | `spawned_by`, top-level `edges` | Delegation is declared on the parent, as `delegates_to` |
 | `start = "eager"` | The root starts alone and fills seats with `by spawn --seat` |

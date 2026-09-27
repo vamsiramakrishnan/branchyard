@@ -41,7 +41,7 @@ use crate::storage::{
     ArtifactRef, ArtifactRow, LockOutcome, NewArtifact, ScratchArea, ScratchLock, ScratchRow,
     StorageBackend,
 };
-use crate::{BranchStatus, Error, RecordedEvent, SteerState};
+use crate::{BranchStatus, Error, Message, RecordedEvent, SteerState};
 
 const SCHEMA: i64 = 1;
 /// How long a write keeps retrying serialization failures.
@@ -187,6 +187,24 @@ CREATE TABLE IF NOT EXISTS by_scratch_locks (
     acquired_ms BIGINT NOT NULL,
     PRIMARY KEY (repo, name)
 );
+CREATE TABLE IF NOT EXISTS by_messages (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    repo TEXT NOT NULL,
+    from_branch TEXT NOT NULL,
+    to_branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    in_reply_to BIGINT,
+    at_ms BIGINT NOT NULL,
+    delivered_ms BIGINT,
+    steer_id BIGINT,
+    delivered_steer BIGINT,
+    awaiting_until_ms BIGINT
+);
+CREATE INDEX IF NOT EXISTS by_messages_to ON by_messages (repo, to_branch, id);
+CREATE INDEX IF NOT EXISTS by_messages_steer ON by_messages (steer_id);
+CREATE INDEX IF NOT EXISTS by_messages_from ON by_messages (repo, from_branch, kind);
+CREATE INDEX IF NOT EXISTS by_messages_reply ON by_messages (repo, in_reply_to);
 ";
 
 fn steer_row(r: &Row) -> SteerRow {
@@ -198,8 +216,16 @@ fn steer_row(r: &Row) -> SteerRow {
         text: r.get(4),
         requested_ms: uint(r.get::<_, i64>(5)),
         state: SteerState::from_columns(&r.get::<_, String>(6), r.get(7)),
+        message: r.get::<_, Option<i64>>(8).map(uint),
+        message_delivered: r.get::<_, Option<bool>>(9).unwrap_or(false),
     }
 }
+
+/// The columns [`steer_row`] reads, from `by_steers` as `s`. Steer ids are
+/// unique across the database, so a message links to one without a repo.
+const STEER_COLUMNS: &str = "s.id, s.branch, s.turn, s.requested_by, s.text, s.at_ms, s.state, \
+     s.reason, (SELECT m.id FROM by_messages m WHERE m.steer_id = s.id), \
+     (SELECT m.delivered_ms IS NOT NULL FROM by_messages m WHERE m.steer_id = s.id)";
 
 /// Branch state for one repository scope in a PostgreSQL database.
 pub(crate) struct Postgres {
@@ -1126,7 +1152,13 @@ impl Backend for Postgres {
             .map(|r| r.get(0)))
     }
 
-    fn request_steer(&self, name: &str, by: &str, text: &str) -> Result<Option<u64>, Error> {
+    fn request_steer(
+        &self,
+        name: &str,
+        by: &str,
+        text: &str,
+        message: Option<u64>,
+    ) -> Result<Option<u64>, Error> {
         self.tx(true, |tx| {
             let Some(incarnation) = self.incarnation(tx, name)? else {
                 return Err(Error::UnknownBranch(name.to_owned()).into());
@@ -1150,7 +1182,24 @@ impl Backend for Postgres {
                     ],
                 )
                 .map_err(db("steer"))?;
-            Ok(Some(uint(row.get::<_, i64>(0))))
+            let id: i64 = row.get(0);
+            if let Some(message) = message {
+                let linked = tx
+                    .execute(
+                        "UPDATE by_messages SET steer_id = $3 \
+                         WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
+                        &[&self.repo, &int(message), &id],
+                    )
+                    .map_err(db("message"))?;
+                if linked == 0 {
+                    // Rolls the steer back with the transaction.
+                    return Err(Error::Denied(format!(
+                        "message #{message} is unknown or already delivered"
+                    ))
+                    .into());
+                }
+            }
+            Ok(Some(uint(id)))
         })
     }
 
@@ -1158,9 +1207,10 @@ impl Backend for Postgres {
         Ok(self
             .query(|c| {
                 c.query(
-                    "SELECT id, branch, turn, requested_by, text, at_ms, state, reason \
-                     FROM by_steers WHERE incarnation = $1 AND turn = $2 AND state = 'pending' \
-                     ORDER BY id",
+                    &format!(
+                        "SELECT {STEER_COLUMNS} FROM by_steers s WHERE s.incarnation = $1 \
+                         AND s.turn = $2 AND s.state = 'pending' ORDER BY s.id"
+                    ),
                     &[&fence.incarnation, &int(fence.turn)],
                 )
             })?
@@ -1169,23 +1219,52 @@ impl Backend for Postgres {
             .collect())
     }
 
-    fn settle_steer(&self, fence: &Fence, id: u64, state: &SteerState) -> Result<(), Error> {
+    fn settle_steer(
+        &self,
+        fence: &Fence,
+        id: u64,
+        state: &SteerState,
+    ) -> Result<Option<u64>, Error> {
         let (name, reason) = state.columns();
         self.tx(true, |tx| {
             self.check(tx, fence)?;
-            tx.execute(
-                "UPDATE by_steers SET state = $4, reason = $5 \
-                 WHERE id = $1 AND incarnation = $2 AND turn = $3",
-                &[
-                    &int(id),
-                    &fence.incarnation,
-                    &int(fence.turn),
-                    &name,
-                    &reason,
-                ],
-            )
-            .map_err(db("steer"))?;
-            Ok(())
+            let settled = tx
+                .execute(
+                    "UPDATE by_steers SET state = $4, reason = $5 \
+                     WHERE id = $1 AND incarnation = $2 AND turn = $3",
+                    &[
+                        &int(id),
+                        &fence.incarnation,
+                        &int(fence.turn),
+                        &name,
+                        &reason,
+                    ],
+                )
+                .map_err(db("steer"))?;
+            if settled == 0 {
+                return Ok(None);
+            }
+            match state {
+                SteerState::Pending => Ok(None),
+                SteerState::Delivered | SteerState::Accepted => Ok(tx
+                    .query_opt(
+                        "UPDATE by_messages SET delivered_ms = $2, delivered_steer = $1 \
+                         WHERE steer_id = $1 AND delivered_ms IS NULL RETURNING id",
+                        &[&int(id), &int(now_ms())],
+                    )
+                    .map_err(db("message"))?
+                    .map(|r| uint(r.get::<_, i64>(0)))),
+                SteerState::Refused { .. } => {
+                    tx.execute(
+                        "UPDATE by_messages SET steer_id = NULL, delivered_steer = NULL, \
+                         delivered_ms = CASE WHEN delivered_steer = $1 THEN NULL \
+                         ELSE delivered_ms END WHERE steer_id = $1",
+                        &[&int(id)],
+                    )
+                    .map_err(db("message"))?;
+                    Ok(None)
+                }
+            }
         })
     }
 
@@ -1195,10 +1274,11 @@ impl Backend for Postgres {
         Ok(self
             .query(move |c| {
                 c.query_opt(
-                    "SELECT s.id, s.branch, s.turn, s.requested_by, s.text, s.at_ms, s.state, \
-                     s.reason FROM by_steers s JOIN by_branches b \
-                     ON b.incarnation = s.incarnation \
-                     WHERE b.repo = $1 AND b.name = $2 AND s.id = $3",
+                    &format!(
+                        "SELECT {STEER_COLUMNS} FROM by_steers s JOIN by_branches b \
+                         ON b.incarnation = s.incarnation \
+                         WHERE b.repo = $1 AND b.name = $2 AND s.id = $3"
+                    ),
                     &[&repo, &name, &int(id)],
                 )
             })?
@@ -1302,6 +1382,136 @@ impl Backend for Postgres {
         })
         .map(|r| uint(r.get(0)))
     }
+
+    fn send_message(&self, message: &Message) -> Result<Message, Error> {
+        self.tx(true, |tx| {
+            let at_ms = now_ms();
+            let row = tx
+                .query_one(
+                    "INSERT INTO by_messages \
+                     (repo, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                      delivered_ms) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL) RETURNING id",
+                    &[
+                        &self.repo,
+                        &message.from,
+                        &message.to,
+                        &message.kind.as_str(),
+                        &message.text,
+                        &message.in_reply_to.map(int),
+                        &int(at_ms),
+                    ],
+                )
+                .map_err(db("message"))?;
+            Ok(Message {
+                id: uint(row.get(0)),
+                at_ms,
+                delivered: false,
+                ..message.clone()
+            })
+        })
+    }
+
+    fn message(&self, id: u64) -> Result<Option<Message>, Error> {
+        let row = self.query(|c| {
+            c.query_opt(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM by_messages WHERE repo = $1 AND id = $2",
+                &[&self.repo, &int(id)],
+            )
+        })?;
+        row.map(|r| message_row(&r)).transpose()
+    }
+
+    fn inbox(&self, to: &str) -> Result<Vec<Message>, Error> {
+        let rows = self.query(|c| {
+            c.query(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM by_messages WHERE repo = $1 AND to_branch = $2 ORDER BY id",
+                &[&self.repo, &to],
+            )
+        })?;
+        rows.iter().map(message_row).collect()
+    }
+
+    fn mark_delivered(&self, ids: &[u64]) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.tx(true, |tx| {
+            let now = int(now_ms());
+            for id in ids {
+                tx.execute(
+                    "UPDATE by_messages SET delivered_ms = $3 \
+                     WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
+                    &[&self.repo, &int(*id), &now],
+                )
+                .map_err(db("message"))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn answer_to(&self, question_id: u64) -> Result<Option<Message>, Error> {
+        let row = self.query(|c| {
+            c.query_opt(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM by_messages WHERE repo = $1 AND in_reply_to = $2 \
+                 ORDER BY id LIMIT 1",
+                &[&self.repo, &int(question_id)],
+            )
+        })?;
+        row.map(|r| message_row(&r)).transpose()
+    }
+
+    fn message_steer(&self, id: u64) -> Result<Option<u64>, Error> {
+        let row = self.query(|c| {
+            c.query_opt(
+                "SELECT steer_id FROM by_messages WHERE repo = $1 AND id = $2",
+                &[&self.repo, &int(id)],
+            )
+        })?;
+        Ok(row.and_then(|r| r.get::<_, Option<i64>>(0)).map(uint))
+    }
+
+    fn set_awaiting(&self, id: u64, until_ms: Option<u64>) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                "UPDATE by_messages SET awaiting_until_ms = $3 WHERE repo = $1 AND id = $2",
+                &[&self.repo, &int(id), &until_ms.map(int)],
+            )
+            .map_err(db("message"))?;
+            Ok(())
+        })
+    }
+
+    fn awaiting_answer(&self, from: &str, now_ms: u64) -> Result<bool, Error> {
+        let row = self.query(|c| {
+            c.query_one(
+                "SELECT EXISTS (SELECT 1 FROM by_messages q \
+                 WHERE q.repo = $1 AND q.from_branch = $2 AND q.kind = 'question' \
+                 AND q.awaiting_until_ms > $3 \
+                 AND NOT EXISTS (SELECT 1 FROM by_messages a \
+                 WHERE a.repo = $1 AND a.in_reply_to = q.id))",
+                &[&self.repo, &from, &int(now_ms)],
+            )
+        })?;
+        Ok(row.get(0))
+    }
+}
+
+/// Reads one `by_messages` row.
+fn message_row(r: &Row) -> Result<Message, Error> {
+    let kind: String = r.get(3);
+    Ok(Message {
+        id: uint(r.get(0)),
+        from: r.get(1),
+        to: r.get(2),
+        kind: kind.parse()?,
+        text: r.get(4),
+        in_reply_to: r.get::<_, Option<i64>>(5).map(uint),
+        at_ms: uint(r.get(6)),
+        delivered: r.get::<_, Option<i64>>(7).is_some(),
+    })
 }
 
 fn artifact_row_from(row: &Row) -> Result<ArtifactRow, Error> {

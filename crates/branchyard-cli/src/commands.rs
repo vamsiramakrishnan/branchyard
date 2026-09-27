@@ -193,6 +193,8 @@ impl Live {
                 max_usd: task.budget_usd,
                 max_turns: task.max_turns,
                 max_duration: task.max_duration,
+                stall_after: task.stall_after,
+                stall_action: task.stall_action,
             },
             policy,
             check: task.check.clone(),
@@ -349,6 +351,7 @@ pub fn send(
     branch: &str,
     prompt: &str,
     task: &TaskArgs,
+    wait: bool,
     json: bool,
 ) -> Outcome {
     if let Some(delegate) = harness_delegate(json)? {
@@ -356,9 +359,17 @@ pub fn send(
             return fail(
                 json,
                 &branchyard::Error::Denied(
-                    "inside a harness, send takes only --json; the child keeps its own limits"
+                    "inside a harness, send takes only --wait and --json; the child keeps its \
+                     own limits"
                         .into(),
                 ),
+            );
+        }
+        if wait {
+            return emit(
+                json,
+                delegate.send_and_wait(branch, prompt, std::time::Duration::MAX),
+                |i| render::inspection(i, env.style()),
             );
         }
         return emit(json, delegate.send(branch, prompt), |sent| {
@@ -474,6 +485,16 @@ pub fn fork(
     let branch = open()?.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
     let result = branch.fork(prompt, fresh_session, live.options(task)?);
+    live.finish(env, result)
+}
+
+pub fn reincarnate(env: &Env, target: &Target, branch: &str, task: &TaskArgs) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::reincarnate(env, remote, branch, task);
+    }
+    let branch = open()?.branch(branch)?;
+    let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
+    let result = branch.reincarnate(live.options(task)?);
     live.finish(env, result)
 }
 
@@ -802,6 +823,8 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
             max_usd: task.budget_usd,
             max_turns: task.max_turns,
             max_duration: task.max_duration,
+            stall_after: task.stall_after,
+            stall_action: task.stall_action,
         },
         check: task.check.clone(),
         max_depth: args.max_depth,
@@ -952,6 +975,133 @@ pub fn cancel(target: &Target, branch: &str, json: bool) -> Outcome {
     emit(json, result, |c| match c.cancelled.is_empty() {
         true => "nothing was running\n".into(),
         false => format!("asked {} to stop\n", c.cancelled.join(", ")),
+    })
+}
+
+/// The acting branch outside a harness: `--as`, required, since these
+/// commands have no other way to name who is asking.
+fn as_branch_required(
+    as_branch: Option<String>,
+    command: &str,
+) -> Result<String, branchyard::Error> {
+    as_branch.ok_or_else(|| {
+        branchyard::Error::Denied(format!(
+            "outside a harness, by {command} needs --as <branch>"
+        ))
+    })
+}
+
+pub fn ask(
+    target: &Target,
+    as_branch: Option<String>,
+    text: &str,
+    wait_seconds: Option<f64>,
+    json: bool,
+) -> Outcome {
+    let wait = wait_seconds.map(std::time::Duration::from_secs_f64);
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.ask(text, wait),
+        (None, Target::Remote(remote)) => as_branch_required(as_branch, "ask").and_then(|b| {
+            remote
+                .repo
+                .ask(&b, text, wait_seconds)
+                .map_err(remote::sdk_error)
+        }),
+        (None, Target::Local) => as_branch_required(as_branch, "ask")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.ask(text, wait)),
+    };
+    emit(json, result, |asked| match &asked.answer {
+        Some(answer) => format!(
+            "asked #{}: {}\nanswer: {}\n",
+            asked.message.id, asked.message.text, answer.text
+        ),
+        None => format!(
+            "asked #{}: {}\nno answer yet\n",
+            asked.message.id, asked.message.text
+        ),
+    })
+}
+
+pub fn report(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.report(text),
+        (None, Target::Remote(remote)) => as_branch_required(as_branch, "report")
+            .and_then(|b| remote.repo.report(&b, text).map_err(remote::sdk_error)),
+        (None, Target::Local) => as_branch_required(as_branch, "report")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.report(text)),
+    };
+    emit(json, result, |m| {
+        format!("reported #{}: {}\n", m.id, m.text)
+    })
+}
+
+pub fn escalate(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.escalate(text),
+        (None, Target::Remote(remote)) => as_branch_required(as_branch, "escalate")
+            .and_then(|b| remote.repo.escalate(&b, text).map_err(remote::sdk_error)),
+        (None, Target::Local) => as_branch_required(as_branch, "escalate")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.escalate(text)),
+    };
+    emit(json, result, |m| {
+        format!("escalated #{} to {}: {}\n", m.id, m.to, m.text)
+    })
+}
+
+pub fn answer(
+    target: &Target,
+    as_branch: Option<String>,
+    message_id: u64,
+    text: &str,
+    json: bool,
+) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.answer(message_id, text),
+        (None, Target::Remote(remote)) => as_branch_required(as_branch, "answer").and_then(|b| {
+            remote
+                .repo
+                .answer(&b, message_id, text)
+                .map_err(remote::sdk_error)
+        }),
+        (None, Target::Local) => as_branch_required(as_branch, "answer")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.answer(message_id, text)),
+    };
+    emit(json, result, |m| {
+        format!("answered #{message_id} as #{}: {}\n", m.id, m.text)
+    })
+}
+
+pub fn inbox(target: &Target, as_branch: Option<String>, unread: bool, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.inbox(),
+        (None, Target::Remote(remote)) => as_branch_required(as_branch, "inbox")
+            .and_then(|b| remote.repo.inbox(&b).map_err(remote::sdk_error)),
+        (None, Target::Local) => as_branch_required(as_branch, "inbox")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.inbox()),
+    };
+    emit(json, result, |inbox| {
+        let messages: Vec<&branchyard::Message> = inbox
+            .messages
+            .iter()
+            .filter(|m| !unread || !m.delivered)
+            .collect();
+        if messages.is_empty() {
+            return "empty\n".to_owned();
+        }
+        messages
+            .iter()
+            .map(|m| {
+                let reply = match m.in_reply_to {
+                    Some(id) => format!(" (re #{id})"),
+                    None => String::new(),
+                };
+                let read = if m.delivered { "" } else { " [unread]" };
+                format!(
+                    "#{} {} from {}{reply}{read}: {}\n",
+                    m.id, m.kind, m.from, m.text
+                )
+            })
+            .collect()
     })
 }
 
@@ -1448,6 +1598,7 @@ pub fn rig(env: &Env, target: &Target, args: &args::RigArgs) -> Outcome {
                     .budget
                     .max_minutes
                     .and_then(|m| std::time::Duration::try_from_secs_f64(m * 60.0).ok()),
+                ..Budget::default()
             },
             policy,
             check: root.check.clone(),

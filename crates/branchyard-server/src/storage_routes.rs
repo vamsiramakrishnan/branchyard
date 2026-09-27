@@ -15,6 +15,14 @@
 //! over it); a download streams them back with a digest header the client
 //! checks against the metadata it already fetched. Everything else is
 //! ordinary JSON, matching the style of the other routes.
+//!
+//! Every handler here goes through `Yard`'s public storage methods
+//! (`publish_artifact`, `artifacts`, `read_artifact`, `share_artifact`,
+//! and the scratch ones) — never `branchyard::storage`'s own internals —
+//! round-tripping a publish's and a download's bytes through a
+//! [`TempFile`], since those methods are path-based. That keeps this
+//! module clean of grant, hashing and GC details that belong to
+//! `branchyard::storage` alone and may change there independently.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -26,7 +34,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 
-use branchyard::{ArtifactRef, ScratchArea, ScratchLock};
+use branchyard::{ArtifactRef, ScratchArea, ScratchLock, Yard};
 use branchyard_client::storage_api::{
     Ack, ArtifactList, CreateScratchRequest, Empty, LockState, ScratchList, ShareRequest,
     DIGEST_HEADER,
@@ -230,11 +238,41 @@ fn parse_publish_query(query: &str) -> (Option<String>, Option<String>, BTreeMap
     (name, media_type, labels)
 }
 
+/// A path under the system temp directory, removed on drop: round-trips
+/// bytes through the public, path-based `Yard::publish_artifact` and
+/// `Yard::read_artifact`, the same ones local mode and every delegation
+/// surface use. Kept off `branchyard::storage`'s own internals (grants,
+/// hashing, GC) on purpose, so a change there needs no matching change
+/// here.
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn new(prefix: &str) -> TempFile {
+        let name = format!(
+            "branchyard-server-{prefix}-{}-{}",
+            std::process::id(),
+            branchyard_client::new_key()
+        );
+        TempFile(std::env::temp_dir().join(name))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// `POST /v1/repos/{repo}/branches/{branch}/artifacts`: the request body
 /// is the artifact's bytes, bounded by `max_artifact_bytes`; `name`,
 /// `media_type` and `label` are query parameters, since the body is not
-/// JSON. Digest deduplication is [`branchyard::Yard::publish_artifact_bytes`]'s,
-/// unchanged from local mode.
+/// JSON. Written to a temporary file and published through
+/// [`branchyard::Yard::publish_artifact`], so digest dedup, grants and GC
+/// stay exactly local mode's.
 async fn publish(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
@@ -259,16 +297,36 @@ async fn publish(
     }
     let (name, media_type, labels) = parse_publish_query(&query);
     let (yard, acting) = (repo.yard.clone(), branch.clone());
-    let bytes = body.to_vec();
-    let artifact =
-        blocking(move || yard.publish_artifact_bytes(&acting, &bytes, name, media_type, labels))
-            .await?
-            .map_err(|e| error::sdk(&e))?;
+    let artifact = blocking(move || {
+        let temp = TempFile::new("upload");
+        std::fs::write(temp.path(), &body).map_err(|e| {
+            branchyard::Error::State(format!("write {}: {e}", temp.path().display()))
+        })?;
+        yard.publish_artifact(&acting, temp.path(), name, media_type, labels)
+    })
+    .await?
+    .map_err(|e| error::sdk(&e))?;
     if let (Some(key), Some(fp)) = (&idem_key, &fingerprint) {
         app.storage_idem
             .put(&caller.0, key, fp, StatusCode::CREATED, &artifact);
     }
     Ok((StatusCode::CREATED, Json(artifact)).into_response())
+}
+
+/// Artifact `id`'s provenance and bytes, for `branch`, through the public
+/// `Yard::read_artifact` (which writes to a path): a temporary file
+/// stands in for the response body [`artifact_content`] streams, or is
+/// discarded for [`artifact_meta`]'s metadata-only answer.
+fn read_via_temp(
+    yard: &Yard,
+    branch: &str,
+    id: &str,
+) -> Result<(ArtifactRef, Vec<u8>), branchyard::Error> {
+    let temp = TempFile::new("download");
+    let artifact = yard.read_artifact(branch, id, temp.path())?;
+    let bytes = std::fs::read(temp.path())
+        .map_err(|e| branchyard::Error::State(format!("read {}: {e}", temp.path().display())))?;
+    Ok((artifact, bytes))
 }
 
 async fn list_artifacts(
@@ -292,7 +350,7 @@ async fn artifact_meta(
     Path((repo, branch, id)): Path<(String, String, String)>,
 ) -> Result<Json<ArtifactRef>, ApiError> {
     let yard = app.repo(&repo)?.yard.clone();
-    let artifact = blocking(move || yard.read_artifact_bytes(&branch, &id).map(|(a, _)| a))
+    let artifact = blocking(move || read_via_temp(&yard, &branch, &id).map(|(a, _)| a))
         .await?
         .map_err(|e| error::sdk(&e))?;
     Ok(Json(artifact))
@@ -303,7 +361,7 @@ async fn artifact_content(
     Path((repo, branch, id)): Path<(String, String, String)>,
 ) -> Result<Response, ApiError> {
     let yard = app.repo(&repo)?.yard.clone();
-    let (artifact, bytes) = blocking(move || yard.read_artifact_bytes(&branch, &id))
+    let (artifact, bytes) = blocking(move || read_via_temp(&yard, &branch, &id))
         .await?
         .map_err(|e| error::sdk(&e))?;
     let content_type = HeaderValue::from_str(&artifact.media_type)

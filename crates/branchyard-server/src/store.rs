@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use branchyard_client::api::Operation;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 /// An idempotency key as the server scopes it: per authenticated caller and
@@ -44,6 +45,13 @@ pub trait OperationStore: Send + Sync {
     fn load(&self) -> io::Result<Vec<StoredOperation>>;
     /// Insert or replace one operation.
     fn save(&self, operation: &StoredOperation) -> io::Result<()>;
+
+    /// A webhook's last delivered feed position (`repo:webhook_id`); `None`
+    /// before its first delivery.
+    fn load_webhook_cursor(&self, id: &str) -> io::Result<Option<u64>>;
+    /// Advance a webhook's cursor. Only ever moves forward; the caller
+    /// guarantees that.
+    fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()>;
 }
 
 /// Operations as JSON lines in one append-only file, each save fsynced.
@@ -53,6 +61,9 @@ pub trait OperationStore: Send + Sync {
 pub struct FileStore {
     path: PathBuf,
     file: Mutex<File>,
+    /// Not durable: `FileStore` is the legacy import path and embedding
+    /// tests, never what a live server chooses for its registry.
+    webhook_cursors: Mutex<HashMap<String, u64>>,
 }
 
 impl FileStore {
@@ -84,6 +95,7 @@ impl FileStore {
         Ok(FileStore {
             path,
             file: Mutex::new(file),
+            webhook_cursors: Mutex::new(HashMap::new()),
         })
     }
 
@@ -145,6 +157,23 @@ impl OperationStore for FileStore {
         file.write_all(&line)?;
         file.sync_data()
     }
+
+    fn load_webhook_cursor(&self, id: &str) -> io::Result<Option<u64>> {
+        Ok(self
+            .webhook_cursors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(id)
+            .copied())
+    }
+
+    fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
+        self.webhook_cursors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id.to_owned(), cursor);
+        Ok(())
+    }
 }
 
 /// Operations in SQLite at `DATA-DIR/state.db`, in write-ahead-log mode,
@@ -189,6 +218,10 @@ impl SqliteStore {
                  id TEXT PRIMARY KEY,
                  seq INTEGER NOT NULL,
                  body TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS webhook_cursors (
+                 id TEXT PRIMARY KEY,
+                 cursor INTEGER NOT NULL
              );",
         )
         .map_err(sql)?;
@@ -256,6 +289,30 @@ impl OperationStore for SqliteStore {
     fn save(&self, operation: &StoredOperation) -> io::Result<()> {
         self.insert(operation, true)
     }
+
+    fn load_webhook_cursor(&self, id: &str) -> io::Result<Option<u64>> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT cursor FROM webhook_cursors WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        Ok(found.map(|c| c as u64))
+    }
+
+    fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "INSERT INTO webhook_cursors (id, cursor) VALUES (?1, ?2) \
+             ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor",
+            rusqlite::params![id, cursor as i64],
+        )
+        .map_err(sql)?;
+        Ok(())
+    }
 }
 
 /// Operations in a PostgreSQL database, in the connection's `search_path`
@@ -287,6 +344,10 @@ impl PostgresStore {
                      id TEXT PRIMARY KEY,
                      seq BIGINT GENERATED ALWAYS AS IDENTITY,
                      body TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS by_webhook_cursors (
+                     id TEXT PRIMARY KEY,
+                     cursor BIGINT NOT NULL
                  )",
             )?;
             tx.commit()
@@ -363,12 +424,40 @@ impl OperationStore for PostgresStore {
         })?;
         Ok(())
     }
+
+    fn load_webhook_cursor(&self, id: &str) -> io::Result<Option<u64>> {
+        let id = id.to_owned();
+        let rows = self.with(move |c| {
+            c.query(
+                "SELECT cursor FROM by_webhook_cursors WHERE id = $1",
+                &[&id],
+            )
+        })?;
+        Ok(rows.first().map(|row| {
+            let cursor: i64 = row.get(0);
+            cursor as u64
+        }))
+    }
+
+    fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
+        let id = id.to_owned();
+        let cursor = cursor as i64;
+        self.with(move |c| {
+            c.execute(
+                "INSERT INTO by_webhook_cursors (id, cursor) VALUES ($1, $2) \
+                 ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor",
+                &[&id, &cursor],
+            )
+        })?;
+        Ok(())
+    }
 }
 
 /// Operations in memory only, for tests and embedding.
 #[derive(Default)]
 pub struct MemoryStore {
     ops: Mutex<Vec<StoredOperation>>,
+    webhook_cursors: Mutex<HashMap<String, u64>>,
 }
 
 impl OperationStore for MemoryStore {
@@ -385,6 +474,23 @@ impl OperationStore for MemoryStore {
             Some(existing) => *existing = operation.clone(),
             None => ops.push(operation.clone()),
         }
+        Ok(())
+    }
+
+    fn load_webhook_cursor(&self, id: &str) -> io::Result<Option<u64>> {
+        Ok(self
+            .webhook_cursors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(id)
+            .copied())
+    }
+
+    fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
+        self.webhook_cursors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id.to_owned(), cursor);
         Ok(())
     }
 }
@@ -442,6 +548,31 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 2);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn webhook_cursors_round_trip_and_only_ever_move_as_told() {
+        let dir =
+            std::env::temp_dir().join(format!("branchyard-webhook-cursor-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = SqliteStore::open(dir.join("state.db"), None).unwrap();
+        assert_eq!(store.load_webhook_cursor("repo:hook").unwrap(), None);
+        store.save_webhook_cursor("repo:hook", 5).unwrap();
+        assert_eq!(store.load_webhook_cursor("repo:hook").unwrap(), Some(5));
+        store.save_webhook_cursor("repo:hook", 12).unwrap();
+        assert_eq!(store.load_webhook_cursor("repo:hook").unwrap(), Some(12));
+        // A distinct id has its own cursor.
+        assert_eq!(store.load_webhook_cursor("repo:other").unwrap(), None);
+        drop(store);
+        // Durable: reopening finds it again.
+        let store = SqliteStore::open(dir.join("state.db"), None).unwrap();
+        assert_eq!(store.load_webhook_cursor("repo:hook").unwrap(), Some(12));
+        let _ = fs::remove_dir_all(&dir);
+
+        let memory = MemoryStore::default();
+        assert_eq!(memory.load_webhook_cursor("h").unwrap(), None);
+        memory.save_webhook_cursor("h", 3).unwrap();
+        assert_eq!(memory.load_webhook_cursor("h").unwrap(), Some(3));
     }
 
     #[test]

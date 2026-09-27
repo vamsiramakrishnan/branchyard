@@ -1,0 +1,345 @@
+//! Webhook notifications: an operator-configured target receives a signed
+//! JSON envelope for each matching entry of a served repository's activity
+//! feed — branch status changes (further tagged `merge` or `failure`),
+//! stalls, and permission requests (`permission_wait`).
+//!
+//! Delivery is by cursor from the durable operation store
+//! ([`OperationStore::load_webhook_cursor`],
+//! [`OperationStore::save_webhook_cursor`]), keyed by `<repo>:<webhook id>`,
+//! so a restart resumes after the last delivered position rather than
+//! replaying the feed or silently skipping ahead: at-least-once. Delivery
+//! is retried with backoff; a target that keeps refusing gets a
+//! dead-letter note logged to stderr, and its cursor still advances past
+//! that entry, so one broken target never blocks the others or the feed
+//! itself. `X-Branchyard-Delivery` carries the feed position as the
+//! receiver's dedupe key.
+
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use branchyard::{Activity, BranchStatus};
+use branchyard_client::api::FeedEntry;
+use hmac::{Hmac, KeyInit, Mac};
+use serde::Serialize;
+use sha2::Sha256;
+use tokio::sync::watch;
+
+use crate::api::RepoState;
+use crate::config::WebhookConfig;
+use crate::store::OperationStore;
+
+/// Feed entries read per delivery batch.
+const BATCH: usize = 100;
+/// How long a quiet task sleeps between polls, beyond being woken by new
+/// activity.
+const POLL: Duration = Duration::from_secs(5);
+/// Delivery attempts before a dead-letter note and moving on. Overridable
+/// with `BY_TEST_WEBHOOK_MAX_ATTEMPTS` so a hermetic test can see
+/// exhaustion without waiting through the production backoff.
+const MAX_ATTEMPTS: u32 = 6;
+const RETRY_BASE: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn max_attempts() -> u32 {
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("BY_TEST_WEBHOOK_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(MAX_ATTEMPTS)
+    })
+}
+
+/// Overridable with `BY_TEST_WEBHOOK_RETRY_MS`; see [`max_attempts`].
+fn retry_base() -> Duration {
+    static V: OnceLock<Duration> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("BY_TEST_WEBHOOK_RETRY_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(RETRY_BASE)
+    })
+}
+
+/// A signed delivery: what a webhook receiver gets as its JSON body.
+#[derive(Serialize)]
+struct Envelope<'a> {
+    repo: &'a str,
+    seq: u64,
+    branch: &'a str,
+    at_ms: u64,
+    kinds: &'a [&'static str],
+    activity: &'a Activity,
+}
+
+/// The recognized kinds `activity` matches; see
+/// [`crate::config::WEBHOOK_EVENT_KINDS`]. A status change is also `merge`
+/// or `failure` when it settles there.
+fn kinds_of(activity: &Activity) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    match activity {
+        Activity::Status(status) => {
+            kinds.push("status");
+            match status {
+                BranchStatus::Merged { .. } => kinds.push("merge"),
+                BranchStatus::Failed { .. } => kinds.push("failure"),
+                _ => {}
+            }
+        }
+        Activity::Stalled { .. } => kinds.push("stall"),
+        Activity::Harness(branchyard::Event::PermissionRequested { .. }) => {
+            kinds.push("permission_wait")
+        }
+        _ => {}
+    }
+    kinds
+}
+
+/// Whether `webhook` wants an entry with these kinds; an empty filter wants
+/// everything.
+fn wants(webhook: &WebhookConfig, kinds: &[&str]) -> bool {
+    webhook.events.is_empty() || kinds.iter().any(|k| webhook.events.contains(*k))
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Hex-encoded HMAC-SHA256 of `body` with `secret`.
+fn sign(secret: &str, body: &[u8]) -> String {
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts a key of any length");
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Start delivering `repo`'s feed to `webhook`, from its durably stored
+/// cursor (the feed's current head if none is stored, so a webhook added
+/// to a long-lived repository does not replay its whole history).
+pub fn spawn(
+    repo: RepoState,
+    webhook: WebhookConfig,
+    store: Arc<dyn OperationStore>,
+    client: reqwest::Client,
+    shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run(repo, webhook, store, client, shutdown))
+}
+
+async fn run(
+    repo: RepoState,
+    webhook: WebhookConfig,
+    store: Arc<dyn OperationStore>,
+    client: reqwest::Client,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let cursor_id = format!("{}:{}", repo.name, webhook.id);
+    let mut cursor = {
+        let store = store.clone();
+        let id = cursor_id.clone();
+        let loaded = tokio::task::spawn_blocking(move || store.load_webhook_cursor(&id)).await;
+        match loaded {
+            Ok(Ok(Some(cursor))) => cursor,
+            Ok(Ok(None)) => repo.feed.head(),
+            Ok(Err(e)) => {
+                eprintln!(
+                    "branchyard-server: webhook {} reading its cursor: {e}; starting from the \
+                     current head of {}",
+                    webhook.url, repo.name
+                );
+                repo.feed.head()
+            }
+            Err(_) => repo.feed.head(),
+        }
+    };
+    loop {
+        loop {
+            let (feed, from) = (repo.feed.clone(), cursor);
+            let entries = tokio::task::spawn_blocking(move || feed.read_after(from, BATCH)).await;
+            let entries: Vec<FeedEntry> = match entries {
+                Ok(Ok(entries)) => entries,
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "branchyard-server: webhook {} reading {}'s feed: {e}",
+                        webhook.url, repo.name
+                    );
+                    break;
+                }
+                Err(_) => return,
+            };
+            if entries.is_empty() {
+                break;
+            }
+            for entry in &entries {
+                let kinds = kinds_of(&entry.activity);
+                if wants(&webhook, &kinds) {
+                    deliver(&client, &webhook, &repo.name, entry, &kinds).await;
+                }
+                cursor = entry.seq;
+                let (store, id, cursor) = (store.clone(), cursor_id.clone(), cursor);
+                let saved =
+                    tokio::task::spawn_blocking(move || store.save_webhook_cursor(&id, cursor))
+                        .await;
+                if let Ok(Err(e)) = saved {
+                    eprintln!(
+                        "branchyard-server: webhook {} saving its cursor: {e}",
+                        webhook.url
+                    );
+                }
+            }
+            if *shutdown.borrow() {
+                return;
+            }
+        }
+        if *shutdown.borrow() {
+            return;
+        }
+        tokio::select! {
+            _ = repo.wake.notified() => {}
+            _ = tokio::time::sleep(POLL) => {}
+            _ = shutdown.changed() => {}
+        }
+    }
+}
+
+/// Deliver one entry, retrying with backoff; logs a dead-letter note and
+/// gives up after [`MAX_ATTEMPTS`].
+async fn deliver(
+    client: &reqwest::Client,
+    webhook: &WebhookConfig,
+    repo: &str,
+    entry: &FeedEntry,
+    kinds: &[&'static str],
+) {
+    let envelope = Envelope {
+        repo,
+        seq: entry.seq,
+        branch: &entry.branch,
+        at_ms: entry.at_ms,
+        kinds,
+        activity: &entry.activity,
+    };
+    let body = match serde_json::to_vec(&envelope) {
+        Ok(body) => body,
+        Err(e) => {
+            eprintln!(
+                "branchyard-server: webhook {}: could not encode delivery {}: {e}",
+                webhook.url, entry.seq
+            );
+            return;
+        }
+    };
+    let signature = sign(&webhook.secret, &body);
+    let max_attempts = max_attempts();
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let result = client
+            .post(&webhook.url)
+            .header("content-type", "application/json")
+            .header("x-branchyard-signature", format!("sha256={signature}"))
+            .header("x-branchyard-delivery", entry.seq.to_string())
+            .body(body.clone())
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await;
+        match result {
+            Ok(response) if response.status().is_success() => return,
+            Ok(response) => eprintln!(
+                "branchyard-server: webhook {} refused delivery {} with status {}",
+                webhook.url,
+                entry.seq,
+                response.status()
+            ),
+            Err(e) => eprintln!(
+                "branchyard-server: webhook {} delivery {}: {e}",
+                webhook.url, entry.seq
+            ),
+        }
+        if attempt >= max_attempts {
+            eprintln!(
+                "branchyard-server: webhook {} dead-lettered delivery {} after {attempt} \
+                 attempt(s); its cursor still advances past it",
+                webhook.url, entry.seq
+            );
+            return;
+        }
+        let backoff = retry_base()
+            .saturating_mul(1u32 << (attempt - 1).min(16))
+            .min(RETRY_MAX);
+        tokio::time::sleep(backoff).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use branchyard::CandidateInfo;
+
+    #[test]
+    fn kinds_tag_status_stall_and_permission_requests() {
+        assert_eq!(kinds_of(&Activity::Status(BranchStatus::Ready)), ["status"]);
+        assert_eq!(
+            kinds_of(&Activity::Status(BranchStatus::Merged {
+                target: "main".into(),
+                commit: "c".into(),
+            })),
+            ["status", "merge"]
+        );
+        assert_eq!(
+            kinds_of(&Activity::Status(BranchStatus::Failed {
+                reason: "x".into()
+            })),
+            ["status", "failure"]
+        );
+        assert_eq!(kinds_of(&Activity::Stalled { since_ms: 1 }), ["stall"]);
+        assert_eq!(
+            kinds_of(&Activity::Harness(branchyard::Event::PermissionRequested {
+                turn: Some(1),
+                request: branchyard::PermissionRequest {
+                    key: branchyard::PermissionKey("k".into()),
+                    tool: "t".into(),
+                    input: serde_json::Value::Null,
+                },
+            })),
+            ["permission_wait"]
+        );
+        assert!(kinds_of(&Activity::Warning("x".into())).is_empty());
+        // Sanity: a snapshot (no kind) is not accidentally matched.
+        assert!(kinds_of(&Activity::Snapshot(CandidateInfo {
+            commit: "c".into(),
+            files_changed: 1,
+            insertions: 1,
+            deletions: 0,
+        }))
+        .is_empty());
+    }
+
+    fn webhook(events: &[&str]) -> WebhookConfig {
+        WebhookConfig {
+            id: "h".into(),
+            url: "https://example.invalid/hook".into(),
+            secret: "0123456789abcdef".into(),
+            events: events.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn an_empty_filter_wants_everything_and_others_narrow() {
+        assert!(wants(&webhook(&[]), &["status"]));
+        assert!(wants(&webhook(&[]), &[]));
+        assert!(wants(&webhook(&["stall"]), &["stall"]));
+        assert!(!wants(&webhook(&["stall"]), &["status"]));
+        assert!(wants(&webhook(&["stall", "merge"]), &["status", "merge"]));
+    }
+
+    #[test]
+    fn signatures_are_deterministic_and_key_dependent() {
+        let a = sign("secret-one", b"body");
+        let b = sign("secret-one", b"body");
+        let c = sign("secret-two", b"body");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 64, "hex-encoded SHA-256");
+    }
+}

@@ -273,13 +273,23 @@ pub(crate) fn steers(s: Opened) {
     let store = &s.backend;
     store.reserve("b", &owner("a")).unwrap();
     assert!(matches!(
-        store.request_steer("nope", "x", "t"),
+        store.request_steer("nope", "x", "t", None),
         Err(Error::UnknownBranch(_))
     ));
-    assert_eq!(store.request_steer("b", "x", "t").unwrap(), None, "no turn");
+    assert_eq!(
+        store.request_steer("b", "x", "t", None).unwrap(),
+        None,
+        "no turn"
+    );
     let fence = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
-    let first = store.request_steer("b", "alice", "one").unwrap().unwrap();
-    let second = store.request_steer("b", "bob", "two").unwrap().unwrap();
+    let first = store
+        .request_steer("b", "alice", "one", None)
+        .unwrap()
+        .unwrap();
+    let second = store
+        .request_steer("b", "bob", "two", None)
+        .unwrap()
+        .unwrap();
     assert!(second > first);
     let pending = store.pending_steers(&fence).unwrap();
     assert_eq!(
@@ -323,7 +333,10 @@ pub(crate) fn steers(s: Opened) {
     assert_eq!(store.steer("b", second + 100).unwrap(), None);
 
     // Settling is fenced: an engine whose lease was taken over cannot.
-    let third = store.request_steer("b", "carol", "three").unwrap().unwrap();
+    let third = store
+        .request_steer("b", "carol", "three", None)
+        .unwrap()
+        .unwrap();
     let row = store.leases().unwrap().remove(0);
     let taken = store.take_over(&row, &owner("b"), TTL).unwrap().unwrap();
     assert!(matches!(
@@ -337,7 +350,10 @@ pub(crate) fn steers(s: Opened) {
     store.finish(&taken, None, None).unwrap();
     let next = granted(store.acquire(&record("b"), &owner("a"), TTL).unwrap());
     assert!(store.pending_steers(&next).unwrap().is_empty());
-    let fourth = store.request_steer("b", "dan", "four").unwrap().unwrap();
+    let fourth = store
+        .request_steer("b", "dan", "four", None)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         store
             .pending_steers(&next)
@@ -350,6 +366,154 @@ pub(crate) fn steers(s: Opened) {
     store.finish(&next, None, None).unwrap();
     store.delete("b").unwrap();
     assert_eq!(store.steer("b", fourth).unwrap(), None);
+}
+
+pub(crate) fn messages(s: Opened) {
+    let store = &s.backend;
+    let sent = store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "kid".into(),
+            to: "parent".into(),
+            kind: crate::MessageKind::Question,
+            text: "should I rename the module?".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+    assert!(sent.id > 0);
+    assert!(sent.at_ms > 0);
+    assert!(!sent.delivered);
+    assert_eq!(store.message(sent.id).unwrap().as_ref(), Some(&sent));
+    assert_eq!(store.message(sent.id + 999).unwrap(), None);
+
+    // A second, unrelated message to someone else does not show up in
+    // parent's inbox or as an answer to the first.
+    store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "other".into(),
+            to: "elsewhere".into(),
+            kind: crate::MessageKind::Report,
+            text: "tests pass".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+
+    let inbox = store.inbox("parent").unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].id, sent.id);
+    assert!(!inbox[0].delivered);
+    assert!(store.answer_to(sent.id).unwrap().is_none());
+
+    store.mark_delivered(&[sent.id]).unwrap();
+    assert!(store.inbox("parent").unwrap()[0].delivered);
+    // Delivering twice, or an id nobody sent, is not an error.
+    store.mark_delivered(&[sent.id, sent.id + 999]).unwrap();
+
+    let answer = store
+        .send_message(&crate::Message {
+            id: 0,
+            from: "parent".into(),
+            to: "kid".into(),
+            kind: crate::MessageKind::Answer,
+            text: "yes, rename it".into(),
+            in_reply_to: Some(sent.id),
+            at_ms: 0,
+            delivered: false,
+        })
+        .unwrap();
+    assert_eq!(store.answer_to(sent.id).unwrap().as_ref(), Some(&answer));
+    assert_eq!(store.inbox("kid").unwrap(), [answer]);
+
+    let note = |from: &str, to: &str, kind: crate::MessageKind| {
+        store
+            .send_message(&crate::Message {
+                id: 0,
+                from: from.into(),
+                to: to.into(),
+                kind,
+                text: "note".into(),
+                in_reply_to: None,
+                at_ms: 0,
+                delivered: false,
+            })
+            .unwrap()
+    };
+    let delivered = |id: u64| store.message(id).unwrap().unwrap().delivered;
+
+    // Steering a message: linked in the steer's own transaction, delivered
+    // as that input settles written or accepted, pending again if refused.
+    store.reserve("m", &owner("a")).unwrap();
+    let fence = granted(store.acquire(&record("m"), &owner("a"), TTL).unwrap());
+    let one = note("kid", "m", crate::MessageKind::Report);
+    let first = store
+        .request_steer("m", "kid", "one", Some(one.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.message_steer(one.id).unwrap(), Some(first));
+    let row = store.pending_steers(&fence).unwrap().remove(0);
+    assert_eq!((row.message, row.message_delivered), (Some(one.id), false));
+    // A delivered or unknown message is refused, and nothing is queued.
+    for id in [sent.id, one.id + 999] {
+        assert!(matches!(
+            store.request_steer("m", "kid", "x", Some(id)),
+            Err(Error::Denied(_))
+        ));
+    }
+    assert_eq!(store.pending_steers(&fence).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .settle_steer(&fence, first, &SteerState::Delivered)
+            .unwrap(),
+        Some(one.id)
+    );
+    assert!(delivered(one.id));
+    assert_eq!(
+        store
+            .settle_steer(&fence, first, &SteerState::Accepted)
+            .unwrap(),
+        None,
+        "delivered once"
+    );
+    let refused = SteerState::Refused {
+        reason: "dropped".into(),
+    };
+    assert_eq!(store.settle_steer(&fence, first, &refused).unwrap(), None);
+    assert!(!delivered(one.id), "refused after all: pending again");
+    assert_eq!(store.message_steer(one.id).unwrap(), None);
+
+    // The turn's start delivers it first: the queued input sees that, and
+    // refusing it does not undo the delivery.
+    let second = store
+        .request_steer("m", "kid", "one", Some(one.id))
+        .unwrap()
+        .unwrap();
+    store.mark_delivered(&[one.id]).unwrap();
+    let row = store.pending_steers(&fence).unwrap().remove(0);
+    assert_eq!((row.id, row.message_delivered), (second, true));
+    assert_eq!(store.settle_steer(&fence, second, &refused).unwrap(), None);
+    assert!(delivered(one.id));
+    store.finish(&fence, None, None).unwrap();
+
+    // A waiter for an answer counts until its deadline or the answer.
+    let question = note("asker", "parent", crate::MessageKind::Question);
+    assert!(!store.awaiting_answer("asker", 1_000).unwrap());
+    store.set_awaiting(question.id, Some(5_000)).unwrap();
+    assert!(store.awaiting_answer("asker", 1_000).unwrap());
+    assert!(!store.awaiting_answer("asker", 6_000).unwrap(), "past it");
+    assert!(!store.awaiting_answer("parent", 1_000).unwrap());
+    store.set_awaiting(question.id, None).unwrap();
+    assert!(!store.awaiting_answer("asker", 1_000).unwrap());
+    store.set_awaiting(question.id, Some(5_000)).unwrap();
+    let mut reply = note("parent", "asker", crate::MessageKind::Answer);
+    reply.in_reply_to = Some(question.id);
+    assert!(store.awaiting_answer("asker", 1_000).unwrap());
+    store.send_message(&reply).unwrap();
+    assert!(!store.awaiting_answer("asker", 1_000).unwrap(), "answered");
 }
 
 pub(crate) fn records(s: Opened) {
@@ -725,7 +889,7 @@ pub(crate) fn storage(s: Opened) {
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
-            concurrent_appends, races, storage);
+            concurrent_appends, races, storage, messages);
     };
     ($open:expr; $($check:ident),*) => {
         $(

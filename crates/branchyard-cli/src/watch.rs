@@ -641,6 +641,8 @@ mod tests {
             turns: 2,
             cost_usd: Some(0.5),
             created_at: 1_000,
+            stalled: false,
+            superseded_by: None,
         }
     }
 

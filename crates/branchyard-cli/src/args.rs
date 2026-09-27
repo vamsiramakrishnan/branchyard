@@ -30,6 +30,10 @@ pub struct TaskArgs {
     pub max_turns: Option<u32>,
     /// From `--max-minutes`.
     pub max_duration: Option<Duration>,
+    /// From `--stall-after`, in minutes.
+    pub stall_after: Option<Duration>,
+    /// From `--stall-action`; ignored without `--stall-after`.
+    pub stall_action: branchyard::StallAction,
     pub permissions: Permissions,
     pub isolated: bool,
     /// Executable and fixed arguments replacing the profile's.
@@ -170,12 +174,17 @@ pub enum Command {
         task: TaskArgs,
         /// `--steer`: into the running turn rather than a new one.
         steer: bool,
+        wait: bool,
         json: bool,
     },
     Fork {
         branch: String,
         prompt: String,
         fresh_session: bool,
+        task: TaskArgs,
+    },
+    Reincarnate {
+        branch: String,
         task: TaskArgs,
     },
     Ls {
@@ -242,6 +251,33 @@ pub enum Command {
     },
     Children {
         branch: Option<String>,
+        json: bool,
+    },
+    Ask {
+        as_branch: Option<String>,
+        text: String,
+        wait_seconds: Option<f64>,
+        json: bool,
+    },
+    Report {
+        as_branch: Option<String>,
+        text: String,
+        json: bool,
+    },
+    Escalate {
+        as_branch: Option<String>,
+        text: String,
+        json: bool,
+    },
+    Answer {
+        as_branch: Option<String>,
+        message_id: u64,
+        text: String,
+        json: bool,
+    },
+    Inbox {
+        as_branch: Option<String>,
+        unread: bool,
         json: bool,
     },
     Rig(RigArgs),
@@ -417,6 +453,16 @@ const MAX_MINUTES: Flag = Flag {
     value: Some("N"),
     help: "Interrupt the turn after N minutes",
 };
+const STALL_AFTER: Flag = Flag {
+    long: "stall-after",
+    value: Some("N"),
+    help: "Mark the branch stalled after N minutes with no harness activity",
+};
+const STALL_ACTION: Flag = Flag {
+    long: "stall-action",
+    value: Some("notify|interrupt"),
+    help: "What a stall does (default: notify); needs --stall-after",
+};
 const ISOLATED: Flag = Flag {
     long: "isolated",
     value: None,
@@ -586,7 +632,7 @@ const PARENT: Flag = Flag {
 const WAIT: Flag = Flag {
     long: "wait",
     value: None,
-    help: "Wait for the child's turn to end and show it (outside a harness, spawn always waits)",
+    help: "Wait for the turn to end and show it (outside a harness, spawn and send always wait)",
 };
 const MAX_DEPTH: Flag = Flag {
     long: "max-depth",
@@ -602,6 +648,21 @@ const SEAT: Flag = Flag {
     long: "seat",
     value: Some("NAME"),
     help: "In a rig, the seat the child fills; it sets the child's harness, limits, check and instructions",
+};
+const AS_BRANCH: Flag = Flag {
+    long: "as",
+    value: Some("BRANCH"),
+    help: "Act as this branch (outside a harness; inside one, it is the harness's own)",
+};
+const WAIT_SECONDS: Flag = Flag {
+    long: "wait",
+    value: Some("SECS"),
+    help: "Block up to SECS seconds for an answer (default: return once the question is sent)",
+};
+const UNREAD: Flag = Flag {
+    long: "unread",
+    value: None,
+    help: "Only messages not yet delivered to a turn",
 };
 const CURSOR: Flag = Flag {
     long: "cursor",
@@ -701,6 +762,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -746,6 +809,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -789,6 +854,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             COMMAND,
@@ -802,6 +869,7 @@ pub static COMMANDS: &[Spec] = &[
             MODEL,
             EFFORT,
             TELEMETRY,
+            WAIT,
             JSON,
         ],
     },
@@ -816,6 +884,54 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
+            YES,
+            ASK,
+            ISOLATED,
+            COMMAND,
+            PROVIDER,
+            IMAGE,
+            CPUS,
+            MEMORY,
+            PASS_ENV,
+            SUBSTRATE_ENDPOINT,
+            SUBSTRATE_ROUTER,
+            SUBSTRATE_TEMPLATE,
+            SUBSTRATE_KEY,
+            SUBSTRATE_ATESPACE,
+            SUBSTRATE_WORKDIR,
+            SUBSTRATE_HOME,
+            SUBSTRATE_CA,
+            SUBSTRATE_CLIENT_CERT,
+            SUBSTRATE_CLIENT_KEY,
+            SUBSTRATE_ROUTER_CA,
+            SUBSTRATE_INSECURE,
+            DELEGATE,
+            ALLOW_DELEGATION,
+            ALLOW_UNAPPROVED_TOOLS,
+            SECRET,
+            AUTH,
+            MCP,
+            INSTRUCTIONS,
+            MODEL,
+            EFFORT,
+            TELEMETRY,
+        ],
+    },
+    Spec {
+        name: "reincarnate",
+        positionals: &["branch"],
+        summary: "Fork a branch's candidate into a fresh session with a generated handoff brief",
+        flags: &[
+            NAME,
+            HARNESS,
+            CHECK,
+            BUDGET_USD,
+            MAX_TURNS,
+            MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             YES,
             ASK,
             ISOLATED,
@@ -917,6 +1033,8 @@ pub static COMMANDS: &[Spec] = &[
             BUDGET_USD,
             MAX_TURNS,
             MAX_MINUTES,
+            STALL_AFTER,
+            STALL_ACTION,
             MAX_DEPTH,
             DENY,
             ALLOW_UNAPPROVED_TOOLS,
@@ -955,6 +1073,36 @@ pub static COMMANDS: &[Spec] = &[
         positionals: &["branch?"],
         summary: "List the branches a branch delegated to",
         flags: &[JSON],
+    },
+    Spec {
+        name: "ask",
+        positionals: &["text"],
+        summary: "Ask this branch's parent a question",
+        flags: &[AS_BRANCH, WAIT_SECONDS, JSON],
+    },
+    Spec {
+        name: "report",
+        positionals: &["text"],
+        summary: "Report to this branch's parent",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "escalate",
+        positionals: &["text"],
+        summary: "Escalate to this branch's parent, or further up if its rig seat allows",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "answer",
+        positionals: &["message-id", "text"],
+        summary: "Answer a message (usually a question) from a descendant",
+        flags: &[AS_BRANCH, JSON],
+    },
+    Spec {
+        name: "inbox",
+        positionals: &[],
+        summary: "List messages addressed to this branch",
+        flags: &[AS_BRANCH, UNREAD, JSON],
     },
     Spec {
         name: "rig",
@@ -1052,12 +1200,17 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             prompt: next(),
             task: m.task()?,
             steer: m.switch("steer"),
+            wait: m.switch("wait"),
             json: m.switch("json"),
         },
         "fork" => Command::Fork {
             branch: next(),
             prompt: next(),
             fresh_session: m.switch("fresh-session"),
+            task: m.task()?,
+        },
+        "reincarnate" => Command::Reincarnate {
+            branch: next(),
             task: m.task()?,
         },
         "ls" => Command::Ls {
@@ -1137,6 +1290,41 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         },
         "children" => Command::Children {
             branch: optional.next(),
+            json: m.switch("json"),
+        },
+        "ask" => Command::Ask {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            wait_seconds: m.number("wait")?,
+            json: m.switch("json"),
+        },
+        "report" => Command::Report {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            json: m.switch("json"),
+        },
+        "escalate" => Command::Escalate {
+            as_branch: m.value("as").map(str::to_owned),
+            text: next(),
+            json: m.switch("json"),
+        },
+        "answer" => {
+            let message_id_text = next();
+            let message_id = message_id_text.parse::<u64>().map_err(|_| {
+                m.error(format!(
+                    "message-id must be a whole number, not '{message_id_text}'"
+                ))
+            })?;
+            Command::Answer {
+                as_branch: m.value("as").map(str::to_owned),
+                message_id,
+                text: next(),
+                json: m.switch("json"),
+            }
+        }
+        "inbox" => Command::Inbox {
+            as_branch: m.value("as").map(str::to_owned),
+            unread: m.switch("unread"),
             json: m.switch("json"),
         },
         "rig" => {
@@ -1458,6 +1646,37 @@ impl Matches {
                 }
             },
         };
+        let stall_after = match self.value("stall-after") {
+            None => None,
+            Some(text) => match text
+                .parse::<f64>()
+                .ok()
+                .filter(|m| m.is_finite() && *m > 0.0)
+            {
+                Some(minutes) => Some(
+                    Duration::try_from_secs_f64(minutes * 60.0)
+                        .map_err(|_| self.error(format!("--stall-after {text} is too large")))?,
+                ),
+                None => {
+                    return Err(self.error(format!(
+                        "--stall-after needs a positive number of minutes, not '{text}'"
+                    )))
+                }
+            },
+        };
+        let stall_action = match self.value("stall-action") {
+            None => branchyard::StallAction::Notify,
+            Some("notify") => branchyard::StallAction::Notify,
+            Some("interrupt") => branchyard::StallAction::Interrupt,
+            Some(text) => {
+                return Err(self.error(format!(
+                    "--stall-action must be 'notify' or 'interrupt', not '{text}'"
+                )))
+            }
+        };
+        if self.value("stall-action").is_some() && stall_after.is_none() {
+            return Err(self.error("--stall-action needs --stall-after"));
+        }
         let command = match self.value("command") {
             None => None,
             Some(line) => {
@@ -1495,6 +1714,8 @@ impl Matches {
             budget_usd,
             max_turns,
             max_duration,
+            stall_after,
+            stall_action,
             permissions,
             isolated: self.switch("isolated"),
             command,
@@ -1828,6 +2049,8 @@ mod tests {
                     budget_usd: Some(2.5),
                     max_turns: Some(3),
                     max_duration: Some(Duration::from_secs(90)),
+                    stall_after: None,
+                    stall_action: branchyard::StallAction::Notify,
                     permissions: Permissions::Yes,
                     isolated: true,
                     command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
@@ -2140,6 +2363,7 @@ mod tests {
                     ..TaskArgs::default()
                 },
                 steer: false,
+                wait: false,
                 json: false,
             }
         );
