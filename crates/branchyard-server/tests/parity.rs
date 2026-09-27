@@ -6,7 +6,8 @@ mod common;
 
 use branchyard::{BranchStatus, Envelope, Provider, SubstrateOptions, TaskOptions, Yard};
 use branchyard_client::api::{
-    ForkRequest, OperationKind, OperationState, PolicySpec, SendRequest, SpawnRequest, TaskRequest,
+    BudgetSpec, ForkRequest, OperationKind, OperationState, PolicySpec, SendRequest, SpawnRequest,
+    TaskRequest,
 };
 use branchyard_client::{new_key, Client};
 use common::{get, post, raw, run, task, wait, Fixture, Server, TOKEN};
@@ -249,6 +250,42 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         ("kid", "by/root")
     );
     assert_eq!(common::git(&f.root, &["show", "by/root:kid.txt"]), "k\n");
+
+    // A spawn locks its parent: a send to it or its removal is refused
+    // while the child runs.
+    let hang = repo
+        .spawn(
+            "root",
+            &SpawnRequest {
+                prompt: "HANG".into(),
+                name: Some("hung".into()),
+                budget: BudgetSpec {
+                    max_seconds: Some(3.0),
+                    ..BudgetSpec::default()
+                },
+                ..SpawnRequest::default()
+            },
+            &new_key(),
+        )
+        .unwrap();
+    let busy = repo
+        .send(
+            "root",
+            &SendRequest {
+                prompt: "x".into(),
+                ..SendRequest::default()
+            },
+            &new_key(),
+        )
+        .unwrap_err();
+    assert_eq!(busy.code(), Some("branch_busy"), "{busy}");
+    assert_eq!(repo.remove("root").unwrap_err().code(), Some("branch_busy"));
+    let hang = wait(&client, &hang.id);
+    assert_eq!(hang.state, OperationState::Succeeded, "{hang:?}");
+    assert!(matches!(
+        repo.branch("hung").unwrap().status,
+        BranchStatus::BudgetExceeded { .. }
+    ));
 
     // The envelope binds a person through the server as it does locally.
     let op = wait(

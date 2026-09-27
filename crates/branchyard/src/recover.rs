@@ -29,7 +29,10 @@ use serde_json::Value;
 use crate::engine::{self, Driven, End, STEP_START, STEP_SUBMIT, STEP_TURN_END};
 use crate::record::{self, Recorder};
 use crate::state::{now_ms, Lease, LeaseRow, Record, Taken, LEASE_TTL};
-use crate::{placement, proc, Activity, BranchStatus, Error, Event, NativeSession, Recovery, Yard};
+use crate::{
+    placement, proc, Activity, BranchStatus, Error, Event, NativeSession, RecordedEvent, Recovery,
+    Yard,
+};
 
 /// Recover every branch that needs it. A branch that cannot be recovered
 /// does not stop the others; the first such error is returned after all
@@ -207,7 +210,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         end,
         submitted,
         session: last_session(yard, &row.branch),
-        cost: None,
+        cost: turn_cost(yard, &row.branch),
     };
     if let Err(error) = engine::conclude(yard, &prompt, &fence, &mut record, &mut recorder, driven)
     {
@@ -222,6 +225,29 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         reason,
         killed,
     }))
+}
+
+/// The highest cumulative cost the harness reported since the turn's prompt,
+/// as the engine would have kept it: spend is recorded whether or not the
+/// turn's outcome is known.
+fn turn_cost(yard: &Yard, name: &str) -> Option<f64> {
+    cost_since_prompt(&record::read(&yard.store(), name).ok()?)
+}
+
+fn cost_since_prompt(events: &[RecordedEvent]) -> Option<f64> {
+    let start = events
+        .iter()
+        .rposition(|event| matches!(event.activity, Activity::Prompt(_)))
+        .map_or(0, |i| i + 1);
+    events[start..]
+        .iter()
+        .filter_map(|event| match &event.activity {
+            Activity::Harness(Event::UsageObserved { usage, .. }) if usage.cumulative => {
+                usage.cost_usd
+            }
+            _ => None,
+        })
+        .reduce(f64::max)
 }
 
 /// The session the harness last reported, which a resumed send needs.
@@ -266,4 +292,47 @@ fn unowned(yard: &Yard, mut record: Record) -> Result<Option<Recovery>, Error> {
         reason,
         killed: Vec::new(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use branchyard_harness::Usage;
+
+    fn usage(cumulative: bool, cost: f64) -> RecordedEvent {
+        RecordedEvent {
+            at_ms: 0,
+            activity: Activity::Harness(Event::UsageObserved {
+                turn: None,
+                usage: Usage {
+                    cumulative,
+                    cost_usd: Some(cost),
+                    ..Usage::default()
+                },
+            }),
+        }
+    }
+
+    fn prompt() -> RecordedEvent {
+        RecordedEvent {
+            at_ms: 0,
+            activity: Activity::Prompt("p".into()),
+        }
+    }
+
+    #[test]
+    fn a_recovered_turn_keeps_the_highest_cumulative_cost_since_its_prompt() {
+        let events = [
+            prompt(),
+            usage(true, 5.0),
+            prompt(),
+            usage(true, 1.0),
+            usage(false, 9.0),
+            usage(true, 2.5),
+            usage(true, 2.0),
+        ];
+        assert_eq!(cost_since_prompt(&events), Some(2.5));
+        assert_eq!(cost_since_prompt(&events[..3]), None, "none reported yet");
+        assert_eq!(cost_since_prompt(&[]), None);
+    }
 }

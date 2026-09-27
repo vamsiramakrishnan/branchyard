@@ -988,10 +988,14 @@ async fn post_spawn(
         };
         run().map_err(|e| *error::sdk(&e).body)
     });
+    // The parent too: the spawn reads its work and changes its children, so
+    // a send or removal of it must not run meanwhile.
+    let mut locks = planned.clone();
+    locks.push(parent);
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Spawn,
-        locks: planned.clone(),
+        locks,
         branches: planned,
         cursor,
         idempotency: idem,
