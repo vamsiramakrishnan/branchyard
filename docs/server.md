@@ -291,7 +291,7 @@ Content-Type: application/json
  "kinds": ["stall"], "activity": {"stalled": {"since_ms": 1790000000000}}}
 ```
 
-`seq` (also sent as `X-Branchyard-Delivery`) is the feed position: use it as the receiver's dedupe key, since at-least-once means the same entry can arrive more than once. `activity` is the same [`RecordedEvent::activity`](../crates/branchyard/src/lib.rs) shape the SSE stream and `by log --json` use. A delivery is retried with backoff on a non-2xx response or a connection failure; after repeated failure it is logged as dead-lettered to the server's stderr and the cursor still advances, so one broken target never blocks the others or the feed.
+`seq` (also sent as `X-Branchyard-Delivery`) is the feed position: use it as the receiver's dedupe key, since at-least-once means the same entry can arrive more than once. `activity` is the same [`RecordedEvent::activity`](../crates/branchyard/src/lib.rs) shape the SSE stream and `by log --json` use. A delivery is retried on a non-2xx response or a connection failure, up to six attempts, waiting 0.5, 1, 2, 4 and 8 seconds between them (doubling, at most 30 s; [`backon`](https://docs.rs/backon)), with a warning for each failed attempt; after repeated failure it is logged as dead-lettered to the server's stderr and the cursor still advances, so one broken target never blocks the others or the feed.
 
 ### Errors
 

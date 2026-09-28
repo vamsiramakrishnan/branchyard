@@ -17,6 +17,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use backon::{ExponentialBuilder, Retryable};
 use branchyard::{Activity, BranchStatus};
 use branchyard_client::api::FeedEntry;
 use hmac::{Hmac, KeyInit, Mac};
@@ -206,8 +207,9 @@ async fn run(
     }
 }
 
-/// Deliver one entry, retrying with backoff; logs a dead-letter note and
-/// gives up after [`MAX_ATTEMPTS`].
+/// Deliver one entry, retrying with backoff ([`backoff`], through
+/// `backon`); logs a warning for each failed attempt that will be retried,
+/// then a dead-letter note with the last error after [`MAX_ATTEMPTS`].
 async fn deliver(
     client: &reqwest::Client,
     webhook: &WebhookConfig,
@@ -237,10 +239,8 @@ async fn deliver(
     };
     let signature = sign(&webhook.secret, &body);
     let max_attempts = max_attempts();
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        let result = client
+    let attempt = || async {
+        let response = client
             .post(&webhook.url)
             .header("content-type", "application/json")
             .header("x-branchyard-signature", format!("sha256={signature}"))
@@ -248,42 +248,87 @@ async fn deliver(
             .body(body.clone())
             .timeout(REQUEST_TIMEOUT)
             .send()
-            .await;
-        match result {
-            Ok(response) if response.status().is_success() => return,
-            Ok(response) => tracing::warn!(
+            .await
+            .map_err(Refused::Transport)?;
+        match response.status().is_success() {
+            true => Ok(()),
+            false => Err(Refused::Status(response.status())),
+        }
+    };
+    let delivered = attempt
+        .retry(backoff(max_attempts))
+        .sleep(tokio::time::sleep)
+        .notify(|error, wait| {
+            tracing::warn!(
                 webhook = %webhook.url,
                 seq = entry.seq,
-                status = %response.status(),
-                "webhook: delivery refused"
-            ),
-            Err(e) => tracing::warn!(
-                webhook = %webhook.url,
-                seq = entry.seq,
-                error = %e,
+                error = %error,
+                retry_in_ms = wait.as_millis() as u64,
                 "webhook: delivery attempt failed"
-            ),
-        }
-        if attempt >= max_attempts {
-            tracing::error!(
-                webhook = %webhook.url,
-                seq = entry.seq,
-                attempt,
-                "webhook: dead-lettered a delivery; its cursor still advances past it"
-            );
-            return;
-        }
-        let backoff = retry_base()
-            .saturating_mul(1u32 << (attempt - 1).min(16))
-            .min(RETRY_MAX);
-        tokio::time::sleep(backoff).await;
+            )
+        })
+        .await;
+    if let Err(error) = delivered {
+        tracing::error!(
+            webhook = %webhook.url,
+            seq = entry.seq,
+            attempts = max_attempts.max(1),
+            error = %error,
+            "webhook: dead-lettered a delivery; its cursor still advances past it"
+        );
     }
+}
+
+/// Why one delivery attempt did not land.
+#[derive(Debug)]
+enum Refused {
+    Transport(reqwest::Error),
+    Status(reqwest::StatusCode),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::Transport(error) => write!(f, "{error}"),
+            Refused::Status(status) => write!(f, "refused with HTTP {status}"),
+        }
+    }
+}
+
+/// The waits between a delivery's `attempts`: [`retry_base`] (500 ms),
+/// doubling, at most [`RETRY_MAX`]: 0.5, 1, 2, 4 and 8 s for the default
+/// six attempts.
+fn backoff(attempts: u32) -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(retry_base())
+        .with_factor(2.0)
+        .with_max_delay(RETRY_MAX)
+        .with_max_times(attempts.saturating_sub(1) as usize)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use branchyard::CandidateInfo;
+
+    /// The waits are the hand-written formula's from before backon:
+    /// `min(base * 2^(attempt-1), RETRY_MAX)` after each failed attempt but
+    /// the last.
+    #[test]
+    fn delivery_backoff_keeps_the_old_timing() {
+        use backon::BackoffBuilder;
+        for attempts in [0u32, 1, 2, 6, 12] {
+            let waits: Vec<Duration> = backoff(attempts).build().collect();
+            let old: Vec<Duration> = (1..attempts.max(1))
+                .map(|attempt| {
+                    retry_base()
+                        .saturating_mul(1u32 << (attempt - 1).min(16))
+                        .min(RETRY_MAX)
+                })
+                .collect();
+            assert_eq!(waits, old, "{attempts} attempts");
+        }
+    }
 
     #[test]
     fn kinds_tag_status_stall_and_permission_requests() {
