@@ -1389,7 +1389,7 @@ fn help_version_typos_and_exit_codes() {
     );
     let run = repo.by(&["help", "run"]);
     assert!(run.status.success());
-    assert!(stdout(&run).contains("Usage: by run [OPTIONS] <PROMPT>"));
+    assert!(stdout(&run).contains("Usage: by run [OPTIONS] [PROMPT]"));
     assert_eq!(stdout(&repo.by(&["run", "--help"])), stdout(&run));
     let nested = repo.by(&["help", "graph", "apply"]);
     assert!(

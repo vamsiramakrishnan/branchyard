@@ -114,6 +114,7 @@ mod policy;
 mod proc;
 mod projection;
 mod provisioning;
+mod pull_request;
 mod record;
 mod recover;
 mod run;
@@ -151,6 +152,10 @@ pub use graph::{
 };
 pub use inbox::{DeliveryHook, SteerDelivery};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
+pub use pull_request::{
+    slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
+    PullRequestRef, Pushed,
+};
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1418,6 +1423,10 @@ pub enum Activity {
     /// Inbox messages reached this branch's turn, and by which path; see
     /// `docs/delegation.md#delivery`. Each message is delivered once.
     MessagesDelivered { ids: Vec<u64>, via: DeliveredVia },
+    /// A step towards a pull request: an issue linked, a check run, a push,
+    /// a pull request opened or observed, feedback delivered. See
+    /// [`PullRequestActivity`] and `docs/pull-requests.md`.
+    PullRequest(Box<PullRequestActivity>),
 }
 
 /// How [`Activity::MessagesDelivered`] messages reached a turn. Serialized

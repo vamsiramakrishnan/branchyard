@@ -176,6 +176,41 @@ impl Repository {
         })
     }
 
+    /// Pushes exactly `commit` to `remote` (a remote name or URL) as
+    /// `refs/heads/<remote_branch>`, without a shell, without the
+    /// repository's hooks and without a terminal prompt, so credentials come
+    /// from the user's configured helpers or SSH agent. `force` replaces a
+    /// remote branch that is not an ancestor of `commit`; without it such a
+    /// push is refused by the remote.
+    pub fn push(
+        &self,
+        remote: &str,
+        commit: &Commit,
+        remote_branch: &str,
+        force: bool,
+    ) -> Result<(), GitError> {
+        if remote.is_empty() || remote.starts_with('-') {
+            return Err(GitError::InvalidRef(remote.to_owned()));
+        }
+        let target = format!("refs/heads/{remote_branch}");
+        if remote_branch.is_empty()
+            || remote_branch.starts_with('-')
+            || !Git::new(&self.root)
+                .args(["check-ref-format", &target])
+                .test()?
+        {
+            return Err(GitError::InvalidRef(remote_branch.to_owned()));
+        }
+        let commit = self.resolve(commit.as_str())?;
+        let plus = if force { "+" } else { "" };
+        Git::new(&self.root)
+            .no_hooks()
+            .args(["push", "--quiet", "--porcelain", "--", remote])
+            .arg(format!("{plus}{commit}:{target}"))
+            .run()?;
+        Ok(())
+    }
+
     /// The worktree that has `by/<name>` checked out, if any.
     pub fn workspace(&self, name: &BranchName) -> Result<Option<Workspace>, GitError> {
         Ok(self.workspaces()?.into_iter().find(|w| &w.name == name))

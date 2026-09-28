@@ -192,6 +192,10 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "ids": ids,
             "via": via,
         }),
+        Activity::PullRequest(activity) => json!({
+            "activity": "pull_request",
+            "pull_request": serde(activity),
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value

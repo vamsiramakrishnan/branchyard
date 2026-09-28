@@ -367,6 +367,10 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 ),
             )
         }
+        Activity::PullRequest(activity) => {
+            let (text, tone) = crate::pr::log_line(activity);
+            style.paint(tone, &text)
+        }
         Activity::MessagesDelivered { ids, via } => {
             let ids = ids
                 .iter()
@@ -1069,7 +1073,8 @@ pub fn graph_applied(a: &branchyard::GraphApplied, style: Style) -> String {
 }
 
 /// `by show`.
-pub fn details(info: &BranchInfo, now: u64, style: Style) -> String {
+/// With `extra` `(key, value)` lines at the end, aligned with the rest.
+pub fn details(info: &BranchInfo, now: u64, style: Style, extra: Vec<(&str, String)>) -> String {
     let (status, tone) = branch_status_text(info);
     let mut pairs = vec![
         ("branch", info.name.clone()),
@@ -1101,6 +1106,7 @@ pub fn details(info: &BranchInfo, now: u64, style: Style) -> String {
     if let BranchStatus::Merged { commit, .. } = &info.status {
         pairs.push(("merge commit", short_commit(commit).to_owned()));
     }
+    pairs.extend(extra);
     key_values(&pairs, style)
 }
 
@@ -1751,7 +1757,7 @@ mod tests {
     fn details_include_fork_parent_and_session() {
         let mut fork = info("alt", Some("flaky"));
         fork.session = Some("s-9".into());
-        let text = details(&fork, 10_000 + 120, PLAIN);
+        let text = details(&fork, 10_000 + 120, PLAIN, Vec::new());
         assert!(text.contains("forked from  flaky\n"), "{text}");
         assert!(text.contains("session      s-9\n"));
         assert!(text.contains("base         0123456789\n"));
