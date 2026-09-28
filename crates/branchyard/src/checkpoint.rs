@@ -98,6 +98,21 @@ pub fn recorded(events: &[RecordedEvent]) -> Vec<Checkpoint> {
     by_turn.into_values().collect()
 }
 
+/// The checkpoints recorded in a branch's events, each with its turn's
+/// prompt; `available` is assumed, since events cannot say whether the ref
+/// still exists ([`crate::Branch::checkpoints`] checks it).
+pub fn entries(events: &[RecordedEvent]) -> Vec<CheckpointEntry> {
+    let texts = turn_texts(events);
+    recorded(events)
+        .into_iter()
+        .map(|checkpoint| CheckpointEntry {
+            prompt: texts.get(&checkpoint.turn).map(|t| t.prompt.clone()),
+            checkpoint,
+            available: true,
+        })
+        .collect()
+}
+
 /// A branch's checkpoints, from [`crate::Branch::checkpoints`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoints {
@@ -137,17 +152,12 @@ pub(crate) fn list(yard: &Yard, name: &str) -> Result<Checkpoints, Error> {
     let store = yard.store();
     let record = store.read(name)?;
     let events = record::read(&store, name)?;
-    let texts = turn_texts(&events);
-    let checkpoints = recorded(&events)
+    let checkpoints = entries(&events)
         .into_iter()
-        .map(|checkpoint| {
-            let available = git::commit(&yard.root, &checkpoint.git_ref)?.as_deref()
-                == Some(checkpoint.commit.as_str());
-            Ok(CheckpointEntry {
-                prompt: texts.get(&checkpoint.turn).map(|t| t.prompt.clone()),
-                checkpoint,
-                available,
-            })
+        .map(|mut entry| {
+            entry.available = git::commit(&yard.root, &entry.checkpoint.git_ref)?.as_deref()
+                == Some(entry.checkpoint.commit.as_str());
+            Ok(entry)
         })
         .collect::<Result<Vec<_>, Error>>()?;
     Ok(Checkpoints {

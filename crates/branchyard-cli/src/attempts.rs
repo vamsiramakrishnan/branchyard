@@ -64,14 +64,7 @@ pub fn checkpoints(target: &Target, info: &BranchInfo) -> Result<Checkpoints, Fa
                 branch: info.name.clone(),
                 base: info.base.clone(),
                 current: current.or(Some(0)),
-                checkpoints: branchyard::recorded_checkpoints(&events)
-                    .into_iter()
-                    .map(|checkpoint| CheckpointEntry {
-                        checkpoint,
-                        prompt: None,
-                        available: true,
-                    })
-                    .collect(),
+                checkpoints: branchyard::checkpoint_entries(&events),
             })
         }
     }

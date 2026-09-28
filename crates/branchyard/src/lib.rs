@@ -144,7 +144,10 @@ pub use branchyard_provision::{
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
-pub use checkpoint::{recorded as recorded_checkpoints, CheckpointEntry, Checkpoints, Rewound};
+pub use checkpoint::{
+    entries as checkpoint_entries, recorded as recorded_checkpoints, CheckpointEntry, Checkpoints,
+    Rewound,
+};
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, CheckRun};
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
