@@ -366,7 +366,19 @@ Examples (inside a harness, the parent is the harness's own branch):
 const MERGE_EXAMPLES: &str = "\
 Examples:
   by merge fix-the-flaky-test
-  by merge fix-the-flaky-test --into release";
+  by merge fix-the-flaky-test --into release
+  by merge fix-the-flaky-test --rm";
+
+const WORKSPACE_EXAMPLES: &str = "\
+Examples:
+  by workspace show
+  by workspace trust
+  by workspace run fix-the-flaky-test dev
+  by workspace show fix-the-flaky-test --json
+
+[workspace] in branchyard.toml copies untracked files into each new worktree,
+runs setup before its first turn and teardown when it is removed. Its scripts
+never run until you trust them; see docs/workspace.md.";
 
 const WATCH_EXAMPLES: &str = "\
 Examples:
@@ -481,6 +493,18 @@ pub enum Command {
         /// Local branch to merge into (default: the current branch)
         #[arg(long, value_name = "TARGET")]
         into: Option<String>,
+        /// Then remove the branch, running its workspace teardown, as `by rm` does
+        #[arg(long)]
+        rm: bool,
+    },
+    /// A branch's workspace: trust its scripts, show it, or run a named script in it
+    #[command(display_order = 110, subcommand_required = true, after_help = WORKSPACE_EXAMPLES)]
+    Workspace {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: WorkspaceAction,
     },
     /// Remove a branch's worktree and record
     #[command(display_order = 106)]
@@ -754,6 +778,30 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: ConfigAction,
+    },
+}
+
+/// `by workspace ...`; see docs/workspace.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceAction {
+    /// The effective [workspace], where it came from, whether it is trusted, and ports
+    Show {
+        /// One branch's workspace: what it was created with, its setup, its port
+        branch: Option<String>,
+    },
+    /// Trust this repository's [workspace] scripts as they are now
+    Trust,
+    /// Forget the trust decision for this repository
+    Untrust,
+    /// Run a named [workspace.run] script in a branch's worktree
+    Run {
+        /// The branch (default: $BRANCHYARD_BRANCH inside a harness), then the
+        /// script's name (default: the one marked default, or the only one)
+        #[arg(value_name = "BRANCH [NAME]", num_args = 0..=2)]
+        args: Vec<String>,
+        /// Start it in the background, output to a log file, and return
+        #[arg(long)]
+        detach: bool,
     },
 }
 
@@ -2769,14 +2817,16 @@ mod tests {
             parse_str("merge b").unwrap(),
             Command::Merge {
                 branch: "b".into(),
-                into: None
+                into: None,
+                rm: false
             }
         );
         assert_eq!(
             parse_str("merge b --into release").unwrap(),
             Command::Merge {
                 branch: "b".into(),
-                into: Some("release".into())
+                into: Some("release".into()),
+                rm: false
             }
         );
         assert_eq!(
@@ -2787,6 +2837,65 @@ mod tests {
             }
         );
         assert!(err("merge b --into").contains("a value is required for '--into <TARGET>'"));
+        assert_eq!(
+            parse_str("merge b --rm").unwrap(),
+            Command::Merge {
+                branch: "b".into(),
+                into: None,
+                rm: true
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_actions_parse_with_json_anywhere() {
+        let workspace = |line: &str| match parse_str(line).unwrap() {
+            Command::Workspace { json, action } => (json, action),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            workspace("workspace show"),
+            (false, WorkspaceAction::Show { branch: None })
+        );
+        assert_eq!(
+            workspace("workspace --json show b"),
+            (
+                true,
+                WorkspaceAction::Show {
+                    branch: Some("b".into())
+                }
+            )
+        );
+        assert_eq!(
+            workspace("workspace trust"),
+            (false, WorkspaceAction::Trust)
+        );
+        assert_eq!(
+            workspace("workspace untrust --json"),
+            (true, WorkspaceAction::Untrust)
+        );
+        assert_eq!(
+            workspace("workspace run b dev --detach"),
+            (
+                false,
+                WorkspaceAction::Run {
+                    args: vec!["b".into(), "dev".into()],
+                    detach: true
+                }
+            )
+        );
+        assert_eq!(
+            workspace("workspace run"),
+            (
+                false,
+                WorkspaceAction::Run {
+                    args: vec![],
+                    detach: false
+                }
+            )
+        );
+        assert!(err("workspace run a b c").contains("no more were expected"));
+        assert!(err("workspace").contains("Usage"));
     }
 
     #[test]

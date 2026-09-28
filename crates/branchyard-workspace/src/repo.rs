@@ -173,6 +173,7 @@ impl Repository {
             path: dir,
             base,
             root: self.root.clone(),
+            exclude: Vec::new(),
         })
     }
 
@@ -204,6 +205,7 @@ impl Repository {
                 path: entry.path,
                 base: Commit(base),
                 root: self.root.clone(),
+                exclude: Vec::new(),
             });
         }
         Ok(found)
@@ -307,9 +309,46 @@ pub struct Workspace {
     pub path: PathBuf,
     pub base: Commit,
     root: PathBuf,
+    /// Paths, relative to the worktree, that [`Workspace::snapshot`] and
+    /// [`Workspace::diff`] leave out even when git would add them; see
+    /// [`Workspace::excluding`].
+    exclude: Vec<String>,
 }
 
 impl Workspace {
+    /// This workspace with `paths` (relative to the worktree, taken
+    /// literally, not as patterns) left out of every snapshot and diff,
+    /// even when no ignore rule covers them: files placed in the worktree
+    /// for the agent's use, such as a copied `.env`, never reach a
+    /// candidate.
+    pub fn excluding(mut self, paths: impl IntoIterator<Item = String>) -> Workspace {
+        self.exclude.extend(paths);
+        self
+    }
+
+    /// `git add --all` over the whole worktree minus [`Workspace::excluding`].
+    /// A path an ignore rule already covers is not named: git refuses a
+    /// pathspec, even an exclusion, that names an ignored file.
+    fn add_all(&self) -> Result<Git, GitError> {
+        let mut exclude = self.exclude.clone();
+        if !exclude.is_empty() {
+            // One path per line, as given: a path with a newline is
+            // simply never recognised here, and stays named.
+            let (out, _) = Git::new(&self.path)
+                .args(["check-ignore", "--"])
+                .args(&exclude)
+                .output()?;
+            let ignored: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            exclude.retain(|p| !ignored.contains(p));
+        }
+        Ok(Git::new(&self.path)
+            .args(["add", "--all", "--", "."])
+            .args(exclude.iter().map(|p| format!(":(exclude,literal){p}"))))
+    }
+
     /// Stages every change in the worktree, respecting `.gitignore`, and
     /// commits it on `by/<name>` if anything is staged.
     ///
@@ -325,9 +364,7 @@ impl Workspace {
                 actual: branch,
             });
         }
-        Git::new(&self.path)
-            .args(["add", "--all", "--", "."])
-            .run()?;
+        self.add_all()?.run()?;
         let unchanged = Git::new(&self.path)
             .args(["diff", "--cached", "--quiet", "--no-ext-diff"])
             .test()?;
@@ -423,10 +460,7 @@ impl Workspace {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        Git::new(&self.path)
-            .env("GIT_INDEX_FILE", &scratch)
-            .args(["add", "--all", "--", "."])
-            .run()?;
+        self.add_all()?.env("GIT_INDEX_FILE", &scratch).run()?;
         Ok(Git::new(&self.path)
             .env("GIT_INDEX_FILE", &scratch)
             .arg("write-tree")

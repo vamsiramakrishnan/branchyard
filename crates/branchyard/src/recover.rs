@@ -140,9 +140,13 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     // What carries the start's marker: a harness spawned just before the
     // engine stopped, whose pid was never recorded, and anything that left
     // the harness's process group.
-    if let Some(start) = step(STEP_START) {
-        let here = start.intent.get("host").and_then(Value::as_str) == Some(proc::host());
-        if let (true, Some(marker)) = (here, start.intent.get("spawn").and_then(Value::as_str)) {
+    // The workspace setup's commands carry a marker of their own.
+    for started in [step(STEP_START), step(crate::workspace::STEP_SETUP)]
+        .into_iter()
+        .flatten()
+    {
+        let here = started.intent.get("host").and_then(Value::as_str) == Some(proc::host());
+        if let (true, Some(marker)) = (here, started.intent.get("spawn").and_then(Value::as_str)) {
             for pid in proc::kill_marked(marker) {
                 if !killed.contains(&pid) {
                     killed.push(pid);
@@ -150,6 +154,15 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
             }
         }
     }
+    // Setup cut short: the record still says it is not ready, so the
+    // branch's next turn runs it again from the start.
+    let setup = match step(crate::workspace::STEP_SETUP) {
+        Some(s) if s.outcome.is_none() => {
+            "; its workspace setup was cut short and runs again, from the start, before its \
+             next turn"
+        }
+        _ => "",
+    };
     let sandbox = step(placement::STEP_SANDBOX)
         .and_then(|s| placement::recover(yard, &record, &s.intent))
         .map(|done| format!("; {done}"))
@@ -191,7 +204,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
                 Some(_) => "the prompt was submitted",
                 None => "the harness was started",
             };
-            let reason = format!("{why} before {started}; the turn never ran{sandbox}");
+            let reason = format!("{why} before {started}; the turn never ran{setup}{sandbox}");
             (
                 End::Lost {
                     reason: reason.clone(),

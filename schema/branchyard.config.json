@@ -47,6 +47,24 @@
         }
       ],
       "description": "Options for `provider = \"microsandbox\"`."
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What prepares each new branch's worktree and cleans up after it\n(docs/workspace.md). Project file only; its scripts run only once\nyou trust them (`by workspace trust`)."
+    },
+    "projects": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ProjectOverride"
+      },
+      "description": "Per-repository settings, keyed by the repository root's absolute\npath. User file only: `[projects.\"/src/app\".workspace]` replaces\nthat repository's own `[workspace]` for you."
     }
   },
   "title": "Branchyard configuration",
@@ -270,6 +288,85 @@
       "required": [
         "image"
       ]
+    },
+    "WorkspaceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "copy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Globs, relative to the repository root, of untracked files copied\ninto each new worktree, such as `.env` or `.env.*`. Never outside\nthe repository; symbolic links are not copied."
+        },
+        "setup": {
+          "$ref": "#/$defs/Script",
+          "description": "Run in each new worktree before its first turn: one command or a\nlist, each with `sh -c`, stopping at the first that fails."
+        },
+        "run": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RunScript"
+          },
+          "description": "Named commands `by workspace run [BRANCH] [NAME]` runs in a\nbranch's worktree, such as a dev server on `$BRANCHYARD_PORT`."
+        },
+        "teardown": {
+          "$ref": "#/$defs/Script",
+          "description": "Run in the worktree when the branch is removed (`by rm`, `by merge\n--rm`), best-effort."
+        }
+      },
+      "description": "A branch's workspace lifecycle: `[workspace]`."
+    },
+    "Script": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "One command, or a list run in order."
+    },
+    "RunScript": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/Script",
+          "description": "One command or a list, run with `sh -c` in the branch's worktree."
+        },
+        "default": {
+          "type": "boolean",
+          "description": "What `by workspace run` runs when given no name; at most one."
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "description": "A named command: `[workspace.run.NAME]`."
+    },
+    "ProjectOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Replaces the repository's own `[workspace]` whole, for you, with no\ntrust step: it is your own file."
+        }
+      },
+      "description": "`[projects.\"<repository root>\"]` in the user file."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

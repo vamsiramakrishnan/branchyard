@@ -8,7 +8,9 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use crate::graph::GraphBackend;
-use crate::state::{now_ms, Acquired, Backend, Begun, Fence, Owner, ProcessRow, Record};
+use crate::state::{
+    now_ms, Acquired, Backend, Begun, Fence, Owner, PortBackend, ProcessRow, Record,
+};
 use crate::storage::StorageBackend;
 use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
 
@@ -21,8 +23,12 @@ pub(crate) struct Opened {
     pub storage: Arc<dyn StorageBackend>,
     /// The same backend, as [`GraphBackend`]: see [`crate::graph`].
     pub graph: Arc<dyn GraphBackend>,
+    /// The same backend, as [`PortBackend`].
+    pub ports: Arc<dyn PortBackend>,
     /// Opens another handle on the same store, as a second engine would.
     pub again: Box<dyn Fn() -> Arc<dyn Backend>>,
+    /// [`Opened::again`], as [`PortBackend`].
+    pub again_ports: Box<dyn Fn() -> Arc<dyn PortBackend> + Send + Sync>,
     _cleanup: Box<dyn std::any::Any>,
 }
 
@@ -51,11 +57,17 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn Backend>
     };
+    let open_ports = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn PortBackend>
+    };
     Opened {
         backend: shared.clone(),
         storage: shared.clone(),
-        graph: shared,
+        graph: shared.clone(),
+        ports: shared,
         again: Box::new(open),
+        again_ports: Box::new(open_ports),
         _cleanup: Box::new(Temp(dir)),
     }
 }
@@ -78,10 +90,17 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
         let scope = scope.clone();
         move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn Backend>
     };
+    let open_ports = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn PortBackend>
+    };
     Some(Opened {
         backend: shared.clone(),
         storage: shared.clone(),
-        graph: shared,
+        graph: shared.clone(),
+        ports: shared,
+        again_ports: Box::new(open_ports),
         again: Box::new(open),
         _cleanup: Box::new(()),
     })
@@ -1353,11 +1372,61 @@ pub(crate) fn graph(s: Opened) {
     assert_eq!(graph.dependencies("root").unwrap().len(), 1);
 }
 
+/// Branch ports: stable per branch, never shared, `usable` honored,
+/// wrapping within the range, released when the branch is deleted, and
+/// distinct when several engines reserve at once.
+pub(crate) fn ports(s: Opened) {
+    let (low, high) = crate::workspace::PORT_RANGE;
+    let ports = &s.ports;
+    let branches = &s.backend;
+    let a = ports.reserve_port("a", low + 100, &|_| true).unwrap();
+    assert!((low..=high).contains(&a));
+    assert_eq!(ports.reserve_port("a", low + 7, &|_| true).unwrap(), a);
+    assert_eq!(ports.port("a").unwrap(), Some(a));
+    assert_eq!(ports.port("b").unwrap(), None);
+    let b = ports.reserve_port("b", a, &|p| p % 5 == 0).unwrap();
+    assert_ne!(a, b);
+    assert_eq!(b % 5, 0, "only a usable port is reserved");
+    let c = ports.reserve_port("c", high, &|_| true).unwrap();
+    assert!((low..=high).contains(&c) && c != a && c != b);
+    let none = ports.reserve_port("d", low, &|_| false);
+    assert!(matches!(none, Err(Error::State(_))), "{none:?}");
+    assert_eq!(ports.port("d").unwrap(), None);
+
+    // Deleting the branch releases its port.
+    assert!(branches.reserve("a", &owner("o")).unwrap());
+    granted(branches.acquire(&record("a"), &owner("o"), TTL).unwrap());
+    branches.delete("a").unwrap();
+    assert_eq!(ports.port("a").unwrap(), None);
+    assert_eq!(ports.port("b").unwrap(), Some(b));
+
+    // Engines reserving at once from the same start get distinct ports.
+    let barrier = Barrier::new(6);
+    let reserved: Vec<u16> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..6)
+            .map(|i| {
+                let handle = (s.again_ports)();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    handle
+                        .reserve_port(&format!("racer-{i}"), low + 500, &|_| true)
+                        .unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let distinct: std::collections::BTreeSet<u16> = reserved.iter().copied().collect();
+    assert_eq!(distinct.len(), reserved.len(), "{reserved:?}");
+    assert!(!distinct.contains(&b) && !distinct.contains(&c));
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
-            concurrent_appends, races, storage, messages, delivery, graph);
+            concurrent_appends, races, storage, messages, delivery, graph, ports);
     };
     ($open:expr; $($check:ident),*) => {
         $(

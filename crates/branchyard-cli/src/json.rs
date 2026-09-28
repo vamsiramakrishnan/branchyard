@@ -192,6 +192,11 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "ids": ids,
             "via": via,
         }),
+        Activity::Workspace(report) => {
+            let mut value = serde_json::to_value(report).unwrap_or_default();
+            value["activity"] = json!("workspace");
+            value
+        }
     };
     value["at_ms"] = json!(recorded.at_ms);
     value

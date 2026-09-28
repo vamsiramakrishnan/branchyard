@@ -238,6 +238,65 @@ pub fn decision_line(tool: &str, allowed: bool, message: Option<&str>, style: St
     }
 }
 
+/// A workspace lifecycle phase: one line, and when it failed the last
+/// lines of its output, indented.
+pub fn workspace_line(report: &branchyard::WorkspaceReport, style: Style) -> String {
+    use branchyard::WorkspacePhase;
+    let secs = report.duration_ms as f64 / 1000.0;
+    let port = report
+        .port
+        .map(|p| format!(", port {p}"))
+        .unwrap_or_default();
+    let mut line = match report.phase {
+        WorkspacePhase::Copy => {
+            let mut text = format!("workspace copy: {} file(s)", report.copied.len());
+            if !report.copied.is_empty() {
+                text.push_str(&format!(" ({})", truncate(&report.copied.join(", "), 80)));
+            }
+            if !report.refused.is_empty() {
+                text.push_str(&format!("; refused {}", report.refused.join("; ")));
+            }
+            text
+        }
+        WorkspacePhase::Run if report.ok && report.exit_code.is_none() => format!(
+            "workspace run: started `{}`{port}; {}",
+            truncate(&report.commands.join(" && "), 60),
+            report.output.trim()
+        ),
+        WorkspacePhase::Setup | WorkspacePhase::Teardown | WorkspacePhase::Run => {
+            let phase = match report.phase {
+                WorkspacePhase::Setup => "setup",
+                WorkspacePhase::Run => "run",
+                _ => "teardown",
+            };
+            let outcome = match (report.ok, &report.error, report.exit_code) {
+                (true, _, _) => "ok".to_owned(),
+                (false, Some(error), _) => error.clone(),
+                (false, None, Some(code)) => format!("exit {code}"),
+                (false, None, None) => "failed".to_owned(),
+            };
+            let last = report.commands.last().map(String::as_str).unwrap_or("");
+            format!(
+                "workspace {phase}: {outcome} after {secs:.1}s{port} ({} command(s), last `{}`)",
+                report.commands.len(),
+                truncate(last, 60)
+            )
+        }
+    };
+    let tone = match report.ok {
+        true => Tone::Dim,
+        false => Tone::Red,
+    };
+    if !report.ok && !report.output.trim().is_empty() {
+        let lines: Vec<&str> = report.output.trim_end().lines().collect();
+        let start = lines.len().saturating_sub(20);
+        for output in &lines[start..] {
+            line.push_str(&format!("\n    {output}"));
+        }
+    }
+    style.paint(tone, &line)
+}
+
 /// One line for recorded activity. Message deltas are text, not lines, and
 /// return `None`.
 pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
@@ -343,6 +402,7 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             "stalled: no harness activity for its stall window",
         ),
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
+        Activity::Workspace(report) => workspace_line(report, style),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
                 Some(id) => format!(" (re #{id})"),

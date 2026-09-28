@@ -83,6 +83,8 @@ pub(crate) struct NewBranch<'a> {
     pub grant: Option<Grant>,
     pub depth: u32,
     pub provision: Option<Provisioning>,
+    /// Its workspace lifecycle; see `crate::workspace`.
+    pub workspace: Option<crate::WorkspaceSpec>,
 }
 
 /// The journaled step that creates a branch's worktree.
@@ -138,6 +140,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         provision: new.provision,
         bindings: Vec::new(),
         start_base: None,
+        workspace: new.workspace.map(crate::workspace::WorkspaceState::new),
     })
 }
 
@@ -267,6 +270,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             grant,
             depth: 0,
             provision: options.provision.clone(),
+            workspace: options.workspace.clone(),
         },
     );
     let (record, lease) = record.inspect_err(|_| store.release(&name))?;
@@ -335,6 +339,7 @@ pub(crate) fn run_on(
                 grant: grant.clone(),
                 depth: 0,
                 provision: options.provision.clone(),
+                workspace: options.workspace.clone(),
             },
         );
         match record {
@@ -653,6 +658,10 @@ pub(crate) fn fork(
             grant,
             depth: 0,
             provision,
+            workspace: options
+                .workspace
+                .clone()
+                .or_else(|| parent.workspace.as_ref().map(|w| w.spec.clone())),
         },
     )
     .inspect_err(|_| store.release(&reserved))?;
@@ -737,6 +746,10 @@ pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Res
             grant,
             depth: 0,
             provision,
+            workspace: options
+                .workspace
+                .clone()
+                .or_else(|| parent.workspace.as_ref().map(|w| w.spec.clone())),
         },
     )
     .inspect_err(|_| store.release(&reserved))?;

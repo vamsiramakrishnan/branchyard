@@ -614,6 +614,19 @@
                 "max"
               ],
               "description": "Comma-separated names, each a [`Rule::Name`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rule": {
+                  "type": "string",
+                  "const": "copy_glob"
+                }
+              },
+              "required": [
+                "rule"
+              ],
+              "description": "A `[workspace] copy` glob: relative, inside the repository."
             }
           ],
           "description": "A check on an answer, beyond its kind."

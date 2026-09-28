@@ -33,6 +33,7 @@ rusqlite = { version = "0.39", default-features = false, features = ["bundled"] 
 postgres = { version = "0.19", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }
 schemars = { version = "1", optional = true }
+glob = "0.3"
 
 [dev-dependencies]
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }

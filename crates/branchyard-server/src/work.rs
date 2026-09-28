@@ -315,6 +315,7 @@ pub(crate) fn task_options(
         isolated: request.isolated,
         provision: app.provision(request.provision.clone())?,
         seats: app.seats(request.seats.clone())?,
+        workspace: app.workspace(repo)?,
         ..app.options(
             repo,
             budget,
@@ -427,6 +428,7 @@ pub(crate) fn fork_options(
         name: request.name.clone(),
         isolated: request.isolated,
         provision: app.provision(request.provision.clone())?,
+        workspace: app.workspace(repo)?,
         ..app.options(
             repo,
             budget,
@@ -459,6 +461,7 @@ pub(crate) fn reincarnate_options(
         name: request.name.clone(),
         isolated: request.isolated,
         provision: app.provision(request.provision.clone())?,
+        workspace: app.workspace(repo)?,
         ..app.options(
             repo,
             budget,

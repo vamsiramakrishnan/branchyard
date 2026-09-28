@@ -24,8 +24,8 @@ use serde_json::Value;
 
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
-    ReservationRow, SteerRow, StepRow,
+    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PortBackend,
+    ProcessRow, Record, ReservationRow, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
@@ -196,6 +196,11 @@ CREATE TABLE IF NOT EXISTS graph_edges (
 );
 CREATE INDEX IF NOT EXISTS graph_edges_prerequisite ON graph_edges (prerequisite);
 CREATE INDEX IF NOT EXISTS graph_edges_parent ON graph_edges (parent);
+CREATE TABLE IF NOT EXISTS ports (
+    port INTEGER PRIMARY KEY,
+    branch TEXT NOT NULL UNIQUE,
+    reserved_ms INTEGER NOT NULL
+);
 ";
 
 #[derive(Debug)]
@@ -1001,6 +1006,7 @@ impl Backend for Sqlite {
             for sql in [
                 "DELETE FROM graph_edges WHERE dependent = ?1",
                 "DELETE FROM graph_revisions WHERE parent = ?1",
+                "DELETE FROM ports WHERE branch = ?1",
             ] {
                 tx.execute(sql, params![name])
                     .map_err(|e| db("delete", e))?;
@@ -1756,6 +1762,57 @@ fn graph_revision(conn: &Connection, parent: &str) -> Result<u64, Error> {
         .optional()
         .map_err(|e| db("graph revision", e))?;
     Ok(revision.map_or(0, uint))
+}
+
+impl PortBackend for Sqlite {
+    fn reserve_port(
+        &self,
+        branch: &str,
+        start: u16,
+        usable: &(dyn Fn(u16) -> bool + Sync),
+    ) -> Result<u16, Error> {
+        let e = |error| db("port", error);
+        self.tx(true, |tx| {
+            let held: Option<i64> = tx
+                .query_row(
+                    "SELECT port FROM ports WHERE branch = ?1",
+                    params![branch],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(e)?;
+            if let Some(port) = held {
+                return Ok(port as u16);
+            }
+            let taken = {
+                let mut statement = tx.prepare("SELECT port FROM ports").map_err(e)?;
+                let rows = statement.query_map([], |r| r.get::<_, i64>(0)).map_err(e)?;
+                rows.map(|r| r.map(|p| p as u16))
+                    .collect::<Result<std::collections::BTreeSet<u16>, _>>()
+                    .map_err(e)?
+            };
+            let port = pick_port(start, &taken, usable)?;
+            tx.execute(
+                "INSERT INTO ports (port, branch, reserved_ms) VALUES (?1, ?2, ?3)",
+                params![port, branch, int(now_ms())],
+            )
+            .map_err(e)?;
+            Ok(port)
+        })
+    }
+
+    fn port(&self, branch: &str) -> Result<Option<u16>, Error> {
+        self.query(|conn| {
+            conn.query_row(
+                "SELECT port FROM ports WHERE branch = ?1",
+                params![branch],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|p| p.map(|p| p as u16))
+            .map_err(|error| db("port", error))
+        })
+    }
 }
 
 impl GraphBackend for Sqlite {

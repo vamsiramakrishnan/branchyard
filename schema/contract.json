@@ -5791,6 +5791,19 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "workspace": {
+                  "$ref": "#/$defs/WorkspaceReport"
+                }
+              },
+              "required": [
+                "workspace"
+              ],
+              "additionalProperties": false,
+              "description": "A phase of the branch's workspace lifecycle ran: files copied into\nits new worktree, setup before its first turn, or teardown at its\nremoval. See [`TaskOptions::workspace`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -6789,6 +6802,103 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "WorkspaceReport": {
+          "type": "object",
+          "properties": {
+            "phase": {
+              "$ref": "#/$defs/WorkspacePhase"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The commands that ran, in order, up to and including one that failed."
+            },
+            "copied": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files copied, relative to the repository root."
+            },
+            "refused": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths or globs not copied, each with why."
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The last command's exit code; `None` when it was killed or never\nstarted."
+            },
+            "output": {
+              "type": "string",
+              "description": "The commands' combined standard output and error, at most its last\n[`OUTPUT_TAIL`] bytes."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it failed when no exit code says so: a timeout, a cancel, a\ncommand that could not start, scripts denied on this yard."
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The branch's reserved port, as the commands saw it."
+            }
+          },
+          "required": [
+            "phase",
+            "ok"
+          ],
+          "description": "What one phase of a branch's workspace lifecycle did."
+        },
+        "WorkspacePhase": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "copy",
+              "description": "Untracked files copied into the new worktree."
+            },
+            {
+              "type": "string",
+              "const": "setup",
+              "description": "The setup commands, before the first turn."
+            },
+            {
+              "type": "string",
+              "const": "teardown",
+              "description": "The teardown commands, at removal."
+            },
+            {
+              "type": "string",
+              "const": "run",
+              "description": "A named run script, from `by workspace run`."
+            }
+          ],
+          "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
         }
       }
     },
@@ -7163,6 +7273,19 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "workspace": {
+                  "$ref": "#/$defs/WorkspaceReport"
+                }
+              },
+              "required": [
+                "workspace"
+              ],
+              "additionalProperties": false,
+              "description": "A phase of the branch's workspace lifecycle ran: files copied into\nits new worktree, setup before its first turn, or teardown at its\nremoval. See [`TaskOptions::workspace`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -8161,6 +8284,103 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "WorkspaceReport": {
+          "type": "object",
+          "properties": {
+            "phase": {
+              "$ref": "#/$defs/WorkspacePhase"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The commands that ran, in order, up to and including one that failed."
+            },
+            "copied": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files copied, relative to the repository root."
+            },
+            "refused": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths or globs not copied, each with why."
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The last command's exit code; `None` when it was killed or never\nstarted."
+            },
+            "output": {
+              "type": "string",
+              "description": "The commands' combined standard output and error, at most its last\n[`OUTPUT_TAIL`] bytes."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it failed when no exit code says so: a timeout, a cancel, a\ncommand that could not start, scripts denied on this yard."
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The branch's reserved port, as the commands saw it."
+            }
+          },
+          "required": [
+            "phase",
+            "ok"
+          ],
+          "description": "What one phase of a branch's workspace lifecycle did."
+        },
+        "WorkspacePhase": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "copy",
+              "description": "Untracked files copied into the new worktree."
+            },
+            {
+              "type": "string",
+              "const": "setup",
+              "description": "The setup commands, before the first turn."
+            },
+            {
+              "type": "string",
+              "const": "teardown",
+              "description": "The teardown commands, at removal."
+            },
+            {
+              "type": "string",
+              "const": "run",
+              "description": "A named run script, from `by workspace run`."
+            }
+          ],
+          "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
         }
       }
     },
@@ -10033,6 +10253,19 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "workspace": {
+                  "$ref": "#/$defs/WorkspaceReport"
+                }
+              },
+              "required": [
+                "workspace"
+              ],
+              "additionalProperties": false,
+              "description": "A phase of the branch's workspace lifecycle ran: files copied into\nits new worktree, setup before its first turn, or teardown at its\nremoval. See [`TaskOptions::workspace`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -11031,6 +11264,103 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "WorkspaceReport": {
+          "type": "object",
+          "properties": {
+            "phase": {
+              "$ref": "#/$defs/WorkspacePhase"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The commands that ran, in order, up to and including one that failed."
+            },
+            "copied": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files copied, relative to the repository root."
+            },
+            "refused": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths or globs not copied, each with why."
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The last command's exit code; `None` when it was killed or never\nstarted."
+            },
+            "output": {
+              "type": "string",
+              "description": "The commands' combined standard output and error, at most its last\n[`OUTPUT_TAIL`] bytes."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it failed when no exit code says so: a timeout, a cancel, a\ncommand that could not start, scripts denied on this yard."
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The branch's reserved port, as the commands saw it."
+            }
+          },
+          "required": [
+            "phase",
+            "ok"
+          ],
+          "description": "What one phase of a branch's workspace lifecycle did."
+        },
+        "WorkspacePhase": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "copy",
+              "description": "Untracked files copied into the new worktree."
+            },
+            {
+              "type": "string",
+              "const": "setup",
+              "description": "The setup commands, before the first turn."
+            },
+            {
+              "type": "string",
+              "const": "teardown",
+              "description": "The teardown commands, at removal."
+            },
+            {
+              "type": "string",
+              "const": "run",
+              "description": "A named run script, from `by workspace run`."
+            }
+          ],
+          "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
         }
       }
     },

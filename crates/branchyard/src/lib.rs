@@ -123,6 +123,7 @@ mod state;
 mod steer;
 mod storage;
 mod tarball;
+mod workspace;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -155,6 +156,11 @@ pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
+pub use workspace::{
+    check_glob as check_workspace_glob, WorkspaceInfo, WorkspacePhase, WorkspaceReport,
+    WorkspaceSpec, ENV_PORT, ENV_WORKTREE, OUTPUT_TAIL as WORKSPACE_OUTPUT_TAIL,
+    PORT_RANGE as WORKSPACE_PORT_RANGE,
+};
 
 /// This process as the engine names a lease's holder: its host and boot,
 /// its pid, and its start time. For leases kept outside the engine, such as
@@ -385,12 +391,73 @@ impl Yard {
     /// and in any case the credential files provisioning wrote there; see
     /// [`Yard::remove_with`] to keep those.
     pub fn remove(&self, branch: &str) -> Result<(), Error> {
-        ops::remove(self, branch, &RemoveOptions::default())
+        ops::remove(self, branch, &RemoveOptions::default()).map(|_| ())
     }
 
     /// [`Yard::remove`], with options.
     pub fn remove_with(&self, branch: &str, options: &RemoveOptions) -> Result<(), Error> {
+        ops::remove(self, branch, options).map(|_| ())
+    }
+
+    /// [`Yard::remove_with`], returning what the branch's workspace
+    /// teardown did, when it has one; see `docs/workspace.md`. A failed
+    /// teardown does not stop the removal.
+    pub fn remove_reporting(
+        &self,
+        branch: &str,
+        options: &RemoveOptions,
+    ) -> Result<Option<WorkspaceReport>, Error> {
         ops::remove(self, branch, options)
+    }
+
+    /// `branch`'s workspace: what it was created with, whether its setup
+    /// completed, and its reserved port. See `docs/workspace.md`.
+    pub fn workspace(&self, branch: &str) -> Result<WorkspaceInfo, Error> {
+        let store = self.store();
+        let record = store.read(branch)?;
+        let port = store.ports().port(branch)?;
+        Ok(WorkspaceInfo {
+            branch: branch.to_owned(),
+            worktree: record.info.worktree.clone(),
+            spec: record.workspace.as_ref().map(|w| w.spec.clone()),
+            ready: record.workspace.as_ref().is_some_and(|w| w.ready),
+            copied: workspace::excluded(&record),
+            port,
+        })
+    }
+
+    /// The variables `branch`'s scripts and harness get:
+    /// `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and
+    /// `BRANCHYARD_PORT`, reserving the branch's port now if it has none
+    /// yet. For running a command in its worktree, as `by workspace run`
+    /// does.
+    pub fn workspace_env(&self, branch: &str) -> Result<Vec<(String, String)>, Error> {
+        let store = self.store();
+        let record = store.read(branch)?;
+        let port = workspace::reserve_port(&store, &self.root, branch)?;
+        Ok(workspace::variables(
+            self,
+            branch,
+            &record.info.worktree,
+            Some(port),
+        ))
+    }
+
+    /// Append a workspace lifecycle report to `branch`'s event log, for a
+    /// phase run outside the engine, such as `by workspace run`.
+    pub fn record_workspace(&self, branch: &str, report: WorkspaceReport) -> Result<(), Error> {
+        let store = self.store();
+        store.read(branch)?;
+        record::Recorder::open(&store, branch, None)?.record(Activity::Workspace(report))
+    }
+
+    /// Never run workspace setup or teardown commands on this yard (or its
+    /// clones): a branch that needs its setup fails, saying why, and a
+    /// teardown is skipped and recorded. Copying files still happens. A
+    /// server does this unless its operator allowed a repository's
+    /// scripts; see `docs/workspace.md`.
+    pub fn deny_workspace_scripts(&self) {
+        self.hub.deny_scripts();
     }
 
     /// Known harness profiles, whether their executable is on `PATH`, and
@@ -627,6 +694,14 @@ pub struct TaskOptions {
     /// bounds every child. Stored with the branch; a send without one keeps
     /// the branch's.
     pub seats: Option<Seats>,
+    /// Prepare each new branch's worktree before its first turn (copy
+    /// untracked files, run setup) and clean up when it is removed
+    /// (teardown), with `BRANCHYARD_PORT` reserved for it. Read only when a
+    /// branch is created (run, fan, fork, reincarnate); stored with it, and
+    /// a fork, reincarnation or delegated child without one takes its
+    /// parent's. Whether a repository's scripts may run is the caller's
+    /// decision: `by` asks you to trust them. See `docs/workspace.md`.
+    pub workspace: Option<WorkspaceSpec>,
 }
 
 /// Where a branch's harness runs.
@@ -1418,6 +1493,10 @@ pub enum Activity {
     /// Inbox messages reached this branch's turn, and by which path; see
     /// `docs/delegation.md#delivery`. Each message is delivered once.
     MessagesDelivered { ids: Vec<u64>, via: DeliveredVia },
+    /// A phase of the branch's workspace lifecycle ran: files copied into
+    /// its new worktree, setup before its first turn, or teardown at its
+    /// removal. See [`TaskOptions::workspace`].
+    Workspace(WorkspaceReport),
 }
 
 /// How [`Activity::MessagesDelivered`] messages reached a turn. Serialized

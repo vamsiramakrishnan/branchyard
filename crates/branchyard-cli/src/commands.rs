@@ -210,6 +210,7 @@ impl Live {
             unapproved_tools: task.unapproved_tools,
             provision: provision(task)?,
             seats: None,
+            workspace: None,
         })
     }
 
@@ -273,13 +274,24 @@ pub fn branch_outcome(info: &BranchInfo) -> Outcome {
     }
 }
 
+/// The repository's `[workspace]` for a command that creates branches,
+/// once its scripts are trusted (docs/workspace.md).
+fn workspace(env: &Env, yard: &Yard) -> Result<Option<branchyard::WorkspaceSpec>, Failure> {
+    crate::workspace_cmd::for_new_branch(env, yard.root())
+}
+
 pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome {
     if let Target::Remote(remote) = target {
         return remote::run(env, remote, prompt, task);
     }
     let yard = open()?;
+    let workspace = workspace(env, &yard)?;
     let live = Live::start(env, task, task.delegate.is_some(), None);
-    let result = yard.task(prompt).options(live.options(task)?).run();
+    let options = TaskOptions {
+        workspace,
+        ..live.options(task)?
+    };
+    let result = yard.task(prompt).options(options).run();
     live.finish(env, result)
 }
 
@@ -294,9 +306,14 @@ pub fn fan(
         return remote::fan(env, remote, prompt, harnesses, task);
     }
     let yard = open()?;
+    let workspace = workspace(env, &yard)?;
     let live = Live::start(env, task, true, None);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
-    let builder = yard.task(prompt).options(live.options(task)?);
+    let options = TaskOptions {
+        workspace,
+        ..live.options(task)?
+    };
+    let builder = yard.task(prompt).options(options);
     // Knowing the names up front lines the prefixes up from the first line.
     if let Ok(names) = builder.planned_names(&ids) {
         live.console.reserve(&names);
@@ -484,9 +501,15 @@ pub fn fork(
     if let Target::Remote(remote) = target {
         return remote::fork(env, remote, branch, prompt, fresh_session, task);
     }
-    let branch = open()?.branch(branch)?;
+    let yard = open()?;
+    let workspace = workspace(env, &yard)?;
+    let branch = yard.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
-    let result = branch.fork(prompt, fresh_session, live.options(task)?);
+    let options = TaskOptions {
+        workspace,
+        ..live.options(task)?
+    };
+    let result = branch.fork(prompt, fresh_session, options);
     live.finish(env, result)
 }
 
@@ -494,9 +517,15 @@ pub fn reincarnate(env: &Env, target: &Target, branch: &str, task: &TaskArgs) ->
     if let Target::Remote(remote) = target {
         return remote::reincarnate(env, remote, branch, task);
     }
-    let branch = open()?.branch(branch)?;
+    let yard = open()?;
+    let workspace = workspace(env, &yard)?;
+    let branch = yard.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
-    let result = branch.reincarnate(live.options(task)?);
+    let options = TaskOptions {
+        workspace,
+        ..live.options(task)?
+    };
+    let result = branch.reincarnate(options);
     live.finish(env, result)
 }
 
@@ -683,9 +712,13 @@ fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcom
     }
 }
 
-pub fn merge(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
+pub fn merge(target: &Target, branch: &str, into: Option<&str>, remove: bool) -> Outcome {
     if let Target::Remote(remote) = target {
-        return remote::merge(remote, branch, into);
+        remote::merge(remote, branch, into)?;
+        return match remove {
+            true => rm(target, branch, false),
+            false => Ok(()),
+        };
     }
     let yard = open()?;
     let target = match into {
@@ -698,7 +731,11 @@ pub fn merge(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
         &merged.target,
         &merged.previous,
         &merged.commit,
-    )
+    )?;
+    match remove {
+        true => rm(&Target::Local, branch, false),
+        false => Ok(()),
+    }
 }
 
 pub fn print_merged(branch: &str, target: &str, previous: &str, commit: &str) -> Outcome {
@@ -735,7 +772,16 @@ fn current_branch(root: &Path) -> Result<String, Failure> {
 
 pub fn rm(target: &Target, branch: &str, keep_credentials: bool) -> Outcome {
     match target {
-        Target::Local => open()?.remove_with(branch, &RemoveOptions { keep_credentials })?,
+        Target::Local => {
+            let teardown = open()?.remove_reporting(branch, &RemoveOptions { keep_credentials })?;
+            if let Some(report) = teardown {
+                // Best-effort: the branch is gone either way.
+                eprintln!(
+                    "by: {}",
+                    render::workspace_line(&report, render::Style { color: false })
+                );
+            }
+        }
         // The server decides what stays on its disk.
         Target::Remote(_) if keep_credentials => {
             return Err(Failure::Message(
@@ -1761,9 +1807,13 @@ pub fn rig(env: &Env, target: &Target, args: &args::RigArgs) -> Outcome {
         unapproved_tools: args.unapproved_tools,
         ..TaskArgs::default()
     };
+    let workspace = workspace(env, &open()?)?;
     let live = Live::start_to(env, &task, true, args.json, None);
     let result = (|| {
-        let options = live.options(&task)?;
+        let options = TaskOptions {
+            workspace,
+            ..live.options(&task)?
+        };
         let mut policy = match root.policy.default {
             rig::Fallback::Allow => Policy::allow_all(),
             rig::Fallback::Deny => Policy::deny_all(),
