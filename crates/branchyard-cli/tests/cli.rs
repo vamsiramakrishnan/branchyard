@@ -543,6 +543,66 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
     }
 }
 
+/// A waiting `by run` on a terminal says when its branch ends: a bell and
+/// OSC 9 by default, OSC 777 when `branchyard.toml` asks, nothing with
+/// `--no-notify`; and never on a pipe.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_waiting_run_notifies_on_its_terminal_when_the_branch_ends() {
+    if !Path::new("/usr/bin/script").exists() {
+        eprintln!("skipped: no /usr/bin/script for a pseudo-terminal");
+        return;
+    }
+    let repo = Repo::new();
+    let agent = fake_agent().display().to_string();
+    let by = env!("CARGO_BIN_EXE_by");
+    let on_terminal = |name: &str, extra: &str| {
+        let line = format!(
+            "{by} run 'WRITE {name}.txt=1' --name {name} --yes --harness gemini-cli \
+             --command {agent} {extra}"
+        );
+        let out = repo
+            .command("/usr/bin/script")
+            .args(["-qfec", &line, "/dev/null"])
+            .env("TERM", "xterm")
+            .env_remove("TERM_PROGRAM")
+            .env_remove("VTE_VERSION")
+            .env_remove("TMUX")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let screen = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(out.status.success(), "{screen}");
+        screen
+    };
+    let screen = on_terminal("a", "");
+    assert!(
+        screen.contains("\x07\x1b]9;Branchyard: a is ready to merge\x07"),
+        "{screen:?}"
+    );
+    assert!(!on_terminal("b", "--no-notify").contains("\x1b]9;"));
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        "[notify]\nterminal = \"osc777\"\n",
+    )
+    .unwrap();
+    assert!(repo.by(&["config", "validate"]).status.success());
+    let screen = on_terminal("c", "");
+    assert!(
+        screen.contains("\x1b]777;notify;Branchyard;c is ready to merge\x07"),
+        "{screen:?}"
+    );
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        "[notify]\nenabled = false\n",
+    )
+    .unwrap();
+    assert!(!on_terminal("d", "").contains("Branchyard"));
+    // Piped: no escapes in the output at all.
+    let piped = repo.by_agent(&["run", "WRITE e.txt=1", "--name", "e", "--yes"]);
+    assert!(!stdout(&piped).contains('\x07') && !stderr(&piped).contains('\x07'));
+}
+
 /// The JSON value a `SH ... --json` line printed in a harness's reply,
 /// after the `sh: <status>` line for the `n`th command.
 fn sh_json(reply: &str, n: usize) -> (i32, Value) {

@@ -47,6 +47,10 @@
         }
       ],
       "description": "Options for `provider = \"microsandbox\"`."
+    },
+    "notify": {
+      "$ref": "#/$defs/Notify",
+      "description": "Telling you when a branch needs you or ends, from `by watch` and a\nwaiting `by run`, `by fan`, `by send` or `by fork`."
     }
   },
   "title": "Branchyard configuration",
@@ -270,6 +274,68 @@
       "required": [
         "image"
       ]
+    },
+    "Notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Notify at all. Unset: yes; `--no-notify` turns it off for one command."
+        },
+        "desktop": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Also show a desktop notification through `notify-send` (Linux and\nother Unix) or `osascript` (macOS). Unset: no."
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotifyTerminal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to write to the terminal. Unset: `auto`."
+        }
+      },
+      "description": "`[notify]`: when a branch asks for permission or asks a question,\nstalls, fails, is interrupted or finishes."
+    },
+    "NotifyTerminal": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "auto",
+          "description": "A bell, and the desktop-notification escape this terminal is known\nto take: OSC 777 on foot, urxvt and VTE terminals, OSC 9 elsewhere."
+        },
+        {
+          "type": "string",
+          "const": "osc9",
+          "description": "A bell and OSC 9 (iTerm2, WezTerm, kitty, Ghostty, Windows Terminal)."
+        },
+        {
+          "type": "string",
+          "const": "osc777",
+          "description": "A bell and OSC 777 (foot, urxvt, VTE terminals such as GNOME Terminal, WezTerm)."
+        },
+        {
+          "type": "string",
+          "const": "bell",
+          "description": "Only a bell."
+        },
+        {
+          "type": "string",
+          "const": "none",
+          "description": "Nothing on the terminal (the desktop notification, if on, still runs)."
+        }
+      ],
+      "description": "The terminal side of a notification."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

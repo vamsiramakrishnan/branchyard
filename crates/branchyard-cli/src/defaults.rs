@@ -111,10 +111,11 @@ fn load(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Proje
     Ok(Some(config))
 }
 
-/// `[remote]` for what `--remote`, `--token-file`, `--ca-file`, `--repo`
-/// and their variables left unset. The rest of `[remote]` applies only
+/// `[notify]`, and `[remote]` for what `--remote`, `--token-file`,
+/// `--ca-file`, `--repo` and their variables left unset. The rest of `[remote]` applies only
 /// when its `url` is the server in use.
 pub fn apply_globals(config: &ProjectConfig, globals: &mut Globals) {
+    globals.notify = config.notify.clone();
     let remote = &config.remote;
     let same_server = match (&globals.remote, &remote.url) {
         (None, Some(_)) => {

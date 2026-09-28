@@ -44,6 +44,7 @@ fn the_configuration_schema_describes_every_table() {
         "remote",
         "serve",
         "microsandbox",
+        "notify",
     ] {
         assert!(properties.contains_key(table), "{table}");
     }

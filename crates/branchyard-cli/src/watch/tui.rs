@@ -27,6 +27,7 @@ use ratatui::Frame;
 
 use super::actions::{self, Action, ActionId, Ask, CopyWhat, PaneKind, Run};
 use super::Doing;
+use crate::notify;
 use crate::render;
 
 /// Recent events kept per branch for the detail pane.
@@ -142,6 +143,8 @@ pub enum Cmd {
     },
     /// Put text on the clipboard through the terminal.
     Copy(String),
+    /// Tell the person a branch needs them or ended; see [`crate::notify`].
+    Notify(notify::Notice),
 }
 
 /// One run of `by` for an action.
@@ -341,6 +344,8 @@ pub struct Model {
     pub toast: Option<Toast>,
     /// The terminal's size, for paging a pane.
     pub size: (u16, u16),
+    /// What has been notified, so each event is said once.
+    pub notified: notify::Tracker,
 }
 
 /// One row of the tree as shown.
@@ -505,6 +510,14 @@ impl Model {
             }
         }
         for (branch, event) in snapshot.events {
+            // The first refresh reads every log from the start, and a
+            // server's stream may replay older events: those only prime
+            // the tracker, so what it already said is not said again.
+            if let Some(notice) = self.notified.observe(&branch, &event.activity) {
+                if self.refreshes > 0 && notify::fresh(event.at_ms, self.now_ms) {
+                    cmds.push(Cmd::Notify(notice));
+                }
+            }
             self.doing.entry(branch.clone()).or_default().apply(&event);
             let detail = self.detail.entry(branch.clone()).or_default();
             match &event.activity {
@@ -2552,6 +2565,76 @@ mod tests {
         assert!(find(&buffer, " fork docs with the prompt ").is_some());
         assert!(find(&buffer, "try another way").is_some());
         assert!(lines(&buffer)[23].starts_with("Enter send"));
+    }
+
+    #[test]
+    fn new_events_that_need_you_notify_once_and_history_does_not() {
+        let asks = |key: &str| {
+            Activity::Harness(Event::PermissionRequested {
+                turn: Some(1),
+                request: branchyard::PermissionRequest {
+                    key: branchyard::PermissionKey(key.into()),
+                    tool: "Bash".into(),
+                    input: serde_json::Value::Null,
+                },
+            })
+        };
+        // The first refresh is history: nothing notifies.
+        let mut m = Model::new("/repo");
+        let first = update(
+            &mut m,
+            Msg::Refreshed(snapshot(
+                yard(),
+                vec![
+                    ("impl", Activity::Status(BranchStatus::Interrupted)),
+                    ("lead", asks("old")),
+                ],
+            )),
+        );
+        assert!(first.is_empty(), "{first:?}");
+        let notices = |cmds: Vec<Cmd>| -> Vec<String> {
+            cmds.into_iter()
+                .filter_map(|cmd| match cmd {
+                    Cmd::Notify(notice) => Some(notice.text),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Later ones do, once each; activity that needs no one does not.
+        let later = update(
+            &mut m,
+            Msg::Refreshed(snapshot(
+                yard(),
+                vec![
+                    ("lead", asks("old")),
+                    ("lead", asks("new")),
+                    ("lead", Activity::Prompt("x".into())),
+                    ("impl", Activity::Status(BranchStatus::Interrupted)),
+                    (
+                        "docs",
+                        Activity::Status(BranchStatus::Failed {
+                            reason: "exit 2".into(),
+                        }),
+                    ),
+                    ("review", Activity::Stalled { since_ms: 1 }),
+                ],
+            )),
+        );
+        assert_eq!(
+            notices(later),
+            [
+                "lead asks to use Bash",
+                "docs failed: exit 2",
+                "review has stalled: no activity from its harness"
+            ]
+        );
+        // An old event arriving late (a server's replay) is not news.
+        let mut stale = snapshot(
+            yard(),
+            vec![("tests", Activity::Status(BranchStatus::Ready))],
+        );
+        stale.now_ms += notify::FRESH_MS + 60_000;
+        assert!(notices(update(&mut m, Msg::Refreshed(stale))).is_empty());
     }
 
     #[test]

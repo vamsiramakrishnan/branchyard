@@ -28,6 +28,7 @@ use branchyard_client::api::FeedEntry;
 use branchyard_client::Repo;
 
 use crate::commands::{self, Env, Failure, Outcome, Target};
+use crate::notify;
 use crate::render::{self, Style, Tone};
 
 /// What a branch is doing now, from its recent events.
@@ -525,7 +526,7 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
         if matches!(source, Source::Remote { .. }) {
             std::thread::sleep(Duration::from_millis(300));
         }
-        let infos = update(&mut source, &mut doing)?;
+        let infos = update(&mut source, &mut doing, |_, _| {})?;
         let title = format!("by watch · {}", source.label());
         let lines = frame(&title, &infos, &doing, now_ms() / 1000, once_width(), style);
         return commands::print(&(lines.join("\n") + "\n"));
@@ -533,8 +534,20 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
     if !env.stdout_tty {
         let input = keys(io::stdin());
         let mut previous = HashMap::new();
+        // Escapes on stderr if that is still a terminal; the first round
+        // is history and only primes it.
+        let notifier = env.notifier();
+        let mut primed = false;
         loop {
-            let infos = update(&mut source, &mut doing)?;
+            let now = now_ms();
+            let infos = update(&mut source, &mut doing, |branch, event| {
+                if let Some(notifier) = notifier.as_ref().filter(|_| primed) {
+                    if notify::fresh(event.at_ms, now) {
+                        notifier.observe(branch, &event.activity);
+                    }
+                }
+            })?;
+            primed = true;
             let lines = changes(&mut previous, &infos, &doing, now_ms());
             if !lines.is_empty() {
                 commands::print(&(lines.join("\n") + "\n"))?;
@@ -545,7 +558,7 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
         }
     }
     let label = source.label();
-    let cockpit = Cockpit::new(source, target);
+    let cockpit = Cockpit::new(source, target, env.notify);
     let remote = matches!(target, Target::Remote(_));
     match tui::run(label, remote, interval, cockpit) {
         Ok(outcome) => outcome,
@@ -553,10 +566,12 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
     }
 }
 
-/// The dashboard's effects: its data source, and the `by` its actions run.
+/// The dashboard's effects: its data source, the `by` its actions run,
+/// and how it notifies.
 struct Cockpit {
     source: Source,
     runner: Runner,
+    notify: notify::Settings,
 }
 
 /// Runs `by` for the dashboard's actions.
@@ -575,8 +590,8 @@ struct Runner {
 const LOG_TAIL: usize = 40;
 
 impl Cockpit {
-    fn new(source: Source, target: &Target) -> Cockpit {
-        let (globals, root, logs) = match (&source, target) {
+    fn new(source: Source, target: &Target, notify: notify::Settings) -> Cockpit {
+        let (mut globals, root, logs) = match (&source, target) {
             (Source::Local { yard, .. }, _) => (
                 Vec::new(),
                 Some(yard.root().to_path_buf()),
@@ -593,8 +608,11 @@ impl Cockpit {
                 std::env::temp_dir().join("branchyard-watch"),
             ),
         };
+        // The dashboard notifies; the commands it starts do not, too.
+        globals.push(notify::Settings::CHILD_FLAG.to_owned());
         Cockpit {
             source,
+            notify,
             runner: Runner {
                 by: std::env::current_exe().ok(),
                 globals,
@@ -745,6 +763,11 @@ impl tui::Effects for Cockpit {
                     result,
                 });
             }
+            tui::Cmd::Notify(notice) => {
+                // The dashboard's own terminal.
+                let mut out: Option<Box<dyn Write + Send>> = Some(Box::new(io::stdout()));
+                notify::show(&self.notify, &notice, &mut out);
+            }
             tui::Cmd::Copy(text) => {
                 let mut stdout = io::stdout();
                 let _ =
@@ -796,9 +819,11 @@ fn osc52(text: &str, tmux: bool) -> String {
 fn update(
     source: &mut Source,
     doing: &mut HashMap<String, Doing>,
+    mut each: impl FnMut(&str, &RecordedEvent),
 ) -> Result<Vec<BranchInfo>, Failure> {
     let infos = source.branches()?;
     for (branch, event) in source.events(&infos) {
+        each(&branch, &event);
         doing.entry(branch).or_default().apply(&event);
     }
     let names: HashSet<&str> = infos.iter().map(|i| i.name.as_str()).collect();
@@ -977,7 +1002,7 @@ mod tests {
         std::fs::set_permissions(&by, std::fs::Permissions::from_mode(0o755)).unwrap();
         Runner {
             by: Some(by),
-            globals: vec!["--remote".into(), "http://x".into()],
+            globals: vec!["--remote".into(), "http://x".into(), "--no-notify".into()],
             root: Some(dir.to_path_buf()),
             logs: dir.join("logs"),
         }
@@ -1003,7 +1028,10 @@ mod tests {
         match rx.recv_timeout(wait).unwrap() {
             tui::Msg::Done { ok, output, .. } => {
                 assert!(ok);
-                assert_eq!(output, "args: --remote http://x cancel -- ok\ncolor: 1\n");
+                assert_eq!(
+                    output,
+                    "args: --remote http://x --no-notify cancel -- ok\ncolor: 1\n"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -1030,7 +1058,7 @@ mod tests {
             tui::Msg::Done { ok, output, .. } => {
                 assert!(!ok);
                 assert!(
-                    output.contains("args: --remote http://x send -- fail go"),
+                    output.contains("args: --remote http://x --no-notify send -- fail go"),
                     "{output}"
                 );
             }

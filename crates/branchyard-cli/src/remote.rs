@@ -169,11 +169,14 @@ fn live_console(env: &Env, prefixed: bool, json: bool) -> Arc<Console> {
         true => Box::new(io::stderr()),
         false => Box::new(io::stdout()),
     };
-    Arc::new(Console::new(
-        Renderer::new(render::Style { color: env.color }, prefixed),
-        out,
-        Box::new(|_| Err(io::Error::other("remote mode does not ask"))),
-    ))
+    Arc::new(
+        Console::new(
+            Renderer::new(render::Style { color: env.color }, prefixed),
+            out,
+            Box::new(|_| Err(io::Error::other("remote mode does not ask"))),
+        )
+        .with_notifier(env.notifier()),
+    )
 }
 
 fn failed(error: ErrorBody) -> Failure {

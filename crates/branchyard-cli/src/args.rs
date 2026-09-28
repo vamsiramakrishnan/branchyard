@@ -281,6 +281,12 @@ pub struct Globals {
         value_parser = non_blank
     )]
     pub ca_file: Option<String>,
+    /// No bell or desktop notification when a branch needs you or ends
+    #[arg(long, global = true, display_order = 5)]
+    pub no_notify: bool,
+    /// `[notify]` from the configuration files.
+    #[arg(skip)]
+    pub notify: branchyard_setup::config::Notify,
 }
 
 /// Unset each of [`GLOBAL_ENV`] that is set but blank, so that clap, which
@@ -2878,9 +2884,11 @@ mod tests {
             remote: Some("http://h:1".into()),
             token_file: Some("t".into()),
             repo: Some("app".into()),
-            ca_file: None,
+            ..Globals::default()
         };
         assert_eq!(before.globals, expected);
+        let quiet = parse_from(split_words("by watch --no-notify").unwrap()).unwrap();
+        assert!(quiet.globals.no_notify);
         assert_eq!(before.command, Some(Command::Ls { json: true }));
         let after = parse_from(
             split_words("by ls --json --remote http://h:1 --repo app --token-file t").unwrap(),

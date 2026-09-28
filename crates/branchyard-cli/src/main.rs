@@ -10,6 +10,7 @@ mod console;
 mod defaults;
 mod init;
 mod json;
+mod notify;
 mod remote;
 mod render;
 mod rig;
@@ -53,7 +54,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run(&Env::detect(), &globals, command) {
+    let mut env_now = Env::detect();
+    env_now.notify = notify::Settings::resolve(globals.no_notify, &globals.notify, &env);
+    match run(&env_now, &globals, command) {
         Ok(()) => ExitCode::SUCCESS,
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
