@@ -707,7 +707,9 @@ pub fn merge(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
     let yard = open()?;
     let target = match into {
         Some(target) => target.to_owned(),
-        None => current_branch(yard.root())?,
+        None => yard
+            .current_branch()?
+            .ok_or_else(|| Failure::Message("HEAD is detached; pass --into <branch>".into()))?,
     };
     let merged = yard.merge(branch, &target)?;
     print_merged(
@@ -725,29 +727,6 @@ pub fn print_merged(branch: &str, target: &str, previous: &str, commit: &str) ->
         short(previous),
         short(commit)
     ))
-}
-
-/// The repository's checked-out branch, the default merge target.
-fn current_branch(root: &Path) -> Result<String, Failure> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| Failure::Message(format!("could not run git: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Failure::Message(format!(
-            "could not resolve the current branch: {}",
-            stderr.trim()
-        )));
-    }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if name == "HEAD" {
-        return Err(Failure::Message(
-            "HEAD is detached; pass --into <branch>".into(),
-        ));
-    }
-    Ok(name)
 }
 
 pub fn rm(target: &Target, branch: &str, keep_credentials: bool) -> Outcome {

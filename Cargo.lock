@@ -839,6 +839,7 @@ dependencies = [
  "branchyard-bridge",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-workspace",
  "prost",
  "prost-types",
  "protoc-bin-vendored",

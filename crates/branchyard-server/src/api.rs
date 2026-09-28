@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1240,28 +1239,19 @@ async fn post_reincarnate(
 
 /// The branch checked out in the served repository.
 fn current_branch(root: &std::path::Path) -> Result<String, ApiError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| ApiError::internal(format!("could not run git: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "git_error",
-            format!("could not resolve the current branch: {}", stderr.trim()),
-        ));
-    }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if name == "HEAD" {
-        return Err(ApiError::new(
+    match branchyard::current_branch(root) {
+        Ok(Some(name)) => Ok(name),
+        Ok(None) => Err(ApiError::new(
             StatusCode::CONFLICT,
             "detached_head",
             "the served repository's HEAD is detached; pass a target",
-        ));
+        )),
+        Err(error) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "git_error",
+            format!("could not resolve the current branch: {error}"),
+        )),
     }
-    Ok(name)
 }
 
 async fn post_merge(

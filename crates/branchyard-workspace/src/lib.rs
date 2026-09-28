@@ -31,12 +31,12 @@
 //! - Portability beyond Unix-like hosts with git 2.36 or later.
 mod branch;
 mod check;
-mod git;
+pub mod git;
 mod integrate;
 mod repo;
 
 pub use branch::{BranchName, InvalidBranchName, BRANCH_PREFIX};
 pub use check::{Check, OUTPUT_TAIL_BYTES};
-pub use git::GitError;
+pub use git::{Git, GitError};
 pub use integrate::{Integrated, IntegrationError};
 pub use repo::{Candidate, Commit, DiffStat, Repository, Workspace};

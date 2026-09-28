@@ -174,8 +174,58 @@ fn open_resolve_and_current_branch() {
         fixture.repo.current_branch().unwrap().as_deref(),
         Some("main")
     );
+    assert_eq!(
+        branchyard_workspace::git::current_branch(&sub)
+            .unwrap()
+            .as_deref(),
+        Some("main")
+    );
     git(&fixture.root(), &["checkout", "-q", "--detach"]);
     assert_eq!(fixture.repo.current_branch().unwrap(), None);
+    assert_eq!(
+        branchyard_workspace::git::current_branch(&fixture.root()).unwrap(),
+        None
+    );
+}
+
+/// The shared `Git` choke point: stdout, a failure's arguments, exit code
+/// and stderr, yes/no answers, and a directory that is not there.
+#[test]
+fn the_git_runner_reports_output_and_failures() {
+    use branchyard_workspace::Git;
+    let fixture = Fixture::new();
+    let root = &fixture.root();
+    let out = Git::new(root)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .run();
+    assert_eq!(out.unwrap(), "main\n");
+    match Git::new(root).args(["rev-parse", "--verify", "nope"]).run() {
+        Err(GitError::Failed { args, code, stderr }) => {
+            assert_eq!(args, ["rev-parse", "--verify", "nope"]);
+            assert_eq!(code, Some(128));
+            assert!(!stderr.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    let exists = |r: &str| {
+        Git::new(root)
+            .args(["show-ref", "--verify", "--quiet", r])
+            .succeeds()
+            .unwrap()
+    };
+    assert!(exists("refs/heads/main"));
+    assert!(!exists("refs/heads/nope"));
+    // The variables that would point git elsewhere are not inherited.
+    let dir = Git::new(root)
+        .env("GIT_TEST_UNUSED", "1")
+        .args(["rev-parse", "--show-toplevel"])
+        .run()
+        .unwrap();
+    assert_eq!(Path::new(dir.trim()), root);
+    assert!(matches!(
+        Git::new(&fixture.dir.join("missing")).arg("status").run(),
+        Err(GitError::Spawn(_))
+    ));
 }
 
 #[test]

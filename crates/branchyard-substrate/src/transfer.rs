@@ -41,12 +41,12 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use branchyard_bridge::Endpoint;
 use branchyard_sandbox::{ExecSpec, Process, ProviderError};
+use branchyard_workspace::Git;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -56,18 +56,6 @@ const IDENTITY: [(&str, &str); 4] = [
     ("GIT_AUTHOR_EMAIL", "branchyard@localhost"),
     ("GIT_COMMITTER_NAME", "Branchyard"),
     ("GIT_COMMITTER_EMAIL", "branchyard@localhost"),
-];
-
-/// Variables that would point git at another repository.
-const SCRUBBED_ENV: &[&str] = &[
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_NAMESPACE",
-    "GIT_PREFIX",
 ];
 
 /// Why a transfer failed.
@@ -240,20 +228,17 @@ fn host_output(
     args: &[&str],
     env: &[(OsString, OsString)],
 ) -> Result<(bool, String, String), Error> {
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C");
-    for var in SCRUBBED_ENV {
-        command.env_remove(var);
+    // branchyard-workspace's `Git` scrubs the variables that would point
+    // git elsewhere; `env` then names this transfer's own index and object
+    // store.
+    let mut git = Git::new(dir).args(args);
+    for (key, value) in IDENTITY {
+        git = git.env(key, value);
     }
-    command.envs(IDENTITY).envs(env.iter().cloned());
-    let out = command
-        .output()
-        .map_err(|e| Error::Host(format!("could not run git: {e}")))?;
+    for (key, value) in env {
+        git = git.env(key, value);
+    }
+    let (out, _) = git.output().map_err(|e| Error::Host(e.to_string()))?;
     Ok((
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),

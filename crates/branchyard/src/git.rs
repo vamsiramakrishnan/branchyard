@@ -1,26 +1,14 @@
-//! The few git queries the engine makes itself; everything that changes
-//! branches or worktrees goes through `branchyard_workspace`.
+//! The few git queries the engine makes itself, through
+//! `branchyard_workspace`'s [`Git`], the one place that starts `git`;
+//! everything that changes branches or worktrees goes through
+//! `branchyard_workspace`'s repository API.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
-use branchyard_workspace::GitError;
+use branchyard_workspace::{Git, GitError};
 
 use crate::Error;
-
-/// Variables that would point git at another repository; they leak in when
-/// the caller runs under a git hook.
-const SCRUBBED_ENV: &[&str] = &[
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_NAMESPACE",
-    "GIT_PREFIX",
-];
 
 /// Serializes this process's writes to the repository's shared state.
 /// Worktree creation, branch deletion and `git config` take the same
@@ -34,42 +22,27 @@ pub(crate) fn lock() -> MutexGuard<'static, ()> {
 
 /// Run git in `dir` and return stdout, or the exit's stderr as an error.
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String, Error> {
-    let (ok, stdout, stderr) = output(dir, args)?;
-    if ok {
-        Ok(stdout)
-    } else {
-        Err(Error::Git(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )))
-    }
+    Git::new(dir).args(args).run().map_err(error)
 }
 
 /// Whether git exits successfully.
 pub(crate) fn test(dir: &Path, args: &[&str]) -> Result<bool, Error> {
-    Ok(output(dir, args)?.0)
+    Git::new(dir).args(args).succeeds().map_err(error)
 }
 
 fn output(dir: &Path, args: &[&str]) -> Result<(bool, String, String), Error> {
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C");
-    for var in SCRUBBED_ENV {
-        command.env_remove(var);
-    }
-    let out = command
-        .output()
-        .map_err(|e| Error::Git(format!("could not run git: {e}")))?;
+    let (out, _) = Git::new(dir).args(args).output().map_err(error)?;
     Ok((
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+/// The branch checked out at `root`, or `None` when HEAD is detached: the
+/// default target of a merge.
+pub fn current_branch(root: &Path) -> Result<Option<String>, Error> {
+    branchyard_workspace::git::current_branch(root).map_err(error)
 }
 
 /// The repository's common git directory, shared by all its worktrees.
