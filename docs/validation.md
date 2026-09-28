@@ -76,6 +76,7 @@ Use Python 3.12 and the checked-in Rust toolchain. Python tools use the standard
 ```sh
 cargo fetch --locked
 python3 tools/verify_vendor.py
+python3 tests/test_verify_vendor.py
 python3 tools/verify_derivatives.py
 python3 tools/check_catalog.py
 python3 tools/check_docs.py

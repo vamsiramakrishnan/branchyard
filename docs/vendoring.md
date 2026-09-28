@@ -1,6 +1,19 @@
 # Vendoring decisions
 
-Branchyard vendors selected control sources rather than copying whole orchestrators. The immutable upstream layer makes subsequent changes reviewable. Runtime integration is explicit: retaining a source file does not establish production support.
+Branchyard vendors selected control sources rather than copying whole orchestrators. Runtime integration is explicit: retaining a source file does not establish production support.
+
+## Pins and local patches
+
+`vendor/` is a pinned reference snapshot. It no longer has to stay byte-identical with upstream: a file may carry a local patch, as long as the patch is recorded.
+
+- **Pins.** [`vendor.lock.json`](../vendor.lock.json) pins every file under `vendor/` to its upstream repository, commit and path, with the Git blob ID and SHA-256 of the file as fetched, its license and its use. A pin always describes upstream (`"modified": false`); a local change never rewrites it.
+- **Patches.** [`vendor.patches.json`](../vendor.patches.json) lists each patched file: `path`, `reason`, and `upstream_commit`, which must be the commit the file is pinned at, so a re-pin forces each patch to be reviewed against the new upstream. It is empty today.
+- **Verification.** [`tools/verify_vendor.py`](../tools/verify_vendor.py) (no network) fails when a file not listed as patched differs from its pin; when a listed file matches its pin (a stale entry); when an entry lacks a reason, names another commit, or names a file that is not pinned; and when a file under `vendor/` is not pinned or a pin has no file. `tests/test_verify_vendor.py` exercises each case on small fixture trees.
+- **Derived code follows upstream.** `tools/verify_derivatives.py` compares each Scion translation's recorded blobs with the pins, not with the working file, so a local patch to a vendored copy does not change what a translation follows. Herdr's `patches/herdr-resume.patch` is the diff from the vendored file as checked in; regenerate it if that file is patched.
+
+To patch a file: edit it, add its entry to `vendor.patches.json` with a reason a reviewer can check, and run `python3 tools/verify_vendor.py`. When re-pinning an upstream, re-fetch the file, then re-apply or drop each patch and update its `upstream_commit`.
+
+The license boundary is unchanged, and the verifier enforces the mechanical part of it: files licensed AGPL live only under `vendor/warp-agpl/`, no Cargo workspace member lives under `vendor/`, and no Rust or Cargo file outside `vendor/` refers to `vendor/warp-agpl` (so no path dependency, `include!` or `#[path]` can pull Warp code into an Apache-licensed crate). Copying or paraphrasing Warp code into an Apache file is still forbidden, and remains a review matter; see [Warp](#warp-preserve-the-license-boundary).
 
 ## Included material
 
@@ -76,7 +89,7 @@ The adapter always creates atespace-scoped tags; it never publishes a tag beyond
 
 1. Select a commit and fetch its tree and licenses. Review changes to license scope, public interfaces, auth handling, hook execution, and defaults.
 2. Fetch the selected files from that exact commit. Verify each Git blob ID and record SHA-256. Keep the original paths.
-3. Reapply adaptations outside `vendor/`; regenerate a human-readable patch against the new source.
+3. Reapply adaptations outside `vendor/`; regenerate a human-readable patch against the new source. Re-apply or drop each local patch listed in `vendor.patches.json`, and set its `upstream_commit` to the new pin.
 4. Run source-integrity checks, upstream unit suites, and Branchyard driver contract tests. Record failures and disable affected profiles; do not mask them as supported.
 5. Build a new immutable harness image and pass sandbox conformance before promotion. Retain the previous image and compatibility record for rollback.
 

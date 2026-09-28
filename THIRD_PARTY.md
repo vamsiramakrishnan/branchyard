@@ -1,6 +1,6 @@
 # Third-party sources
 
-Retrieved 2026-09-16; Agent Substrate retrieved 2026-09-26; Scion re-pinned 2026-09-27. Files under `vendor/` are byte-for-byte upstream copies. `vendor.lock.json` records each path, commit, Git blob ID, SHA-256 digest, and license. No upstream NOTICE file was found at the selected repository roots. Existing copyright notices remain in their source files.
+Retrieved 2026-09-16; Agent Substrate retrieved 2026-09-26; Scion re-pinned 2026-09-27. Files under `vendor/` are upstream copies pinned in `vendor.lock.json`, which records each path, commit, Git blob ID, SHA-256 digest, and license as fetched. A file may carry a local patch only when `vendor.patches.json` lists it with its reason and upstream commit; none does today, so every file is byte-for-byte upstream. No upstream NOTICE file was found at the selected repository roots. Existing copyright notices remain in their source files.
 
 | Directory | Upstream | Revision | License |
 |---|---|---|---|
