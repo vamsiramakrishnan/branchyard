@@ -2,18 +2,25 @@
 //! current activity, cost, turns and age.
 //!
 //! On a terminal it is a ratatui dashboard ([`tui`]): the tree, a detail
-//! pane for the selected branch, a filter, subtree focus and a help sheet;
-//! `q`, Esc or Ctrl-C exits and restores the terminal, as a panic does.
+//! pane for the selected branch, a filter, subtree focus, a help sheet, and
+//! keys that act on the selected branch (send, steer, resume, cancel,
+//! merge, fork, diff, log, copy; see [`actions`]), each running the `by`
+//! command it names; `q`, Esc or Ctrl-C exits and restores the terminal,
+//! as a panic does.
 //! Otherwise it appends one line per change, and `--once` prints one
 //! frame. Activity comes from the repository's event feed from a cursor:
 //! locally through [`Yard::events_since`], remotely from the server's
 //! event stream.
 
+mod actions;
 mod tui;
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, IsTerminal, Read};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::fs::File;
+use std::io::{self, IsTerminal, Read, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use branchyard::{Activity, BranchInfo, Event, RecordedEvent, Yard};
@@ -21,6 +28,7 @@ use branchyard_client::api::FeedEntry;
 use branchyard_client::Repo;
 
 use crate::commands::{self, Env, Failure, Outcome, Target};
+use crate::notify;
 use crate::render::{self, Style, Tone};
 
 /// What a branch is doing now, from its recent events.
@@ -350,6 +358,31 @@ impl Source {
         }
     }
 
+    /// `by diff`'s text for a branch.
+    fn diff(&self, branch: &str) -> Result<String, String> {
+        match self {
+            Source::Local { yard, .. } => yard
+                .branch(branch)
+                .and_then(|branch| branch.diff())
+                .map_err(|e| e.to_string()),
+            Source::Remote { repo, .. } => repo.diff(branch).map_err(|e| e.to_string()),
+        }
+    }
+
+    /// `by log`'s text for a branch, without color.
+    fn log(&self, branch: &str) -> Result<String, String> {
+        let events = match self {
+            Source::Local { yard, .. } => yard
+                .branch(branch)
+                .and_then(|branch| branch.events())
+                .map_err(|e| e.to_string())?,
+            Source::Remote { repo, .. } => {
+                repo.events(branch, 0).map_err(|e| e.to_string())?.events
+            }
+        };
+        Ok(render::log_text(&events, Style { color: false }))
+    }
+
     fn branches(&self) -> Result<Vec<BranchInfo>, Failure> {
         Ok(match self {
             Source::Local { yard, .. } => yard.branches()?,
@@ -493,7 +526,7 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
         if matches!(source, Source::Remote { .. }) {
             std::thread::sleep(Duration::from_millis(300));
         }
-        let infos = update(&mut source, &mut doing)?;
+        let infos = update(&mut source, &mut doing, |_, _| {})?;
         let title = format!("by watch · {}", source.label());
         let lines = frame(&title, &infos, &doing, now_ms() / 1000, once_width(), style);
         return commands::print(&(lines.join("\n") + "\n"));
@@ -501,8 +534,20 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
     if !env.stdout_tty {
         let input = keys(io::stdin());
         let mut previous = HashMap::new();
+        // Escapes on stderr if that is still a terminal; the first round
+        // is history and only primes it.
+        let notifier = env.notifier();
+        let mut primed = false;
         loop {
-            let infos = update(&mut source, &mut doing)?;
+            let now = now_ms();
+            let infos = update(&mut source, &mut doing, |branch, event| {
+                if let Some(notifier) = notifier.as_ref().filter(|_| primed) {
+                    if notify::fresh(event.at_ms, now) {
+                        notifier.observe(branch, &event.activity);
+                    }
+                }
+            })?;
+            primed = true;
             let lines = changes(&mut previous, &infos, &doing, now_ms());
             if !lines.is_empty() {
                 commands::print(&(lines.join("\n") + "\n"))?;
@@ -513,19 +558,260 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
         }
     }
     let label = source.label();
-    let refresh = || -> Result<tui::Snapshot, Failure> {
-        let infos = source.branches()?;
-        let events = source.events(&infos);
+    let cockpit = Cockpit::new(source, target, env.notify);
+    let remote = matches!(target, Target::Remote(_));
+    match tui::run(label, remote, interval, cockpit) {
+        Ok(outcome) => outcome,
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The dashboard's effects: its data source, the `by` its actions run,
+/// and how it notifies.
+struct Cockpit {
+    source: Source,
+    runner: Runner,
+    notify: notify::Settings,
+}
+
+/// Runs `by` for the dashboard's actions.
+struct Runner {
+    /// This executable, which the actions run with `globals` before their
+    /// own arguments.
+    by: Option<PathBuf>,
+    globals: Vec<String>,
+    /// Where a local yard's commands run.
+    root: Option<PathBuf>,
+    /// Where background commands write their output.
+    logs: PathBuf,
+}
+
+/// Lines of a background command's log shown when it ends.
+const LOG_TAIL: usize = 40;
+
+impl Cockpit {
+    fn new(source: Source, target: &Target, notify: notify::Settings) -> Cockpit {
+        let (mut globals, root, logs) = match (&source, target) {
+            (Source::Local { yard, .. }, _) => (
+                Vec::new(),
+                Some(yard.root().to_path_buf()),
+                yard.root().join(".branchyard").join("watch"),
+            ),
+            (Source::Remote { .. }, Target::Remote(remote)) => (
+                remote.args.clone(),
+                None,
+                std::env::temp_dir().join("branchyard-watch"),
+            ),
+            (Source::Remote { .. }, Target::Local) => (
+                Vec::new(),
+                None,
+                std::env::temp_dir().join("branchyard-watch"),
+            ),
+        };
+        // The dashboard notifies; the commands it starts do not, too.
+        globals.push(notify::Settings::CHILD_FLAG.to_owned());
+        Cockpit {
+            source,
+            notify,
+            runner: Runner {
+                by: std::env::current_exe().ok(),
+                globals,
+                root,
+                logs,
+            },
+        }
+    }
+}
+
+impl Runner {
+    fn command(&self, invocation: &tui::Invocation) -> Result<Command, String> {
+        let by = self
+            .by
+            .as_ref()
+            .ok_or("cannot find the by executable to run")?;
+        let mut command = Command::new(by);
+        command
+            .args(&self.globals)
+            .args(&invocation.argv)
+            .stdin(Stdio::null())
+            .env("NO_COLOR", "1");
+        if let Some(root) = &self.root {
+            command.current_dir(root);
+        }
+        Ok(command)
+    }
+
+    /// Run `invocation`, reporting on `done` from another thread.
+    fn run(&self, invocation: tui::Invocation, done: &Sender<tui::Msg>) {
+        let finished = |ok: bool, output: String| tui::Msg::Done {
+            action: invocation.action,
+            branch: invocation.branch.clone(),
+            ok,
+            output,
+        };
+        let mut command = match self.command(&invocation) {
+            Ok(command) => command,
+            Err(error) => {
+                let _ = done.send(finished(false, error));
+                return;
+            }
+        };
+        let done = done.clone();
+        if !invocation.background {
+            std::thread::spawn(move || {
+                let msg = match command.output() {
+                    Ok(out) => {
+                        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                        text.push_str(&String::from_utf8_lossy(&out.stderr));
+                        tui::Msg::Done {
+                            action: invocation.action,
+                            branch: invocation.branch,
+                            ok: out.status.success(),
+                            output: text,
+                        }
+                    }
+                    Err(error) => tui::Msg::Done {
+                        action: invocation.action,
+                        branch: invocation.branch,
+                        ok: false,
+                        output: format!("could not run by: {error}"),
+                    },
+                };
+                let _ = done.send(msg);
+            });
+            return;
+        }
+        let log = self.logs.join(format!(
+            "{}-{}-{}.log",
+            invocation
+                .branch
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                })
+                .collect::<String>(),
+            actions::by_id(invocation.action).name.replace(' ', "-"),
+            now_ms()
+        ));
+        let started = std::fs::create_dir_all(&self.logs)
+            .and_then(|()| File::create(&log))
+            .and_then(|file| Ok((file.try_clone()?, file)))
+            .and_then(|(out, err)| {
+                command.stdout(out).stderr(err);
+                // Its own process group: the terminal's signals, and the
+                // dashboard quitting, leave it running.
+                #[cfg(unix)]
+                std::os::unix::process::CommandExt::process_group(&mut command, 0);
+                command.spawn()
+            });
+        let mut child = match started {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = done.send(finished(false, format!("could not start by: {error}")));
+                return;
+            }
+        };
+        let _ = done.send(tui::Msg::Started {
+            action: invocation.action,
+            branch: invocation.branch.clone(),
+            log: log.display().to_string(),
+        });
+        std::thread::spawn(move || {
+            let ok = child.wait().is_ok_and(|status| status.success());
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            let tail = lines[lines.len().saturating_sub(LOG_TAIL)..].join("\n");
+            let _ = done.send(tui::Msg::Done {
+                action: invocation.action,
+                branch: invocation.branch,
+                ok,
+                output: tail,
+            });
+        });
+    }
+}
+
+impl tui::Effects for Cockpit {
+    type Error = Failure;
+
+    fn refresh(&mut self) -> Result<tui::Snapshot, Failure> {
+        let infos = self.source.branches()?;
+        let events = self.source.events(&infos);
         Ok(tui::Snapshot {
-            label: source.label(),
+            label: self.source.label(),
             infos,
             events,
             now_ms: now_ms(),
         })
-    };
-    match tui::run(label, interval, refresh) {
-        Ok(outcome) => outcome,
-        Err(error) => Err(error.into()),
+    }
+
+    fn perform(&mut self, cmd: tui::Cmd, done: &Sender<tui::Msg>) {
+        match cmd {
+            tui::Cmd::Quit => {}
+            tui::Cmd::Run(invocation) => self.runner.run(invocation, done),
+            tui::Cmd::Load { kind, branch } => {
+                let result = match kind {
+                    actions::PaneKind::Diff => self.source.diff(&branch),
+                    actions::PaneKind::Log => self.source.log(&branch),
+                    actions::PaneKind::Output => Err("nothing to load".into()),
+                };
+                let _ = done.send(tui::Msg::Loaded {
+                    kind,
+                    branch,
+                    result,
+                });
+            }
+            tui::Cmd::Notify(notice) => {
+                // The dashboard's own terminal.
+                let mut out: Option<Box<dyn Write + Send>> = Some(Box::new(io::stdout()));
+                notify::show(&self.notify, &notice, &mut out);
+            }
+            tui::Cmd::Copy(text) => {
+                let mut stdout = io::stdout();
+                let _ =
+                    stdout.write_all(osc52(&text, std::env::var_os("TMUX").is_some()).as_bytes());
+                let _ = stdout.flush();
+            }
+        }
+    }
+}
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 with padding, as OSC 52 takes it.
+fn base64(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(BASE64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Wrap an escape sequence so tmux passes it to the terminal outside it.
+pub fn tmux_passthrough(sequence: &str) -> String {
+    format!("\x1bPtmux;{}\x1b\\", sequence.replace('\x1b', "\x1b\x1b"))
+}
+
+/// The OSC 52 sequence that sets the clipboard to `text`.
+fn osc52(text: &str, tmux: bool) -> String {
+    let sequence = format!("\x1b]52;c;{}\x07", base64(text.as_bytes()));
+    match tmux {
+        true => tmux_passthrough(&sequence),
+        false => sequence,
     }
 }
 
@@ -533,9 +819,11 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
 fn update(
     source: &mut Source,
     doing: &mut HashMap<String, Doing>,
+    mut each: impl FnMut(&str, &RecordedEvent),
 ) -> Result<Vec<BranchInfo>, Failure> {
     let infos = source.branches()?;
     for (branch, event) in source.events(&infos) {
+        each(&branch, &event);
         doing.entry(branch).or_default().apply(&event);
     }
     let names: HashSet<&str> = infos.iter().map(|i| i.name.as_str()).collect();
@@ -699,6 +987,110 @@ mod tests {
         );
         let empty = frame("t", &[], &HashMap::new(), 0, 80, Style::PLAIN);
         assert!(empty[2].starts_with("no branches yet"));
+    }
+
+    /// A `by` that prints its arguments and fails when asked to.
+    fn fake_by(dir: &std::path::Path) -> Runner {
+        use std::os::unix::fs::PermissionsExt;
+        let by = dir.join("by");
+        std::fs::write(
+            &by,
+            "#!/bin/sh\necho \"args: $*\"\necho \"color: $NO_COLOR\" >&2\n\
+             case \"$*\" in *fail*) exit 3;; esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&by, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Runner {
+            by: Some(by),
+            globals: vec!["--remote".into(), "http://x".into(), "--no-notify".into()],
+            root: Some(dir.to_path_buf()),
+            logs: dir.join("logs"),
+        }
+    }
+
+    fn invocation(argv: &[&str], background: bool) -> tui::Invocation {
+        tui::Invocation {
+            action: actions::ActionId::Send,
+            branch: "a/b".into(),
+            argv: argv.iter().map(|a| a.to_string()).collect(),
+            background,
+        }
+    }
+
+    #[test]
+    fn actions_run_by_with_the_global_flags_and_report_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = fake_by(dir.path());
+        let (tx, rx) = mpsc::channel();
+        let wait = Duration::from_secs(20);
+
+        runner.run(invocation(&["cancel", "--", "ok"], false), &tx);
+        match rx.recv_timeout(wait).unwrap() {
+            tui::Msg::Done { ok, output, .. } => {
+                assert!(ok);
+                assert_eq!(
+                    output,
+                    "args: --remote http://x --no-notify cancel -- ok\ncolor: 1\n"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        runner.run(invocation(&["cancel", "--", "fail"], false), &tx);
+        assert!(matches!(
+            rx.recv_timeout(wait).unwrap(),
+            tui::Msg::Done { ok: false, .. }
+        ));
+
+        // In the background: started, with its log, then done with the log's end.
+        runner.run(invocation(&["send", "--", "fail", "go"], true), &tx);
+        let log = match rx.recv_timeout(wait).unwrap() {
+            tui::Msg::Started { log, .. } => log,
+            other => panic!("{other:?}"),
+        };
+        assert!(log.starts_with(
+            &dir.path()
+                .join("logs")
+                .join("a_b-send-")
+                .display()
+                .to_string()
+        ));
+        match rx.recv_timeout(wait).unwrap() {
+            tui::Msg::Done { ok, output, .. } => {
+                assert!(!ok);
+                assert!(
+                    output.contains("args: --remote http://x --no-notify send -- fail go"),
+                    "{output}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(std::fs::read_to_string(&log).unwrap().contains("color: 1"));
+
+        // No executable: a failure, not a hang.
+        let missing = Runner {
+            by: None,
+            ..fake_by(dir.path())
+        };
+        missing.run(invocation(&["send"], true), &tx);
+        assert!(matches!(
+            rx.recv_timeout(wait).unwrap(),
+            tui::Msg::Done { ok: false, output, .. } if output.contains("cannot find the by executable")
+        ));
+    }
+
+    #[test]
+    fn clipboard_escapes_are_osc_52_in_base64() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"by/impl-2"), "YnkvaW1wbC0y");
+        assert_eq!(base64("é".as_bytes()), "w6k=");
+        assert_eq!(osc52("impl", false), "\x1b]52;c;aW1wbA==\x07");
+        assert_eq!(
+            osc52("impl", true),
+            "\x1bPtmux;\x1b\x1b]52;c;aW1wbA==\x07\x1b\\"
+        );
     }
 
     #[test]

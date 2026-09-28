@@ -33,6 +33,9 @@ use crate::rig::{Fallback, RigPlan};
 pub struct Remote {
     pub client: Client,
     pub repo: Repo,
+    /// The global flags that reach this server and repository, for a `by`
+    /// this one starts (as `by watch`'s actions do).
+    pub args: Vec<String>,
 }
 
 impl Remote {
@@ -70,7 +73,18 @@ impl Remote {
             }
         };
         let repo = client.repo(&name);
-        Ok(Remote { client, repo })
+        let mut args = vec![
+            "--remote".to_owned(),
+            url.to_owned(),
+            "--token-file".to_owned(),
+            token_file.to_owned(),
+            "--repo".to_owned(),
+            name,
+        ];
+        if let Some(ca) = &globals.ca_file {
+            args.extend(["--ca-file".to_owned(), ca.clone()]);
+        }
+        Ok(Remote { client, repo, args })
     }
 
     /// Where commands run, for messages.
@@ -155,11 +169,14 @@ fn live_console(env: &Env, prefixed: bool, json: bool) -> Arc<Console> {
         true => Box::new(io::stderr()),
         false => Box::new(io::stdout()),
     };
-    Arc::new(Console::new(
-        Renderer::new(render::Style { color: env.color }, prefixed),
-        out,
-        Box::new(|_| Err(io::Error::other("remote mode does not ask"))),
-    ))
+    Arc::new(
+        Console::new(
+            Renderer::new(render::Style { color: env.color }, prefixed),
+            out,
+            Box::new(|_| Err(io::Error::other("remote mode does not ask"))),
+        )
+        .with_notifier(env.notifier()),
+    )
 }
 
 fn failed(error: ErrorBody) -> Failure {

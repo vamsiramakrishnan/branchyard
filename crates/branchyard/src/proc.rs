@@ -100,14 +100,14 @@ pub(crate) fn kill_group(pgid: u32, start: &str) -> Vec<u32> {
     match start_time(pgid) {
         Some(current) if current == start => {
             let members = members(pgid, start);
-            signal(&format!("-{pgid}"));
+            signal_group(pgid);
             members
         }
         Some(_) => Vec::new(),
         None => {
             let members = members(pgid, start);
             for pid in &members {
-                signal(&pid.to_string());
+                signal(*pid);
             }
             members
         }
@@ -132,7 +132,7 @@ pub(crate) fn kill_marked(marker: &str) -> Vec<u32> {
             break;
         }
         for pid in &found {
-            signal(&pid.to_string());
+            signal(*pid);
         }
         killed.extend(found);
     }
@@ -169,13 +169,27 @@ fn marked(_marker: &str) -> Vec<u32> {
     Vec::new()
 }
 
-fn signal(target: &str) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", target])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+/// SIGKILL `pid`, through kill(2) rather than a `kill` process. Best
+/// effort: a process already gone is not an error.
+fn signal(pid: u32) {
+    #[cfg(unix)]
+    if let Some(pid) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+}
+
+/// SIGKILL every process in group `pgid`, through killpg(2).
+fn signal_group(pgid: u32) {
+    #[cfg(unix)]
+    if let Some(pgid) = i32::try_from(pgid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+    }
 }
 
 /// Live members of process group `pgid` that started no earlier than

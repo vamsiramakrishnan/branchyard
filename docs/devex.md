@@ -76,6 +76,8 @@ emdash autosaves terminal state and resumes agents where they left off ([tasks](
 - `by watch` should show interrupted branches prominently, with a one-key resume (a `by send` to the branch, which resumes its native session).
 - With a server running (`by serve` or `by worker`), local turns should outlive the terminal that started them. This is the daemon behaviour Superset has.
 
+**Status:** the first is done. `by watch` draws an interrupted branch in black on yellow, counts them in its header, and `R` resumes the selected one with one key (`by send` with a "continue where you left off" prompt, which resumes the harness's native session). A turn started from `by watch` runs in its own process group, detached from the dashboard, so it outlives `by watch` and the terminal. What remains is the second: `by run` in a terminal still ties its turn to that terminal unless it goes through a server.
+
 ### 5. Review, PR and CI without leaving the tool
 
 - **emdash:**
@@ -144,6 +146,8 @@ All three create a workspace straight from a GitHub issue, a Linear issue or a p
 - Shows statuses in `by watch`.
 - Tells no one on the desktop. **Take:** an opt-in desktop notification (and terminal bell) from `by watch` and from a waiting `by run` when a branch asks, stalls, fails or finishes.
 
+**Status:** done. `by watch` and a waiting `by run`, `by fan`, `by send` or `by fork` ring the terminal bell and write an OSC 9 or OSC 777 desktop-notification escape (chosen from the terminal, passed through tmux) when a tool waits for permission, a branch asks or escalates, a turn stalls, or a branch fails, is blocked, is interrupted or finishes; each event once, and never for the history `by watch` reads at start. `[notify] desktop = true` adds `notify-send` or `osascript`; `--no-notify` or `[notify] enabled = false` turns it off. On by default, since an escape a terminal does not know is ignored. Not done: a sound of its own, or a badge.
+
 ### 11. Leave for a real editor in one click
 
 Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a terminal (⌘O in emdash).
@@ -160,6 +164,8 @@ Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a
 - a `?` help sheet;
 - `/` to filter;
 - keys to send, steer, merge, open, fork and resume without leaving the view.
+
+**Status:** done except `open`. `by watch` has the `?` sheet and `/` filter, and keys on the selected branch: `s` send (an input box), `S` steer, `R` resume, `x` cancel and `m` merge (each after a yes; the merge's check result is shown), `f` fork, `d` diff and `l` log in scrollable panes, `y`/`Y` copy the name or worktree path. Each runs the existing `by` command. The keys live in one table (`crates/branchyard-cli/src/watch/actions.rs`) that drives the handling, the footer and the `?` sheet, and reserves `p`, `o`, `r`, `c` and `t` for `by pr`, `by open`, `by rewind`, `by compare` and `by try`, so binding each is a one-row change. Not done: a command palette and remappable keys.
 
 ## What they struggle with, and Branchyard already handles
 
@@ -192,9 +198,9 @@ In order of what a user would feel first:
    - `by pr` and `by pr --watch`, which routes CI failures and review comments back into the branch;
    - a merge-readiness line in `by show`; `by open` (§11) came with it.
 4. **`by watch` as the cockpit** (§4, §10, §11, §12):
-   - interrupted branches with one-key resume;
-   - notifications;
-   - `by open`;
-   - a keyboard sheet and actions.
-5. **Compare and choose** after a fan-out (§3). Done: `by compare` ([checkpoints](checkpoints.md#compare-attempts)); the `by watch` view remains.
-6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7). Done in local mode ([checkpoints](checkpoints.md)); remote rewind and `fork --at` remain.
+   - interrupted branches with one-key resume (done);
+   - notifications (done);
+   - `by open` (done, the `o` key);
+   - a keyboard sheet and actions (done).
+5. **Compare and choose** after a fan-out (§3). Done: `by compare` ([checkpoints](checkpoints.md#compare-attempts)), and `c` in `by watch` compares the selected branch with its siblings.
+6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7). Done in local mode ([checkpoints](checkpoints.md)), with `r` and `t` in `by watch`; remote rewind and `fork --at` remain.

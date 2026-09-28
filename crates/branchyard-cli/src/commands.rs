@@ -38,6 +38,9 @@ pub struct Env {
     pub stderr_tty: bool,
     /// Color only on a terminal, and never when `NO_COLOR` is set.
     pub color: bool,
+    /// Whether and how to say a branch needs you or ended; off until
+    /// `main` resolves it from the flags and configuration.
+    pub notify: crate::notify::Settings,
 }
 
 impl Env {
@@ -49,11 +52,22 @@ impl Env {
             stdout_tty,
             stderr_tty: io::stderr().is_terminal(),
             color: stdout_tty && !no_color,
+            notify: crate::notify::Settings::default(),
         }
     }
 
     fn style(&self) -> Style {
         Style { color: self.color }
+    }
+
+    /// The notifier for a command that waits for branches: its escapes go
+    /// to stderr when that is a terminal.
+    pub fn notifier(&self) -> Option<crate::notify::Notifier> {
+        let out: Option<Box<dyn Write + Send>> = match self.stderr_tty {
+            true => Some(Box::new(io::stderr())),
+            false => None,
+        };
+        crate::notify::Notifier::new(self.notify, out)
     }
 }
 
@@ -151,11 +165,14 @@ impl Live {
             true => Box::new(io::stderr()),
             false => Box::new(io::stdout()),
         };
-        let console = Arc::new(Console::new(
-            Renderer::new(env.style(), prefixed),
-            out,
-            Box::new(console::terminal_prompt),
-        ));
+        let console = Arc::new(
+            Console::new(
+                Renderer::new(env.style(), prefixed),
+                out,
+                Box::new(console::terminal_prompt),
+            )
+            .with_notifier(env.notifier()),
+        );
         let choice = console::choose(task.permissions, env.stdin_tty, env.stderr_tty);
         match provider(task).or(branch) {
             None | Some(Provider::Local) => {
@@ -762,7 +779,9 @@ pub fn merge(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
     let yard = open()?;
     let target = match into {
         Some(target) => target.to_owned(),
-        None => current_branch(yard.root())?,
+        None => yard
+            .current_branch()?
+            .ok_or_else(|| Failure::Message("HEAD is detached; pass --into <branch>".into()))?,
     };
     let merged = yard.merge(branch, &target)?;
     print_merged(
@@ -780,29 +799,6 @@ pub fn print_merged(branch: &str, target: &str, previous: &str, commit: &str) ->
         short(previous),
         short(commit)
     ))
-}
-
-/// The repository's checked-out branch, the default merge target.
-fn current_branch(root: &Path) -> Result<String, Failure> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| Failure::Message(format!("could not run git: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Failure::Message(format!(
-            "could not resolve the current branch: {}",
-            stderr.trim()
-        )));
-    }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if name == "HEAD" {
-        return Err(Failure::Message(
-            "HEAD is detached; pass --into <branch>".into(),
-        ));
-    }
-    Ok(name)
 }
 
 pub fn rm(target: &Target, branch: &str, keep_credentials: bool) -> Outcome {

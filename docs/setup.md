@@ -184,6 +184,11 @@ image = "ghcr.io/you/claude-code:2.1"
 cpus = 2
 memory_mib = 4096
 pass_env = ["ANTHROPIC_API_KEY"]
+
+[notify]                    # when a branch needs you or ends; see the README
+enabled = true              # unset: on; --no-notify turns it off for one command
+desktop = false             # also run notify-send (osascript on macOS)
+terminal = "auto"           # osc9, osc777, bell or none
 ```
 
 The file is read strictly: an unknown key, a harness that is not in the registry, an effort, secret source, MCP command or URL the flags would refuse, is an error naming the key and its line, and every `by` command stops on it. A secret source that looks like a credential (a known key prefix, or a long mixed-case alphanumeric string) is refused without being quoted. The `#:schema` line lets taplo and editors with TOML schema support complete and check the file against [`schema/branchyard.config.json`](../schema/branchyard.config.json).
@@ -195,6 +200,7 @@ What each command takes, in `crates/branchyard-cli/src/defaults.rs` (`defaults::
 | `run`, `fan` | every `[defaults]` key the flags left unset, `[mcp]`, and `[secrets]` when the branch has a private home; `isolated = true` cannot be turned off by a flag |
 | `send`, `fork`, `reincarnate`, `spawn` | `permissions` only: the rest would override what the branch, its fork parent or its seat already has |
 | `serve`, `worker` | `[serve] config` as `--config`, unless the arguments give one (`--config FILE`, `--config=FILE`, `-c FILE`), ask for help or the version, or are `token new` |
+| `watch`, and `run`, `fan`, `send`, `fork` while they wait | `[notify]`, unless `--no-notify` is given |
 | every command but `serve`, `worker`, `init`, `config`, `mcp`, `completions`, `man` | `[remote]` for what `--remote`, `--token-file`, `--ca-file`, `--repo` and their variables left unset; `token_file`, `ca_file` and `repo` only when `url` is the server in use |
 
 How "left unset" is decided: clap reads the four global variables itself (`env = "BRANCHYARD_REMOTE"` and so on), so by the time the files are consulted a variable is already in the parsed options and counts as given, which is what puts variables above both files. None of the options the files fill has a clap default value or a variable of its own, so an option that is `None` (or `--yes`/`--ask` both absent, or `--isolated` absent) was not on the command line. `by serve`'s `--config` is asked of the server's parser: `branchyard_server::cli::names_config` parses the arguments and checks `ArgMatches::value_source("config")` is the command line, so every spelling clap accepts counts and nothing else does.

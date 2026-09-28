@@ -8,9 +8,10 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use branchyard::{BranchEvent, PermissionDecision, PermissionRequest, Policy};
+use branchyard::{Activity, BranchEvent, Event, PermissionDecision, PermissionRequest, Policy};
 
 use crate::args::Permissions;
+use crate::notify::Notifier;
 use crate::render::{compact_input, Renderer};
 
 /// How permission requests will be answered.
@@ -44,6 +45,8 @@ pub type Prompter = Box<dyn Fn(&str) -> io::Result<String> + Send + Sync>;
 pub struct Console {
     state: Mutex<State>,
     prompter: Prompter,
+    /// Says when a branch needs the person or ends; see [`crate::notify`].
+    notifier: Option<Notifier>,
 }
 
 struct State {
@@ -66,7 +69,13 @@ impl Console {
         Console {
             state: Mutex::new(State { renderer, out }),
             prompter,
+            notifier: None,
         }
+    }
+
+    pub fn with_notifier(mut self, notifier: Option<Notifier>) -> Self {
+        self.notifier = notifier;
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -76,9 +85,16 @@ impl Console {
     }
 
     pub fn event(&self, event: &BranchEvent) {
-        let mut state = self.lock();
-        let text = state.renderer.activity(&event.branch, &event.activity);
-        state.write(&text);
+        {
+            let mut state = self.lock();
+            let text = state.renderer.activity(&event.branch, &event.activity);
+            state.write(&text);
+        }
+        // After the line it is about, so a permission prompt's bell rings
+        // with the prompt on screen.
+        if let Some(notifier) = &self.notifier {
+            notifier.observe(&event.branch, &event.activity);
+        }
     }
 
     /// See [`Renderer::reserve`].
@@ -89,6 +105,17 @@ impl Console {
     /// Prompt for one request. Holding the lock serializes prompts across
     /// branches and keeps other branches' output from landing in the prompt.
     pub fn ask(&self, branch: &str, request: &PermissionRequest) -> PermissionDecision {
+        // Ring before the prompt waits; the recorded request, if it comes
+        // later, is the same notice and is not said again.
+        if let Some(notifier) = &self.notifier {
+            notifier.observe(
+                branch,
+                &Activity::Harness(Event::PermissionRequested {
+                    turn: None,
+                    request: request.clone(),
+                }),
+            );
+        }
         let mut state = self.lock();
         let pending = state.renderer.finish();
         state.write(&pending);

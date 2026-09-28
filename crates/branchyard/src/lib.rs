@@ -133,6 +133,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use git::current_branch;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
@@ -357,6 +358,12 @@ impl Yard {
     /// Repository root.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The branch checked out at the repository root (the default merge
+    /// target), or `None` when HEAD is detached.
+    pub fn current_branch(&self) -> Result<Option<String>, Error> {
+        git::current_branch(&self.root)
     }
 
     /// Start describing a task.

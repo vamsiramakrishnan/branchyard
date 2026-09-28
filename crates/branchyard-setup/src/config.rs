@@ -64,6 +64,10 @@ pub struct ProjectConfig {
     /// Options for `provider = "microsandbox"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microsandbox: Option<Microsandbox>,
+    /// Telling you when a branch needs you or ends, from `by watch` and a
+    /// waiting `by run`, `by fan`, `by send` or `by fork`.
+    #[serde(default, skip_serializing_if = "Notify::is_empty")]
+    pub notify: Notify,
 }
 
 /// Task defaults.
@@ -191,6 +195,46 @@ pub struct Microsandbox {
     /// Variables to copy into the sandbox, by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pass_env: Vec<String>,
+}
+
+/// `[notify]`: when a branch asks for permission or asks a question,
+/// stalls, fails, is interrupted or finishes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Notify {
+    /// Notify at all. Unset: yes; `--no-notify` turns it off for one command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Also show a desktop notification through `notify-send` (Linux and
+    /// other Unix) or `osascript` (macOS). Unset: no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
+    /// What to write to the terminal. Unset: `auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<NotifyTerminal>,
+}
+
+impl Notify {
+    pub fn is_empty(&self) -> bool {
+        self == &Notify::default()
+    }
+}
+
+/// The terminal side of a notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyTerminal {
+    /// A bell, and the desktop-notification escape this terminal is known
+    /// to take: OSC 777 on foot, urxvt and VTE terminals, OSC 9 elsewhere.
+    Auto,
+    /// A bell and OSC 9 (iTerm2, WezTerm, kitty, Ghostty, Windows Terminal).
+    Osc9,
+    /// A bell and OSC 777 (foot, urxvt, VTE terminals such as GNOME Terminal, WezTerm).
+    Osc777,
+    /// Only a bell.
+    Bell,
+    /// Nothing on the terminal (the desktop notification, if on, still runs).
+    None,
 }
 
 /// A refused file: its message names the key, and the line when known.
@@ -322,6 +366,12 @@ impl ProjectConfig {
             if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
                 return fail(key, "must not be empty".into());
             }
+        }
+        if self.notify.enabled == Some(false) && self.notify.desktop == Some(true) {
+            return fail(
+                "notify.desktop",
+                "has no effect while notify.enabled = false; remove one of them".into(),
+            );
         }
         if let Some(sandbox) = &self.microsandbox {
             if sandbox.image.trim().is_empty() {
@@ -726,6 +776,28 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
     if let Some(path) = &config.serve.config {
         out.push_str(&format!("\n[serve]\nconfig = {}\n", toml_string(path)));
     }
+    let n = &config.notify;
+    if !n.is_empty() {
+        out.push_str(
+            "\n# When a branch needs you or ends: by watch and a waiting by run.\n[notify]\n",
+        );
+        if let Some(enabled) = n.enabled {
+            out.push_str(&format!("enabled = {enabled}\n"));
+        }
+        if let Some(desktop) = n.desktop {
+            out.push_str(&format!("desktop = {desktop}\n"));
+        }
+        if let Some(terminal) = n.terminal {
+            let name = match terminal {
+                NotifyTerminal::Auto => "auto",
+                NotifyTerminal::Osc9 => "osc9",
+                NotifyTerminal::Osc777 => "osc777",
+                NotifyTerminal::Bell => "bell",
+                NotifyTerminal::None => "none",
+            };
+            out.push_str(&format!("terminal = {}\n", toml_string(name)));
+        }
+    }
     out
 }
 
@@ -759,12 +831,18 @@ config = ".branchyard/server.json"
 [microsandbox]
 image = "ghcr.io/you/codex:1"
 pass_env = ["OPENAI_API_KEY"]
+[notify]
+desktop = true
+terminal = "osc777"
 "#;
 
     #[test]
     fn a_full_file_parses_and_renders_back_to_itself() {
         let config = parse(FULL).unwrap();
         assert_eq!(config.defaults.harness.as_deref(), Some("codex"));
+        assert_eq!(config.notify.desktop, Some(true));
+        assert_eq!(config.notify.terminal, Some(NotifyTerminal::Osc777));
+        assert_eq!(config.flatten()["notify.terminal"], "osc777");
         assert_eq!(config.defaults.budget_usd, Some(5.0));
         let rendered = render(&config, "test");
         assert!(rendered.starts_with("#:schema https://"), "{rendered}");
@@ -787,6 +865,13 @@ pass_env = ["OPENAI_API_KEY"]
             ("[remote]\nurl = \"ftp://x\"", "remote.url"),
             ("version = 2", "version"),
             ("[defaults]\nprovider = \"microsandbox\"", "[microsandbox]"),
+            ("[notify]\nsound = true", "unknown field `sound`"),
+            ("[notify]\nterminal = \"osc99\"", "unknown variant `osc99`"),
+            ("[notify]\nenabled = \"no\"", "line 2"),
+            (
+                "[notify]\nenabled = false\ndesktop = true",
+                "notify.desktop: has no effect",
+            ),
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");

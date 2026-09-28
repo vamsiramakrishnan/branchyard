@@ -17,6 +17,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/verify_vendor.py
+      - run: python tests/test_verify_vendor.py
       - run: python tools/verify_derivatives.py
       - run: python tools/check_catalog.py
       - run: python tools/check_docs.py

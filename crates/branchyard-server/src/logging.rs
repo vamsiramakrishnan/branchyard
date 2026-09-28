@@ -7,26 +7,43 @@
 //! [`EnvFilter`](tracing_subscriber::EnvFilter) syntax, e.g.
 //! `branchyard_server=debug,warn`), checked in that order; `--quiet`
 //! selects `warn` as the default when neither is set, matching its old
-//! meaning of "warn and above". The format is `pretty` unless
-//! `BRANCHYARD_LOG_FORMAT=json`.
-//!
-//! TODO(BRANCHYARD_LOG_FORMAT): once the CLI grows a `--log-format
-//! json|pretty` flag (tracked with the clap conversion), prefer it over
-//! this env var and keep the env var as a fallback.
+//! meaning of "warn and above". The format is `--log-format`'s, else
+//! `BRANCHYARD_LOG_FORMAT`'s (`json` or `pretty`), else `pretty`.
 use tracing_subscriber::EnvFilter;
 
-/// Sets up the process's global tracing subscriber. Idempotent: a second
-/// call (as in a test binary that runs several integration tests linked
-/// together) is a harmless no-op.
-pub fn init(quiet: bool) {
+/// How log lines are written.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable lines.
+    #[default]
+    Pretty,
+    /// One JSON object per line.
+    Json,
+}
+
+impl LogFormat {
+    /// The flag's format if given, else `BRANCHYARD_LOG_FORMAT`'s (`json`
+    /// or `pretty`, any case; anything else is `pretty`), else `pretty`.
+    pub fn resolve(flag: Option<LogFormat>, env: Option<&str>) -> LogFormat {
+        flag.unwrap_or(match env {
+            Some(value) if value.trim().eq_ignore_ascii_case("json") => LogFormat::Json,
+            _ => LogFormat::Pretty,
+        })
+    }
+}
+
+/// Sets up the process's global tracing subscriber, in `format` if given
+/// (see [`LogFormat::resolve`]). Idempotent: a second call (as in a test
+/// binary that runs several integration tests linked together) is a
+/// harmless no-op.
+pub fn init(quiet: bool, format: Option<LogFormat>) {
     let filter = std::env::var("BRANCHYARD_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
         .ok()
         .and_then(|directives| EnvFilter::try_new(directives).ok())
         .unwrap_or_else(|| EnvFilter::new(if quiet { "warn" } else { "info" }));
-    let json = std::env::var("BRANCHYARD_LOG_FORMAT")
-        .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
+    let env = std::env::var("BRANCHYARD_LOG_FORMAT").ok();
+    let json = LogFormat::resolve(format, env.as_deref()) == LogFormat::Json;
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -40,4 +57,24 @@ pub fn init(quiet: bool) {
     } else {
         builder.try_init()
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogFormat;
+
+    #[test]
+    fn the_flag_wins_over_the_variable() {
+        assert_eq!(LogFormat::resolve(None, None), LogFormat::Pretty);
+        assert_eq!(LogFormat::resolve(None, Some("JSON")), LogFormat::Json);
+        assert_eq!(LogFormat::resolve(None, Some("yaml")), LogFormat::Pretty);
+        assert_eq!(
+            LogFormat::resolve(Some(LogFormat::Pretty), Some("json")),
+            LogFormat::Pretty
+        );
+        assert_eq!(
+            LogFormat::resolve(Some(LogFormat::Json), None),
+            LogFormat::Json
+        );
+    }
 }

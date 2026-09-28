@@ -170,12 +170,10 @@ fn landed(
     let Some(head) = git::local_branch(&yard.root, target)? else {
         return Ok(None);
     };
-    let contained = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", candidate, &head])
-        .current_dir(&yard.root)
-        .status()
-        .map_err(|e| Error::Git(format!("could not run git: {e}")))?
-        .success();
+    let contained = git::test(
+        &yard.root,
+        &["merge-base", "--is-ancestor", candidate, &head],
+    )?;
     Ok(contained.then(|| Merged {
         branch: name.to_owned(),
         target: target.to_owned(),
