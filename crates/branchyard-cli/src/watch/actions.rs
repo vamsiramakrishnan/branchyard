@@ -10,16 +10,17 @@
 //! the dashboard was started with, so in remote mode they go through the
 //! server's client exactly as typing the command would.
 //!
-//! # Binding a new command (integration point)
+//! # Binding a command
 //!
-//! The rows marked `Run::Pending` reserve keys for commands being added in
-//! parallel: `p` (`by pr`), `o` (`by open`), `r` (`by rewind`), `c`
-//! (`by compare`) and `t` (`by try`). Once the command exists, replace its
-//! row's `run` with `Run::Background(&[...])` or `Run::Wait(&[...])` (an
-//! argv template: `{branch}` and `{text}` are filled in), set `ask` and
-//! `when`, and say whether it works remotely. The test
-//! `every_command_row_parses_as_the_command_it_names` then checks the argv
-//! against `by`'s real command line.
+//! A row's `run` is `Run::Background(&[...])` or `Run::Wait(&[...])` (an
+//! argv template: `{branch}` and `{text}` are filled in), or
+//! `Run::Toggle` for a command with an on and an off form (`t`: `by try`
+//! and `by try --off`); `ask`, `when` and `remote` say what it asks, where
+//! it applies and whether it works against a server. The test
+//! `every_command_row_parses_as_the_command_it_names` checks every argv
+//! against `by`'s real command line. `o` ([`Run::Open`]) runs the editor
+//! in-process through `open::plan`, so the dashboard can leave its screen
+//! for an editor that takes over the terminal.
 
 use branchyard::{BranchInfo, BranchStatus};
 
@@ -39,6 +40,7 @@ pub enum ActionId {
     CopyName,
     CopyPath,
     Pr,
+    PrWatch,
     Open,
     Rewind,
     Compare,
@@ -58,6 +60,13 @@ pub enum Ask {
     Confirm {
         question: &'static str,
     },
+    /// A checkpoint's turn number (`{text}`), typed under the branch's
+    /// checkpoint list ([`PaneKind::Checkpoints`]), then a yes/no question
+    /// naming it; `{branch}` and `{text}` are filled in.
+    Checkpoint {
+        title: &'static str,
+        question: &'static str,
+    },
 }
 
 /// A scrollable pane over the dashboard.
@@ -69,6 +78,10 @@ pub enum PaneKind {
     Log,
     /// The output of a command, such as a merge and its check.
     Output,
+    /// `by show`'s checkpoint list, shown above `r`'s input box.
+    Checkpoints,
+    /// `by compare`: the branch beside its siblings ([`siblings`]).
+    Compare,
 }
 
 /// What to copy to the clipboard.
@@ -92,8 +105,17 @@ pub enum Run {
     Pane(PaneKind),
     /// Copy through the terminal (OSC 52).
     Copy(CopyWhat),
-    /// A key reserved for a command not in this build yet, named here.
-    Pending(&'static str),
+    /// `on` (waited for) unless the branch is the one being tried, then
+    /// `off`, asking `off_question` instead of the row's question.
+    Toggle {
+        on: &'static [&'static str],
+        off: &'static [&'static str],
+        off_question: &'static str,
+    },
+    /// `by open`: the worktree in the editor `open::plan` picks, run by
+    /// the dashboard itself; a terminal editor gets the screen until it
+    /// exits.
+    Open,
 }
 
 /// Whether an action works in remote mode (`by --remote URL watch`).
@@ -211,6 +233,32 @@ fn has_candidate(info: &BranchInfo) -> Result<(), String> {
     }
 }
 
+fn pushable(info: &BranchInfo) -> Result<(), String> {
+    not_running(info)?;
+    match (&info.status, &info.candidate) {
+        (BranchStatus::Merged { .. }, _) => Err(format!(
+            "{} is merged here already; by pr pushes a branch's candidate for review",
+            info.name
+        )),
+        (_, None) => Err(format!("{} has no candidate commit to push", info.name)),
+        _ => Ok(()),
+    }
+}
+
+fn rewindable(info: &BranchInfo) -> Result<(), String> {
+    not_running(info)?;
+    match info.status {
+        BranchStatus::Merged { .. } => Err(format!(
+            "{} is merged; fork it at a checkpoint instead (by fork --at)",
+            info.name
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// What the local-only commands say in remote mode.
+const ON_THIS_MACHINE: &str = "the worktree is on the server, not this machine";
+
 /// The registry. Order is the `?` sheet's order.
 pub const ACTIONS: &[Action] = &[
     Action {
@@ -324,45 +372,64 @@ pub const ACTIONS: &[Action] = &[
         when: always,
         remote: Remote::No("the worktree is on the server, not this machine"),
     },
-    // Reserved for commands being added in parallel; see the module
-    // documentation for how to bind them.
     Action {
         key: 'p',
         id: ActionId::Pr,
         name: "pr",
-        help: "push and open or update a pull request",
-        ask: Ask::Nothing,
-        run: Run::Pending("by pr"),
-        when: always,
-        remote: Remote::Yes,
+        help: "check, push and open or update the pull request (by pr)",
+        ask: Ask::Confirm {
+            question: "Push {branch}'s candidate and open or update its pull request? Its check \
+                       runs on the candidate first; the push and gh use your credentials.",
+        },
+        run: Run::Wait(&["pr", "--", "{branch}"]),
+        when: pushable,
+        remote: Remote::No("by pr pushes from this machine's repository with your gh login"),
+    },
+    Action {
+        key: 'P',
+        id: ActionId::PrWatch,
+        name: "pr watch",
+        help: "by pr, then feed CI and reviews back as turns (by pr --watch)",
+        ask: Ask::Confirm {
+            question: "Push {branch}, open or update its pull request, and keep following it in \
+                       the background, sending failed CI checks and review comments into it as \
+                       new turns?",
+        },
+        run: Run::Background(&["pr", "--watch", "--", "{branch}"]),
+        when: pushable,
+        remote: Remote::No("by pr pushes from this machine's repository with your gh login"),
     },
     Action {
         key: 'o',
         id: ActionId::Open,
         name: "open",
-        help: "open the worktree in an editor",
+        help: "open the worktree in $VISUAL or $EDITOR (by open)",
         ask: Ask::Nothing,
-        run: Run::Pending("by open"),
+        run: Run::Open,
         when: always,
-        remote: Remote::No("the worktree is on the server, not this machine"),
+        remote: Remote::No(ON_THIS_MACHINE),
     },
     Action {
         key: 'r',
         id: ActionId::Rewind,
         name: "rewind",
-        help: "rewind the branch to an earlier turn",
-        ask: Ask::Nothing,
-        run: Run::Pending("by rewind"),
-        when: always,
-        remote: Remote::Yes,
+        help: "reset the branch to a checkpoint from its list (by rewind)",
+        ask: Ask::Checkpoint {
+            title: "rewind {branch} to checkpoint",
+            question: "Reset {branch} and its worktree to checkpoint {text}? Later checkpoints \
+                       stay, so you can rewind forward again.",
+        },
+        run: Run::Wait(&["rewind", "--yes", "--to", "{text}", "--", "{branch}"]),
+        when: rewindable,
+        remote: Remote::No(ON_THIS_MACHINE),
     },
     Action {
         key: 'c',
         id: ActionId::Compare,
         name: "compare",
-        help: "compare this branch with its fan-out siblings",
+        help: "compare with its siblings, in a pane (by compare)",
         ask: Ask::Nothing,
-        run: Run::Pending("by compare"),
+        run: Run::Pane(PaneKind::Compare),
         when: always,
         remote: Remote::Yes,
     },
@@ -370,10 +437,17 @@ pub const ACTIONS: &[Action] = &[
         key: 't',
         id: ActionId::Try,
         name: "try",
-        help: "try the branch in the main checkout",
-        ask: Ask::Nothing,
-        run: Run::Pending("by try"),
-        when: always,
+        help: "try its changes in this checkout; again to restore (by try)",
+        ask: Ask::Confirm {
+            question: "Apply {branch}'s changes to this checkout to try them? A try of another \
+                       branch is turned off first; t on {branch} again restores the checkout.",
+        },
+        run: Run::Toggle {
+            on: &["try", "--", "{branch}"],
+            off: &["try", "--off"],
+            off_question: "Turn off the try of {branch} and restore the checkout as it was?",
+        },
+        when: has_candidate,
         remote: Remote::No("it changes the checkout on this machine"),
     },
 ];
@@ -408,16 +482,68 @@ pub fn fill(text: &str, branch: &str) -> String {
     text.replace("{branch}", branch)
 }
 
+/// The branches `c` compares `branch` with, `branch` first: its parent's
+/// other children, or for a top-level branch from `by fan` (named
+/// `NAME-<harness>`), the others of that fan-out with the same prompt.
+/// Just `branch` when it has none.
+pub fn siblings(infos: &[BranchInfo], branch: &str) -> Vec<String> {
+    let Some(me) = infos.iter().find(|i| i.name == branch) else {
+        return vec![branch.to_owned()];
+    };
+    let fan = |info: &BranchInfo| {
+        [&info.harness, &info.profile].iter().find_map(|id| {
+            info.name
+                .strip_suffix(id.as_str())
+                .and_then(|n| n.strip_suffix('-'))
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned)
+        })
+    };
+    let mine = fan(me);
+    let mut out = vec![me.name.clone()];
+    for info in infos.iter().filter(|i| i.name != me.name) {
+        let sibling = match &me.parent {
+            Some(parent) => info.parent.as_ref() == Some(parent),
+            None => {
+                info.parent.is_none()
+                    && mine.is_some()
+                    && fan(info) == mine
+                    && info.prompt == me.prompt
+            }
+        };
+        if sibling {
+            out.push(info.name.clone());
+        }
+    }
+    out
+}
+
+/// The argv `action` runs on `branch`: the `off` form of a toggle when
+/// `off`. `None` for actions that run no `by`.
+pub fn command(action: &Action, branch: &str, text: &str, off: bool) -> Option<Vec<String>> {
+    let template = match action.run {
+        Run::Background(template) | Run::Wait(template) => template,
+        Run::Toggle { off: template, .. } if off => template,
+        Run::Toggle { on, .. } => on,
+        Run::Pane(_) | Run::Copy(_) | Run::Open => return None,
+    };
+    Some(argv(template, branch, text))
+}
+
+/// A checkpoint number typed into `r`'s box, or why it is not one.
+pub fn checkpoint_number(text: &str) -> Result<u32, String> {
+    text.trim().parse::<u32>().map_err(|_| {
+        format!(
+            "{:?} is not a checkpoint: type its turn number (0 is the base)",
+            text.trim()
+        )
+    })
+}
+
 /// Why `action` cannot run on `info` now, if it cannot.
 pub fn refusal(action: &Action, info: &BranchInfo, remote: bool) -> Option<String> {
     if let (true, Remote::No(reason)) = (remote, action.remote) {
         return Some(format!("{} is local only: {reason}", action.name));
-    }
-    if let Run::Pending(command) = action.run {
-        return Some(format!(
-            "{} {}: `{command}` is not in this build yet; this key is reserved for it",
-            action.key, action.name
-        ));
     }
     (action.when)(info).err()
 }
@@ -469,9 +595,16 @@ mod tests {
         for id in ids {
             assert_eq!(by_id(id).id, id);
         }
-        // The slots the parallel commands will fill.
-        for key in ['p', 'o', 'r', 'c', 't'] {
-            assert!(matches!(by_key(key).unwrap().run, Run::Pending(_)), "{key}");
+        // The keys the commands from the parallel branches are bound to.
+        for (key, id) in [
+            ('p', ActionId::Pr),
+            ('P', ActionId::PrWatch),
+            ('o', ActionId::Open),
+            ('r', ActionId::Rewind),
+            ('c', ActionId::Compare),
+            ('t', ActionId::Try),
+        ] {
+            assert_eq!(by_key(key).unwrap().id, id);
         }
     }
 
@@ -479,14 +612,21 @@ mod tests {
     /// would parse to, including text that looks like a flag.
     #[test]
     fn every_command_row_parses_as_the_command_it_names() {
+        let mut rows = Vec::new();
         for action in ACTIONS {
-            let template = match action.run {
-                Run::Background(argv) | Run::Wait(argv) => argv,
-                _ => continue,
+            let text = match action.ask {
+                Ask::Checkpoint { .. } => "3",
+                _ => "-v looks like a flag",
             };
-            let text = "-v looks like a flag";
+            for off in [false, true] {
+                if let Some(filled) = command(action, "impl", text, off) {
+                    rows.push((action, text, off, filled));
+                }
+            }
+        }
+        for (action, text, off, filled) in rows {
             let mut full = vec!["by".to_owned()];
-            full.extend(argv(template, "impl", text));
+            full.extend(filled);
             let cli = args::parse_from(&full)
                 .unwrap_or_else(|e| panic!("{}: {full:?}: {e}", action.name));
             let command = cli.command.unwrap();
@@ -533,6 +673,36 @@ mod tests {
                 (ActionId::Fork, Command::Fork { branch, prompt, .. }) => {
                     assert_eq!((branch.as_str(), prompt.as_str()), ("impl", text))
                 }
+                (ActionId::Pr, Command::Pr { branch, pr }) => {
+                    assert_eq!(branch, "impl");
+                    assert!(!pr.into_inner().watch);
+                }
+                (ActionId::PrWatch, Command::Pr { branch, pr }) => {
+                    assert_eq!(branch, "impl");
+                    assert!(pr.into_inner().watch);
+                }
+                (
+                    ActionId::Rewind,
+                    Command::Rewind {
+                        branch,
+                        to: 3,
+                        yes: true,
+                        json: false,
+                    },
+                ) => assert_eq!(branch, "impl"),
+                (
+                    ActionId::Try,
+                    Command::Try {
+                        branch,
+                        off: o,
+                        status: false,
+                        force: false,
+                        json: false,
+                    },
+                ) => {
+                    assert_eq!(o, off);
+                    assert_eq!(branch.as_deref(), (!off).then_some("impl"));
+                }
                 (id, command) => panic!("{id:?} parsed as {command:?}"),
             }
         }
@@ -563,9 +733,64 @@ mod tests {
         assert!(refused('Y', BranchStatus::Ready, false, true)
             .unwrap()
             .contains("local only"));
-        assert!(refused('p', BranchStatus::Ready, true, false)
+        assert_eq!(refused('p', BranchStatus::Ready, true, false), None);
+        assert!(refused('p', BranchStatus::Ready, false, false)
             .unwrap()
-            .contains("`by pr` is not in this build yet"));
+            .contains("no candidate commit to push"));
+        assert!(refused(
+            'p',
+            BranchStatus::Merged {
+                target: "main".into(),
+                commit: "c".into()
+            },
+            true,
+            false
+        )
+        .unwrap()
+        .contains("merged here already"));
+        assert!(refused('r', BranchStatus::Running, true, false).is_some());
+        assert_eq!(refused('r', BranchStatus::Interrupted, false, false), None);
+        assert_eq!(refused('c', BranchStatus::Waiting, false, true), None);
+        for key in ['p', 'P', 'o', 'r', 't'] {
+            assert!(refused(key, BranchStatus::Ready, true, true)
+                .unwrap()
+                .contains("local only"));
+        }
+        assert!(refused('t', BranchStatus::Running, false, false)
+            .unwrap()
+            .contains("no candidate commit"));
+    }
+
+    #[test]
+    fn siblings_are_the_fan_out_or_the_parent_s_other_children() {
+        let named = |name: &str, harness: &str, parent: Option<&str>, prompt: &str| {
+            let mut i = info(BranchStatus::Ready, true);
+            i.name = name.into();
+            i.harness = harness.into();
+            i.parent = parent.map(Into::into);
+            i.prompt = prompt.into();
+            i
+        };
+        let infos = vec![
+            named("speed-codex", "codex", None, "p"),
+            named("speed-claude", "claude", None, "p"),
+            named("speed-gemini", "gemini", None, "other"),
+            named("lone", "codex", None, "p"),
+            named("a", "codex", Some("lead"), "x"),
+            named("b", "claude", Some("lead"), "y"),
+            named("c", "codex", Some("other"), "x"),
+        ];
+        assert_eq!(
+            siblings(&infos, "speed-claude"),
+            ["speed-claude", "speed-codex"]
+        );
+        assert_eq!(siblings(&infos, "b"), ["b", "a"]);
+        assert_eq!(siblings(&infos, "lone"), ["lone"]);
+        assert_eq!(siblings(&infos, "gone"), ["gone"]);
+        assert_eq!(checkpoint_number(" 2 "), Ok(2));
+        assert!(checkpoint_number("-1")
+            .unwrap_err()
+            .contains("not a checkpoint"));
     }
 
     #[test]

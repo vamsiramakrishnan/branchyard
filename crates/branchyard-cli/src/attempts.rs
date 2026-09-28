@@ -9,6 +9,7 @@ use branchyard::{
     Activity, Attempt, Branch, BranchInfo, BranchStatus, Checkpoint, CheckpointEntry, Checkpoints,
     RemoveOptions, TryState,
 };
+use branchyard_client::Repo;
 use serde_json::json;
 
 use crate::commands::{self, open, print, Env, Failure, Outcome, Target};
@@ -330,17 +331,23 @@ fn gather(target: &Target, args: &CompareArgs) -> Result<Vec<Attempt>, Failure> 
                     args.fan.as_deref().unwrap_or_default()
                 )));
             }
-            let mut attempts = Vec::new();
-            for name in &names {
-                let info = remote.repo.branch(name)?;
-                let events = remote.repo.events(name, 0)?.events;
-                let files = branchyard::diff_files(&remote.repo.diff(name)?);
-                attempts.push(branchyard::compare_attempt(&info, &events, files));
-            }
-            branchyard::mark_unique(&mut attempts);
-            Ok(attempts)
+            remote_attempts(&remote.repo, &names)
         }
     }
+}
+
+/// Attempts on a server, from its records, events and diffs (no checks
+/// run there); `by watch`'s `c` uses it too.
+pub fn remote_attempts(repo: &Repo, names: &[String]) -> Result<Vec<Attempt>, Failure> {
+    let mut attempts = Vec::new();
+    for name in names {
+        let info = repo.branch(name)?;
+        let events = repo.events(name, 0)?.events;
+        let files = branchyard::diff_files(&repo.diff(name)?);
+        attempts.push(branchyard::compare_attempt(&info, &events, files));
+    }
+    branchyard::mark_unique(&mut attempts);
+    Ok(attempts)
 }
 
 pub fn compare(env: &Env, target: &Target, args: &CompareArgs) -> Outcome {

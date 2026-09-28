@@ -383,6 +383,78 @@ impl Source {
         Ok(render::log_text(&events, Style { color: false }))
     }
 
+    /// `by show`'s checkpoint list for a branch, without color: what `r`
+    /// chooses from. Local only, as `by rewind` is.
+    fn checkpoints(&self, branch: &str) -> Result<String, String> {
+        match self {
+            Source::Local { yard, .. } => yard
+                .branch(branch)
+                .and_then(|branch| branch.checkpoints())
+                .map(|list| {
+                    crate::attempts::checkpoint_lines(&list, Style { color: false })
+                        .lines()
+                        .skip_while(|l| l.trim().is_empty() || l.trim() == "checkpoints")
+                        .map(|l| format!("{l}\n"))
+                        .collect()
+                })
+                .map_err(|e| e.to_string()),
+            Source::Remote { .. } => Err("by rewind is local only".into()),
+        }
+    }
+
+    /// `by compare`'s table for a branch and its siblings, without color.
+    fn compare(&self, branch: &str) -> Result<String, String> {
+        let infos = self.branches().map_err(|e| e.to_string())?;
+        let names = actions::siblings(&infos, branch);
+        let attempts = match self {
+            Source::Local { yard, .. } => yard.compare(&names, false).map_err(|e| e.to_string()),
+            Source::Remote { repo, .. } => {
+                crate::attempts::remote_attempts(repo, &names).map_err(|e| e.to_string())
+            }
+        }?;
+        let mut text = crate::attempts::compare_table(&attempts, Style { color: false });
+        if names.len() == 1 {
+            text.push_str(&format!(
+                "\n{branch} has no siblings: no other child of its parent, and no other branch \
+                 of its by fan\n"
+            ));
+        } else {
+            text.push_str(&format!(
+                "\npick one with: by compare {} --pick BRANCH\n",
+                names.join(" ")
+            ));
+        }
+        Ok(text)
+    }
+
+    /// The branch `by try` has applied here (never remotely).
+    fn trying(&self) -> Option<String> {
+        match self {
+            Source::Local { yard, .. } => yard.try_recorded().ok().flatten().map(|s| s.branch),
+            Source::Remote { .. } => None,
+        }
+    }
+
+    /// How `by open` would open a branch's worktree.
+    fn editor(&self, branch: &str) -> Result<crate::open::Plan, String> {
+        let Source::Local { yard, .. } = self else {
+            return Err("by open is local only: the worktree is on the server".into());
+        };
+        let info = yard
+            .branch(branch)
+            .map_err(|e| e.to_string())?
+            .info()
+            .clone();
+        if !info.worktree.is_dir() {
+            return Err(format!(
+                "{branch} has no worktree at {}",
+                info.worktree.display()
+            ));
+        }
+        crate::open::plan(&info.worktree, None, &|name| std::env::var(name).ok())
+            .map_err(|e| e.to_string())
+    }
+
     fn branches(&self) -> Result<Vec<BranchInfo>, Failure> {
         Ok(match self {
             Source::Local { yard, .. } => yard.branches()?,
@@ -736,6 +808,10 @@ impl Runner {
 impl tui::Effects for Cockpit {
     type Error = Failure;
 
+    fn editor(&mut self, branch: &str) -> Result<crate::open::Plan, String> {
+        self.source.editor(branch)
+    }
+
     fn refresh(&mut self) -> Result<tui::Snapshot, Failure> {
         let infos = self.source.branches()?;
         let events = self.source.events(&infos);
@@ -744,6 +820,7 @@ impl tui::Effects for Cockpit {
             infos,
             events,
             now_ms: now_ms(),
+            trying: self.source.trying(),
         })
     }
 
@@ -755,6 +832,8 @@ impl tui::Effects for Cockpit {
                 let result = match kind {
                     actions::PaneKind::Diff => self.source.diff(&branch),
                     actions::PaneKind::Log => self.source.log(&branch),
+                    actions::PaneKind::Checkpoints => self.source.checkpoints(&branch),
+                    actions::PaneKind::Compare => self.source.compare(&branch),
                     actions::PaneKind::Output => Err("nothing to load".into()),
                 };
                 let _ = done.send(tui::Msg::Loaded {
@@ -768,6 +847,8 @@ impl tui::Effects for Cockpit {
                 let mut out: Option<Box<dyn Write + Send>> = Some(Box::new(io::stdout()));
                 notify::show(&self.notify, &notice, &mut out);
             }
+            // The dashboard opens editors itself; see `tui::run`.
+            tui::Cmd::Open(_) => {}
             tui::Cmd::Copy(text) => {
                 let mut stdout = io::stdout();
                 let _ =

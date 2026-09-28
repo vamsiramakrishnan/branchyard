@@ -92,7 +92,7 @@ const APPLYING: &str = "applying";
 const APPLIED: &str = "applied";
 const RESTORING: &str = "restoring";
 
-fn load(yard: &Yard) -> Result<Option<TryState>, Error> {
+pub(crate) fn load(yard: &Yard) -> Result<Option<TryState>, Error> {
     match fs::read(state_path(yard)) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)

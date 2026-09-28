@@ -453,6 +453,13 @@ impl Yard {
         spotlight::status(self)
     }
 
+    /// The try recorded, read without taking the try lock or recovering a
+    /// half-done one: a glance for a dashboard that refreshes often, which
+    /// must not contend with a `try_*` in progress.
+    pub fn try_recorded(&self) -> Result<Option<TryState>, Error> {
+        spotlight::load(self)
+    }
+
     /// Roll back a try a stopped process left half-applied or
     /// half-restored; says what was done. Every `try_*` call does this
     /// first.

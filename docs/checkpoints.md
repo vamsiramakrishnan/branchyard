@@ -101,7 +101,15 @@ The check column is `none` for a branch without a check, `passed` for one merged
 
 ## For `by watch`
 
-The SDK calls are what a cockpit binds keys to: `Branch::checkpoints`, `Branch::rewind`, `Branch::fork_at`, `Yard::try_on`/`try_off`/`try_status`/`try_recover`, `Yard::compare`/`fan_branches`/`diff_between`, and `branchyard::compare_attempt`, `mark_unique`, `diff_files` and `recorded_checkpoints` for a remote view built from events. In the CLI, `attempts::compare_table`, `checkpoint_lines`, `try_text` and `confirm` render and confirm.
+`by watch` binds three keys to these commands ([README](../README.md#watching-branches) has the whole key table):
+
+- `r` opens a box under the selected branch's checkpoint list (`by show`'s, with `*` where the branch is); a turn number and Enter ask *Reset … to checkpoint N?*, and a yes runs `by rewind <branch> --to N --yes`, waited for, with its output (how the next turn continues) in a pane.
+- `c` shows `by compare`'s table for the selected branch and its siblings in a pane: the rest of its `by fan` (top-level branches named `<name>-<harness>` with one prompt), or its parent's other children. It works remotely, from the server's records, events and diffs.
+- `t` asks, then runs `by try <branch>`; on the branch being tried, `t` asks to restore the checkout and runs `by try --off`. The dashboard reads the recorded try without taking its lock (`Yard::try_recorded`).
+
+The detail pane shows the checkpoint the branch is at (`at 2 of 3`, or the base) from its `checkpoint` and `rewound` events, and marks the branch being tried. Remotely `r` and `t` are refused with the reason.
+
+The SDK calls behind them: `Branch::checkpoints`, `Branch::rewind`, `Branch::fork_at`, `Yard::try_on`/`try_off`/`try_status`/`try_recorded`/`try_recover`, `Yard::compare`/`fan_branches`/`diff_between`, and `branchyard::compare_attempt`, `mark_unique`, `diff_files` and `recorded_checkpoints` for a remote view built from events. In the CLI, `attempts::compare_table`, `remote_attempts`, `checkpoint_lines`, `try_text` and `confirm` render and confirm.
 
 ## Not done yet
 

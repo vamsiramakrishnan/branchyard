@@ -118,7 +118,7 @@ Every step is an `Activity::PullRequest` event on the branch's log, shown by `by
 | `feedback_undelivered` | `keys`, `reason` | `pull request feedback not delivered (…)` |
 | `watch_stopped` | `reason` | `stopped watching the pull request: the pull request was merged` |
 
-The CLI folds these (`pr::state`) into the branch's issue, last check, last push, pull request, last observation and delivered keys. In the SDK, `Branch::record_pull_request` appends one, `Branch::verify_candidate` runs the check on the candidate in a temporary worktree, and `Branch::push_candidate` pushes it (`Repository::verify` and `Repository::push` in `branchyard-workspace`). `by watch` can bind keys to `pr::publish`, `pr::readiness`, `open::plan` and `open::launch`, which print nothing.
+The CLI folds these (`pr::state`) into the branch's issue, last check, last push, pull request, last observation and delivered keys. In the SDK, `Branch::record_pull_request` appends one, `Branch::verify_candidate` runs the check on the candidate in a temporary worktree, and `Branch::push_candidate` pushes it (`Repository::verify` and `Repository::push` in `branchyard-workspace`). In `by watch`, `p` runs `by pr` after a yes (waited for, its output in a pane), `P` runs `by pr --watch` in the background, `o` opens the worktree through `open::plan` and `open::launch` (leaving the dashboard's screen for a terminal editor, whose `Plan::terminal` says so, and redrawing it after), and the detail pane shows the merge-readiness line folded from the branch's `pull_request` events with `pr::state` and `pr::readiness`; all three keys are refused remotely.
 
 ## Not done
 

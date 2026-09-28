@@ -52,6 +52,8 @@ pub struct Snapshot {
     /// Events recorded since the previous snapshot, by branch.
     pub events: Vec<(String, RecordedEvent)>,
     pub now_ms: u64,
+    /// The branch `by try` has applied to this checkout, if any.
+    pub trying: Option<String>,
 }
 
 /// A key, as the dashboard reads it.
@@ -143,6 +145,9 @@ pub enum Cmd {
     },
     /// Put text on the clipboard through the terminal.
     Copy(String),
+    /// Open a branch's worktree in the editor (`by open`); [`run`] leaves
+    /// the screen for an editor that takes over the terminal.
+    Open(String),
     /// Tell the person a branch needs them or ended; see [`crate::notify`].
     Notify(notify::Notice),
 }
@@ -183,6 +188,9 @@ pub struct Input {
     pub text: String,
     /// In characters.
     pub cursor: usize,
+    /// Lines shown above the box to choose from (`r`'s checkpoints):
+    /// `None` while loading, `Err` when they could not be.
+    pub list: Option<Result<Vec<String>, String>>,
 }
 
 impl Input {
@@ -213,6 +221,10 @@ impl Input {
 pub struct Pending {
     pub action: ActionId,
     pub branch: String,
+    /// What was typed first, for an action that asks both (`r`).
+    pub text: String,
+    /// The `off` form of a [`Run::Toggle`].
+    pub off: bool,
 }
 
 /// A diff, a log or a command's output, scrolled by line.
@@ -235,6 +247,8 @@ impl Pane {
             PaneKind::Diff => format!("diff {branch}"),
             PaneKind::Log => format!("log {branch}"),
             PaneKind::Output => branch.to_owned(),
+            PaneKind::Checkpoints => format!("checkpoints {branch}"),
+            PaneKind::Compare => format!("compare {branch} with its siblings"),
         };
         Pane {
             kind,
@@ -270,6 +284,12 @@ pub struct Detail {
     /// Inbox messages sent to this branch and not yet delivered to it.
     pub unread: BTreeSet<u64>,
     pub tokens: Tokens,
+    /// The branch's pull-request steps, folded into merge readiness.
+    pub pull_request: Vec<RecordedEvent>,
+    /// The checkpoint the branch is at (0 is its base), and the latest
+    /// turn with one.
+    pub checkpoint: Option<u32>,
+    pub last_checkpoint: u32,
 }
 
 /// Token counts the harness reported, summed over turns.
@@ -346,6 +366,8 @@ pub struct Model {
     pub size: (u16, u16),
     /// What has been notified, so each event is said once.
     pub notified: notify::Tracker,
+    /// The branch `by try` has applied to this checkout.
+    pub trying: Option<String>,
 }
 
 /// One row of the tree as shown.
@@ -492,6 +514,7 @@ impl Model {
         self.label = snapshot.label;
         self.now_ms = snapshot.now_ms;
         self.infos = snapshot.infos;
+        self.trying = snapshot.trying;
         if self
             .toast
             .as_ref()
@@ -533,6 +556,12 @@ impl Model {
                         detail.unread.remove(id);
                     }
                 }
+                Activity::PullRequest(_) => detail.pull_request.push(event.clone()),
+                Activity::Checkpoint(checkpoint) => {
+                    detail.checkpoint = Some(checkpoint.turn);
+                    detail.last_checkpoint = detail.last_checkpoint.max(checkpoint.turn);
+                }
+                Activity::Rewound { to, .. } => detail.checkpoint = Some(*to),
                 _ => {}
             }
             if let Some(line) =
@@ -601,11 +630,18 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
             branch,
             result,
         } => {
+            if let Mode::Input(input) = &mut model.mode {
+                if kind == PaneKind::Checkpoints && input.branch == branch {
+                    input.list = Some(result.map(|text| text.lines().map(str::to_owned).collect()));
+                }
+                return Vec::new();
+            }
             if let Mode::Pane(pane) = &mut model.mode {
                 if pane.kind == kind && pane.branch == branch {
                     pane.lines = Some(result.map(|text| match text.is_empty() {
                         true => vec![match kind {
                             PaneKind::Diff => "no changes against the base".to_owned(),
+                            PaneKind::Compare => "nothing to compare".to_owned(),
                             _ => "nothing recorded yet".to_owned(),
                         }],
                         false => text.lines().map(str::to_owned).collect(),
@@ -664,8 +700,23 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
                     model.mode = Mode::Browse;
                     return Vec::new();
                 };
+                if let Ask::Checkpoint { .. } = action.ask {
+                    // A number first, then a yes naming it.
+                    match actions::checkpoint_number(&text) {
+                        Ok(turn) => {
+                            model.mode = Mode::Confirm(Pending {
+                                action: action.id,
+                                branch,
+                                text: turn.to_string(),
+                                off: false,
+                            });
+                        }
+                        Err(why) => model.toast(Tone::Warn, why),
+                    }
+                    return Vec::new();
+                }
                 model.mode = Mode::Browse;
-                return start(model, action, &branch, &text);
+                return start(model, action, &branch, &text, false);
             }
             Key::Backspace => input.backspace(),
             Key::Left => input.cursor = input.cursor.saturating_sub(1),
@@ -679,7 +730,13 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
             Key::Char('y' | 'Y') | Key::Enter => {
                 let pending = pending.clone();
                 model.mode = Mode::Browse;
-                return start(model, actions::by_id(pending.action), &pending.branch, "");
+                return start(
+                    model,
+                    actions::by_id(pending.action),
+                    &pending.branch,
+                    &pending.text,
+                    pending.off,
+                );
             }
             Key::Char('n' | 'N' | 'q') | Key::Esc => {
                 let name = actions::by_id(pending.action).name;
@@ -770,8 +827,11 @@ fn trigger(model: &mut Model, action: &'static Action) -> Vec<Cmd> {
         return Vec::new();
     }
     let branch = info.name.clone();
+    // A toggle's off form, on the branch being tried.
+    let off = matches!(action.run, Run::Toggle { .. })
+        && model.trying.as_deref() == Some(branch.as_str());
     match action.ask {
-        Ask::Nothing => start(model, action, &branch, ""),
+        Ask::Nothing => start(model, action, &branch, "", off),
         Ask::Text { .. } => {
             model.mode = Mode::Input(Input {
                 action: Some(action.id),
@@ -780,10 +840,23 @@ fn trigger(model: &mut Model, action: &'static Action) -> Vec<Cmd> {
             });
             Vec::new()
         }
+        Ask::Checkpoint { .. } => {
+            model.mode = Mode::Input(Input {
+                action: Some(action.id),
+                branch: branch.clone(),
+                ..Input::default()
+            });
+            vec![Cmd::Load {
+                kind: PaneKind::Checkpoints,
+                branch,
+            }]
+        }
         Ask::Confirm { .. } => {
             model.mode = Mode::Confirm(Pending {
                 action: action.id,
                 branch,
+                text: String::new(),
+                off,
             });
             Vec::new()
         }
@@ -792,10 +865,10 @@ fn trigger(model: &mut Model, action: &'static Action) -> Vec<Cmd> {
 
 /// The command that carries out `action` on `branch`, with `text` from its
 /// input box.
-fn start(model: &mut Model, action: &Action, branch: &str, text: &str) -> Vec<Cmd> {
+fn start(model: &mut Model, action: &Action, branch: &str, text: &str, off: bool) -> Vec<Cmd> {
     match action.run {
-        Run::Background(template) | Run::Wait(template) => {
-            let argv = actions::argv(template, branch, text);
+        Run::Background(_) | Run::Wait(_) | Run::Toggle { .. } => {
+            let argv = actions::command(action, branch, text, off).unwrap_or_default();
             let shown: Vec<String> = argv
                 .iter()
                 .filter(|a| *a != "--")
@@ -830,7 +903,10 @@ fn start(model: &mut Model, action: &Action, branch: &str, text: &str) -> Vec<Cm
             );
             vec![Cmd::Copy(text)]
         }
-        Run::Pending(_) => Vec::new(),
+        Run::Open => {
+            model.toast(Tone::Accent, format!("opening {branch}'s worktree"));
+            vec![Cmd::Open(branch.to_owned())]
+        }
     }
 }
 
@@ -855,7 +931,10 @@ fn finished(model: &mut Model, action: &Action, branch: &str, ok: bool, output: 
     };
     model.toast(if ok { Tone::Good } else { Tone::Bad }, text);
     let lines: Vec<&str> = output.lines().collect();
-    let show = action.id == ActionId::Merge || (!ok && lines.len() > 1);
+    // A merge's and a pull request's check output, and a rewind's note on
+    // how the conversation continues, are worth reading whole.
+    let show = matches!(action.id, ActionId::Merge | ActionId::Pr | ActionId::Rewind)
+        || (!ok && lines.len() > 1);
     if show && model.mode == Mode::Browse {
         let mut pane = Pane::loading(
             PaneKind::Output,
@@ -1117,9 +1196,12 @@ fn footer_line(model: &Model) -> Line<'static> {
             key("Esc"),
             text("clear"),
         ]),
-        Mode::Input(_) => Line::from(vec![
+        Mode::Input(input) => Line::from(vec![
             key("Enter"),
-            text("send"),
+            text(match input.action.map(|id| actions::by_id(id).ask) {
+                Some(Ask::Checkpoint { .. }) => "choose",
+                _ => "send",
+            }),
             key("Esc"),
             text("cancel"),
             key("←/→"),
@@ -1383,6 +1465,43 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
         }
     }
     lines.push(Line::from(vec![label("cost"), Span::raw(cost)]));
+    if let Some(detail) = detail.filter(|d| d.last_checkpoint > 0 || d.checkpoint.is_some()) {
+        let at = match detail.checkpoint {
+            Some(0) => "at the base (0)".to_owned(),
+            Some(turn) => format!("at {turn}"),
+            None => "not at a recorded one".to_owned(),
+        };
+        lines.push(Line::from(vec![
+            label("checkpt"),
+            Span::raw(format!("{at} of {} · r rewinds", detail.last_checkpoint)),
+        ]));
+    }
+    if let Some(readiness) = detail
+        .filter(|d| !d.pull_request.is_empty())
+        .and_then(|d| crate::pr::readiness(info, &crate::pr::state(info, &d.pull_request)))
+    {
+        let look = match readiness.verdict {
+            "ready" | "merged" => Style::new().fg(Color::Green),
+            "closed" => Style::new().fg(Color::DarkGray),
+            _ => Style::new().fg(Color::Yellow),
+        };
+        lines.push(Line::from(vec![
+            label("merge"),
+            Span::styled(
+                crate::pr::readiness_text(&readiness, model.now_ms, render::Style { color: false }),
+                look,
+            ),
+        ]));
+    }
+    if model.trying.as_deref() == Some(info.name.as_str()) {
+        lines.push(Line::from(vec![
+            label("try"),
+            Span::styled(
+                "applied to this checkout (t restores it)",
+                Style::new().fg(Color::Magenta),
+            ),
+        ]));
+    }
     let unread = detail.map_or(0, |d| d.unread.len());
     lines.push(Line::from(vec![
         label("inbox"),
@@ -1495,13 +1614,12 @@ pub fn help_lines(remote: bool) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     lines.push(heading("on the selected branch"));
     for action in actions::ACTIONS {
-        let note = match (action.run, action.remote) {
-            (Run::Pending(command), _) => Some(format!("coming with {command}")),
-            (_, actions::Remote::No(_)) if remote => Some("local only".to_owned()),
+        let note = match action.remote {
+            actions::Remote::No(_) if remote => Some("local only".to_owned()),
             _ => None,
         };
         let asks = match action.ask {
-            Ask::Confirm { .. } => ", after a yes",
+            Ask::Confirm { .. } | Ask::Checkpoint { .. } => ", after a yes",
             _ => "",
         };
         lines.push(row(
@@ -1544,14 +1662,21 @@ fn popup(area: Rect, height: u16) -> Rect {
 }
 
 fn draw_input(input: &Input, frame: &mut Frame, area: Rect) {
-    let title = match input.action.map(|id| actions::by_id(id).ask) {
-        Some(Ask::Text { title }) => actions::fill(title, &input.branch),
-        _ => input.branch.clone(),
+    let (title, bottom) = match input.action.map(|id| actions::by_id(id).ask) {
+        Some(Ask::Text { title }) => (actions::fill(title, &input.branch), "Enter sends"),
+        Some(Ask::Checkpoint { title, .. }) => {
+            (actions::fill(title, &input.branch), "Enter chooses")
+        }
+        _ => (input.branch.clone(), "Enter sends"),
+    };
+    let area = match input.action.map(|id| actions::by_id(id).ask) {
+        Some(Ask::Checkpoint { .. }) => draw_choices(input, frame, area),
+        _ => area,
     };
     let area = popup(area, 3);
     let block = Block::bordered()
         .title(format!(" {title} "))
-        .title_bottom(" Enter sends · Esc cancels ")
+        .title_bottom(format!(" {bottom} · Esc cancels "))
         .border_style(Style::new().fg(Color::Cyan));
     let inner = block.inner(area);
     // Keep the cursor in view: scroll the text left as it grows.
@@ -1569,10 +1694,56 @@ fn draw_input(input: &Input, frame: &mut Frame, area: Rect) {
     frame.set_cursor_position((inner.x + (used - skip) as u16, inner.y));
 }
 
+/// The list an input box chooses from, drawn in the upper part of `area`;
+/// returns the part left for the box.
+fn draw_choices(input: &Input, frame: &mut Frame, area: Rect) -> Rect {
+    let lines: Vec<Line> = match &input.list {
+        None => vec![Line::from(Span::styled(
+            "loading…",
+            Style::new().fg(Color::DarkGray),
+        ))],
+        Some(Err(error)) => vec![Line::from(Span::styled(
+            error.clone(),
+            Style::new().fg(Color::Red),
+        ))],
+        Some(Ok(lines)) => lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| Line::from(l.clone()))
+            .collect(),
+    };
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(5).max(3));
+    let list = popup(area, height);
+    frame.render_widget(Clear, list);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(format!(
+                    " checkpoints of {} (* is where it is) ",
+                    input.branch
+                ))
+                .border_style(Style::new().fg(Color::DarkGray)),
+        ),
+        list,
+    );
+    let below = list.y + list.height;
+    Rect::new(
+        area.x,
+        below,
+        area.width,
+        (area.y + area.height).saturating_sub(below),
+    )
+}
+
 fn draw_confirm(model: &Model, pending: &Pending, frame: &mut Frame, area: Rect) {
     let action = actions::by_id(pending.action);
-    let question = match action.ask {
-        Ask::Confirm { question } => actions::fill(question, &pending.branch),
+    let question = match (action.ask, action.run) {
+        (_, Run::Toggle { off_question, .. }) if pending.off => {
+            actions::fill(off_question, &pending.branch)
+        }
+        (Ask::Confirm { question } | Ask::Checkpoint { question, .. }, _) => {
+            actions::fill(question, &pending.branch).replace("{text}", &pending.text)
+        }
         _ => format!("{} {}?", action.name, pending.branch),
     };
     let mut lines = vec![Line::from(question), Line::from("")];
@@ -1685,8 +1856,61 @@ pub trait Effects {
     type Error;
     /// The branches and the events recorded since the last call.
     fn refresh(&mut self) -> Result<Snapshot, Self::Error>;
-    /// Carry out `cmd` (never [`Cmd::Quit`]).
+    /// Carry out `cmd` (never [`Cmd::Quit`] or [`Cmd::Open`]).
     fn perform(&mut self, cmd: Cmd, done: &mpsc::Sender<Msg>);
+    /// How `by open` would start an editor on `branch`'s worktree, or why
+    /// it cannot.
+    fn editor(&mut self, branch: &str) -> Result<crate::open::Plan, String>;
+}
+
+/// `by open` from the dashboard: a terminal editor gets the screen (raw
+/// mode off, the main screen back) until it exits, and the dashboard is
+/// redrawn from scratch; a graphical one starts on another thread. The
+/// result comes back as [`Msg::Done`].
+fn open_editor(
+    terminal: &mut ratatui::DefaultTerminal,
+    plan: Result<crate::open::Plan, String>,
+    branch: String,
+    done: &mpsc::Sender<Msg>,
+) -> std::io::Result<()> {
+    use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+    use ratatui::crossterm::execute;
+    use ratatui::crossterm::terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    };
+    let finished = move |result: crate::commands::Outcome, argv: &[String]| Msg::Done {
+        action: ActionId::Open,
+        branch,
+        ok: result.is_ok(),
+        output: match result {
+            Ok(()) => format!("opened with {}", argv.join(" ")),
+            Err(error) => error.to_string(),
+        },
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            let _ = done.send(finished(Err(crate::commands::Failure::Message(error)), &[]));
+            return Ok(());
+        }
+    };
+    if !plan.terminal {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let result = crate::open::launch(&plan);
+            let _ = done.send(finished(result, &plan.argv));
+        });
+        return Ok(());
+    }
+    let mut stdout = std::io::stdout();
+    execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    let result = crate::open::launch(&plan);
+    enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    terminal.clear()?;
+    let _ = done.send(finished(result, &plan.argv));
+    Ok(())
 }
 
 /// How long [`run`] waits for a key before looking for results.
@@ -1751,6 +1975,10 @@ pub fn run<F: Effects>(
             for cmd in update(&mut model, msg) {
                 match cmd {
                     Cmd::Quit => return Ok(Ok(())),
+                    Cmd::Open(branch) => {
+                        let plan = effects.editor(&branch);
+                        open_editor(&mut terminal, plan, branch, &tx)?;
+                    }
                     cmd => effects.perform(cmd, &tx),
                 }
             }
@@ -1827,6 +2055,7 @@ mod tests {
                 })
                 .collect(),
             now_ms: 1_130_000,
+            trying: None,
         }
     }
 
@@ -2099,7 +2328,7 @@ mod tests {
         assert!(
             screen[23].starts_with(
                 "j/k move  Enter focus  / filter  S steer  x cancel  f fork  l log  y copy name  \
-                 Y copy path  ? keys  q quit"
+                 Y copy path  o open  c compare  ? keys  q quit"
             ),
             "{}",
             screen[23]
@@ -2513,16 +2742,11 @@ mod tests {
     }
 
     #[test]
-    fn copy_reserved_slots_and_remote_mode() {
+    fn copy_keys_and_remote_mode() {
         let mut m = model();
         select(&mut m, "impl");
         assert_eq!(press(&mut m, &[Key::Char('y')]), [Cmd::Copy("impl".into())]);
         assert_eq!(press(&mut m, &[Key::Char('Y')]), [Cmd::Copy("/w".into())]);
-        for key in ['p', 'o', 'r', 'c', 't'] {
-            assert!(press(&mut m, &[Key::Char(key)]).is_empty());
-            let toast = m.toast.clone().unwrap();
-            assert!(toast.text.contains("is not in this build yet"), "{toast:?}");
-        }
         m.remote = true;
         assert!(press(&mut m, &[Key::Char('Y')]).is_empty());
         assert!(m
@@ -2543,6 +2767,237 @@ mod tests {
         assert_eq!(empty.toast.unwrap().text, "no branch selected");
     }
 
+    fn yes(model: &mut Model, key: char) -> Invocation {
+        assert!(
+            press(model, &[Key::Char(key)]).is_empty(),
+            "{key} asks first"
+        );
+        assert!(matches!(model.mode, Mode::Confirm(_)), "{:?}", model.mode);
+        run_of(&press(model, &[Key::Char('y')])).clone()
+    }
+
+    #[test]
+    fn pr_open_compare_and_try_run_their_commands() {
+        let mut m = Model::new("/repo");
+        update(&mut m, Msg::Refreshed(snapshot(ready_yard(), Vec::new())));
+        select(&mut m, "done");
+        // p: by pr, after a yes, waited for, with its output in a pane.
+        press(&mut m, &[Key::Char('p')]);
+        let buffer = draw(&m, 120, 30);
+        assert!(find(&buffer, "Push done's candidate and open or update").is_some());
+        press(&mut m, &[Key::Esc]);
+        let pr = yes(&mut m, 'p');
+        assert_eq!(pr.argv, ["pr", "--", "done"]);
+        assert!(!pr.background);
+        update(
+            &mut m,
+            Msg::Done {
+                action: ActionId::Pr,
+                branch: "done".into(),
+                ok: true,
+                output: "check passed\nopened https://github.com/o/r/pull/7\n".into(),
+            },
+        );
+        assert!(matches!(&m.mode, Mode::Pane(p) if p.title == "pr done: done"));
+        press(&mut m, &[Key::Char('q')]);
+        // P: by pr --watch, in the background.
+        let watch = yes(&mut m, 'P');
+        assert_eq!(watch.argv, ["pr", "--watch", "--", "done"]);
+        assert!(watch.background);
+        // o: the dashboard opens the editor itself.
+        assert_eq!(press(&mut m, &[Key::Char('o')]), [Cmd::Open("done".into())]);
+        update(
+            &mut m,
+            Msg::Done {
+                action: ActionId::Open,
+                branch: "done".into(),
+                ok: false,
+                output: "no editor: set $VISUAL or $EDITOR".into(),
+            },
+        );
+        assert!(m.toast.as_ref().unwrap().text.contains("no editor"));
+        // c: the comparison, in a pane.
+        let cmds = press(&mut m, &[Key::Char('c')]);
+        assert_eq!(
+            cmds,
+            [Cmd::Load {
+                kind: PaneKind::Compare,
+                branch: "done".into()
+            }]
+        );
+        assert!(matches!(&m.mode, Mode::Pane(p) if p.kind == PaneKind::Compare));
+        update(
+            &mut m,
+            Msg::Loaded {
+                kind: PaneKind::Compare,
+                branch: "done".into(),
+                result: Ok("BRANCH  STATUS\ndone    ready\n".into()),
+            },
+        );
+        assert!(find(&draw(&m, 100, 24), "done    ready").is_some());
+        press(&mut m, &[Key::Char('q')]);
+        // t: try, then t again on the tried branch turns it off.
+        let on = yes(&mut m, 't');
+        assert_eq!(on.argv, ["try", "--", "done"]);
+        let mut tried = snapshot(ready_yard(), Vec::new());
+        tried.trying = Some("done".into());
+        update(&mut m, Msg::Refreshed(tried));
+        assert!(find(&draw(&m, 120, 30), "applied to this checkout").is_some());
+        press(&mut m, &[Key::Char('t')]);
+        assert!(find(&draw(&m, 120, 30), "Turn off the try of done").is_some());
+        let off = run_of(&press(&mut m, &[Key::Char('y')])).clone();
+        assert_eq!(off.argv, ["try", "--off"]);
+        // Not on a running branch, and not against a server.
+        select(&mut m, "lead");
+        for key in ['p', 'P', 'r'] {
+            assert!(press(&mut m, &[Key::Char(key)]).is_empty());
+            assert!(m
+                .toast
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("has a turn running"));
+        }
+        select(&mut m, "done");
+        m.remote = true;
+        for key in ['p', 'P', 'o', 'r', 't'] {
+            assert!(press(&mut m, &[Key::Char(key)]).is_empty(), "{key}");
+            assert!(m.toast.as_ref().unwrap().text.contains("is local only"));
+        }
+        assert_eq!(
+            press(&mut m, &[Key::Char('c')]),
+            [Cmd::Load {
+                kind: PaneKind::Compare,
+                branch: "done".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn rewind_chooses_a_checkpoint_from_the_list_then_asks() {
+        let mut m = Model::new("/repo");
+        update(&mut m, Msg::Refreshed(snapshot(ready_yard(), Vec::new())));
+        select(&mut m, "done");
+        let cmds = press(&mut m, &[Key::Char('r')]);
+        assert_eq!(
+            cmds,
+            [Cmd::Load {
+                kind: PaneKind::Checkpoints,
+                branch: "done".into()
+            }]
+        );
+        assert!(matches!(&m.mode, Mode::Input(i) if i.list.is_none()));
+        update(
+            &mut m,
+            Msg::Loaded {
+                kind: PaneKind::Checkpoints,
+                branch: "done".into(),
+                result: Ok("    0  0123456789  base\n  * 1  abcdef0123  2 file(s) +3 -1\n".into()),
+            },
+        );
+        let buffer = draw(&m, 100, 24);
+        assert!(find(&buffer, "* 1  abcdef0123").is_some());
+        assert!(find(&buffer, " rewind done to checkpoint ").is_some());
+        assert!(lines(&buffer)[23].starts_with("Enter choose"));
+        // Not a number: said, and the box stays.
+        typed(&mut m, "one");
+        assert!(press(&mut m, &[Key::Enter]).is_empty());
+        assert!(m
+            .toast
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("is not a checkpoint"));
+        assert!(matches!(m.mode, Mode::Input(_)));
+        press(&mut m, &[Key::Backspace, Key::Backspace, Key::Backspace]);
+        typed(&mut m, "0");
+        assert!(press(&mut m, &[Key::Enter]).is_empty());
+        assert!(matches!(&m.mode, Mode::Confirm(p) if p.text == "0"));
+        let buffer = draw(&m, 120, 30);
+        assert!(find(&buffer, "Reset done and its worktree to checkpoint 0?").is_some());
+        let run = run_of(&press(&mut m, &[Key::Char('y')])).clone();
+        assert_eq!(run.argv, ["rewind", "--yes", "--to", "0", "--", "done"]);
+        assert!(!run.background);
+        // Esc at the box sends nothing.
+        press(&mut m, &[Key::Char('r')]);
+        assert!(press(&mut m, &[Key::Esc]).is_empty());
+        assert_eq!(m.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn the_detail_shows_the_checkpoint_and_merge_readiness() {
+        use branchyard::{CheckRun, Checkpoint, PullRequestActivity, PullRequestRef};
+        let checkpoint = |turn: u32| {
+            Activity::Checkpoint(Checkpoint {
+                turn,
+                commit: "c".repeat(40),
+                git_ref: format!("refs/branchyard/done/1/turn-{turn}"),
+                after: Some(turn - 1),
+                session: None,
+                files_changed: 1,
+                insertions: 1,
+                deletions: 0,
+            })
+        };
+        let pr = |activity: PullRequestActivity| Activity::PullRequest(Box::new(activity));
+        let mut m = Model::new("/repo");
+        update(
+            &mut m,
+            Msg::Refreshed(snapshot(
+                ready_yard(),
+                vec![
+                    ("done", checkpoint(1)),
+                    ("done", checkpoint(2)),
+                    (
+                        "done",
+                        Activity::Rewound {
+                            from: Some(2),
+                            to: 1,
+                            commit: "c".repeat(40),
+                            session: branchyard::SessionContinuity::Fresh {
+                                reason: "test".into(),
+                            },
+                        },
+                    ),
+                    (
+                        "done",
+                        pr(PullRequestActivity::Checked(CheckRun {
+                            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                            argv: vec!["true".into()],
+                            passed: true,
+                            timed_out: false,
+                            output_tail: String::new(),
+                        })),
+                    ),
+                    (
+                        "done",
+                        pr(PullRequestActivity::Opened(PullRequestRef {
+                            number: 7,
+                            url: "https://github.com/o/r/pull/7".into(),
+                            head: "by/done".into(),
+                            base: None,
+                            draft: false,
+                        })),
+                    ),
+                ],
+            )),
+        );
+        select(&mut m, "done");
+        let buffer = draw(&m, 160, 40);
+        assert!(find(&buffer, "at 1 of 2 · r rewinds").is_some());
+        assert!(find(
+            &buffer,
+            "unknown (by show --refresh asks GitHub) · check passed"
+        )
+        .is_some());
+        assert!(find(&buffer, "PR #7 not observed yet").is_some());
+        // A branch without either shows neither.
+        select(&mut m, "docs");
+        let buffer = draw(&m, 160, 40);
+        assert!(find(&buffer, "r rewinds").is_none());
+        assert!(find(&buffer, "PR #").is_none());
+    }
+
     #[test]
     fn the_help_sheet_lists_every_action_from_the_registry() {
         let mut m = model();
@@ -2551,7 +3006,7 @@ mod tests {
         for action in actions::ACTIONS {
             assert!(find(&buffer, action.help).is_some(), "{}", action.help);
         }
-        assert!(find(&buffer, "(coming with by pr)").is_some());
+        assert!(find(&buffer, "coming with").is_none());
         assert!(find(&buffer, "local only").is_none());
         m.remote = true;
         let buffer = draw(&m, 120, 40);
