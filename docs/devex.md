@@ -88,10 +88,12 @@ emdash autosaves terminal state and resumes agents where they left off ([tasks](
   - A Checks tab that combines git status, PR state, CI, review threads and todos into one merge-readiness gate.
   - GitHub review comments appear inline, and resolving them updates the gate ([checks](https://www.conductor.build/docs/reference/checks), [diff viewer](https://www.conductor.build/docs/reference/diff-viewer)).
 
-**Branchyard:** `by diff` and `by merge` with a validated `--check`, all local; nothing reaches a pull request. **Take:**
-- `by pr <branch>`: push the branch, then open or update a pull request through `gh`, with a body built from the branch's task, turns and check results.
-- `by pr <branch> --watch`: follow CI, and on failure or a review comment, `by send` the failure or comment back to the same branch. Branchyard's steering and inbox already deliver that message into a running turn.
-- A merge-readiness line in `by show` and `by watch` (checks, CI, unresolved comments).
+**Branchyard (done, [pull requests](pull-requests.md)):**
+- `by pr <branch>` runs the branch's check on its candidate, pushes it (`--git-remote`, default `origin`), and opens or updates its pull request through `gh`, with a body built from the task, linked issue, turns, cost, check result and diffstat. Running it again updates the same pull request.
+- `by pr <branch> --watch` follows the pull request with backoff. A failed CI check (with a bounded `gh run view --log-failed` tail), a review, a comment or an unresolved review comment is sent back into the branch once, by steering its running turn or with `by send`'s path, and the next candidate is pushed. Every step is an event in `by log`, and what was delivered is kept there, so a restarted watch repeats nothing.
+- `by show` (and `--json`) has a merge-readiness line: local check, pull-request state, CI summary, unresolved threads, mergeability and review decision, from the last observation; `--refresh` asks GitHub first.
+
+**What remains:** the readiness line and a `p` key in `by watch` (the functions exist for it); replying to and resolving review threads; GitHub only, local mode only; nothing tested against GitHub itself.
 
 ### 6. Undo one step, not the whole branch
 
@@ -125,8 +127,10 @@ emdash's Library holds a catalog of 54 MCP servers. Adding one writes it into ea
 
 All three create a workspace straight from a GitHub issue, a Linear issue or a pull request (emdash also Jira, GitLab, Asana and others; Superset also from a Slack message). emdash's automations turn a cron schedule into ordinary tasks, with a history of runs.
 
-**Branchyard:** absent. **Take:**
-- `by run --issue <url|#n>`, which fetches the issue through `gh`, names the branch after it, uses the issue text as the prompt, and links the eventual pull request back to it.
+**Branchyard (done, [pull requests](pull-requests.md#starting-from-an-issue)):** `by run --issue <url|#n|n> ["more instructions"]` (and `by fan`, `by spawn`) fetch the issue through `gh`, name the branch `issue-<n>-<slug>`, use the issue under a header as the prompt, and record the link, so the pull request `by pr` opens says `Closes #n`.
+
+**What remains:**
+- Linear, Jira and other trackers; starting from a pull request.
 - Scheduling belongs to the server (a webhook-triggered or scheduled operation) rather than a desktop app.
 
 ### 10. Notice when an agent needs you
@@ -142,7 +146,9 @@ All three create a workspace straight from a GitHub issue, a Linear issue or a p
 
 ### 11. Leave for a real editor in one click
 
-Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a terminal (⌘O in emdash). **Take:** `by open <branch> [--editor code|cursor|zed|…]`, using `$VISUAL` by default, and an `o` key in `by watch`.
+Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a terminal (⌘O in emdash).
+
+**Branchyard (done, [pull requests](pull-requests.md#by-open)):** `by open <branch> [--editor code|cursor|zed|…] [--print]`, using `$VISUAL`, then `$EDITOR`, and refusing with the known names when none is set. **What remains:** the `o` key in `by watch`, which `open::plan` and `open::launch` are separated for.
 
 ### 12. Keyboard-first
 
@@ -181,10 +187,10 @@ In order of what a user would feel first:
    - Branchyard-given variables with an allocated port;
    - a per-repository trust decision;
    - setup journaled and recovered.
-3. **From branch to merged PR** (§5, §9):
+3. **From branch to merged PR** (§5, §9), done ([pull requests](pull-requests.md)):
    - `by run --issue`;
    - `by pr` and `by pr --watch`, which routes CI failures and review comments back into the branch;
-   - a merge-readiness line.
+   - a merge-readiness line in `by show`; `by open` (§11) came with it.
 4. **`by watch` as the cockpit** (§4, §10, §11, §12):
    - interrupted branches with one-key resume;
    - notifications;

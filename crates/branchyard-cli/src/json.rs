@@ -217,6 +217,10 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "commit": commit,
             "session": session,
         }),
+        Activity::PullRequest(activity) => json!({
+            "activity": "pull_request",
+            "pull_request": serde(activity),
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value

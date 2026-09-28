@@ -217,6 +217,28 @@ Setup and configuration are the CLI's: they write files for `by` and the server 
 | `Repository::check_commit`, `CheckResult` (`branchyard-workspace`) | none | a check on an exact commit in a private worktree |
 | `refs/branchyard/<branch>/<incarnation>/turn-N`, `refs/branchyard-try/*`, `.branchyard/try/` | none | checkpoint refs (deleted by `rm`), and a try's pins and saved state |
 
+## Added with pull requests
+
+GitHub is reached through the user's `gh`, which runs where the repository and its git remote are ([pull requests](pull-requests.md)). The SDK records and folds the steps; the CLI talks to `gh`.
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Start from an issue | no: pass the prompt; `slug` names the branch | `run`, `fan`, `spawn` `--issue URL\|#N\|N` | yes: `gh` runs on the client, the server gets the prompt (the link is its header; no `issue_linked` event) | n/a | n/a | `spawn --issue`, with the harness's own `gh` login; the link is the prompt's header |
+| Check the candidate alone | `Branch::verify_candidate` | inside `pr` | no: `pr` is local only | no | no | no |
+| Push the candidate | `Branch::push_candidate` | inside `pr` | no: the server's repository has its own remote and credentials; not built | no | no | no |
+| Open or update a pull request | no: the CLI's, through `gh` | `pr` | no, `unsupported` | no | no | no: `by pr` refuses inside a harness, since it pushes with the user's credentials |
+| Follow it, feeding CI and reviews back | no | `pr --watch` | no, `unsupported` | no | no | no |
+| Merge readiness | `Activity::PullRequest` events; fold them | `show`, `show --json` (`merge_readiness`) | yes, from the branch's events (a server's branches have none yet) | the events | the events | `events` shows them |
+| Observe now | no | `show --refresh` | no, `unsupported` | no | no | no |
+| Open the worktree in an editor | `BranchInfo::worktree` | `open` | no, `unsupported`: the worktree is on the server | n/a | n/a | n/a |
+
+| Surface | Before | Now |
+|---|---|---|
+| `Activity` | no pull-request steps | `pull_request` (`PullRequestActivity`, tagged by `kind`: `issue_linked`, `checked`, `pushed`, `opened`, `updated`, `observed`, `feedback_delivered`, `feedback_undelivered`, `watch_stopped`); `schema/contract.json` regenerated |
+| `by show --json` | the branch | the branch and `merge_readiness` (`null` without pull-request steps) |
+| `by run`, `fan`, `spawn` | a prompt was required | optional with `--issue`; `Usage: by run [OPTIONS] [PROMPT]` |
+| `Repository::verify`, `Repository::push` (`branchyard-workspace`) | none | a check on one commit in a temporary worktree; a push of one commit to a remote branch, without hooks or a terminal prompt |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |

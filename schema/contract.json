@@ -5881,6 +5881,19 @@
               ],
               "additionalProperties": false,
               "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "pull_request": {
+                  "$ref": "#/$defs/PullRequestActivity"
+                }
+              },
+              "required": [
+                "pull_request"
+              ],
+              "additionalProperties": false,
+              "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -7002,6 +7015,394 @@
             }
           ],
           "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
+        },
+        "PullRequestActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IssueLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "issue_linked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch works on this issue; its pull request closes it."
+            },
+            {
+              "$ref": "#/$defs/CheckRun",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "checked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's check ran on its candidate, in a temporary worktree."
+            },
+            {
+              "$ref": "#/$defs/Pushed",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "pushed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The candidate was pushed to a git remote."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "opened"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A pull request was created for the branch."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "updated"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's existing pull request was updated."
+            },
+            {
+              "$ref": "#/$defs/PullRequestObservation",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "observed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "What the forge said about the pull request, recorded when it\nchanged."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "via": {
+                  "type": "string",
+                  "description": "`steer` into a running turn, or `send` as a new turn."
+                },
+                "summary": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "One line per piece, for the log."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_delivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "via",
+                "summary"
+              ],
+              "description": "Feedback (failed CI checks, review comments) was sent into the\nbranch, each piece named by a key so it is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_undelivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "reason"
+              ],
+              "description": "Feedback recorded as delivered did not reach the branch after all;\nits keys are delivered again later."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "watch_stopped"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "`by pr --watch` stopped following the pull request."
+            }
+          ],
+          "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
+        },
+        "IssueLink": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "title"
+          ],
+          "description": "An issue a branch works on."
+        },
+        "CheckRun": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "passed": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "type": "boolean",
+              "default": false
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The end of its combined output, at most 4096 bytes.",
+              "default": ""
+            }
+          },
+          "required": [
+            "commit",
+            "argv",
+            "passed"
+          ],
+          "description": "A check run on one commit; see [`Branch::verify_candidate`]."
+        },
+        "Pushed": {
+          "type": "object",
+          "properties": {
+            "remote": {
+              "type": "string",
+              "description": "The git remote's name (or URL)."
+            },
+            "remote_branch": {
+              "type": "string",
+              "description": "The branch on the remote, without `refs/heads/`."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "forced": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "remote",
+            "remote_branch",
+            "commit"
+          ],
+          "description": "A candidate pushed to a git remote."
+        },
+        "PullRequestRef": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string",
+              "description": "Its head: the branch on the remote."
+            },
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its base, when `by pr` set one.",
+              "default": null
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "head"
+          ],
+          "description": "A pull request as `by pr` last opened or updated it."
+        },
+        "CiSummary": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failing": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The names of the failed checks.",
+              "default": []
+            }
+          },
+          "required": [
+            "passed",
+            "failed",
+            "pending",
+            "skipped"
+          ],
+          "description": "The pull request's CI checks, counted by outcome."
+        },
+        "PullRequestObservation": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "description": "`open`, `merged` or `closed`."
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            },
+            "head_commit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the pull request's head is at.",
+              "default": null
+            },
+            "review_decision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's review decision: `approved`, `changes_requested`,\n`review_required`, or none.",
+              "default": null
+            },
+            "mergeable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`mergeable`, `conflicting` or `unknown`.",
+              "default": null
+            },
+            "merge_state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's merge state: `clean`, `blocked`, `behind`, `dirty`,\n`unstable`, `has_hooks`, `draft` or `unknown`.",
+              "default": null
+            },
+            "ci": {
+              "$ref": "#/$defs/CiSummary"
+            },
+            "unresolved_threads": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Review threads not yet resolved.",
+              "default": 0
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "state",
+            "ci"
+          ],
+          "description": "What was observed of a pull request at one moment."
         }
       }
     },
@@ -7466,6 +7867,19 @@
               ],
               "additionalProperties": false,
               "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "pull_request": {
+                  "$ref": "#/$defs/PullRequestActivity"
+                }
+              },
+              "required": [
+                "pull_request"
+              ],
+              "additionalProperties": false,
+              "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -8587,6 +9001,394 @@
             }
           ],
           "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
+        },
+        "PullRequestActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IssueLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "issue_linked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch works on this issue; its pull request closes it."
+            },
+            {
+              "$ref": "#/$defs/CheckRun",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "checked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's check ran on its candidate, in a temporary worktree."
+            },
+            {
+              "$ref": "#/$defs/Pushed",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "pushed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The candidate was pushed to a git remote."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "opened"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A pull request was created for the branch."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "updated"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's existing pull request was updated."
+            },
+            {
+              "$ref": "#/$defs/PullRequestObservation",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "observed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "What the forge said about the pull request, recorded when it\nchanged."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "via": {
+                  "type": "string",
+                  "description": "`steer` into a running turn, or `send` as a new turn."
+                },
+                "summary": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "One line per piece, for the log."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_delivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "via",
+                "summary"
+              ],
+              "description": "Feedback (failed CI checks, review comments) was sent into the\nbranch, each piece named by a key so it is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_undelivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "reason"
+              ],
+              "description": "Feedback recorded as delivered did not reach the branch after all;\nits keys are delivered again later."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "watch_stopped"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "`by pr --watch` stopped following the pull request."
+            }
+          ],
+          "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
+        },
+        "IssueLink": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "title"
+          ],
+          "description": "An issue a branch works on."
+        },
+        "CheckRun": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "passed": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "type": "boolean",
+              "default": false
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The end of its combined output, at most 4096 bytes.",
+              "default": ""
+            }
+          },
+          "required": [
+            "commit",
+            "argv",
+            "passed"
+          ],
+          "description": "A check run on one commit; see [`Branch::verify_candidate`]."
+        },
+        "Pushed": {
+          "type": "object",
+          "properties": {
+            "remote": {
+              "type": "string",
+              "description": "The git remote's name (or URL)."
+            },
+            "remote_branch": {
+              "type": "string",
+              "description": "The branch on the remote, without `refs/heads/`."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "forced": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "remote",
+            "remote_branch",
+            "commit"
+          ],
+          "description": "A candidate pushed to a git remote."
+        },
+        "PullRequestRef": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string",
+              "description": "Its head: the branch on the remote."
+            },
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its base, when `by pr` set one.",
+              "default": null
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "head"
+          ],
+          "description": "A pull request as `by pr` last opened or updated it."
+        },
+        "CiSummary": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failing": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The names of the failed checks.",
+              "default": []
+            }
+          },
+          "required": [
+            "passed",
+            "failed",
+            "pending",
+            "skipped"
+          ],
+          "description": "The pull request's CI checks, counted by outcome."
+        },
+        "PullRequestObservation": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "description": "`open`, `merged` or `closed`."
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            },
+            "head_commit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the pull request's head is at.",
+              "default": null
+            },
+            "review_decision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's review decision: `approved`, `changes_requested`,\n`review_required`, or none.",
+              "default": null
+            },
+            "mergeable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`mergeable`, `conflicting` or `unknown`.",
+              "default": null
+            },
+            "merge_state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's merge state: `clean`, `blocked`, `behind`, `dirty`,\n`unstable`, `has_hooks`, `draft` or `unknown`.",
+              "default": null
+            },
+            "ci": {
+              "$ref": "#/$defs/CiSummary"
+            },
+            "unresolved_threads": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Review threads not yet resolved.",
+              "default": 0
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "state",
+            "ci"
+          ],
+          "description": "What was observed of a pull request at one moment."
         }
       }
     },
@@ -10549,6 +11351,19 @@
               ],
               "additionalProperties": false,
               "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "pull_request": {
+                  "$ref": "#/$defs/PullRequestActivity"
+                }
+              },
+              "required": [
+                "pull_request"
+              ],
+              "additionalProperties": false,
+              "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -11670,6 +12485,394 @@
             }
           ],
           "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
+        },
+        "PullRequestActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IssueLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "issue_linked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch works on this issue; its pull request closes it."
+            },
+            {
+              "$ref": "#/$defs/CheckRun",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "checked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's check ran on its candidate, in a temporary worktree."
+            },
+            {
+              "$ref": "#/$defs/Pushed",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "pushed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The candidate was pushed to a git remote."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "opened"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A pull request was created for the branch."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "updated"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's existing pull request was updated."
+            },
+            {
+              "$ref": "#/$defs/PullRequestObservation",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "observed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "What the forge said about the pull request, recorded when it\nchanged."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "via": {
+                  "type": "string",
+                  "description": "`steer` into a running turn, or `send` as a new turn."
+                },
+                "summary": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "One line per piece, for the log."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_delivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "via",
+                "summary"
+              ],
+              "description": "Feedback (failed CI checks, review comments) was sent into the\nbranch, each piece named by a key so it is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_undelivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "reason"
+              ],
+              "description": "Feedback recorded as delivered did not reach the branch after all;\nits keys are delivered again later."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "watch_stopped"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "`by pr --watch` stopped following the pull request."
+            }
+          ],
+          "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
+        },
+        "IssueLink": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "title"
+          ],
+          "description": "An issue a branch works on."
+        },
+        "CheckRun": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "passed": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "type": "boolean",
+              "default": false
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The end of its combined output, at most 4096 bytes.",
+              "default": ""
+            }
+          },
+          "required": [
+            "commit",
+            "argv",
+            "passed"
+          ],
+          "description": "A check run on one commit; see [`Branch::verify_candidate`]."
+        },
+        "Pushed": {
+          "type": "object",
+          "properties": {
+            "remote": {
+              "type": "string",
+              "description": "The git remote's name (or URL)."
+            },
+            "remote_branch": {
+              "type": "string",
+              "description": "The branch on the remote, without `refs/heads/`."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "forced": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "remote",
+            "remote_branch",
+            "commit"
+          ],
+          "description": "A candidate pushed to a git remote."
+        },
+        "PullRequestRef": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string",
+              "description": "Its head: the branch on the remote."
+            },
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its base, when `by pr` set one.",
+              "default": null
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "head"
+          ],
+          "description": "A pull request as `by pr` last opened or updated it."
+        },
+        "CiSummary": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failing": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The names of the failed checks.",
+              "default": []
+            }
+          },
+          "required": [
+            "passed",
+            "failed",
+            "pending",
+            "skipped"
+          ],
+          "description": "The pull request's CI checks, counted by outcome."
+        },
+        "PullRequestObservation": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "description": "`open`, `merged` or `closed`."
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            },
+            "head_commit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the pull request's head is at.",
+              "default": null
+            },
+            "review_decision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's review decision: `approved`, `changes_requested`,\n`review_required`, or none.",
+              "default": null
+            },
+            "mergeable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`mergeable`, `conflicting` or `unknown`.",
+              "default": null
+            },
+            "merge_state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's merge state: `clean`, `blocked`, `behind`, `dirty`,\n`unstable`, `has_hooks`, `draft` or `unknown`.",
+              "default": null
+            },
+            "ci": {
+              "$ref": "#/$defs/CiSummary"
+            },
+            "unresolved_threads": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Review threads not yet resolved.",
+              "default": 0
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "state",
+            "ci"
+          ],
+          "description": "What was observed of a pull request at one moment."
         }
       }
     },

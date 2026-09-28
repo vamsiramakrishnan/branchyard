@@ -23,7 +23,7 @@ pub struct Attempt {
     pub tokens: Option<u64>,
     /// Time spent in turns, from each prompt to the status that ended it.
     pub duration_ms: Option<u64>,
-    pub check: CheckRun,
+    pub check: AttemptCheck,
     pub candidate: Option<String>,
     pub files_changed: u32,
     pub insertions: u32,
@@ -37,7 +37,7 @@ pub struct Attempt {
 /// An attempt's check. Serialized as an object tagged by `state`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum CheckRun {
+pub enum AttemptCheck {
     /// The branch has no check.
     None,
     /// Not run by this comparison; ask for it with `run_checks`.
@@ -59,17 +59,17 @@ pub enum CheckRun {
     NoCandidate,
 }
 
-impl CheckRun {
+impl AttemptCheck {
     /// A short word for tables.
     pub fn word(&self) -> &'static str {
         match self {
-            CheckRun::None => "none",
-            CheckRun::NotRun => "not run",
-            CheckRun::PassedAtMerge | CheckRun::Passed => "passed",
-            CheckRun::Failed { .. } => "failed",
-            CheckRun::TimedOut { .. } => "timed out",
-            CheckRun::Error { .. } => "error",
-            CheckRun::NoCandidate => "-",
+            AttemptCheck::None => "none",
+            AttemptCheck::NotRun => "not run",
+            AttemptCheck::PassedAtMerge | AttemptCheck::Passed => "passed",
+            AttemptCheck::Failed { .. } => "failed",
+            AttemptCheck::TimedOut { .. } => "timed out",
+            AttemptCheck::Error { .. } => "error",
+            AttemptCheck::NoCandidate => "-",
         }
     }
 }
@@ -91,9 +91,9 @@ pub fn attempt(info: &BranchInfo, events: &[RecordedEvent], files: Vec<String>) 
         tokens: tokens(events),
         duration_ms: duration(events),
         check: match (&info.candidate, &info.status) {
-            (None, _) => CheckRun::NoCandidate,
-            (_, BranchStatus::Merged { .. }) => CheckRun::PassedAtMerge,
-            _ => CheckRun::NotRun,
+            (None, _) => AttemptCheck::NoCandidate,
+            (_, BranchStatus::Merged { .. }) => AttemptCheck::PassedAtMerge,
+            _ => AttemptCheck::NotRun,
         },
         candidate: info.candidate.as_ref().map(|c| c.commit.clone()),
         files_changed,
@@ -207,7 +207,7 @@ pub(crate) fn compare(
         };
         let mut attempt = attempt(&record.info, &events, files);
         match (&record.check, &record.info.candidate) {
-            (None, Some(_)) => attempt.check = CheckRun::None,
+            (None, Some(_)) => attempt.check = AttemptCheck::None,
             (Some(argv), Some(candidate)) if run_checks => {
                 let check = Check {
                     argv: argv.clone(),
@@ -217,10 +217,10 @@ pub(crate) fn compare(
                     .repo
                     .check_commit(&Commit(candidate.commit.clone()), &check)
                 {
-                    Ok(CheckResult::Passed { .. }) => CheckRun::Passed,
-                    Ok(CheckResult::Failed { output_tail }) => CheckRun::Failed { output_tail },
-                    Ok(CheckResult::TimedOut { output_tail }) => CheckRun::TimedOut { output_tail },
-                    Err(error) => CheckRun::Error {
+                    Ok(CheckResult::Passed { .. }) => AttemptCheck::Passed,
+                    Ok(CheckResult::Failed { output_tail }) => AttemptCheck::Failed { output_tail },
+                    Ok(CheckResult::TimedOut { output_tail }) => AttemptCheck::TimedOut { output_tail },
+                    Err(error) => AttemptCheck::Error {
                         message: error.to_string(),
                     },
                 };

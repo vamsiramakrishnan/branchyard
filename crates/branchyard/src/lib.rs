@@ -116,6 +116,7 @@ mod policy;
 mod proc;
 mod projection;
 mod provisioning;
+mod pull_request;
 mod record;
 mod recover;
 mod run;
@@ -148,7 +149,7 @@ pub use checkpoint::{
     entries as checkpoint_entries, recorded as recorded_checkpoints, CheckpointEntry, Checkpoints,
     Rewound,
 };
-pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, CheckRun};
+pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
@@ -159,6 +160,10 @@ pub use graph::{
 };
 pub use inbox::{DeliveryHook, SteerDelivery};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
+pub use pull_request::{
+    slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
+    PullRequestRef, Pushed,
+};
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 pub use spotlight::{TryEntry, TryFile, TryState};
@@ -1536,6 +1541,10 @@ pub enum Activity {
         commit: String,
         session: SessionContinuity,
     },
+    /// A step towards a pull request: an issue linked, a check run, a push,
+    /// a pull request opened or observed, feedback delivered. See
+    /// [`PullRequestActivity`] and `docs/pull-requests.md`.
+    PullRequest(Box<PullRequestActivity>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

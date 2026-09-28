@@ -31,6 +31,18 @@ pub struct Integrated {
     pub stale_checkouts: Vec<PathBuf>,
 }
 
+/// What a check said about one commit; see [`Repository::verify`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    pub commit: Commit,
+    pub passed: bool,
+    /// The check ran past its timeout and was killed; `passed` is false.
+    pub timed_out: bool,
+    /// The last [`OUTPUT_TAIL_BYTES`](crate::OUTPUT_TAIL_BYTES) bytes of its
+    /// combined output.
+    pub output_tail: String,
+}
+
 /// Why a candidate was not promoted. In every case the target ref is
 /// unchanged by this call.
 #[derive(Debug)]
@@ -250,6 +262,34 @@ impl Repository {
             check_output_tail,
             stale_checkouts,
         })
+    }
+
+    /// Runs `check` on exactly `commit`, checked out detached in a new
+    /// temporary worktree under the scratch directory (removed on every
+    /// return path), without merging it anywhere. A check that exits
+    /// unsuccessfully or times out is a [`Verified`] with `passed` false,
+    /// not an error; one that cannot start is
+    /// [`IntegrationError::CheckNotStarted`].
+    pub fn verify(&self, commit: &Commit, check: &Check) -> Result<Verified, IntegrationError> {
+        let commit = self.resolve(commit.as_str())?;
+        let scratch = TempWorktree::create(self, &commit)?;
+        let verified = match check::run(check, &scratch.path) {
+            Err(e) => return Err(IntegrationError::CheckNotStarted(e)),
+            Ok((CheckOutcome::Exited(status), output_tail)) => Verified {
+                commit,
+                passed: status.success(),
+                timed_out: false,
+                output_tail,
+            },
+            Ok((CheckOutcome::TimedOut, output_tail)) => Verified {
+                commit,
+                passed: false,
+                timed_out: true,
+                output_tail,
+            },
+        };
+        drop(scratch);
+        Ok(verified)
     }
 
     fn target_ref(&self, target: &str) -> Result<String, GitError> {

@@ -50,6 +50,16 @@ by merge make-the-flaky-parser-test-deterministic-codex   # runs the check on th
 by rm make-the-flaky-parser-test-deterministic-claude-code
 ```
 
+From an issue to a pull request, through the GitHub CLI `gh` ([pull requests](docs/pull-requests.md)):
+
+```sh
+by run --issue 42 --check "cargo test" --yes     # the issue is the task; branch issue-42-<slug>
+by pr issue-42-parser-crash                       # check the candidate, push it, open or update the PR
+by pr issue-42-parser-crash --watch --yes         # CI failures and review comments go back into the branch
+by show issue-42-parser-crash                     # merge readiness: check, PR, CI, threads, mergeability
+by open issue-42-parser-crash --editor cursor     # the worktree in your editor ($VISUAL, $EDITOR)
+```
+
 Every tool permission request reaches Branchyard. The Antigravity, Pi and Amp profiles cannot route them, so `by` refuses them unless you pass `--allow-unapproved-tools` (see [harness integration](docs/harness-integration.md#implemented-drivers)). `--ask` prompts on the terminal, `--yes` allows each one, and with neither flag and no terminal they are denied. `by log` shows each decision. These commands are tested end to end against a fake ACP agent. Against a real harness, one `by run` → `by diff` → `by merge` has run with Claude Code 2.1.283 ([validation](docs/validation.md)); the rest is on the [live testing checklist](docs/testing-live.md). Resuming or forking a session in another worktree may fail for harnesses that keep sessions per directory, such as Claude Code; the branch then reports the failure rather than starting over silently.
 
 State is durable in `.branchyard/state.db` (SQLite). A turn runs under its branch's lease, so two `by` processes never drive one branch, and `by cancel <branch>` stops a running turn from any terminal. If `by` is killed mid-turn, the next `by` command on the repository recovers the branch: it kills the harness's process group when its pid and start time still match, and ends the branch `interrupted`, saying whether the prompt had been submitted. A prompt is never submitted again. See [durability](docs/durability.md) for the journal, leases, recovery rules and limits.
@@ -84,6 +94,8 @@ The global options choose where commands run, and may come before or after the c
 | `--token-file FILE` | `BRANCHYARD_TOKEN_FILE` |
 | `--repo NAME` | `BRANCHYARD_REPO` |
 | `--ca-file FILE` | `BRANCHYARD_CA_FILE` |
+
+Pull requests: `by pr BRANCH [--git-remote NAME] [--head BRANCH] [--base BRANCH] [--title T] [--draft] [--no-check | --allow-failing-check] [--allow-not-ready] [--json]`, and with `--watch [--interval SECS] [--max-rounds N]`; `by run|fan|spawn --issue URL|#N|N`; `by show BRANCH --refresh`; `by open BRANCH [--editor NAME|--print]`. `by pr` pushes to `--git-remote`, since `--remote` is the global option naming a server; `by pr`, `by open` and `by show --refresh` are local-mode only ([pull requests](docs/pull-requests.md)).
 
 Setup is two commands in the *Shell and setup* group: `by init [TOPIC] [--json] [--next | --dry-run | --apply [--force]] [--answers FILE|-] [--defaults]`, where clap refuses two steps at once, `--force` without `--apply`, `--answers` without a step and a step without a topic (all exit 2), and `by config show|path|validate [FILE]|schema [--json]`.
 
@@ -278,6 +290,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Implementation plan](docs/implementation-plan.md): ordered milestones and acceptance gates.
 - [Comparison](docs/comparison.md): Scion, OpenRig and Herdr against Branchyard, and what to absorb from each.
 - [Lifecycle](docs/lifecycle.md): stall detection, webhook notifications and reincarnation.
+- [Pull requests](docs/pull-requests.md): `by run --issue`, `by pr`, `by pr --watch`, merge readiness and `by open`, through `gh`.
 - [Distribution](docs/distribution.md): installing the skill for Claude Code and Codex, and reproducible plugin/SDK archives.
 - [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.

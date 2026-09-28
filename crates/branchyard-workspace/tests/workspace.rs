@@ -653,3 +653,87 @@ fn fallback_identity_when_none_configured() {
         );
     }
 }
+
+#[test]
+fn verify_runs_a_check_on_one_commit_without_merging() {
+    let fixture = Fixture::new();
+    let candidate = fixture.candidate("feature", "feature.txt", "feature\n");
+    let main = fixture.head("main");
+    let pass = sh(
+        "test -f feature.txt && echo verified",
+        Duration::from_secs(30),
+    );
+    let verified = fixture.repo.verify(&candidate.head, &pass).unwrap();
+    assert!(verified.passed && !verified.timed_out);
+    assert_eq!(verified.commit, candidate.head);
+    assert!(verified.output_tail.contains("verified"));
+    let fail = sh("echo nope; exit 3", Duration::from_secs(30));
+    let verified = fixture.repo.verify(&candidate.head, &fail).unwrap();
+    assert!(!verified.passed && !verified.timed_out);
+    assert!(verified.output_tail.contains("nope"));
+    let slow = sh("sleep 5", Duration::from_millis(200));
+    assert!(
+        fixture
+            .repo
+            .verify(&candidate.head, &slow)
+            .unwrap()
+            .timed_out
+    );
+    let missing = Check {
+        argv: vec!["/nonexistent/check".into()],
+        timeout: Duration::from_secs(5),
+    };
+    assert!(matches!(
+        fixture.repo.verify(&candidate.head, &missing),
+        Err(IntegrationError::CheckNotStarted(_))
+    ));
+    // Nothing moved and nothing was left behind.
+    assert_eq!(fixture.head("main"), main);
+    fixture.assert_no_integration_worktrees();
+}
+
+#[test]
+fn push_sends_exactly_the_commit_to_a_remote_branch() {
+    let fixture = Fixture::new();
+    let remote = fixture.dir.join("remote.git");
+    git(
+        &fixture.dir,
+        &["init", "-q", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        &fixture.root(),
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let first = fixture.candidate("feature", "feature.txt", "feature\n");
+    fixture
+        .repo
+        .push("origin", &first.head, "by/feature", false)
+        .unwrap();
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/by/feature"]).trim(),
+        first.head.as_str()
+    );
+    // A commit that does not descend from what is there needs force.
+    let other = fixture.candidate("other", "other.txt", "other\n");
+    let refused = fixture
+        .repo
+        .push("origin", &other.head, "by/feature", false);
+    assert!(
+        matches!(refused, Err(GitError::Failed { .. })),
+        "{refused:?}"
+    );
+    fixture
+        .repo
+        .push("origin", &other.head, "by/feature", true)
+        .unwrap();
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/by/feature"]).trim(),
+        other.head.as_str()
+    );
+    for (remote_name, branch) in [("-u", "x"), ("origin", "-x"), ("origin", "a..b"), ("", "x")] {
+        assert!(matches!(
+            fixture.repo.push(remote_name, &other.head, branch, false),
+            Err(GitError::InvalidRef(_))
+        ));
+    }
+}

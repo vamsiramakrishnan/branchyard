@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    Activity, Branch, BranchStatus, CheckRun, Error, Policy, RecordedEvent, SessionContinuity, Yard,
+    Activity, Branch, BranchStatus, AttemptCheck, Error, Policy, RecordedEvent, SessionContinuity, Yard,
 };
 use common::{git, text, Fixture};
 
@@ -705,15 +705,15 @@ fn attempts_compare_side_by_side_with_checks_and_diffs() {
         (2, 2, 2)
     );
     assert!(one.duration_ms.is_some());
-    assert_eq!(one.check, CheckRun::NotRun);
+    assert_eq!(one.check, AttemptCheck::NotRun);
 
     let checked = f.yard.compare(&all, true).unwrap();
     assert!(
-        matches!(checked[0].check, CheckRun::Failed { .. }),
+        matches!(checked[0].check, AttemptCheck::Failed { .. }),
         "{:?}",
         checked[0].check
     );
-    assert_eq!(checked[1].check, CheckRun::Passed);
+    assert_eq!(checked[1].check, AttemptCheck::Passed);
     // Checks run in private worktrees, which are gone.
     assert_eq!(f.git(&["worktree", "list"]).lines().count(), 4);
 

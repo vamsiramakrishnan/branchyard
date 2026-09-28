@@ -275,11 +275,18 @@ pub fn branch_outcome(info: &BranchInfo) -> Outcome {
 
 pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome {
     if let Target::Remote(remote) = target {
-        return remote::run(env, remote, prompt, task);
+        // The issue's link lives in the prompt's header on a server.
+        let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
+        return remote::run(env, remote, &prompt, &task);
     }
     let yard = open()?;
+    let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
+    let task = &task;
     let live = Live::start(env, task, task.delegate.is_some(), None);
     let result = yard.task(prompt).options(live.options(task)?).run();
+    if let (Ok(branch), Some(issue)) = (&result, &issue) {
+        crate::pr::link_issue(branch, issue)?;
+    }
     live.finish(env, result)
 }
 
@@ -291,9 +298,12 @@ pub fn fan(
     task: &TaskArgs,
 ) -> Outcome {
     if let Target::Remote(remote) = target {
-        return remote::fan(env, remote, prompt, harnesses, task);
+        let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
+        return remote::fan(env, remote, &prompt, harnesses, &task);
     }
     let yard = open()?;
+    let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
+    let (prompt, task) = (prompt.as_str(), &task);
     let live = Live::start(env, task, true, None);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
     let builder = yard.task(prompt).options(live.options(task)?);
@@ -309,6 +319,11 @@ pub fn fan(
             return Err(error.into());
         }
     };
+    if let Some(issue) = &issue {
+        for branch in &branches {
+            crate::pr::link_issue(branch, issue)?;
+        }
+    }
     let descendants = wait_for_descendants(&branches.iter().collect::<Vec<_>>());
     live.console.finish();
     let descendants = descendants?.unwrap_or_default();
@@ -539,18 +554,43 @@ pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
     print(&render::branch_table(&infos, now(), env.style()))
 }
 
-pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
-    let info = match target {
-        Target::Local => open()?.branch(branch)?.info().clone(),
-        Target::Remote(remote) => remote.repo.branch(branch)?,
+/// `by show`, with the merge-readiness line `by pr` and `by pr --watch`
+/// recorded; `refresh` asks GitHub first (local mode).
+pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bool) -> Outcome {
+    let (info, events) = match target {
+        Target::Local => {
+            let yard = open()?;
+            if refresh {
+                crate::pr::refresh(&yard, branch)?;
+            }
+            let branch = yard.branch(branch)?;
+            (branch.info().clone(), branch.events()?)
+        }
+        Target::Remote(_) if refresh => {
+            return Err(Failure::Sdk(branchyard::Error::Unsupported(
+                "by show --refresh asks GitHub about a pull request by pr opened from this \
+                 repository; it works in local mode only"
+                    .into(),
+            )))
+        }
+        Target::Remote(remote) => (
+            remote.repo.branch(branch)?,
+            remote.repo.events(branch, 0)?.events,
+        ),
     };
     let checkpoints = crate::attempts::checkpoints(target, &info)?;
+    let (readiness, line) = crate::pr::show_readiness(&info, &events, env.style());
     if as_json {
         let mut value = json::branch(&info);
         value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
+        value["merge_readiness"] = readiness;
         return print(&json::text(&value));
     }
-    let mut text = render::details(&info, now(), env.style());
+    let extra = line
+        .map(|line| ("merge readiness", line))
+        .into_iter()
+        .collect();
+    let mut text = render::details(&info, now(), env.style(), extra);
     text.push_str(&crate::attempts::checkpoint_lines(
         &checkpoints,
         env.style(),
@@ -847,7 +887,14 @@ fn required_outside(branch: Option<String>, command: &str) -> Result<String, bra
 
 pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outcome {
     let json = args.json;
-    let task = &args.task;
+    // A child's issue link lives in its prompt's header: a harness has no
+    // yard of its own to record it in.
+    let (prompt, task, _) = crate::pr::issue_task(prompt, &args.task, None)?;
+    let args = &SpawnArgs {
+        task,
+        ..args.clone()
+    };
+    let (prompt, task) = (prompt.as_str(), &args.task);
     let request = Spawn {
         prompt: prompt.to_owned(),
         harness: task.harness.clone(),

@@ -496,7 +496,7 @@ pub fn compare_table(attempts: &[Attempt], style: Style) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use branchyard::{CheckRun, SessionContinuity};
+    use branchyard::{AttemptCheck, SessionContinuity};
 
     fn attempt(name: &str, unique: &[&str]) -> Attempt {
         Attempt {
@@ -507,7 +507,7 @@ mod tests {
             cost_usd: Some(0.5),
             tokens: Some(12_300),
             duration_ms: Some(95_000),
-            check: CheckRun::Passed,
+            check: AttemptCheck::Passed,
             candidate: Some("0123456789abcdef".into()),
             files_changed: 3,
             insertions: 10,

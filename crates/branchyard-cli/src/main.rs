@@ -9,8 +9,11 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod gh;
 mod init;
 mod json;
+mod open;
+mod pr;
 mod remote;
 mod render;
 mod rig;
@@ -212,7 +215,11 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         ),
         Command::Reincarnate { branch, task } => commands::reincarnate(env, target, &branch, &task),
         Command::Ls { json } => commands::ls(env, target, json),
-        Command::Show { branch, json } => commands::show(env, target, &branch, json),
+        Command::Show {
+            branch,
+            json,
+            refresh,
+        } => commands::show(env, target, &branch, json, refresh),
         Command::Diff { branch } => commands::diff(env, target, &branch),
         Command::Log {
             branch,
@@ -225,6 +232,12 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             keep_credentials,
         } => commands::rm(target, &branch, keep_credentials),
         Command::Harnesses { json } => commands::harnesses(env, target, json),
+        Command::Pr { branch, pr } => pr::main(env, target, &branch, &pr),
+        Command::Open {
+            branch,
+            editor,
+            print,
+        } => open::main(target, &branch, editor.as_deref(), print),
         Command::Watch { interval, once } => watch::run(env, target, interval, once),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
         Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),
