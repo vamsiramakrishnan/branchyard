@@ -44,7 +44,7 @@ pub(crate) fn open_with(
 
 /// Take `name`'s lease for a step outside any turn, such as a merge or a
 /// removal, keeping its record. Refused while a turn runs on it.
-fn hold(yard: &Yard, name: &str) -> Result<(Record, Lease), Error> {
+pub(crate) fn hold(yard: &Yard, name: &str) -> Result<(Record, Lease), Error> {
     recover::stale(yard, name)?;
     let store = yard.store();
     let record = store.read(name)?;
@@ -292,6 +292,7 @@ pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result
             }
         }
     }
+    crate::checkpoint::remove_refs(&yard.root, name)?;
     store.delete(name)?;
     // What waited for it can never start now.
     crate::graph::settled(yard, name, None);

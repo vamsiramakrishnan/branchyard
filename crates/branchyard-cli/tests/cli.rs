@@ -1511,3 +1511,189 @@ fn serve_and_worker_hand_their_arguments_to_the_server() {
     assert_eq!(remote.status.code(), Some(2));
     assert!(stderr(&remote).contains("does not take --remote"));
 }
+
+#[test]
+fn checkpoints_show_and_log_then_rewind_and_fork_at() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "WRITE r.txt=1", "--name", "cp", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = repo.by_agent(&["send", "cp", "WRITE r.txt=2", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let show = stdout(&repo.by(&["show", "cp"]));
+    assert!(show.contains("checkpoints"), "{show}");
+    assert!(show.contains("  0  "), "{show}");
+    assert!(
+        show.contains("  1  ") && show.contains("WRITE r.txt=1"),
+        "{show}"
+    );
+    assert!(show.contains("* 2  "), "{show}");
+    let json = repo.json(&["show", "cp", "--json"]);
+    assert_eq!(json["checkpoints"]["current"], 2);
+    let list = json["checkpoints"]["checkpoints"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list[0]["git_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("refs/branchyard/cp/"));
+    let log = stdout(&repo.by(&["log", "cp"]));
+    assert!(log.contains("checkpoint 1 at "), "{log}");
+    let events = repo.json(&["log", "cp", "--json"]);
+    assert!(events
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["activity"] == "checkpoint" && e["checkpoint"]["turn"] == 2));
+
+    // Without a terminal a rewind is not confirmed.
+    let refused = repo.by(&["rewind", "cp", "--to", "1"]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("pass --yes"),
+        "{}",
+        stderr(&refused)
+    );
+    let worktree = repo.root.join(".branchyard/worktrees/cp");
+    assert_eq!(fs::read_to_string(worktree.join("r.txt")).unwrap(), "2\n");
+
+    let rewound = repo.by(&["rewind", "cp", "--to", "1", "--yes"]);
+    assert!(rewound.status.success(), "{}", stderr(&rewound));
+    let text = stdout(&rewound);
+    assert!(
+        text.starts_with("rewound cp from 2 to checkpoint 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("fresh session with a summary of turn 1"),
+        "{text}"
+    );
+    assert_eq!(fs::read_to_string(worktree.join("r.txt")).unwrap(), "1\n");
+    let forward = repo.json(&["rewind", "cp", "--to", "2", "--yes", "--json"]);
+    assert_eq!(forward["to"], 2);
+    assert_eq!(forward["session"]["mode"], "native");
+    assert!(stdout(&repo.by(&["log", "cp"])).contains("rewound from 1 to checkpoint 2"));
+
+    let agent = fake_agent().display().to_string();
+    let forked = repo.by(&[
+        "fork",
+        "cp",
+        "WHOAMI",
+        "--at",
+        "1",
+        "--name",
+        "f1",
+        "--yes",
+        "--command",
+        &agent,
+    ]);
+    assert!(forked.status.success(), "{}", stderr(&forked));
+    assert!(
+        stderr(&forked).contains("forked from cp at checkpoint 1; f1 starts a fresh session"),
+        "{}",
+        stderr(&forked)
+    );
+    assert!(
+        stdout(&forked).contains("resumed=false"),
+        "{}",
+        stdout(&forked)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.root.join(".branchyard/worktrees/f1/r.txt")).unwrap(),
+        "1\n"
+    );
+    let at_and_fresh = repo.by(&["fork", "cp", "x", "--at", "1", "--fresh-session"]);
+    assert_eq!(at_and_fresh.status.code(), Some(2));
+    let missing = repo.by(&["rewind", "cp", "--to", "7", "--yes"]);
+    assert!(
+        stderr(&missing).contains("no checkpoint 7"),
+        "{}",
+        stderr(&missing)
+    );
+}
+
+#[test]
+fn compare_try_and_pick_after_a_fan() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "fan",
+        "WRITE f.txt=x",
+        "--harness",
+        "gemini-cli,qwen-code",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let (a, b) = ("write-f-txt-x-gemini-cli", "write-f-txt-x-qwen-code");
+    let out = repo.by_agent(&["send", b, "WRITE g.txt=y", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let table = stdout(&repo.by(&["compare", "--fan", "write-f-txt-x"]));
+    let lines: Vec<&str> = table.lines().collect();
+    assert!(
+        lines[0].starts_with("BRANCH") && lines[0].contains("UNIQUE FILES"),
+        "{table}"
+    );
+    assert!(
+        lines[1].starts_with(a) && lines[1].contains(" none "),
+        "{table}"
+    );
+    assert!(
+        lines[2].starts_with(b) && lines[2].contains("g.txt"),
+        "{table}"
+    );
+    let json = repo.json(&["compare", a, b, "--json"]);
+    let attempts = json.as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[1]["turns"], 2);
+    assert_eq!(attempts[1]["unique_files"], serde_json::json!(["g.txt"]));
+    assert_eq!(attempts[0]["unique_files"], serde_json::json!([]));
+    let diff = stdout(&repo.by(&["compare", "--diff", a, b]));
+    assert!(diff.contains("+++ b/g.txt"), "{diff}");
+
+    // Try one, swap to the other, and restore.
+    let tried = repo.by(&["try", a]);
+    assert!(tried.status.success(), "{}", stderr(&tried));
+    assert!(
+        stdout(&tried).contains("trying write-f-txt-x-gemini-cli"),
+        "{}",
+        stdout(&tried)
+    );
+    assert_eq!(fs::read_to_string(repo.root.join("f.txt")).unwrap(), "x\n");
+    let swapped = repo.by(&["try", b]);
+    assert!(stdout(&swapped).contains(&format!("turned off the try of {a}")));
+    assert!(repo.root.join("g.txt").exists());
+    let status = repo.json(&["try", "--status", "--json"]);
+    assert_eq!(status["branch"], b);
+    let off = repo.by(&["try", "--off"]);
+    assert!(off.status.success(), "{}", stderr(&off));
+    assert!(!repo.root.join("f.txt").exists() && !repo.root.join("g.txt").exists());
+    assert_eq!(
+        repo.git(&["status", "--porcelain", "--untracked-files=all"]),
+        ""
+    );
+    fs::write(repo.root.join("dirty.txt"), "mine\n").unwrap();
+    let dirty = repo.by(&["try", a]);
+    assert!(
+        stderr(&dirty).contains("uncommitted changes"),
+        "{}",
+        stderr(&dirty)
+    );
+    fs::remove_file(repo.root.join("dirty.txt")).unwrap();
+
+    let picked = repo.by(&[
+        "compare",
+        "--fan",
+        "write-f-txt-x",
+        "--pick",
+        b,
+        "--discard-others",
+        "--yes",
+    ]);
+    assert!(picked.status.success(), "{}", stderr(&picked));
+    let text = stdout(&picked);
+    assert!(text.contains(&format!("merged {b} into main")), "{text}");
+    assert!(text.contains(&format!("removed {a}")), "{text}");
+    assert_eq!(fs::read_to_string(repo.root.join("g.txt")).unwrap(), "y\n");
+    let left = repo.json(&["ls", "--json"]);
+    assert_eq!(left.as_array().unwrap().len(), 1);
+    assert_eq!(left[0]["name"], b);
+}

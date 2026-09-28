@@ -1189,6 +1189,7 @@ pub(crate) fn conclude(
             BranchStatus::Interrupted
         }
     };
+    let snapshot_failed = snapshotted.error.is_some();
     if let Some(error) = snapshotted.error {
         info.status = match &info.status {
             BranchStatus::Failed { reason } => BranchStatus::Failed {
@@ -1196,6 +1197,15 @@ pub(crate) fn conclude(
             },
             _ => BranchStatus::Failed { reason: error },
         };
+    }
+    if driven.submitted {
+        // The summary a rewind left for this turn reached the harness.
+        record.context = None;
+        match snapshot_failed {
+            false => crate::checkpoint::record_turn(yard, fence, record, recorder)?,
+            // The worktree is no longer at a known checkpoint.
+            true => record.checkpoint = None,
+        }
     }
     Ok(())
 }

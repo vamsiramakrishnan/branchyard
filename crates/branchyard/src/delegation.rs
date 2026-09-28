@@ -1154,6 +1154,7 @@ pub(crate) fn start_turn(
     prompt: String,
     options: TaskOptions,
 ) -> Result<(), Error> {
+    let prompt = prepared.prompt(&prompt);
     let Prepared {
         record,
         lease,
@@ -2636,6 +2637,8 @@ mod tests {
             }),
             bindings: Vec::new(),
             start_base: None,
+            checkpoint: None,
+            context: None,
         }
     }
 

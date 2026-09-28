@@ -393,6 +393,30 @@ fn blocks_update(worktree: &Path, from: &Commit, to: Option<&Commit>) -> Result<
 }
 
 /// A detached worktree that is removed when dropped.
+/// What [`Repository::check_commit`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckResult {
+    Passed { output_tail: String },
+    Failed { output_tail: String },
+    TimedOut { output_tail: String },
+}
+
+impl Repository {
+    /// Run `check` on `commit` exactly, in a private temporary worktree
+    /// that is removed on every return path; nothing else is changed.
+    /// Fails if the worktree cannot be created or the check cannot start.
+    pub fn check_commit(&self, commit: &Commit, check: &Check) -> Result<CheckResult, GitError> {
+        let scratch = TempWorktree::create(self, commit)?;
+        match check::run(check, &scratch.path)? {
+            (CheckOutcome::Exited(status), output_tail) if status.success() => {
+                Ok(CheckResult::Passed { output_tail })
+            }
+            (CheckOutcome::Exited(_), output_tail) => Ok(CheckResult::Failed { output_tail }),
+            (CheckOutcome::TimedOut, output_tail) => Ok(CheckResult::TimedOut { output_tail }),
+        }
+    }
+}
+
 struct TempWorktree {
     root: PathBuf,
     path: PathBuf,

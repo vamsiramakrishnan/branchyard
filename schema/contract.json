@@ -5791,6 +5791,96 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/$defs/Checkpoint"
+                }
+              },
+              "required": [
+                "checkpoint"
+              ],
+              "additionalProperties": false,
+              "description": "A turn ended and its worktree was recorded as a checkpoint ref; see\n`docs/checkpoints.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rewound": {
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "The checkpoint the branch was at, when known.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "to": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "description": "The commit the branch and its worktree were reset to.",
+                      "type": "string"
+                    },
+                    "session": {
+                      "description": "How the branch's next turn continues the conversation.",
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "to",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "rewound"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was rewound to an earlier (or, after a rewind, a later)\ncheckpoint by [`Branch::rewind`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "forked_at": {
+                  "type": "object",
+                  "properties": {
+                    "branch": {
+                      "type": "string"
+                    },
+                    "turn": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "branch",
+                    "turn",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "forked_at"
+              ],
+              "additionalProperties": false,
+              "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -6789,6 +6879,129 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "Checkpoint": {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The turn's number, from 1; turn 0 is the branch's base and has no ref."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "git_ref": {
+              "type": "string"
+            },
+            "after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint the turn started from: `Some(0)` for the base, the\nrewound-to checkpoint after a rewind, `None` when not recorded."
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The harness session when the turn ended."
+            },
+            "files_changed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Against the branch's base."
+            },
+            "insertions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "turn",
+            "commit",
+            "git_ref",
+            "files_changed",
+            "insertions",
+            "deletions"
+          ],
+          "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SessionContinuity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "native"
+                }
+              },
+              "required": [
+                "mode",
+                "session"
+              ],
+              "description": "The harness's own session is resumed (a rewind) or forked (a fork):\nit ended exactly at that checkpoint."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "mode",
+                "turns",
+                "reason"
+              ],
+              "description": "A fresh session, whose first prompt carries a generated summary of\nthese turns, because the native session could not continue from the\ncheckpoint, for `reason`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "description": "A fresh session with no summary: nothing ran before the checkpoint\n(turn 0, the base)."
+            }
+          ],
+          "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
         }
       }
     },
@@ -7163,6 +7376,96 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/$defs/Checkpoint"
+                }
+              },
+              "required": [
+                "checkpoint"
+              ],
+              "additionalProperties": false,
+              "description": "A turn ended and its worktree was recorded as a checkpoint ref; see\n`docs/checkpoints.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rewound": {
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "The checkpoint the branch was at, when known.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "to": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "description": "The commit the branch and its worktree were reset to.",
+                      "type": "string"
+                    },
+                    "session": {
+                      "description": "How the branch's next turn continues the conversation.",
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "to",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "rewound"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was rewound to an earlier (or, after a rewind, a later)\ncheckpoint by [`Branch::rewind`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "forked_at": {
+                  "type": "object",
+                  "properties": {
+                    "branch": {
+                      "type": "string"
+                    },
+                    "turn": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "branch",
+                    "turn",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "forked_at"
+              ],
+              "additionalProperties": false,
+              "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -8161,6 +8464,129 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "Checkpoint": {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The turn's number, from 1; turn 0 is the branch's base and has no ref."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "git_ref": {
+              "type": "string"
+            },
+            "after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint the turn started from: `Some(0)` for the base, the\nrewound-to checkpoint after a rewind, `None` when not recorded."
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The harness session when the turn ended."
+            },
+            "files_changed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Against the branch's base."
+            },
+            "insertions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "turn",
+            "commit",
+            "git_ref",
+            "files_changed",
+            "insertions",
+            "deletions"
+          ],
+          "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SessionContinuity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "native"
+                }
+              },
+              "required": [
+                "mode",
+                "session"
+              ],
+              "description": "The harness's own session is resumed (a rewind) or forked (a fork):\nit ended exactly at that checkpoint."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "mode",
+                "turns",
+                "reason"
+              ],
+              "description": "A fresh session, whose first prompt carries a generated summary of\nthese turns, because the native session could not continue from the\ncheckpoint, for `reason`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "description": "A fresh session with no summary: nothing ran before the checkpoint\n(turn 0, the base)."
+            }
+          ],
+          "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
         }
       }
     },
@@ -10033,6 +10459,96 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/$defs/Checkpoint"
+                }
+              },
+              "required": [
+                "checkpoint"
+              ],
+              "additionalProperties": false,
+              "description": "A turn ended and its worktree was recorded as a checkpoint ref; see\n`docs/checkpoints.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rewound": {
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "The checkpoint the branch was at, when known.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "to": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "description": "The commit the branch and its worktree were reset to.",
+                      "type": "string"
+                    },
+                    "session": {
+                      "description": "How the branch's next turn continues the conversation.",
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "to",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "rewound"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was rewound to an earlier (or, after a rewind, a later)\ncheckpoint by [`Branch::rewind`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "forked_at": {
+                  "type": "object",
+                  "properties": {
+                    "branch": {
+                      "type": "string"
+                    },
+                    "turn": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "branch",
+                    "turn",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "forked_at"
+              ],
+              "additionalProperties": false,
+              "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -11031,6 +11547,129 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "Checkpoint": {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The turn's number, from 1; turn 0 is the branch's base and has no ref."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "git_ref": {
+              "type": "string"
+            },
+            "after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint the turn started from: `Some(0)` for the base, the\nrewound-to checkpoint after a rewind, `None` when not recorded."
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The harness session when the turn ended."
+            },
+            "files_changed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Against the branch's base."
+            },
+            "insertions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "turn",
+            "commit",
+            "git_ref",
+            "files_changed",
+            "insertions",
+            "deletions"
+          ],
+          "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SessionContinuity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "native"
+                }
+              },
+              "required": [
+                "mode",
+                "session"
+              ],
+              "description": "The harness's own session is resumed (a rewind) or forked (a fork):\nit ended exactly at that checkpoint."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "mode",
+                "turns",
+                "reason"
+              ],
+              "description": "A fresh session, whose first prompt carries a generated summary of\nthese turns, because the native session could not continue from the\ncheckpoint, for `reason`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "description": "A fresh session with no summary: nothing ran before the checkpoint\n(turn 0, the base)."
+            }
+          ],
+          "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
         }
       }
     },

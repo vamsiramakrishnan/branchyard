@@ -490,6 +490,30 @@ pub fn fork(
     live.finish(env, result)
 }
 
+/// `by fork BRANCH --at N`: a new branch from checkpoint N, saying how its
+/// session continues.
+pub fn fork_at(
+    env: &Env,
+    target: &Target,
+    branch: &str,
+    turn: u32,
+    prompt: &str,
+    task: &TaskArgs,
+) -> Outcome {
+    if let Target::Remote(_) = target {
+        return Err(Failure::Message(
+            "fork --at is not available in remote mode yet; run it on the server's host".into(),
+        ));
+    }
+    let branch = open()?.branch(branch)?;
+    let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
+    let result = branch.fork_at(turn, prompt, live.options(task)?);
+    if let Ok(forked) = &result {
+        crate::attempts::announce_fork(forked);
+    }
+    live.finish(env, result)
+}
+
 pub fn reincarnate(env: &Env, target: &Target, branch: &str, task: &TaskArgs) -> Outcome {
     if let Target::Remote(remote) = target {
         return remote::reincarnate(env, remote, branch, task);
@@ -520,10 +544,18 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome 
         Target::Local => open()?.branch(branch)?.info().clone(),
         Target::Remote(remote) => remote.repo.branch(branch)?,
     };
+    let checkpoints = crate::attempts::checkpoints(target, &info)?;
     if as_json {
-        return print(&json::text(&json::branch(&info)));
+        let mut value = json::branch(&info);
+        value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
+        return print(&json::text(&value));
     }
-    print(&render::details(&info, now(), env.style()))
+    let mut text = render::details(&info, now(), env.style());
+    text.push_str(&crate::attempts::checkpoint_lines(
+        &checkpoints,
+        env.style(),
+    ));
+    print(&text)
 }
 
 pub fn diff(env: &Env, target: &Target, branch: &str) -> Outcome {

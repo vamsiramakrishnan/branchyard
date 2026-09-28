@@ -383,6 +383,45 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             };
             style.paint(Tone::Cyan, &format!("delivered {ids} {via}"))
         }
+        Activity::Checkpoint(c) => style.paint(
+            Tone::Green,
+            &format!(
+                "checkpoint {} at {} ({} file(s), +{} -{})",
+                c.turn,
+                short_commit(&c.commit),
+                c.files_changed,
+                c.insertions,
+                c.deletions
+            ),
+        ),
+        Activity::Rewound {
+            from, to, session, ..
+        } => {
+            let from = from.map(|n| format!(" from {n}")).unwrap_or_default();
+            style.paint(
+                Tone::Yellow,
+                &format!(
+                    "rewound{from} to checkpoint {to}; the next turn {}",
+                    session.describe()
+                ),
+            )
+        }
+        Activity::ForkedAt {
+            branch,
+            turn,
+            session,
+            ..
+        } => style.paint(
+            if session.native() {
+                Tone::Cyan
+            } else {
+                Tone::Yellow
+            },
+            &format!(
+                "forked from {branch} at checkpoint {turn}; this branch {}",
+                session.describe()
+            ),
+        ),
     })
 }
 

@@ -357,6 +357,36 @@ const FORK_EXAMPLES: &str = "\
 Examples:
   by fork fix-the-flaky-test \"try a lock instead\" -n with-lock";
 
+const REWIND_EXAMPLES: &str = "\
+Each turn ends with a checkpoint, refs/branchyard/<branch>/<incarnation>/turn-<N>;
+`by show` lists them. Later checkpoints are kept until the branch is removed, so
+a rewind is undone by rewinding forward again. The next turn resumes the
+harness's session only if it ended at that checkpoint; otherwise it starts a
+fresh session with a summary of the turns before, and says so.
+
+Examples:
+  by rewind fix-the-flaky-test --to 2
+  by rewind fix-the-flaky-test --to 4 --yes      # forward again
+  by fork fix-the-flaky-test --at 1 \"try a lock instead\"";
+
+const TRY_EXAMPLES: &str = "\
+Applies the branch's diff against its base to this checkout, only when it is
+clean, and records what it changed under .branchyard/try/ so --off restores
+it exactly. Local mode only.
+
+Examples:
+  by try fix-the-flaky-test
+  by try --status
+  by try other-attempt      # swaps: the first try is turned off
+  by try --off";
+
+const COMPARE_EXAMPLES: &str = "\
+Examples:
+  by compare --fan speed-up-the-parser
+  by compare a b c --check --json
+  by compare --fan speed-up-the-parser --diff speed-up-the-parser-codex speed-up-the-parser-claude-code
+  by compare --fan speed-up-the-parser --pick speed-up-the-parser-codex --discard-others";
+
 const SPAWN_EXAMPLES: &str = "\
 Examples (inside a harness, the parent is the harness's own branch):
   by spawn \"write the tokenizer\" --harness codex --budget-usd 1 --wait
@@ -464,6 +494,10 @@ pub enum Command {
         /// Start a new session if the harness cannot fork its conversation
         #[arg(long)]
         fresh_session: bool,
+        /// Fork from the branch's checkpoint N (0 is its base) instead of its candidate; the
+        /// session forks only if it ended there, else a fresh one starts with a summary
+        #[arg(long, value_name = "N", conflicts_with = "fresh_session")]
+        at: Option<u32>,
         #[command(flatten)]
         task: Checked<ForkFlags>,
     },
@@ -489,6 +523,70 @@ pub enum Command {
         /// Keep the credential files provisioning wrote in a home a fork still uses
         #[arg(long)]
         keep_credentials: bool,
+    },
+    /// Reset a branch to one of its per-turn checkpoints
+    #[command(display_order = 107, after_help = REWIND_EXAMPLES)]
+    Rewind {
+        branch: String,
+        /// The checkpoint to go to: a turn number, or 0 for the branch's base
+        #[arg(long, value_name = "N")]
+        to: u32,
+        /// Do not ask for confirmation
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a branch's changes to this checkout to try them; --off restores it
+    #[command(display_order = 108, after_help = TRY_EXAMPLES)]
+    Try {
+        /// The branch to try (another branch's try is turned off first)
+        #[arg(required_unless_present_any = ["off", "status"], conflicts_with_all = ["off", "status"])]
+        branch: Option<String>,
+        /// Restore the checkout to what it held before the try
+        #[arg(long, conflicts_with = "status")]
+        off: bool,
+        /// Show what is being tried
+        #[arg(long)]
+        status: bool,
+        /// With --off: restore even files changed since the try, discarding those changes
+        #[arg(long, conflicts_with_all = ["branch", "status"])]
+        force: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare attempts side by side, and pick one to merge
+    #[command(display_order = 109, after_help = COMPARE_EXAMPLES)]
+    Compare {
+        /// Branches to compare
+        #[arg(required_unless_present_any = ["fan", "diff"], conflicts_with = "fan")]
+        branches: Vec<String>,
+        /// Compare the branches one `by fan` started, named NAME-<harness>
+        #[arg(long, value_name = "NAME")]
+        fan: Option<String>,
+        /// Run each branch's check on its exact candidate, in a private worktree
+        #[arg(long)]
+        check: bool,
+        /// Show the diff from attempt A's candidate to B's
+        #[arg(long, num_args = 2, value_names = ["A", "B"], conflicts_with = "pick")]
+        diff: Option<Vec<String>>,
+        /// Merge this attempt (its check must pass, as with by merge)
+        #[arg(long, value_name = "BRANCH")]
+        pick: Option<String>,
+        /// Local branch to merge the pick into (default: the current branch)
+        #[arg(long, value_name = "TARGET", requires = "pick")]
+        into: Option<String>,
+        /// After the pick merges, remove the other attempts
+        #[arg(long, requires = "pick")]
+        discard_others: bool,
+        /// Do not ask before removing the others
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List branches
     #[command(display_order = 200)]
@@ -2703,6 +2801,7 @@ mod tests {
             branch,
             prompt,
             fresh_session,
+            at: None,
             task,
         } = parse_str("fork flaky 'try another way' --fresh-session --name alt").unwrap()
         else {
@@ -2723,6 +2822,76 @@ mod tests {
         assert!(err("send flaky").contains("<PROMPT>"));
         assert!(err("fork").contains("<BRANCH>"));
         assert!(err("send flaky go --harness codex").contains("unexpected argument '--harness'"));
+    }
+
+    #[test]
+    fn checkpoint_try_and_compare_commands() {
+        assert_eq!(
+            parse_str("rewind b --to 2 -y").unwrap(),
+            Command::Rewind {
+                branch: "b".into(),
+                to: 2,
+                yes: true,
+                json: false
+            }
+        );
+        assert!(err("rewind b").contains("--to <N>"));
+        let Command::Fork { at, .. } = parse_str("fork b next --at 0").unwrap() else {
+            panic!("not fork")
+        };
+        assert_eq!(at, Some(0));
+        assert_eq!(
+            kind("fork b next --at 1 --fresh-session"),
+            ErrorKind::ArgumentConflict
+        );
+        assert!(matches!(
+            parse_str("try --off --force").unwrap(),
+            Command::Try {
+                branch: None,
+                off: true,
+                force: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_str("try b").unwrap(),
+            Command::Try {
+                branch: Some(_),
+                off: false,
+                status: false,
+                ..
+            }
+        ));
+        assert_eq!(kind("try"), ErrorKind::MissingRequiredArgument);
+        assert_eq!(kind("try b --off"), ErrorKind::ArgumentConflict);
+        assert_eq!(kind("try b --force"), ErrorKind::ArgumentConflict);
+        assert_eq!(kind("try --force"), ErrorKind::MissingRequiredArgument);
+        let Command::Compare {
+            branches,
+            fan,
+            diff,
+            pick,
+            discard_others,
+            ..
+        } = parse_str("compare --fan speed --pick speed-codex --discard-others").unwrap()
+        else {
+            panic!("not compare")
+        };
+        assert!(branches.is_empty() && discard_others);
+        assert_eq!(
+            (fan.as_deref(), pick.as_deref(), diff),
+            (Some("speed"), Some("speed-codex"), None)
+        );
+        assert!(matches!(
+            parse_str("compare --diff a b").unwrap(),
+            Command::Compare { diff: Some(pair), .. } if pair == ["a", "b"]
+        ));
+        assert_eq!(kind("compare"), ErrorKind::MissingRequiredArgument);
+        assert_eq!(kind("compare a --fan x"), ErrorKind::ArgumentConflict);
+        assert_eq!(
+            kind("compare a --discard-others"),
+            ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]

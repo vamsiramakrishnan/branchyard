@@ -192,6 +192,31 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "ids": ids,
             "via": via,
         }),
+        Activity::Checkpoint(c) => json!({ "activity": "checkpoint", "checkpoint": c }),
+        Activity::Rewound {
+            from,
+            to,
+            commit,
+            session,
+        } => json!({
+            "activity": "rewound",
+            "from": from,
+            "to": to,
+            "commit": commit,
+            "session": session,
+        }),
+        Activity::ForkedAt {
+            branch,
+            turn,
+            commit,
+            session,
+        } => json!({
+            "activity": "forked_at",
+            "branch": branch,
+            "turn": turn,
+            "commit": commit,
+            "session": session,
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value
