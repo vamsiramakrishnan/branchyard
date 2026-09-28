@@ -201,6 +201,21 @@ Setup and configuration are the CLI's: they write files for `by` and the server 
 | `by serve --check`, `branchyard-server --check` | none | load and validate a configuration as serving would, without serving or writing anything; a flag of the server's clap parser, which `by serve` forwards like the rest; `branchyard.toml`'s `[serve] config` is added as `--config` only when the server's parser reports no `--config`/`-c` on the command line |
 | The `setup` skill and `/branchyard:setup` | the plugin had the `delegate` skill only | `plugins/branchyard/skills/setup` drives `by init --json` with the harness's own question tool; the Claude plugin's `commands/setup.md` starts it; `install_skill.py --skill setup`; `by init plugin` installs both skills |
 
+## Added with the workspace lifecycle
+
+A repository's scripts are a trust decision, so each surface takes it where its owner can: a person through `by`, an operator in the server's configuration, SDK code by passing them. See [workspace](workspace.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `[workspace]` in `branchyard.toml`, `[projects."<root>".workspace]` in the user file | none | `copy`, `setup`, `run.NAME`, `teardown` (`schema/branchyard.config.json`); `by run`, `fan`, `fork`, `reincarnate` and `rig run` apply it once trusted; `send` and a harness's `by` never read it |
+| `TaskOptions::workspace`, `WorkspaceSpec` | none | copy and setup before a new branch's first turn, teardown at removal; stored with the branch and inherited by forks, reincarnations and delegated children without one |
+| `BRANCHYARD_WORKTREE`, `BRANCHYARD_PORT` | none | given to a local harness on every turn, and to workspace scripts with `BRANCHYARD_BRANCH` and `BRANCHYARD_ROOT`; the port is reserved in the store per branch |
+| `Activity::Workspace` (`workspace` in `by log --json`) | none | each copy, setup, run and teardown, with its commands, exit code and output tail |
+| `by workspace show [BRANCH]`, `trust`, `untrust`, `run [BRANCH] [NAME] [--detach]` | none | local only; refused with `--remote` |
+| `Yard::workspace`, `workspace_env`, `remove_reporting`, `record_workspace`, `deny_workspace_scripts` | none | a branch's workspace and port, the variables for running in its worktree, removal with its teardown's report |
+| `by merge --rm` | none | merge, then remove as `by rm` does (teardown included); with `--remote` too |
+| `allow_workspace_scripts` in the server's JSON config | none | `true` or served repository names; the server reads those repositories' `[workspace]` itself, never a request's (a `workspace` field is an unknown field, `400`), and refuses every other repository's scripts |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |

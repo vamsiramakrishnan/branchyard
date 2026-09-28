@@ -84,12 +84,15 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "allow_delegation": false,
   "by_path": "/usr/local/bin/by",
   "allow_unapproved_tools": false,
+  "allow_workspace_scripts": ["app"],
   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
   "database": "postgres://branchyard@db.internal/branchyard"
 }
 ```
 
-The server refuses to start with no repository, no token or credential, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
+`allow_workspace_scripts` (`true`, or a list of served repositories) lets a repository's own `[workspace]` scripts in its `branchyard.toml` run for the branches this server creates: copy, setup before the first turn, teardown on removal, with `BRANCHYARD_PORT` reserved per branch. Off by default, and no request can ask for it: every other repository's yard refuses workspace scripts outright. See [workspace](workspace.md#trust).
+
+The server refuses to start with no repository, no token or credential, an `allow_workspace_scripts` entry naming a repository it does not serve, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
 
 SIGINT or SIGTERM starts a graceful shutdown: no new connections or operations (`503 shutting_down`), no more operations claimed from the queue, event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`; queued ones stay queued, and run after the restart or on another server sharing the database. A second signal stops waiting at once.
 

@@ -3,6 +3,7 @@
 | Read | What it answers |
 |---|---|
 | [Setup](setup.md) | How do I set Branchyard up by interview, in a terminal wizard or through my coding harness, and what do `branchyard.toml` and `by init`'s protocol look like? |
+| [Workspace lifecycle](workspace.md) | How does each new branch's worktree get its `.env`, its install and its own port before the first turn, what cleans up after it, and why does a repository's script never run until I trust it? |
 | [Architecture](design.md) | What does the SDK own, where do harnesses run, and how do topology, budgets, storage, recovery, and merging work? |
 | [Harness integration](harness-integration.md) | How do we control sixteen harnesses through ACP and native interfaces? |
 | [Implementation plan](implementation-plan.md) | What do we build next, in what order, and what proves each milestone works? |

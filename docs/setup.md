@@ -11,7 +11,7 @@ Both front-ends call the same engine, [`branchyard-setup`](../crates/branchyard-
 
 | Topic | Writes | Checked by |
 |---|---|---|
-| `project` | `branchyard.toml` at the repository root, or the user's `~/.config/branchyard/config.toml`: default harness, model, effort, budget, turns, duration, permissions, isolation, check, provider, secrets by name, a server to use | the configuration parser `by` uses ([below](#configuration)) |
+| `project` | `branchyard.toml` at the repository root, or the user's `~/.config/branchyard/config.toml`: default harness, model, effort, budget, turns, duration, permissions, isolation, check, provider, secrets by name, a server to use, and (project only) a [`[workspace]`](workspace.md) suggested from the repository's lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, Compose file and `.env` files | the configuration parser `by` uses ([below](#configuration)) |
 | `server` | A server configuration (default `.branchyard/server.json`): listen address and TLS, SQLite or PostgreSQL, one credential per tenant (hash only) with its token in a 0600 file under `tokens/`, tenant quotas, allowed providers, delegation, secrets by reference, a signed webhook | `branchyard-server`'s own loader and `Config::validate`, as `by serve --check` runs them |
 | `rig` | A [rig](rigs.md) spec: a lead seat and, by shape, an implementer (two may run), a reviewer denied every editing tool, or two implementers on different harnesses; budgets split so the children fit | `by rig check`'s parser and planner |
 | `deploy` | `compose.yaml` (PostgreSQL 16 and the server), `server.json`, and `secrets/` (client token, database password, both 0600, and a `.gitignore`) | the server's loader with `--insecure-bind`; `docker compose config` when docker is installed |
@@ -184,7 +184,18 @@ image = "ghcr.io/you/claude-code:2.1"
 cpus = 2
 memory_mib = 4096
 pass_env = ["ANTHROPIC_API_KEY"]
+
+[workspace]                 # project file only; scripts run once you trust them
+copy = [".env", ".env.*"]
+setup = "pnpm install --frozen-lockfile"
+teardown = 'docker compose -p "by-$BRANCHYARD_BRANCH" down'
+
+[workspace.run.dev]
+command = "PORT=$BRANCHYARD_PORT pnpm dev"
+default = true
 ```
+
+`[workspace]` prepares each new branch's worktree and cleans up after it; it is not merged key by key. The user file may replace one repository's section with `[projects."/path/to/repo".workspace]`, which needs no trust; `[workspace]` in the user file and `[projects]` in a project file are refused. See [workspace](workspace.md).
 
 The file is read strictly: an unknown key, a harness that is not in the registry, an effort, secret source, MCP command or URL the flags would refuse, is an error naming the key and its line, and every `by` command stops on it. A secret source that looks like a credential (a known key prefix, or a long mixed-case alphanumeric string) is refused without being quoted. The `#:schema` line lets taplo and editors with TOML schema support complete and check the file against [`schema/branchyard.config.json`](../schema/branchyard.config.json).
 
@@ -192,7 +203,7 @@ What each command takes, in `crates/branchyard-cli/src/defaults.rs` (`defaults::
 
 | Command | Takes |
 |---|---|
-| `run`, `fan` | every `[defaults]` key the flags left unset, `[mcp]`, and `[secrets]` when the branch has a private home; `isolated = true` cannot be turned off by a flag |
+| `run`, `fan` | every `[defaults]` key the flags left unset, `[mcp]`, and `[secrets]` when the branch has a private home; `isolated = true` cannot be turned off by a flag. With `fork`, `reincarnate` and `rig run`, the effective `[workspace]`, once trusted ([workspace](workspace.md#trust)) |
 | `send`, `fork`, `reincarnate`, `spawn` | `permissions` only: the rest would override what the branch, its fork parent or its seat already has |
 | `serve`, `worker` | `[serve] config` as `--config`, unless the arguments give one (`--config FILE`, `--config=FILE`, `-c FILE`), ask for help or the version, or are `token new` |
 | every command but `serve`, `worker`, `init`, `config`, `mcp`, `completions`, `man` | `[remote]` for what `--remote`, `--token-file`, `--ca-file`, `--repo` and their variables left unset; `token_file`, `ca_file` and `repo` only when `url` is the server in use |
@@ -216,6 +227,7 @@ by config schema                     # the JSON Schema
 
 ## What is tested
 
+- **Workspace**: the `[workspace]` section's parsing, refusals, digest and precedence, the project topic's detection and plan, and a golden batch (`tests/golden/project-workspace.json`); see [workspace](workspace.md#what-is-tested).
 - **Engine** (`crates/branchyard-setup`): conditions and batching, answer normalization for every kind, detection with a fake probe (installed harnesses, KVM, existing files as defaults), every topic walked batch by batch answering by label and finishing with a valid plan, determinism of the JSON, no generated secret in any response, a pasted secret refused without being repeated, golden first batches, both schemas' freshness, and the embedded skills byte for byte against `plugins/branchyard/skills`.
 - **Command line** (`crates/branchyard-cli/src/args.rs`): `init` parsed into its topic and step for every topic and flag spelling; each conflict and missing requirement a usage error with exit 2 and its message; the help's topics and flags; `config`'s four actions with `--json` before or after them, and its usage errors; completions for five shells and the man page listing `init`, its flags and `config`. `defaults.rs` and the server's `names_config` test that `-c FILE`, `-cFILE`, `--config=FILE`, `--help`, `--version` and `token new` keep their own configuration.
 - **CLI** (`crates/branchyard-cli/tests/setup.rs`): the built `by` in temporary repositories: a scripted harness completing every topic through `--next`, `--dry-run` and `--apply`; applying twice writes nothing; every generated file passes the tool that reads it (`by serve --check`, `by rig check`, `by config validate`); a multi-tenant server with one 0600 token per tenant and only hashes in the configuration; an off-loopback server without TLS refused by the server's loader; refusal to replace a file without `--force`; a pasted secret never echoed; no generated secret in any output; the non-terminal refusal; configuration defaults under flags and variables, and not inside a harness's branch. The wizard runs on a pseudo-terminal (util-linux `script`) accepting every default and writing after review; its question-to-prompt mapping and review rendering are unit-tested.
