@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Install the canonical delegate skill into a harness's skill directory.
+"""Install a canonical Branchyard skill (`delegate` by default, or `setup`)
+into a harness's skill directory.
 
 Both the Claude Code and Codex plugin manifests point at
-`plugins/branchyard/skills/delegate`; this installs an exact copy of it
-for a skill-capable host that has no plugin loader of its own. See
-`docs/distribution.md`.
+`plugins/branchyard/skills/`; this installs an exact copy of one skill
+for a skill-capable host that has no plugin loader of its own. `by init
+plugin` writes the same bytes. See `docs/distribution.md`.
 """
 import argparse
 import filecmp
@@ -13,7 +14,7 @@ from pathlib import Path
 import shutil
 import sys
 
-SKILL_NAME = "delegate"
+SKILLS = ("delegate", "setup")
 
 
 def _tree_matches(a: Path, b: Path) -> bool:
@@ -30,7 +31,13 @@ def main():
         "--destination",
         type=Path,
         required=True,
-        help="Host's skill directory; 'delegate' is created beneath it",
+        help="Host's skill directory; the skill's directory is created beneath it",
+    )
+    parser.add_argument(
+        "--skill",
+        choices=SKILLS,
+        default="delegate",
+        help="Which skill to install (default: delegate)",
     )
     parser.add_argument("--apply", action="store_true", help="Copy; otherwise print a preview")
     parser.add_argument(
@@ -39,8 +46,8 @@ def main():
         help="Replace an existing install whose contents differ from the canonical skill",
     )
     args = parser.parse_args()
-    source = Path(__file__).resolve().parents[1] / "skills" / SKILL_NAME
-    target = args.destination.expanduser().resolve() / SKILL_NAME
+    source = Path(__file__).resolve().parents[1] / "skills" / args.skill
+    target = args.destination.expanduser().resolve() / args.skill
 
     replacing = False
     if target.is_symlink() or (target.exists() and not target.is_dir()):

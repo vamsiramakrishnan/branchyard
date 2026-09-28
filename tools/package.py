@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build reproducible plugin, standalone-skill and Python SDK archives from
-one canonical source: `plugins/branchyard`, `plugins/branchyard/skills/delegate`
-and `sdk/python`. See `docs/distribution.md`.
+one canonical source: `plugins/branchyard`, `plugins/branchyard/skills/delegate`,
+`plugins/branchyard/skills/setup` and `sdk/python`. See `docs/distribution.md`.
 
 Determinism: inputs are read in sorted path order, every archive entry gets
 a fixed timestamp and mode, and compression is deflate at a fixed level, so
@@ -18,6 +18,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "branchyard"
 SKILL = PLUGIN / "skills" / "delegate"
+SETUP_SKILL = PLUGIN / "skills" / "setup"
 SDK = ROOT / "sdk" / "python"
 
 # A fixed timestamp for every archive entry (ZIP's minimum representable
@@ -28,6 +29,7 @@ FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 ARCHIVES = [
     ("plugin", PLUGIN, "branchyard"),
     ("skill", SKILL, "delegate"),
+    ("setup-skill", SETUP_SKILL, "setup"),
     ("sdk", SDK, "branchyard-sdk"),
 ]
 

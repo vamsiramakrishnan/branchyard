@@ -1,0 +1,4 @@
+interface:
+  display_name: "Branchyard setup"
+  short_description: "Interview the user and write validated Branchyard configuration"
+  default_prompt: "Use $setup to set up Branchyard for this repository."

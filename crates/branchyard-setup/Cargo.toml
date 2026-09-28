@@ -1,0 +1,18 @@
+[package]
+name = "branchyard-setup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Branchyard's setup interview: declarative questions, detected defaults and validated file plans, with no I/O"
+
+[dependencies]
+branchyard-harness = { version = "0.0.1", path = "../branchyard-harness" }
+branchyard-provision = { version = "0.0.1", path = "../branchyard-provision" }
+hex = "0.4.3"
+schemars = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+similar = "3.2.0"
+toml = "1.1.6"

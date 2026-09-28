@@ -18,33 +18,42 @@
 //! 2. Add one arm for it to `dispatch` in `main.rs` (or to `run` there, when
 //!    it needs no repository or server).
 //!
-//! For example, a setup command in the "Shell and setup" group:
+//! For example, `by config` in the "Shell and setup" group, with its
+//! actions as a nested subcommand:
 //!
 //! ```ignore
-//! /// Set up Branchyard in this repository
-//! #[command(display_order = 602)]
-//! Init {
-//!     /// Accept every default without asking
-//!     #[arg(short, long)]
-//!     yes: bool,
+//! /// Show, locate or validate branchyard.toml and the user configuration
+//! #[command(display_order = 603, subcommand_required = true)]
+//! Config {
+//!     /// Print JSON
+//!     #[arg(long, global = true)]
+//!     json: bool,
+//!     #[command(subcommand)]
+//!     action: ConfigAction,
 //! },
-//! // and in main.rs `run`:
-//! Command::Init { yes } => return commands::init(env, yes),
+//! // and in main.rs `run`, since it needs no repository or server:
+//! Command::Config { json, action } => return config_cmd::main(&action, json),
 //! ```
 //!
-//! Validation that spans several flags goes in a [`Flags`] impl, flattened
-//! into the variant as [`Checked<F>`]: it then fails as a usage error
-//! (exit 2) that names the command, before anything runs.
+//! Conflicts between flags go in clap attributes where clap can say them
+//! (`conflicts_with`, `requires`, an `ArgGroup`, as [`InitFlags`] does).
+//! Validation clap cannot express goes in a [`Flags`] impl, flattened into
+//! the variant as [`Checked<F>`]: it then fails as a usage error (exit 2)
+//! that names the command, before anything runs.
 
 use std::ffi::OsString;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 use clap::builder::styling::Style;
+use clap::builder::{PossibleValue, StringValueParser, TypedValueParser};
 use clap::error::{ContextKind, ContextValue, ErrorKind};
-use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{
+    ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+    ValueHint,
+};
 
 /// How tool permission requests are answered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -364,6 +373,35 @@ Examples:
   by watch
   by watch --interval 250ms
   by watch --once | less";
+
+const INIT_EXAMPLES: &str = "\
+Examples:
+  by init                                            # the wizard, on a terminal
+  by init server --defaults                          # the wizard, every default taken
+  by init --json                                     # the topics
+  by init project --json --next --answers answers.json
+  by init project --answers answers.json --dry-run
+  by init project --answers - --apply --json < answers.json
+  by init server --defaults --apply --force
+
+Answers name where a secret is (a variable, or @file), never its value.
+Generated tokens are written 0600 and printed nowhere. See docs/setup.md.";
+
+const CONFIG_EXAMPLES: &str = "\
+Files: ~/.config/branchyard/config.toml (BRANCHYARD_USER_CONFIG overrides the
+path), then branchyard.toml at or above the current directory, up to the
+repository root. The project file overrides the user file key by key;
+BRANCHYARD_REMOTE, BRANCHYARD_TOKEN_FILE, BRANCHYARD_REPO and
+BRANCHYARD_CA_FILE override both; flags override everything. Neither file is
+read inside a harness running on a branch (BRANCHYARD_BRANCH set).
+Write one with `by init project`.
+
+Examples:
+  by config show
+  by config show --json
+  by config validate
+  by config validate ~/.config/branchyard/config.toml
+  by config schema > branchyard.config.json";
 
 const COMPLETIONS_EXAMPLES: &str = "\
 Examples:
@@ -702,6 +740,166 @@ pub enum Command {
     /// Print by's man page (roff), for `man -l -` or a man directory
     #[command(display_order = 601)]
     Man,
+    /// Set up Branchyard by interview: project defaults, a server, a rig, a deployment, skills
+    #[command(display_order = 602, after_help = INIT_EXAMPLES)]
+    Init {
+        #[command(flatten)]
+        init: Checked<InitFlags>,
+    },
+    /// Show, locate or validate branchyard.toml and the user configuration
+    #[command(display_order = 603, subcommand_required = true, after_help = CONFIG_EXAMPLES)]
+    Config {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// `by config ...`.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum ConfigAction {
+    /// Every effective value and where it came from
+    Show,
+    /// The user and project files, and whether they exist
+    Path,
+    /// Load FILE, or every file by reads, strictly
+    Validate {
+        /// One file to check (default: the user and project files, and their merge)
+        #[arg(value_hint = ValueHint::FilePath)]
+        file: Option<String>,
+    },
+    /// The JSON Schema of the file (schema/branchyard.config.json)
+    Schema,
+}
+
+/// Which step of the JSON protocol `by init` takes; none runs the wizard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitStep {
+    /// `--next`: the next batch of questions, or the plan.
+    Next,
+    /// `--dry-run`: the plan, writing nothing.
+    DryRun,
+    /// `--apply`: write the plan.
+    Apply,
+}
+
+/// `by init`, checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InitArgs {
+    pub topic: Option<branchyard_setup::Topic>,
+    pub step: Option<InitStep>,
+    pub json: bool,
+    /// `--answers FILE`, or `-` for stdin.
+    pub answers: Option<String>,
+    pub defaults: bool,
+    pub force: bool,
+}
+
+/// `by init`'s options. At most one step; a step needs a topic; `--answers`
+/// needs a step and `--force` needs `--apply`: all clap's to enforce.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(group(ArgGroup::new("step").args(["next", "dry_run", "apply"]).requires("topic")))]
+pub struct InitFlags {
+    /// What to set up (default: the wizard asks)
+    #[arg(value_name = "TOPIC", value_parser = TopicParser)]
+    topic: Option<branchyard_setup::Topic>,
+    /// Print JSON (schema/setup.protocol.json): the topics, or the step's result
+    #[arg(long)]
+    json: bool,
+    /// Print the next batch of at most four questions given the answers so far, or the plan
+    /// when none remain
+    #[arg(long, help_heading = "Protocol steps (for harnesses and scripts)")]
+    next: bool,
+    /// Print the plan: files, diffs and validation; write nothing
+    #[arg(long, help_heading = "Protocol steps (for harnesses and scripts)")]
+    dry_run: bool,
+    /// Write the plan; refuses to replace a file that differs
+    #[arg(long, help_heading = "Protocol steps (for harnesses and scripts)")]
+    apply: bool,
+    /// With --apply: replace files that differ (shown as diffs)
+    #[arg(
+        long,
+        requires = "apply",
+        // A requirement that conflicts with a given argument is not
+        // enforced, so the other steps are refused by name.
+        conflicts_with_all = ["next", "dry_run"],
+        help_heading = "Protocol steps (for harnesses and scripts)"
+    )]
+    force: bool,
+    /// A JSON object of answers by question id; - reads stdin
+    #[arg(
+        long,
+        value_name = "FILE|-",
+        requires = "step",
+        value_hint = ValueHint::FilePath,
+        help_heading = "Protocol steps (for harnesses and scripts)"
+    )]
+    answers: Option<String>,
+    /// Take the default for every unanswered question
+    #[arg(long)]
+    defaults: bool,
+}
+
+impl Flags for InitFlags {
+    type Output = InitArgs;
+    fn check(self) -> Result<InitArgs, String> {
+        let step = match (self.next, self.dry_run, self.apply) {
+            (true, _, _) => Some(InitStep::Next),
+            (_, true, _) => Some(InitStep::DryRun),
+            (_, _, true) => Some(InitStep::Apply),
+            _ => None,
+        };
+        if self.json && self.topic.is_some() && step.is_none() {
+            return Err("with --json and a topic, give --next, --dry-run or --apply".into());
+        }
+        Ok(InitArgs {
+            topic: self.topic,
+            step,
+            json: self.json,
+            answers: self.answers,
+            defaults: self.defaults,
+            force: self.force,
+        })
+    }
+}
+
+/// `by init`'s topics, from [`branchyard_setup::Topic::ALL`]: completed by
+/// every shell, listed in the man page, and refused with the list.
+#[derive(Clone, Copy, Debug)]
+struct TopicParser;
+
+impl TypedValueParser for TopicParser {
+    type Value = branchyard_setup::Topic;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let known = |text: String| {
+            branchyard_setup::Topic::parse(&text).ok_or_else(|| {
+                let ids: Vec<&str> = branchyard_setup::Topic::ALL
+                    .iter()
+                    .map(|t| t.id())
+                    .collect();
+                format!("unknown topic '{text}'; use {}", ids.join(", "))
+            })
+        };
+        StringValueParser::new()
+            .try_map(known)
+            .parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new(
+            branchyard_setup::Topic::ALL
+                .into_iter()
+                .map(|t| PossibleValue::new(t.id()).help(t.summary())),
+        ))
+    }
 }
 
 /// `by graph ...`.
@@ -994,6 +1192,14 @@ impl<F: Flags> Deref for Checked<F> {
     type Target = F::Output;
     fn deref(&self) -> &F::Output {
         &self.0
+    }
+}
+
+/// `branchyard.toml` defaults fill what the flags left unset
+/// (`crate::defaults`).
+impl<F: Flags> DerefMut for Checked<F> {
+    fn deref_mut(&mut self) -> &mut F::Output {
+        &mut self.0
     }
 }
 
@@ -1760,7 +1966,7 @@ where
     let mut cmd = command();
     let matches = cmd
         .try_get_matches_from_mut(argv.iter().cloned())
-        .map_err(|error| with_prompt_tip(error, &cmd, &argv))?;
+        .map_err(|error| with_step_tip(with_prompt_tip(error, &cmd, &argv)))?;
     Cli::from_arg_matches(&matches).map_err(|error| {
         // Checked flags fail here, after clap's own checks; format the
         // error with the command whose usage explains it.
@@ -1798,6 +2004,43 @@ fn with_prompt_tip(mut error: clap::Error, cmd: &clap::Command, argv: &[OsString
             ContextValue::StyledStrs(vec!["quote a prompt that contains spaces".into()]),
         );
     }
+    error
+}
+
+/// `by init`'s protocol steps are one per call: say so beside clap's
+/// conflict, and name the topics when a step lacks one.
+fn with_step_tip(mut error: clap::Error) -> clap::Error {
+    let steps = ["--next", "--dry-run", "--apply"];
+    let names = |kind| match error.get(kind) {
+        Some(ContextValue::String(arg)) => vec![arg.clone()],
+        Some(ContextValue::Strings(args)) => args.clone(),
+        _ => Vec::new(),
+    };
+    let is_step = |arg: &String| steps.iter().any(|s| arg.starts_with(s));
+    let tip = match error.kind() {
+        ErrorKind::ArgumentConflict
+            if names(ContextKind::InvalidArg).iter().any(is_step)
+                && names(ContextKind::PriorArg).iter().any(is_step) =>
+        {
+            "--next, --dry-run and --apply are separate steps; give one".to_owned()
+        }
+        ErrorKind::MissingRequiredArgument
+            if names(ContextKind::InvalidArg)
+                .iter()
+                .any(|a| a == "<TOPIC>") =>
+        {
+            let ids: Vec<&str> = branchyard_setup::Topic::ALL
+                .iter()
+                .map(|t| t.id())
+                .collect();
+            format!("give a topic: {}", ids.join(", "))
+        }
+        _ => return error,
+    };
+    error.insert(
+        ContextKind::Suggested,
+        ContextValue::StyledStrs(vec![tip.into()]),
+    );
     error
 }
 
@@ -2944,7 +3187,16 @@ mod tests {
             let mut out = Vec::new();
             clap_complete::generate(shell, &mut command(), "by", &mut out);
             let script = String::from_utf8(out).unwrap();
-            for word in ["spawn", "budget-usd", "remote", "completions"] {
+            for word in [
+                "spawn",
+                "budget-usd",
+                "remote",
+                "completions",
+                "init",
+                "dry-run",
+                "config",
+                "validate",
+            ] {
                 assert!(script.contains(word), "{shell}: {word}");
             }
         }
@@ -2952,5 +3204,196 @@ mod tests {
         clap_mangen::Man::new(command()).render(&mut page).unwrap();
         let page = String::from_utf8(page).unwrap();
         assert!(page.contains(".TH by") && page.contains("remote"), "{page}");
+        assert!(
+            page.contains("by\\-init") && page.contains("by\\-config"),
+            "{page}"
+        );
+    }
+
+    fn init(line: &str) -> InitArgs {
+        match parse_str(line).unwrap() {
+            Command::Init { init } => init.into_inner(),
+            other => panic!("{line}: parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn init_takes_a_topic_and_one_protocol_step() {
+        use branchyard_setup::Topic;
+        assert_eq!(
+            init("init"),
+            InitArgs {
+                topic: None,
+                step: None,
+                json: false,
+                answers: None,
+                defaults: false,
+                force: false,
+            }
+        );
+        assert_eq!(init("init --json").step, None);
+        assert_eq!(init("init server --defaults").topic, Some(Topic::Server));
+        let next = init("init project --json --next --answers=a.json");
+        assert_eq!(next.topic, Some(Topic::Project));
+        assert_eq!(next.step, Some(InitStep::Next));
+        assert!(next.json);
+        assert_eq!(next.answers.as_deref(), Some("a.json"));
+        let apply = init("init rig --answers - --apply --force --defaults");
+        assert_eq!(apply.step, Some(InitStep::Apply));
+        assert!(apply.force && apply.defaults);
+        assert_eq!(apply.answers.as_deref(), Some("-"));
+        assert_eq!(init("init deploy --dry-run").step, Some(InitStep::DryRun));
+        // Globals still go anywhere.
+        assert_eq!(
+            init("init plugin --remote http://h:1 --next").topic,
+            Some(Topic::Plugin)
+        );
+        // Every topic the engine knows parses, in its order.
+        for topic in Topic::ALL {
+            assert_eq!(init(&format!("init {}", topic.id())).topic, Some(topic));
+        }
+    }
+
+    #[test]
+    fn init_refuses_conflicting_or_incomplete_steps_as_usage_errors() {
+        for (line, kind, text) in [
+            (
+                "init project --next --apply",
+                ErrorKind::ArgumentConflict,
+                "separate steps",
+            ),
+            (
+                "init project --dry-run --apply",
+                ErrorKind::ArgumentConflict,
+                "separate steps",
+            ),
+            (
+                "init project --next --dry-run",
+                ErrorKind::ArgumentConflict,
+                "separate steps",
+            ),
+            (
+                "init --next",
+                ErrorKind::MissingRequiredArgument,
+                "give a topic",
+            ),
+            (
+                "init project --force",
+                ErrorKind::MissingRequiredArgument,
+                "--apply",
+            ),
+            (
+                "init project --force --dry-run",
+                ErrorKind::ArgumentConflict,
+                "'--force' cannot be used with '--dry-run'",
+            ),
+            (
+                "init project --answers a.json",
+                ErrorKind::MissingRequiredArgument,
+                "--next",
+            ),
+            (
+                "init nope --next",
+                ErrorKind::ValueValidation,
+                "unknown topic 'nope'",
+            ),
+            (
+                "init project extra",
+                ErrorKind::UnknownArgument,
+                "unexpected argument",
+            ),
+            (
+                "init project --bogus",
+                ErrorKind::UnknownArgument,
+                "--bogus",
+            ),
+            (
+                "init project --json --json",
+                ErrorKind::ArgumentConflict,
+                "cannot be used multiple times",
+            ),
+            (
+                "init project --answers",
+                ErrorKind::InvalidValue,
+                "a value is required",
+            ),
+            (
+                "init project --json",
+                ErrorKind::ArgumentConflict,
+                "give --next, --dry-run or --apply",
+            ),
+            (
+                "init --json --apply=yes",
+                ErrorKind::TooManyValues,
+                "--apply",
+            ),
+        ] {
+            let error = parse_str(line).unwrap_err();
+            assert_eq!(error.kind(), kind, "{line}: {error}");
+            assert_eq!(error.exit_code(), 2, "{line}");
+            let text_of = error.to_string();
+            assert!(text_of.contains(text), "{line}: {text_of}");
+            // clap shows the usage line with every error but a bad value.
+            if !matches!(kind, ErrorKind::ValueValidation | ErrorKind::InvalidValue) {
+                assert!(text_of.contains("Usage: by init"), "{line}: {text_of}");
+            }
+        }
+        let help = help("init");
+        for word in [
+            "[TOPIC]",
+            "--next",
+            "--dry-run",
+            "--apply",
+            "--force",
+            "--answers <FILE|->",
+            "Examples:",
+        ] {
+            assert!(help.contains(word), "{word} missing from:\n{help}");
+        }
+        assert!(
+            help.contains("[possible values: project, server, rig, deploy, plugin]"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn config_has_four_actions() {
+        let config = |line: &str| match parse_str(line).unwrap() {
+            Command::Config { json, action } => (json, action),
+            other => panic!("{line}: parsed as {other:?}"),
+        };
+        assert_eq!(config("config show"), (false, ConfigAction::Show));
+        assert_eq!(config("config --json show"), (true, ConfigAction::Show));
+        assert_eq!(config("config path --json"), (true, ConfigAction::Path));
+        assert_eq!(
+            config("config validate"),
+            (false, ConfigAction::Validate { file: None })
+        );
+        assert_eq!(
+            config("config validate b.toml --json"),
+            (
+                true,
+                ConfigAction::Validate {
+                    file: Some("b.toml".into())
+                }
+            )
+        );
+        assert_eq!(config("config schema"), (false, ConfigAction::Schema));
+        for (line, kind) in [
+            (
+                "config",
+                ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+            ),
+            ("config shwo", ErrorKind::InvalidSubcommand),
+            ("config show extra", ErrorKind::UnknownArgument),
+            ("config validate a b", ErrorKind::UnknownArgument),
+            ("config schema --bogus", ErrorKind::UnknownArgument),
+        ] {
+            let error = parse_str(line).unwrap_err();
+            assert_eq!(error.kind(), kind, "{line}: {error}");
+            assert_eq!(error.exit_code(), 2, "{line}");
+        }
+        assert!(err("config shwo").contains("a similar subcommand exists: 'show'"));
+        assert!(help("config").contains("BRANCHYARD_USER_CONFIG"));
     }
 }

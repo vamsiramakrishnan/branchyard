@@ -34,6 +34,11 @@ clap_complete = "4.6"
 clap_mangen = "0.3.3"
 # `--check` and `--command` splitting. Already in Cargo.lock.
 shlex = "2"
+# `by init`'s interactive wizard, and the setup engine it drives.
+cliclack = "0.5.6"
+branchyard-setup = { version = "0.0.1", path = "../branchyard-setup" }
+dirs = "7"
+branchyard-harness = { version = "0.0.1", path = "../branchyard-harness" }
 
 [dev-dependencies]
 branchyard-bridge = { path = "../branchyard-bridge" }

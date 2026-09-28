@@ -102,11 +102,7 @@ fn token_new(args: TokenNew, program: &str) -> ExitCode {
     let name = args
         .name
         .unwrap_or_else(|| format!("token-{}", &branchyard_client::new_key()[..8]));
-    let secret = format!(
-        "{}{}",
-        branchyard_client::new_key(),
-        branchyard_client::new_key()
-    );
+    let secret = new_token();
     let hash = sha256_hex(secret.as_bytes());
     eprintln!("{program}: token (printed once; give it to the client, never store it): {secret}");
     let credential = serde_json::json!({
@@ -124,6 +120,16 @@ fn token_new(args: TokenNew, program: &str) -> ExitCode {
         "{program}: add the object above to your configuration's top-level 'credentials' array"
     );
     ExitCode::SUCCESS
+}
+
+/// A fresh random bearer token or secret, as `token new` and a default
+/// token file get: two random keys.
+pub fn new_token() -> String {
+    format!(
+        "{}{}",
+        branchyard_client::new_key(),
+        branchyard_client::new_key()
+    )
 }
 
 /// The server's options. The `webhook*` and `secret` fields are as given;
@@ -243,6 +249,10 @@ struct Flags {
     /// Do not log requests
     #[arg(short, long)]
     quiet: bool,
+    /// Load and check the configuration as serving would, print any warnings, and exit
+    /// without serving or writing a file
+    #[arg(long)]
+    check: bool,
 }
 
 /// One `--webhook`, with the `--webhook-secret` and `--webhook-events` that
@@ -405,6 +415,23 @@ fn webhooks(matches: &ArgMatches, flags: &Flags) -> Result<Vec<FlagWebhook>, Str
     Ok(webhooks)
 }
 
+/// Whether `args` settle their own configuration file: `--config` (or
+/// `-c`) given on the command line, or a command line that needs none or
+/// does not parse (`--help`, `--version`, `token new`, a usage error the
+/// server reports itself). `by serve` adds `branchyard.toml`'s
+/// `[serve] config` only when this is false. Asks clap where `config`'s
+/// value came from, so a spelling it accepts is never missed.
+pub fn names_config(args: &[String]) -> bool {
+    let argv = std::iter::once("branchyard-server".to_owned()).chain(args.iter().cloned());
+    match Cli::command().try_get_matches_from(argv) {
+        Ok(matches) => {
+            matches.subcommand().is_some()
+                || matches.value_source("config") == Some(clap::parser::ValueSource::CommandLine)
+        }
+        Err(_) => true,
+    }
+}
+
 /// The server's flags from `args`, as `branchyard-server` would parse them.
 #[cfg(test)]
 fn parse(args: &[String]) -> Result<Flags, String> {
@@ -431,11 +458,7 @@ fn default_secret(path: &Path, message: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let token = format!(
-        "{}{}",
-        branchyard_client::new_key(),
-        branchyard_client::new_key()
-    );
+    let token = new_token();
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -487,8 +510,25 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         && !flags.worker
     {
         let path = data_dir.join("token");
-        default_token(&path)?;
-        token_files.push(path);
+        if flags.check {
+            // A check writes nothing: note the token serving would create,
+            // and check the rest as if it existed.
+            if !path.exists() {
+                warnings.push(format!(
+                    "serving would create a token in {}",
+                    path.display()
+                ));
+                tokens.push(Token {
+                    name: "default".into(),
+                    secret: new_token(),
+                });
+            } else {
+                token_files.push(path);
+            }
+        } else {
+            default_token(&path)?;
+            token_files.push(path);
+        }
     }
     for (i, path) in token_files.iter().enumerate() {
         let secret = config::read_token_file(path, &mut warnings)?;
@@ -556,6 +596,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     for (i, webhook) in flags.webhooks.into_iter().enumerate() {
         let secret = match webhook.secret_file {
             Some(path) => config::read_token_file(&path, &mut warnings)?,
+            None if flags.check => new_token(),
             None => {
                 let path = config.data_dir.join(format!("webhook-{i}.secret"));
                 default_secret(
@@ -577,7 +618,44 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         });
     }
     config.webhook_insecure = partial.webhook_insecure || flags.webhook_insecure;
+    if flags.check {
+        for (name, path) in &config.repos {
+            if !path.is_dir() {
+                warnings.push(format!(
+                    "repository {name}: {} is not a directory",
+                    path.display()
+                ));
+            }
+        }
+        if let Some(tls) = &config.tls {
+            for path in [&tls.cert, &tls.key] {
+                if !path.is_file() {
+                    warnings.push(format!("TLS file {} does not exist yet", path.display()));
+                }
+            }
+        }
+    }
     Ok((config, warnings))
+}
+
+/// `--check`: build and validate the configuration `args` describe as
+/// serving would, without writing anything. Returns its warnings, or why
+/// it would not serve. `by init server` checks every configuration it
+/// writes with this.
+pub fn check(args: &[String]) -> Result<Vec<String>, String> {
+    let mut flags = parse_cli(args, "branchyard-server")
+        .map_err(|e| e.to_string().trim_end().to_owned())?
+        .flags;
+    flags.check = true;
+    check_flags(flags)
+}
+
+fn check_flags(flags: Flags) -> Result<Vec<String>, String> {
+    let (config, mut warnings) = build(flags)?;
+    if let Some(warning) = config.validate()? {
+        warnings.push(warning);
+    }
+    Ok(warnings)
 }
 
 /// Wait for SIGINT or SIGTERM.
@@ -619,6 +697,21 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
             return ExitCode::from(error.exit_code() as u8);
         }
     };
+    if flags.check {
+        return match check_flags(flags) {
+            Ok(warnings) => {
+                for warning in &warnings {
+                    eprintln!("{program}: warning: {warning}");
+                }
+                println!("configuration ok");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{program}: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let (config, warnings) = match build(flags) {
         Ok(built) => built,
         Err(error) => {
@@ -900,5 +993,63 @@ mod tests {
         assert!(!dir.join("data/token").exists());
         assert!(config.validate().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_validates_without_writing_anything() {
+        let dir = std::env::temp_dir().join(format!("branchyard-cli-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let file = dir.join("config.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({ "data_dir": "data", "repos": { "app": "app" } }).to_string(),
+        )
+        .unwrap();
+        let line = format!("--config {}", file.display());
+        let warnings = check(&args(&line)).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("would create a token")),
+            "{warnings:?}"
+        );
+        assert!(!dir.join("data").exists(), "a check writes nothing");
+        std::fs::write(
+            &file,
+            serde_json::json!({ "listen": "0.0.0.0:8421", "data_dir": "data", "repos": { "app": "app" } })
+                .to_string(),
+        )
+        .unwrap();
+        assert!(check(&args(&line)).unwrap_err().contains("--insecure-bind"));
+        let insecure = format!("{line} --insecure-bind");
+        assert!(check(&args(&insecure))
+            .unwrap()
+            .iter()
+            .any(|w| w.contains("WARNING")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn names_config_follows_clap() {
+        for (line, names) in [
+            ("", false),
+            ("--worker --database postgres://h/d", false),
+            ("--check", false),
+            ("--config c.json", true),
+            ("--config=c.json --check", true),
+            ("-c c.json", true),
+            ("-cc.json", true),
+            ("--help", true),
+            ("-V", true),
+            ("token new --tenant a", true),
+            ("--bogus", true),
+        ] {
+            assert_eq!(names_config(&args(line)), names, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn check_is_a_flag() {
+        assert!(parse(&args("--check --config c.json")).unwrap().check);
+        assert!(parse(&args("--check=yes")).is_err());
     }
 }

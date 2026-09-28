@@ -82,6 +82,11 @@ impl Repo {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("NO_COLOR", "1")
+            // Never a person's own ~/.config/branchyard/config.toml.
+            .env(
+                "BRANCHYARD_USER_CONFIG",
+                "/nonexistent/branchyard-config.toml",
+            )
             .env("PAGER", "cat");
         // Never inherit a delegating harness's identity from whoever runs
         // the tests.
@@ -369,6 +374,10 @@ fn errors_exit_nonzero() {
     let outside = Command::new(env!("CARGO_BIN_EXE_by"))
         .args(["ls"])
         .current_dir(&repo.dir)
+        .env(
+            "BRANCHYARD_USER_CONFIG",
+            "/nonexistent/branchyard-config.toml",
+        )
         .output()
         .unwrap();
     assert_eq!(outside.status.code(), Some(1));

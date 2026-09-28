@@ -5,12 +5,17 @@
 
 mod args;
 mod commands;
+mod config_cmd;
 mod console;
+mod defaults;
+mod init;
 mod json;
 mod remote;
 mod render;
 mod rig;
+mod setup_io;
 mod watch;
+mod wizard;
 
 use std::ffi::OsString;
 use std::io;
@@ -38,7 +43,17 @@ fn main() -> ExitCode {
         let _ = args::command().print_help();
         return ExitCode::SUCCESS;
     };
-    match run(&Env::detect(), &cli.globals, command) {
+    // branchyard.toml and the user configuration, under flags and variables.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let env = |name: &str| std::env::var(name).ok();
+    let (globals, command) = match defaults::apply(&cwd, &env, cli.globals, command) {
+        Ok(applied) => applied,
+        Err(error) => {
+            eprintln!("by: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match run(&Env::detect(), &globals, command) {
         Ok(()) => ExitCode::SUCCESS,
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
@@ -70,7 +85,17 @@ fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
         eprintln!("by: serve runs a server here; it does not take --remote or BRANCHYARD_REMOTE");
         return ExitCode::from(2);
     }
-    branchyard_server::cli::main(&call.args, call.program)
+    // `[serve] config` from branchyard.toml, unless the arguments name one.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let env = |name: &str| std::env::var(name).ok();
+    let args = match defaults::apply_serve(&cwd, &env, call.args) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("by: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    branchyard_server::cli::main(&args, call.program)
 }
 
 /// Commands that need no repository or server run first; the rest run
@@ -89,6 +114,9 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
             clap_mangen::Man::new(args::command()).render(&mut out)?;
             return commands::print(&String::from_utf8_lossy(&out));
         }
+        // Setup needs no repository or server: it may be what creates them.
+        Command::Init { init } => return init::main(env, &init),
+        Command::Config { json, action } => return config_cmd::main(&action, json),
         _ => {}
     }
     let target = match &globals.remote {
@@ -205,6 +233,8 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Worker { .. }
         | Command::Mcp { .. }
         | Command::Completions { .. }
-        | Command::Man => unreachable!("handled before choosing a target"),
+        | Command::Man
+        | Command::Init { .. }
+        | Command::Config { .. } => unreachable!("handled before choosing a target"),
     }
 }

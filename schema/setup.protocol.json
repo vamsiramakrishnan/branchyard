@@ -1,0 +1,1013 @@
+{
+  "schema": "branchyard/setup-protocol/v1",
+  "protocol": "branchyard.setup/v1",
+  "version": 1,
+  "types": {
+    "Answers": {
+      "type": "object",
+      "additionalProperties": true,
+      "title": "Map_of_AnyValue",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "Response": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "description": "Always `branchyard.setup/v1`."
+        },
+        "topic": {
+          "$ref": "#/$defs/Topic"
+        },
+        "done": {
+          "type": "boolean",
+          "description": "No question remains; `plan` is set."
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Fact"
+          },
+          "description": "What was detected, to show before asking."
+        },
+        "answers": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "The answers accepted so far, normalized (labels mapped to values,\ntext to numbers and booleans); `null` for a question that does not\napply. Send them back, with the new ones, for the next step."
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnswerError"
+          },
+          "description": "Answers that were refused; their questions are asked again."
+        },
+        "unknown_answers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Answer ids no question has; ignored."
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Question"
+          },
+          "description": "The next batch: at most four questions, none depending on another\nin the batch. Empty when `done`."
+        },
+        "remaining": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Questions left after this batch, as far as is known now."
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Plan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "topic",
+        "done",
+        "facts",
+        "answers",
+        "errors",
+        "questions",
+        "remaining"
+      ],
+      "description": "The next questions, or the plan once none remain.",
+      "title": "Response",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Topic": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "project",
+              "description": "`branchyard.toml`: defaults for local runs."
+            },
+            {
+              "type": "string",
+              "const": "rig",
+              "description": "A rig spec: a team of seats."
+            },
+            {
+              "type": "string",
+              "const": "server",
+              "description": "A server configuration, credentials and token files."
+            },
+            {
+              "type": "string",
+              "const": "deploy",
+              "description": "A Docker Compose deployment of the server."
+            },
+            {
+              "type": "string",
+              "const": "plugin",
+              "description": "The Branchyard skills for Claude Code or Codex."
+            }
+          ],
+          "description": "What an interview sets up."
+        },
+        "Fact": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "value"
+          ],
+          "description": "One detected fact, for display."
+        },
+        "AnswerError": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "message"
+          ],
+          "description": "An answer that was refused, and why. The message never quotes a secret\nreference."
+        },
+        "Question": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Stable, dotted; the key of its answer."
+            },
+            "kind": {
+              "$ref": "#/$defs/Kind"
+            },
+            "header": {
+              "type": "string",
+              "description": "A chip label of at most 12 characters (`AskUserQuestion`'s `header`)."
+            },
+            "prompt": {
+              "type": "string",
+              "description": "The question, ending in `?`."
+            },
+            "why": {
+              "type": "string",
+              "description": "Why Branchyard asks: what the answer changes."
+            },
+            "choices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Choice"
+              },
+              "description": "At most [`CHOICES_MAX`] options, the recommended one first."
+            },
+            "more_choices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Choice"
+              },
+              "description": "Further options a wizard lists and a harness accepts as \"Other\"."
+            },
+            "allow_other": {
+              "type": "boolean",
+              "description": "Whether an answer outside the choices is accepted (checked by `rules`)."
+            },
+            "default": {
+              "description": "What an unanswered question becomes with `--defaults`, and what\n`null` means for a required one."
+            },
+            "optional": {
+              "type": "boolean",
+              "description": "Whether `null` (skip) is a valid answer."
+            },
+            "when": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Condition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Rule"
+              }
+            },
+            "secret": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For `secret_ref`: the secret's name."
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "header",
+            "prompt",
+            "why",
+            "choices",
+            "allow_other",
+            "default",
+            "optional"
+          ],
+          "description": "One question."
+        },
+        "Kind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "select",
+              "description": "One of the choices (or, with `allow_other`, any text the rules accept)."
+            },
+            {
+              "type": "string",
+              "const": "multiselect",
+              "description": "Any number of the choices: a JSON array, or a comma-separated string."
+            },
+            {
+              "type": "string",
+              "const": "text",
+              "description": "Free text."
+            },
+            {
+              "type": "string",
+              "const": "confirm",
+              "description": "Yes or no: a JSON boolean, or `yes`/`no`."
+            },
+            {
+              "type": "string",
+              "const": "number",
+              "description": "A number: JSON number or numeric text."
+            },
+            {
+              "type": "string",
+              "const": "path",
+              "description": "A filesystem path."
+            },
+            {
+              "type": "string",
+              "const": "secret_ref",
+              "description": "Where a secret is: a variable name (`ANTHROPIC_API_KEY`) or `@file`.\nNever the secret itself."
+            }
+          ]
+        },
+        "Choice": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "description": "The answer this choice gives; `null` for \"skip\"."
+            },
+            "label": {
+              "type": "string",
+              "description": "Short, comma-free, unique within the question."
+            },
+            "description": {
+              "type": "string"
+            },
+            "recommended": {
+              "type": "boolean",
+              "description": "The engine's suggestion; also the question's default."
+            }
+          },
+          "required": [
+            "value",
+            "label",
+            "description"
+          ],
+          "description": "An option of a question."
+        },
+        "Condition": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "equals": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "value": true
+                  },
+                  "required": [
+                    "id",
+                    "value"
+                  ]
+                }
+              },
+              "required": [
+                "equals"
+              ],
+              "additionalProperties": false,
+              "description": "The answer to `id` equals `value`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "in": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": true
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "values"
+                  ]
+                }
+              },
+              "required": [
+                "in"
+              ],
+              "additionalProperties": false,
+              "description": "The answer to `id` is one of `values`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "includes": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "value": true
+                  },
+                  "required": [
+                    "id",
+                    "value"
+                  ]
+                }
+              },
+              "required": [
+                "includes"
+              ],
+              "additionalProperties": false,
+              "description": "The answer to `id`, a list, includes `value`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "truthy": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              },
+              "required": [
+                "truthy"
+              ],
+              "additionalProperties": false,
+              "description": "The answer to `id` is neither `null`, `false`, `\"\"` nor `[]`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "all": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Condition"
+                  }
+                }
+              },
+              "required": [
+                "all"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "any": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Condition"
+                  }
+                }
+              },
+              "required": [
+                "any"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "not": {
+                  "$ref": "#/$defs/Condition"
+                }
+              },
+              "required": [
+                "not"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "description": "When a question applies, over earlier answers. A question skipped\nbecause its own condition was false reads as `null`."
+        },
+        "Rule": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "rule": {
+                  "type": "string",
+                  "const": "min"
+                }
+              },
+              "required": [
+                "rule",
+                "value"
+              ],
+              "description": "A number at least `value`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "rule": {
+                  "type": "string",
+                  "const": "max"
+                }
+              },
+              "required": [
+                "rule",
+                "value"
+              ],
+              "description": "A number at most `value`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rule": {
+                  "type": "string",
+                  "const": "integer"
+                }
+              },
+              "required": [
+                "rule"
+              ],
+              "description": "A whole number."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "max": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0
+                },
+                "rule": {
+                  "type": "string",
+                  "const": "name"
+                }
+              },
+              "required": [
+                "rule",
+                "max"
+              ],
+              "description": "A name: lowercase letters, digits, `.`, `_`, `-`, starting with a\nletter or digit, at most `max` characters."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rule": {
+                  "type": "string",
+                  "const": "listen_address"
+                }
+              },
+              "required": [
+                "rule"
+              ],
+              "description": "A socket address such as `127.0.0.1:8421`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "schemes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "rule": {
+                  "type": "string",
+                  "const": "url"
+                }
+              },
+              "required": [
+                "rule",
+                "schemes"
+              ],
+              "description": "A URL with one of these schemes."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rule": {
+                  "type": "string",
+                  "const": "postgres_url"
+                }
+              },
+              "required": [
+                "rule"
+              ],
+              "description": "A PostgreSQL URL without a password in it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rule": {
+                  "type": "string",
+                  "const": "secret_ref"
+                }
+              },
+              "required": [
+                "rule"
+              ],
+              "description": "A variable name or `@file`, never a secret's value."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rule": {
+                  "type": "string",
+                  "const": "absolute_command"
+                }
+              },
+              "required": [
+                "rule"
+              ],
+              "description": "An absolute executable path followed by its arguments."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rule": {
+                  "type": "string",
+                  "const": "command_line"
+                }
+              },
+              "required": [
+                "rule"
+              ],
+              "description": "A command line that splits into words."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "max": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0
+                },
+                "rule": {
+                  "type": "string",
+                  "const": "name_list"
+                }
+              },
+              "required": [
+                "rule",
+                "max"
+              ],
+              "description": "Comma-separated names, each a [`Rule::Name`]."
+            }
+          ],
+          "description": "A check on an answer, beyond its kind."
+        },
+        "Plan": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "$ref": "#/$defs/Topic"
+            },
+            "summary": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What the plan does, in a few lines."
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PlannedFile"
+              },
+              "description": "In the order they are written."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FollowUp"
+              },
+              "description": "Run after applying, in order; validation first."
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "valid": {
+              "type": "boolean",
+              "description": "Every file passed its validator."
+            }
+          },
+          "required": [
+            "topic",
+            "summary",
+            "files",
+            "commands",
+            "valid"
+          ],
+          "description": "A topic's result."
+        },
+        "PlannedFile": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Relative to the project root, or absolute."
+            },
+            "kind": {
+              "$ref": "#/$defs/ArtifactKind"
+            },
+            "mode": {
+              "type": "string",
+              "description": "Unix mode, octal text such as `\"0600\"`."
+            },
+            "action": {
+              "$ref": "#/$defs/FileAction"
+            },
+            "overwrites": {
+              "type": "boolean",
+              "description": "Whether applying replaces a file that exists with different text;\n`--apply` refuses that without `--force`."
+            },
+            "sensitive": {
+              "type": "boolean",
+              "description": "A secret: its content is never in the plan's output, only here in\nmemory to be written."
+            },
+            "content": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The text to write; `null` for a sensitive file."
+            },
+            "diff": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A unified diff against the existing file; `null` when unchanged or\nsensitive."
+            },
+            "validation": {
+              "$ref": "#/$defs/Validation"
+            },
+            "serve_flags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "For a server configuration: the flags it is served with\n(`by serve --config FILE FLAGS`), which its validation uses too."
+            }
+          },
+          "required": [
+            "path",
+            "kind",
+            "mode",
+            "action",
+            "overwrites",
+            "sensitive",
+            "validation"
+          ],
+          "description": "One file of a plan."
+        },
+        "ArtifactKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "project_config",
+              "description": "`branchyard.toml` or the user `config.toml`: [`crate::config::parse`]."
+            },
+            {
+              "type": "string",
+              "const": "server_config",
+              "description": "A server's JSON configuration: `branchyard-server`'s loader."
+            },
+            {
+              "type": "string",
+              "const": "rig",
+              "description": "A rig spec: `by rig check`'s parser and planner."
+            },
+            {
+              "type": "string",
+              "const": "compose",
+              "description": "A Docker Compose file."
+            },
+            {
+              "type": "string",
+              "const": "secret",
+              "description": "A bearer token or other generated secret: never shown."
+            },
+            {
+              "type": "string",
+              "const": "skill",
+              "description": "A skill's `SKILL.md` or reference file."
+            },
+            {
+              "type": "string",
+              "const": "text",
+              "description": "Anything else (`.gitignore`)."
+            }
+          ],
+          "description": "What a file is, which decides its validator."
+        },
+        "FileAction": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "create",
+                "update"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "unchanged",
+              "description": "Already exactly this; not rewritten."
+            },
+            {
+              "type": "string",
+              "const": "keep",
+              "description": "A secret file that exists: kept, never read or rewritten."
+            }
+          ]
+        },
+        "Validation": {
+          "type": "object",
+          "properties": {
+            "validator": {
+              "type": "string",
+              "description": "Which loader ran, such as `branchyard-server config`."
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "skipped": {
+              "type": "boolean",
+              "description": "True when no loader could run here (the verdict is then `ok`)."
+            },
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Errors when not `ok`, else warnings and notes."
+            }
+          },
+          "required": [
+            "validator",
+            "ok"
+          ],
+          "description": "A loader's verdict on a file."
+        },
+        "FollowUp": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "why"
+          ],
+          "description": "A command to run after applying."
+        }
+      }
+    },
+    "Applied": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string"
+        },
+        "topic": {
+          "$ref": "#/$defs/Topic"
+        },
+        "written": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Files written, in order."
+        },
+        "unchanged": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Files already exactly as planned, or secrets kept."
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FollowUp"
+          },
+          "description": "Run these next, in order."
+        }
+      },
+      "required": [
+        "protocol",
+        "topic",
+        "written",
+        "unchanged",
+        "commands"
+      ],
+      "description": "What `--apply` did.",
+      "title": "Applied",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Topic": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "project",
+              "description": "`branchyard.toml`: defaults for local runs."
+            },
+            {
+              "type": "string",
+              "const": "rig",
+              "description": "A rig spec: a team of seats."
+            },
+            {
+              "type": "string",
+              "const": "server",
+              "description": "A server configuration, credentials and token files."
+            },
+            {
+              "type": "string",
+              "const": "deploy",
+              "description": "A Docker Compose deployment of the server."
+            },
+            {
+              "type": "string",
+              "const": "plugin",
+              "description": "The Branchyard skills for Claude Code or Codex."
+            }
+          ],
+          "description": "What an interview sets up."
+        },
+        "FollowUp": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "why"
+          ],
+          "description": "A command to run after applying."
+        }
+      }
+    },
+    "TopicList": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string"
+        },
+        "topics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TopicInfo"
+          }
+        }
+      },
+      "required": [
+        "protocol",
+        "topics"
+      ],
+      "description": "`by init --json`: the topics.",
+      "title": "TopicList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "TopicInfo": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "start": {
+              "type": "string",
+              "description": "The first step of its interview."
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "summary",
+            "start"
+          ]
+        }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorBody"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "description": "A refusal, as every `by --json` command prints it.",
+      "title": "ErrorResponse",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ErrorBody": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "`incomplete`, `invalid_plan`, `would_overwrite`, `invalid_answers`,\n`usage`, `io`."
+            },
+            "message": {
+              "type": "string"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "For `would_overwrite`: the files that differ."
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        }
+      }
+    }
+  }
+}

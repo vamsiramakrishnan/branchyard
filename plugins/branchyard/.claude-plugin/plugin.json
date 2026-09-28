@@ -1,7 +1,8 @@
 {
   "name": "branchyard",
-  "description": "Delegate work to child branches with Branchyard: spawn, watch, integrate and cancel children within your envelope.",
+  "description": "Set up Branchyard by interview (branchyard.toml, servers, rigs, deployments) and delegate work to child branches: spawn, watch, integrate and cancel children within your envelope.",
   "version": "0.0.1",
   "license": "Apache-2.0",
-  "skills": "./skills/"
+  "skills": "./skills/",
+  "commands": "./commands/"
 }

@@ -22,13 +22,24 @@ The system is designed to support:
 
 A task, a conversation, a sandbox, and a code branch have separate identities. Forking a conversation does not automatically copy its filesystem or credentials.
 
-## Quick start (local mode)
-
-Local mode runs the engine in-process and each harness as a local process in its own git worktree under `.branchyard/`. It needs no server, but it provides **no isolation beyond your operating-system user**: by default a harness runs with your environment, your `HOME` and your own harness login, and can read and write whatever you can. Every `CLAUDE*` variable except Claude Code configuration (provider selection, credentials, TLS client identity, limits) is removed, so a harness never runs under the identity of a Claude Code session that launched `by`. `--isolated` scrubs credentials and uses a private `HOME`, so the harness is then usually not logged in; `--secret` [provisions](docs/provisioning.md) a credential into that home.
+## Quick start
 
 ```sh
 cargo install --locked --path crates/branchyard-cli   # installs `by`
 cd path/to/your/repo
+by init                                               # set up by interview
+by init project --defaults                            # or: one topic, every default
+```
+
+`by init` asks what to set up and interviews you in the terminal: it detects your installed harnesses, credential variables (by name only), the repository's check command, docker and KVM, shows every file it would write as a diff checked by the loader that reads it, and writes only after you agree. Topics: `project` (`branchyard.toml`: default harness, model, limits, permissions, isolation, check, secrets by name, a server to use), `server` (a server configuration with hashed per-tenant credentials, 0600 token files and quotas), `rig`, `deploy` (compose with PostgreSQL) and `plugin`.
+
+Or let your coding harness do it. `by init plugin` installs the `setup` skill into Claude Code or Codex (or load the whole plugin with `claude --plugin-dir plugins/branchyard`); then ask it to "set up Branchyard" or run `/branchyard:setup`. It drives the same interview through `by init TOPIC --json --next`, asks you each batch with its own question tool, shows the dry-run diff, and applies after you confirm. See [setup](docs/setup.md) for both front-ends, the protocol and `branchyard.toml`; `by config show` prints every effective value and where it came from.
+
+## Local mode
+
+Local mode runs the engine in-process and each harness as a local process in its own git worktree under `.branchyard/`. It needs no server, but it provides **no isolation beyond your operating-system user**: by default a harness runs with your environment, your `HOME` and your own harness login, and can read and write whatever you can. Every `CLAUDE*` variable except Claude Code configuration (provider selection, credentials, TLS client identity, limits) is removed, so a harness never runs under the identity of a Claude Code session that launched `by`. `--isolated` scrubs credentials and uses a private `HOME`, so the harness is then usually not logged in; `--secret` [provisions](docs/provisioning.md) a credential into that home.
+
+```sh
 by harnesses                                          # installed harnesses and their qualification
 by run "Make the flaky parser test deterministic" --check "cargo test" --max-minutes 20 --ask
 by fan "Make the flaky parser test deterministic" --harness claude-code,codex --check "cargo test" --yes
@@ -57,13 +68,15 @@ by ls
 by merge make-the-flaky-parser-test-deterministic
 ```
 
+For more than one user, TLS, PostgreSQL, quotas or webhooks, `by init server` writes a configuration with a hashed credential per tenant and each token in a 0600 file, checks it with the server's own loader, and prints the `by serve --config … --check` and `by serve --config …` to run.
+
 Work runs on the server: interrupting `by` stops watching, not the turn, `by cancel` stops the turn, and a retried request with the same idempotency key never runs twice. Operation status and the activity feed survive a server restart; a turn still running when the server stops is recorded as interrupted, and its branch is recovered when the server starts again; an operation still queued runs then. Plain HTTP binds only to loopback unless TLS is configured or `--insecure-bind` is given. By default the server uses the local process provider, so **harnesses run as the server's user with no isolation**, and every token holder can direct them. Its operator can allow the Microsandbox and Substrate providers (`--allow-provider`), delegation for its harnesses and remote `by spawn`, `inspect`, `events`, `integrate` and `children` (`--allow-delegation`), and unapproved tools (`--allow-unapproved-tools`); `by --remote` then takes the same flags as local `by`. `by serve --database postgres://…` keeps branch state, operations and their dispatch queue in PostgreSQL (the `postgres` feature), where several servers and `by worker` processes may share them; an operation admitted before a crash runs once, on whichever worker claims it. See [the server reference](docs/server.md) for the API, authentication, deployment and what is durable.
 
 ## Command line
 
 `by --help` lists the commands by group; `by help <command>` (or `by <command> --help`, `-h` for a summary) shows a command's options under headings such as *Checks and limits*, *Permissions*, *Launch*, *Provisioning* and *Global options*, with examples for the main commands. Nested commands have their own help: `by help graph apply`, `by artifact publish --help`. A mistyped command or flag gets a suggestion (`by mrege` → `merge`), and a usage error exits with status 2, a failed command with 1.
 
-The global options choose where commands run, and may come before or after the command; each falls back to its variable, and a flag wins over its variable:
+The global options choose where commands run, and may come before or after the command; each falls back to its variable, and a flag wins over its variable. Under both sits the configuration, `branchyard.toml` in the repository and `~/.config/branchyard/config.toml` ([setup](docs/setup.md#configuration)): it fills only what the command line and the variables left unset, so the order is flags, then variables, then the project file, then the user file:
 
 | Option | Variable |
 |---|---|
@@ -72,9 +85,11 @@ The global options choose where commands run, and may come before or after the c
 | `--repo NAME` | `BRANCHYARD_REPO` |
 | `--ca-file FILE` | `BRANCHYARD_CA_FILE` |
 
+Setup is two commands in the *Shell and setup* group: `by init [TOPIC] [--json] [--next | --dry-run | --apply [--force]] [--answers FILE|-] [--defaults]`, where clap refuses two steps at once, `--force` without `--apply`, `--answers` without a step and a step without a topic (all exit 2), and `by config show|path|validate [FILE]|schema [--json]`.
+
 Short forms: `-n` for `--name`, `-b` for `--base`, `-y` for `--yes`, `-f` for `log --follow`, `-o` for `artifact get|export --out`, `-V` for `--version`. Durations take a unit: `--max-minutes 90s`, `--stall-after 2h`, `watch --interval 250ms` (a bare number keeps its old unit); `--budget-usd` also takes `$2.50`. `--check` and `--command` are split like a POSIX shell, including `#` comments.
 
-Shell completions and a man page are generated from the same definitions:
+Shell completions and a man page are generated from the same definitions, including `init`'s topics (`by init <Tab>` offers `project`, `server`, `rig`, `deploy` and `plugin`) and `config`'s actions:
 
 ```sh
 by completions bash > ~/.local/share/bash-completion/completions/by
@@ -84,7 +99,7 @@ by completions powershell >> $PROFILE      # or elvish
 by man | man -l -
 ```
 
-`by serve` and `by worker` hand everything after them to the server's own parser, so `by serve --help` is the server's help and `--repo NAME=PATH` there is the server's flag, not the global one. `branchyard-server`, `branchyard-bridge`, `branchyard-herdr`, `branchyard-mcp` and `branchyard-qualify` parse their command lines the same way (clap), each with `--help`.
+`by serve` and `by worker` hand everything after them to the server's own parser, so `by serve --help` is the server's help and `--repo NAME=PATH` there is the server's flag, not the global one; `branchyard.toml`'s `[serve] config` becomes their `--config` unless they name one (`-c FILE` too), and `by serve --config FILE --check` validates a configuration without serving. `branchyard-server`, `branchyard-bridge`, `branchyard-herdr`, `branchyard-mcp` and `branchyard-qualify` parse their command lines the same way (clap), each with `--help`.
 
 ## Watching branches
 
@@ -207,8 +222,9 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | `branchyard-qualify` | Runs driver qualification scenarios against real harness binaries; see [driver qualification](docs/qualification/README.md) |
 | `branchyard-workspace` | Git worktree branches, candidate commits and validated merges: compare-and-swap on the target, checks in a temporary worktree, conflicts returned for repair; 18 tests |
 | `branchyard-runtime` | Runs a driver against a harness process through any sandbox provider, and the local provider: own process group, scrubbed environment, private home, teardown that names and kills surviving descendants; 30 hermetic tests, including the provider conformance checks, against a fake ACP agent |
-| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log` (with `--follow`), `merge`, `rm`, `cancel`, `send --steer`, `harnesses`, `watch`, `serve`, `rig`, `artifact`, `scratch`, `graph`, and the delegation commands, each also in remote mode, with a [clap](https://docs.rs/clap) command line, shell completions and a man page; 105 tests, 40 of them running the built binary against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent, and 1 more on PostgreSQL |
-| `branchyard-server` | The server: bearer-token authentication with tenant identity (principals with scopes and repository ownership, hashed credentials, `token new`) and per-tenant quotas counted in the admission's transaction, durable operations with idempotency keys, admitted as a durable enqueue and run by workers under fenced leases, cancellation, steering a running turn, a resumable SSE activity feed read from the engine's store, recovery, one server per data directory or several (and `by worker` processes) on one PostgreSQL database, TLS and graceful shutdown, operator opt-ins for providers, delegation and unapproved tools, secrets resolved from the operator's own table, delegation endpoints including graph proposals (a spawn that waits is queued work like any other, and every server and worker resumes graphs on its recovery tick), rig seats checked on submission, artifacts and scratch areas over HTTP (`--max-artifact-bytes`), and a PostgreSQL store; 84 tests, 43 over real HTTP against a fake ACP agent (including adversarial webhook receivers that hang, close without answering or refuse forever, none of which delay an operation or the feed, and identity, scopes, tenant isolation and quotas: `tests/tenants.rs`), and 12 more on PostgreSQL (including a spawn that waits run by a worker alone, and two servers and a worker starting one dependent once) (with the feature, 1 SQLite-only parity test is left out); see [the server reference](docs/server.md) |
+| `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log` (with `--follow`), `merge`, `rm`, `cancel`, `send --steer`, `harnesses`, `watch`, `serve`, `rig`, `artifact`, `scratch`, `graph`, and the delegation commands, each also in remote mode, with a [clap](https://docs.rs/clap) command line, shell completions and a man page; `init` (the setup wizard and its JSON protocol) and `config`, with `branchyard.toml` defaults under the flags; 124 tests, 49 of them running the built binary against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent, and 1 more on PostgreSQL |
+| `branchyard-setup` | The [setup](docs/setup.md) interview without I/O: declarative questions per topic (project, server, rig, deploy, plugin) with conditions, rules and defaults detected through an injected probe, batches for a harness's question tool, plans of files with diffs and validator verdicts, secrets never in any output; `branchyard.toml`'s format, layering and JSON Schema; 29 tests |
+| `branchyard-server` | The server: bearer-token authentication with tenant identity (principals with scopes and repository ownership, hashed credentials, `token new`) and per-tenant quotas counted in the admission's transaction, durable operations with idempotency keys, admitted as a durable enqueue and run by workers under fenced leases, cancellation, steering a running turn, a resumable SSE activity feed read from the engine's store, recovery, one server per data directory or several (and `by worker` processes) on one PostgreSQL database, TLS and graceful shutdown, operator opt-ins for providers, delegation and unapproved tools, secrets resolved from the operator's own table, delegation endpoints including graph proposals (a spawn that waits is queued work like any other, and every server and worker resumes graphs on its recovery tick), rig seats checked on submission, artifacts and scratch areas over HTTP (`--max-artifact-bytes`), and a PostgreSQL store, and `--check` to validate a configuration without serving; 87 tests, 43 over real HTTP against a fake ACP agent (including adversarial webhook receivers that hang, close without answering or refuse forever, none of which delay an operation or the feed, and identity, scopes, tenant isolation and quotas: `tests/tenants.rs`), and 12 more on PostgreSQL (including a spawn that waits run by a worker alone, and two servers and a worker starting one dependent once) (with the feature, 1 SQLite-only parity test is left out); see [the server reference](docs/server.md) |
 | `branchyard-client` | The remote SDK: typed blocking client for every endpoint, including artifacts and scratch areas (digest-verified downloads), SSE parsing and reconnect by cursor; 13 tests |
 | `branchyard-herdr` | The [Herdr plugin](plugins/herdr/README.md)'s binary: a bridge from the server's event stream to one Herdr tab per branch and `herdr pane report-agent` states, with merge, cancel and send actions; 11 tests, 2 of them against a spawned server, the fake ACP agent and a fake `herdr`; not run against a real Herdr |
 | `branchyard-mcp` | Branchyard's delegation tools over MCP on stdio (`by mcp`), for harnesses whose shell is restricted; the same operations and token as `by spawn` and the SDKs; 11 tests |
