@@ -120,13 +120,13 @@ fn kill(child: &mut Child) {
 
 #[cfg(unix)]
 fn kill_group(pgid: u32) {
-    // std has no killpg; use kill(1) with an argument vector.
-    let _ = Command::new("kill")
-        .args(["-s", "KILL", "--", &format!("-{pgid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // std has no killpg; rustix calls killpg(2) directly.
+    if let Some(pgid) = i32::try_from(pgid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+    }
 }
 
 #[cfg(not(unix))]

@@ -645,6 +645,7 @@ dependencies = [
  "postgres",
  "rcgen",
  "rusqlite",
+ "rustix",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -789,6 +790,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-sandbox",
+ "rustix",
  "serde_json",
 ]
 
@@ -866,6 +868,9 @@ dependencies = [
 [[package]]
 name = "branchyard-workspace"
 version = "0.0.1"
+dependencies = [
+ "rustix",
+]
 
 [[package]]
 name = "bs58"
