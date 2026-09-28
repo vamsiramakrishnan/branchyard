@@ -12,6 +12,7 @@
 | [Sandbox providers](providers.md) | What is the provider contract, what does the local provider guarantee, and how do I run harnesses in Microsandbox microVMs or Agent Substrate actors? |
 | [Agent Substrate](substrate.md) | How does Branchyard run harnesses in Agent Substrate actors: the bridge and its protocol, per-attempt credentials, git transfer, and what is still unqualified? |
 | [Durable execution](durability.md) | What survives a crash, how leases, journaled steps, cancellation and recovery work, what is never replayed, and how the store maps onto PostgreSQL? |
+| [Pull requests](pull-requests.md) | How do I start a branch from a GitHub issue, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |
 | [Surfaces](surfaces.md) | Which operations and options work in the SDK, `by`, `by --remote`, the HTTP API, the Rust client and delegation, and which are refused where? |
 | [Server and remote mode](server.md) | How do I run `by serve`, call its HTTP API, and drive it with `by --remote`? What is durable, and what is not isolated? |
 | [Distribution](distribution.md) | How do I install the Branchyard skill for Claude Code or Codex, or build reproducible plugin, skill and SDK archives? |

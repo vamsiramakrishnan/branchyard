@@ -68,6 +68,15 @@ exits non-zero with `{"error": {"kind", "message"}}` on refusal. Run `by`
 by name or as `$BRANCHYARD_BY`; call it as a single command without pipes,
 `&&` or substitutions, so a permission policy can recognize it.
 
+## From a GitHub issue
+
+If the work is a GitHub issue and `gh` works in your shell, `by spawn --issue 42`
+(or an issue URL) makes the issue the child's prompt, under a header naming it,
+and names the child `issue-42-<slug>`; a prompt you add is appended as extra
+instructions. Pull requests are not yours to open: `by pr` pushes with the
+user's credentials and refuses to run inside a harness. Integrate the child;
+whoever started your branch opens the pull request.
+
 ## When one child needs another's work
 
 Give it `--depends-on`: it is created waiting and starts by itself once the
