@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FileConfig",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Ignored: a `\"$schema\": \"https://.../server.config.json\"` key so\neditors with JSON Schema support (e.g. VS Code) offer completion\nand inline docs while editing this file. See\n`schema/server.config.json` and `docs/server.md#published-schema`.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "listen": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "data_dir": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "repos": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {}
+    },
+    "tokens": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FileToken"
+      }
+    },
+    "credentials": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FileCredential"
+      }
+    },
+    "tenants": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/FileTenantPolicy"
+      }
+    },
+    "tls": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileTls"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "max_body_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "max_artifact_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "max_running": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "shutdown_grace_seconds": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "harness_commands": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "default": {}
+    },
+    "allow_client_commands": {
+      "type": "boolean",
+      "default": false
+    },
+    "allow_providers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "allow_delegation": {
+      "type": "boolean",
+      "default": false
+    },
+    "by_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "allow_unapproved_tools": {
+      "type": "boolean",
+      "default": false
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {}
+    },
+    "database": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "webhooks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FileWebhook"
+      }
+    },
+    "webhook_insecure": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "FileToken": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tenant": {
+          "description": "This principal's tenant; defaults to [`DEFAULT_TENANT`] when this\nentry gives no tenant, scopes or repos of its own.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "repos": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "FileCredential": {
+      "type": "object",
+      "properties": {
+        "token_sha256": {
+          "type": "string"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "name": {
+          "description": "Defaults to `token_sha256`'s first 12 characters when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "repos": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "token_sha256",
+        "tenant"
+      ]
+    },
+    "FileTenantPolicy": {
+      "type": "object",
+      "properties": {
+        "repos": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "max_running": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_branches": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_artifact_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "FileTls": {
+      "type": "object",
+      "properties": {
+        "cert": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cert",
+        "key"
+      ]
+    },
+    "FileWebhook": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Defaults to the URL when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        },
+        "secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secret_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    }
+  }
+}

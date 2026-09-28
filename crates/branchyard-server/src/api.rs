@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::extract::{FromRequest, Path, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -30,6 +30,9 @@ use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::{watch, Notify};
+use tower_http::trace::TraceLayer;
+use tracing::field::Empty;
+use tracing::Span;
 
 use crate::auth::Credentials;
 use crate::config::{Config, Principal, TenantPolicy};
@@ -692,17 +695,58 @@ pub fn router(app: Shared) -> Router {
         .layer(tower::limit::GlobalConcurrencyLimitLayer::new(
             MAX_CONCURRENT_REQUESTS,
         ))
-        .layer(middleware::from_fn(move |req, next| {
-            request_id(log, req, next)
-        }))
+        // Inside `request_id` (below), so its span sees the ID that
+        // middleware assigns to the request's extensions.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request| {
+                    let id = request
+                        .extensions()
+                        .get::<RequestId>()
+                        .map(|id| id.0.clone())
+                        .unwrap_or_default();
+                    tracing::info_span!(
+                        "request",
+                        request_id = %id,
+                        method = %request.method(),
+                        path = %request.uri().path(),
+                        status = Empty,
+                        latency_ms = Empty,
+                    )
+                })
+                .on_request(|_request: &Request, _span: &Span| {})
+                .on_response(move |response: &Response, latency: Duration, span: &Span| {
+                    span.record("status", response.status().as_u16());
+                    span.record("latency_ms", latency.as_millis() as u64);
+                    if log {
+                        tracing::info!(parent: span, "request handled");
+                    }
+                })
+                .on_failure(move |error, latency: Duration, span: &Span| {
+                    if log {
+                        tracing::warn!(
+                            parent: span,
+                            %error,
+                            latency_ms = latency.as_millis() as u64,
+                            "request failed"
+                        );
+                    }
+                }),
+        )
+        .layer(middleware::from_fn(request_id))
         .with_state(app)
 }
 
-/// Tag every response with a request ID (the caller's, when usable) and
-/// log one line per request. Headers, including `Authorization`, are
-/// never logged.
-async fn request_id(log: bool, request: Request, next: Next) -> Response {
-    let started = Instant::now();
+/// The request ID assigned by [`request_id`], read back by the
+/// [`TraceLayer`] span above and echoed on the response.
+#[derive(Clone)]
+struct RequestId(String);
+
+/// Tag every request with an ID (the caller's `x-request-id`, when it
+/// looks safe to reuse, else a fresh one), so the access log line above
+/// and the response both carry it. Headers, including `Authorization`,
+/// are never logged.
+async fn request_id(mut request: Request, next: Next) -> Response {
     let id = request
         .headers()
         .get("x-request-id")
@@ -715,18 +759,10 @@ async fn request_id(log: bool, request: Request, next: Next) -> Response {
         })
         .map(str::to_owned)
         .unwrap_or_else(|| format!("req_{}", &branchyard_client::new_key()[..16]));
-    let method = request.method().clone();
-    let path = request.uri().path().to_owned();
+    request.extensions_mut().insert(RequestId(id.clone()));
     let mut response = next.run(request).await;
     if let Ok(value) = HeaderValue::from_str(&id) {
         response.headers_mut().insert("x-request-id", value);
-    }
-    if log {
-        eprintln!(
-            "branchyard-server: {id} {method} {path} {} {}ms",
-            response.status().as_u16(),
-            started.elapsed().as_millis()
-        );
     }
     response
 }

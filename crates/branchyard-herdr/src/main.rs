@@ -65,7 +65,36 @@ enum Plugin {
     Send,
 }
 
+/// Sets up the process's tracing subscriber: level from `BRANCHYARD_LOG` or
+/// `RUST_LOG` (default `info`), format `pretty` unless
+/// `BRANCHYARD_LOG_FORMAT=json`. Writes to stderr, same as the rest of
+/// this plugin's diagnostics, so a Herdr pane still shows them.
+///
+/// TODO(BRANCHYARD_LOG_FORMAT): once this CLI grows a `--log-format
+/// json|pretty` flag, prefer it over the env var.
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter = std::env::var("BRANCHYARD_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .ok()
+        .and_then(|directives| EnvFilter::try_new(directives).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    let json = std::env::var("BRANCHYARD_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr);
+    let _ = if json {
+        builder.json().try_init()
+    } else {
+        builder.try_init()
+    };
+}
+
 fn main() -> ExitCode {
+    init_logging();
     let cli = <Cli as clap::Parser>::parse();
     let flags: Vec<(String, String)> = [
         ("BRANCHYARD_REMOTE", cli.remote),

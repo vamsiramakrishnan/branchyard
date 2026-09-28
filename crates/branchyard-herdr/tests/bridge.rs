@@ -640,9 +640,14 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
         || fake.last_report("after").as_deref() == Some("idle (no changes)"),
         || format!("{:?}\n{}", fake.calls(), log()),
     );
+    // The bridge logs this with `tracing`, as `... INFO reconnecting cursor=N`.
     let resumed = log()
         .lines()
-        .find_map(|l| l.strip_prefix("branchyard-herdr: reconnecting after cursor "))
+        .filter(|l| l.contains("reconnecting"))
+        .find_map(|l| {
+            l.split_whitespace()
+                .find_map(|word| word.strip_prefix("cursor="))
+        })
         .map(|c| c.parse::<u64>().unwrap())
         .unwrap_or_else(|| panic!("no reconnect in\n{}", log()));
     assert!(resumed > 0);

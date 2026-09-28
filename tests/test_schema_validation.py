@@ -12,11 +12,14 @@ check.
 import json
 from pathlib import Path
 import re
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = json.loads((ROOT / "schema/contract.json").read_text())
 TYPES = CONTRACT["types"]
+SERVER_CONFIG_SCHEMA = json.loads((ROOT / "schema/server.config.json").read_text())
+RIG_SCHEMA = json.loads((ROOT / "schema/rig.json").read_text())
 
 
 class ValidationError(Exception):
@@ -37,10 +40,11 @@ def _resolve(ref, defs):
 def validate(value, schema, defs, path="$"):
     """A minimal, non-exhaustive validator for the subset of JSON Schema
     (draft 2020-12) `schemars` 1.x emits for these types: `$ref`, `type`,
-    `properties`/`required`/`additionalProperties`, `items`, `enum`,
-    `const`, and `oneOf`/`anyOf`. Anything else (`format`, `minimum`, ...)
-    is intentionally not checked; this is a structural check, not a full
-    validator.
+    `properties`/`required`/`additionalProperties` (false, or a schema
+    for the other properties), `propertyNames`' `pattern`, `items`,
+    `enum`, `const`, and `oneOf`/`anyOf`. Anything else (`format`,
+    `minimum`, ...) is intentionally not checked; this is a structural
+    check, not a full validator.
     """
     if "$ref" in schema:
         return validate(value, _resolve(schema["$ref"], defs), defs, path)
@@ -74,13 +78,19 @@ def validate(value, schema, defs, path="$"):
         for name in schema.get("required", []):
             if name not in value:
                 raise ValidationError(f"{path}: missing required property {name!r}")
-        if schema.get("additionalProperties") is False:
+        additional = schema.get("additionalProperties")
+        if additional is False:
             extra = set(value) - set(properties)
             if extra:
                 raise ValidationError(f"{path}: unknown properties {sorted(extra)}")
+        pattern = schema.get("propertyNames", {}).get("pattern")
         for name, sub in value.items():
+            if pattern is not None and not re.search(pattern, name):
+                raise ValidationError(f"{path}: property name {name!r} does not match {pattern!r}")
             if name in properties:
                 validate(sub, properties[name], defs, f"{path}.{name}")
+            elif isinstance(additional, dict):
+                validate(sub, additional, defs, f"{path}.{name}")
         return
 
     if kind == "array":
@@ -243,6 +253,112 @@ class GraphTypesValidate(unittest.TestCase):
                     {"dependent": "a", "prerequisite": "b", "after": "later"}]},
                 "Graph",
             )
+
+
+class ServerConfigExampleValidatesAgainstItsSchema(unittest.TestCase):
+    """`deploy/config.example.json` against `schema/server.config.json`
+    (generated from `crates/branchyard-server/src/config.rs`'s
+    `FileConfig`; freshness is `crates/branchyard-server/tests/
+    server_config_schema.rs`). This is the deploy recipe's own sanity
+    check, besides `crates/branchyard-server/tests/deploy_config.rs`'s
+    parse-with-the-real-loader check."""
+
+    def _example(self):
+        return json.loads((ROOT / "deploy/config.example.json").read_text())
+
+    def test_the_example_validates(self):
+        validate(
+            self._example(),
+            SERVER_CONFIG_SCHEMA,
+            _defs(SERVER_CONFIG_SCHEMA),
+        )
+
+    def test_an_unknown_top_level_key_is_refused(self):
+        example = self._example()
+        example["not_a_real_field"] = True
+        with self.assertRaises(ValidationError):
+            validate(example, SERVER_CONFIG_SCHEMA, _defs(SERVER_CONFIG_SCHEMA))
+
+    def test_the_dollar_schema_key_is_accepted(self):
+        example = self._example()
+        example["$schema"] = "https://example.invalid/server.config.json"
+        validate(example, SERVER_CONFIG_SCHEMA, _defs(SERVER_CONFIG_SCHEMA))
+
+    def test_a_wrongly_typed_field_is_refused(self):
+        # A required, non-nullable field (unlike most of `FileConfig`'s
+        # `Option<T>` fields, whose `["T", "null"]` schema type this
+        # minimal validator does not itself enforce; see `validate`'s
+        # docstring).
+        example = self._example()
+        example["repos"] = "not an object"
+        with self.assertRaises(ValidationError):
+            validate(example, SERVER_CONFIG_SCHEMA, _defs(SERVER_CONFIG_SCHEMA))
+
+    def test_an_unknown_token_field_is_refused(self):
+        example = self._example()
+        example["tokens"][0]["colour"] = "blue"
+        with self.assertRaises(ValidationError):
+            validate(example, SERVER_CONFIG_SCHEMA, _defs(SERVER_CONFIG_SCHEMA))
+
+
+class ExampleRigsValidateAgainstTheirSchema(unittest.TestCase):
+    """`examples/rigs/*.toml` against `schema/rig.json` (generated from
+    `crates/branchyard-cli/src/rig.rs`'s `Raw*` types; freshness is that
+    file's `rig_json_is_generated_and_fresh`, behind the `schema`
+    feature). The rig parser itself lowers the same examples to
+    `crates/branchyard-cli/tests/golden/`."""
+
+    def _examples(self):
+        paths = sorted((ROOT / "examples/rigs").glob("*.toml"))
+        self.assertGreaterEqual(len(paths), 2)
+        return [(path.name, tomllib.loads(path.read_text())) for path in paths]
+
+    def _check(self, rig):
+        validate(rig, RIG_SCHEMA, _defs(RIG_SCHEMA))
+
+    def test_every_example_validates(self):
+        for name, rig in self._examples():
+            with self.subTest(name):
+                self._check(rig)
+
+    def test_an_unknown_seat_field_is_refused(self):
+        _, rig = self._examples()[0]
+        next(iter(rig["seats"].values()))["collaborates_with"] = ["lead"]
+        with self.assertRaises(ValidationError):
+            self._check(rig)
+
+    def test_an_unknown_top_level_field_is_refused(self):
+        _, rig = self._examples()[0]
+        rig["culture_file"] = "culture.md"
+        with self.assertRaises(ValidationError):
+            self._check(rig)
+
+    def test_a_seat_name_must_be_usable(self):
+        _, rig = self._examples()[0]
+        rig["seats"]["Not A Name"] = {}
+        with self.assertRaises(ValidationError):
+            self._check(rig)
+
+    def test_a_policy_default_outside_allow_deny_ask_is_refused(self):
+        _, rig = self._examples()[0]
+        rig["seats"][rig["root"]]["policy"] = {"default": "yolo"}
+        with self.assertRaises(ValidationError):
+            self._check(rig)
+
+    def test_effort_is_a_name_or_a_level(self):
+        _, rig = self._examples()[0]
+        seat = rig["seats"][rig["root"]]
+        seat["effort"] = 40
+        self._check(rig)
+        seat["effort"] = "huge"
+        with self.assertRaises(ValidationError):
+            self._check(rig)
+
+    def test_the_version_is_required(self):
+        _, rig = self._examples()[0]
+        del rig["version"]
+        with self.assertRaises(ValidationError):
+            self._check(rig)
 
 
 if __name__ == "__main__":

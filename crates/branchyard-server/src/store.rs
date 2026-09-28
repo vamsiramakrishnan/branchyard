@@ -1663,15 +1663,18 @@ mod tests {
         }
     }
 
-    fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("branchyard-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        dir
+    /// A fresh directory, removed when the returned guard is dropped.
+    fn temp(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("branchyard-{name}-"))
+            .tempdir()
+            .unwrap()
     }
 
     #[test]
     fn the_latest_save_wins_and_survives_reopening() {
-        let dir = temp("store");
+        let temp = temp("store");
+        let dir = temp.path();
         let path = dir.join("operations.jsonl");
         let store = FileStore::open(&path).unwrap();
         store.save(&op("a", OperationState::Queued)).unwrap();
@@ -1695,12 +1698,12 @@ mod tests {
             ]
         );
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 2);
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn webhook_cursors_round_trip_and_only_ever_move_as_told() {
-        let dir = temp("webhook-cursor");
+        let temp = temp("webhook-cursor");
+        let dir = temp.path();
         let store = SqliteStore::open(dir.join("state.db"), None).unwrap();
         assert_eq!(store.load_webhook_cursor("repo:hook").unwrap(), None);
         store.save_webhook_cursor("repo:hook", 5).unwrap();
@@ -1713,7 +1716,6 @@ mod tests {
         // Durable: reopening finds it again.
         let store = SqliteStore::open(dir.join("state.db"), None).unwrap();
         assert_eq!(store.load_webhook_cursor("repo:hook").unwrap(), Some(12));
-        let _ = fs::remove_dir_all(&dir);
 
         let memory = MemoryStore::default();
         assert_eq!(memory.load_webhook_cursor("h").unwrap(), None);
@@ -1723,7 +1725,8 @@ mod tests {
 
     #[test]
     fn sqlite_imports_the_file_once_and_keeps_order_and_the_latest_save() {
-        let dir = temp("sqlite-store");
+        let temp = temp("sqlite-store");
+        let dir = temp.path();
         let legacy = dir.join("operations.jsonl");
         let file = FileStore::open(&legacy).unwrap();
         file.save(&op("a", OperationState::Queued)).unwrap();
@@ -1756,7 +1759,6 @@ mod tests {
             ]
         );
         assert!(store.orphans().unwrap().is_empty());
-        let _ = fs::remove_dir_all(dir);
     }
 
     fn keyed(id: &str, key: &str, locks: &[&str]) -> StoredOperation {

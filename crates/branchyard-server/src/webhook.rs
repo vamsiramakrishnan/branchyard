@@ -142,10 +142,11 @@ async fn run(
             Ok(Ok(Some(cursor))) => cursor,
             Ok(Ok(None)) => repo.feed.head(),
             Ok(Err(e)) => {
-                eprintln!(
-                    "branchyard-server: webhook {} reading its cursor: {e}; starting from the \
-                     current head of {}",
-                    webhook.url, repo.name
+                tracing::error!(
+                    webhook = %webhook.url,
+                    repo = %repo.name,
+                    error = %e,
+                    "webhook: reading its cursor; starting from the current head"
                 );
                 repo.feed.head()
             }
@@ -159,9 +160,11 @@ async fn run(
             let entries: Vec<FeedEntry> = match entries {
                 Ok(Ok(entries)) => entries,
                 Ok(Err(e)) => {
-                    eprintln!(
-                        "branchyard-server: webhook {} reading {}'s feed: {e}",
-                        webhook.url, repo.name
+                    tracing::error!(
+                        webhook = %webhook.url,
+                        repo = %repo.name,
+                        error = %e,
+                        "webhook: reading the repo's feed"
                     );
                     break;
                 }
@@ -181,9 +184,10 @@ async fn run(
                     tokio::task::spawn_blocking(move || store.save_webhook_cursor(&id, cursor))
                         .await;
                 if let Ok(Err(e)) = saved {
-                    eprintln!(
-                        "branchyard-server: webhook {} saving its cursor: {e}",
-                        webhook.url
+                    tracing::error!(
+                        webhook = %webhook.url,
+                        error = %e,
+                        "webhook: saving its cursor"
                     );
                 }
             }
@@ -222,9 +226,11 @@ async fn deliver(
     let body = match serde_json::to_vec(&envelope) {
         Ok(body) => body,
         Err(e) => {
-            eprintln!(
-                "branchyard-server: webhook {}: could not encode delivery {}: {e}",
-                webhook.url, entry.seq
+            tracing::error!(
+                webhook = %webhook.url,
+                seq = entry.seq,
+                error = %e,
+                "webhook: could not encode a delivery"
             );
             return;
         }
@@ -245,22 +251,25 @@ async fn deliver(
             .await;
         match result {
             Ok(response) if response.status().is_success() => return,
-            Ok(response) => eprintln!(
-                "branchyard-server: webhook {} refused delivery {} with status {}",
-                webhook.url,
-                entry.seq,
-                response.status()
+            Ok(response) => tracing::warn!(
+                webhook = %webhook.url,
+                seq = entry.seq,
+                status = %response.status(),
+                "webhook: delivery refused"
             ),
-            Err(e) => eprintln!(
-                "branchyard-server: webhook {} delivery {}: {e}",
-                webhook.url, entry.seq
+            Err(e) => tracing::warn!(
+                webhook = %webhook.url,
+                seq = entry.seq,
+                error = %e,
+                "webhook: delivery attempt failed"
             ),
         }
         if attempt >= max_attempts {
-            eprintln!(
-                "branchyard-server: webhook {} dead-lettered delivery {} after {attempt} \
-                 attempt(s); its cursor still advances past it",
-                webhook.url, entry.seq
+            tracing::error!(
+                webhook = %webhook.url,
+                seq = entry.seq,
+                attempt,
+                "webhook: dead-lettered a delivery; its cursor still advances past it"
             );
             return;
         }

@@ -51,11 +51,10 @@ pub mod sse;
 pub mod storage_api;
 
 use std::fmt;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use branchyard::{
     ArtifactRef, Asked, BranchInfo, Children, EventPage, Graph, GraphApplied, HarnessInfo, Inbox,
@@ -122,24 +121,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// A fresh random idempotency key.
+/// A fresh random idempotency key: a version 4 UUID as 32 lowercase hex
+/// digits, without hyphens.
 pub fn new_key() -> String {
-    let mut bytes = [0u8; 16];
-    let random = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
-    if random.is_err() {
-        // No /dev/urandom: time, process and a counter are unique enough
-        // for idempotency, which needs uniqueness, not secrecy.
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mix = nanos
-            ^ (u128::from(std::process::id()) << 64)
-            ^ (u128::from(COUNTER.fetch_add(1, Ordering::Relaxed)) << 96);
-        bytes = mix.to_le_bytes();
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 /// A connection to one server. Cheap to clone.
@@ -1035,8 +1020,13 @@ mod tests {
         let a = new_key();
         let b = new_key();
         assert_eq!(a.len(), 32);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
         assert_ne!(a, b);
+        // A version 4 UUID: version nibble 4, variant 10xx.
+        assert_eq!(&a[12..13], "4");
+        assert!("89ab".contains(&a[16..17]), "{a}");
     }
 
     #[test]

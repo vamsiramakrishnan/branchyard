@@ -1839,7 +1839,8 @@ pub fn print_rig_run(rig: &str, root: &BranchInfo, descendants: &[BranchInfo]) -
 }
 
 /// A spec `by rig` cannot honor: the field, its line and why; with
-/// `--json`, `{"error": {"kind": "invalid_rig", "message", "field", "line"}}`.
+/// `--json`, `{"error": {"kind": "invalid_rig", "message", "field", "line",
+/// "column"}}`.
 fn rig_refused(args: &args::RigArgs, error: &rig::RigError) -> Outcome {
     let message = format!("{}: {error}", args.file);
     if args.json {
@@ -1848,6 +1849,7 @@ fn rig_refused(args: &args::RigArgs, error: &rig::RigError) -> Outcome {
             "message": message,
             "field": error.field,
             "line": error.line,
+            "column": error.column,
         }});
         print(&json::text(&value))?;
         return Err(Failure::Reported);

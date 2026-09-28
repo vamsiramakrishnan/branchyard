@@ -69,6 +69,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod feed;
+pub mod logging;
 pub mod ops;
 pub mod serve;
 pub mod storage_routes;
@@ -76,5 +77,7 @@ pub mod store;
 pub mod webhook;
 pub mod work;
 
+#[cfg(feature = "schema")]
+pub use config::schema;
 pub use config::Config;
 pub use serve::{start, Handle, Running, Stopped};

@@ -16,7 +16,10 @@ branchyard-client = { path = "../branchyard-client" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 [dev-dependencies]
+tempfile = "3.27.0"
 # Checks plugins/herdr/herdr-plugin.toml. Already in Cargo.lock.
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }

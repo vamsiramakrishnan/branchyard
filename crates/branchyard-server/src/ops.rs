@@ -359,7 +359,7 @@ impl Registry {
                         continue;
                     }
                     Ok(None) => {}
-                    Err(e) => eprintln!("branchyard-server: could not claim an operation: {e}"),
+                    Err(e) => tracing::error!(error = %e, "could not claim an operation"),
                 }
             }
             let wait = self.options.poll.min(renew_every);
@@ -387,10 +387,12 @@ impl Registry {
                 .renew(&self.worker, &id, fence, self.options.lease)
             {
                 Ok(true) => {}
-                Ok(false) => eprintln!(
-                    "branchyard-server: lost the claim on {id}; another worker took it over"
-                ),
-                Err(e) => eprintln!("branchyard-server: could not renew the claim on {id}: {e}"),
+                Ok(false) => {
+                    tracing::warn!(%id, "lost the claim on an operation; another worker took it over")
+                }
+                Err(e) => {
+                    tracing::error!(%id, error = %e, "could not renew the claim on an operation")
+                }
             }
         }
     }
@@ -413,7 +415,7 @@ impl Registry {
             .name(format!("branchyard-{id}"))
             .spawn(move || registry.work(claim, executor));
         if let Err(error) = spawned {
-            eprintln!("branchyard-server: could not start a worker thread for {id}: {error}");
+            tracing::error!(%id, %error, "could not start a worker thread for an operation");
             let _ = self.store.release(&self.worker, &id, fence);
             self.done(&id);
         }
@@ -443,12 +445,12 @@ impl Registry {
         {
             Ok(true) => {}
             Ok(false) => {
-                eprintln!("branchyard-server: lost the claim on {id} before it started");
+                tracing::warn!(%id, "lost the claim on an operation before it started");
                 self.done(&id);
                 return;
             }
             Err(e) => {
-                eprintln!("branchyard-server: could not record {id} as running: {e}");
+                tracing::error!(%id, error = %e, "could not record an operation as running");
                 let _ = self.store.release(&self.worker, &id, fence);
                 self.done(&id);
                 return;
@@ -482,15 +484,16 @@ impl Registry {
             Ok(true) => true,
             Ok(false) => {
                 if !self.lock().closed {
-                    eprintln!(
-                        "branchyard-server: the outcome of {id} was not recorded: another worker \
-                         took its claim over"
+                    tracing::warn!(
+                        %id,
+                        "the outcome of an operation was not recorded: another worker took its \
+                         claim over"
                     );
                 }
                 false
             }
             Err(e) => {
-                eprintln!("branchyard-server: could not record the outcome of {id}: {e}");
+                tracing::error!(%id, error = %e, "could not record the outcome of an operation");
                 false
             }
         }
@@ -667,10 +670,11 @@ impl Drop for Hold {
             .store
             .unhold(&self.repo, &self.branch, &self.token)
         {
-            eprintln!(
-                "branchyard-server: could not release {}; it frees itself within {}s: {e}",
-                self.branch,
-                HOLD_TTL.as_secs()
+            tracing::error!(
+                branch = %self.branch,
+                ttl_s = HOLD_TTL.as_secs(),
+                error = %e,
+                "could not release a hold; it frees itself within the TTL"
             );
         }
     }
@@ -870,16 +874,20 @@ mod tests {
         registry.close();
     }
 
-    fn temp_db(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("branchyard-ops-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir.join("state.db")
+    /// A database path in a fresh directory, removed when the returned
+    /// guard is dropped.
+    fn temp_db(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("branchyard-ops-{name}-"))
+            .tempdir()
+            .unwrap();
+        let db = dir.path().join("state.db");
+        (dir, db)
     }
 
     #[test]
     fn close_interrupts_what_runs_and_a_restart_runs_what_was_queued() {
-        let db = temp_db("close");
+        let (_dir, db) = temp_db("close");
         let (registry, recorder) = started(Box::new(SqliteStore::open(&db, None).unwrap()), 1);
         let (release, gate) = mpsc::channel::<()>();
         *recorder.gate.lock().unwrap() = Some(gate);
@@ -911,12 +919,11 @@ mod tests {
         assert_eq!(*recorder.ran.lock().unwrap(), [7]);
         assert!(reopened.submit(new(None, &["a", "b"]), Value::Null).is_ok());
         reopened.close();
-        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     #[test]
     fn a_crash_between_admission_and_execution_runs_it_once_elsewhere() {
-        let db = temp_db("crash");
+        let (_dir, db) = temp_db("crash");
         // Admitted by a registry that never ran anything, then gone.
         let admitting =
             Registry::open(Box::new(SqliteStore::open(&db, None).unwrap()), options(1)).unwrap();
@@ -935,12 +942,11 @@ mod tests {
         assert_eq!(state(&other, &op.id), OperationState::Succeeded);
         assert_eq!(*recorder.ran.lock().unwrap(), [3]);
         other.close();
-        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     #[test]
     fn an_expired_claim_is_taken_over_and_a_started_one_is_never_rerun() {
-        let db = temp_db("takeover");
+        let (_dir, db) = temp_db("takeover");
         let open =
             || -> Box<dyn OperationStore> { Box::new(SqliteStore::open(&db, None).unwrap()) };
         let shared = Options {
@@ -987,6 +993,5 @@ mod tests {
         assert!(registry.submit(new(None, &["a", "b"]), Value::Null).is_ok());
         registry.close();
         drop(admitting);
-        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }

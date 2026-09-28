@@ -696,10 +696,11 @@ mod tests {
 
     #[test]
     fn substrate_options_are_checked_before_anything_is_created() {
-        let dir = std::env::temp_dir().join(format!("by-placement-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let key = dir.join("key");
-        let _ = std::fs::remove_file(&key);
+        let dir = tempfile::Builder::new()
+            .prefix("by-placement-")
+            .tempdir()
+            .unwrap();
+        let key = dir.path().join("key");
         branchyard_bridge::Signer::write(&key).unwrap();
         let good = SubstrateOptions {
             endpoint: "http://127.0.0.1:9".into(),
@@ -743,7 +744,7 @@ mod tests {
             },
             SubstrateOptions {
                 endpoint: "https://control.example".into(),
-                ca: Some(dir.join("missing-ca.pem")),
+                ca: Some(dir.path().join("missing-ca.pem")),
                 ..good.clone()
             },
             SubstrateOptions {
@@ -764,7 +765,7 @@ mod tests {
                 ..good.clone()
             },
             SubstrateOptions {
-                key: dir.join("missing"),
+                key: dir.path().join("missing"),
                 ..good.clone()
             },
         ];
@@ -777,7 +778,6 @@ mod tests {
                 "{options:?}"
             );
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A stand-in for the Microsandbox provider, which this build may not
