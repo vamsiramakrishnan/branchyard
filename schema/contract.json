@@ -6824,7 +6824,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Files copied, relative to the repository root."
+              "description": "Paths copied, relative to the repository root; a directory a glob\nmatched is named once for everything copied under it."
             },
             "refused": {
               "type": "array",
@@ -8306,7 +8306,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Files copied, relative to the repository root."
+              "description": "Paths copied, relative to the repository root; a directory a glob\nmatched is named once for everything copied under it."
             },
             "refused": {
               "type": "array",
@@ -11286,7 +11286,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Files copied, relative to the repository root."
+              "description": "Paths copied, relative to the repository root; a directory a glob\nmatched is named once for everything copied under it."
             },
             "refused": {
               "type": "array",

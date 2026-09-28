@@ -122,10 +122,7 @@ fn untracked_files_are_copied_and_kept_out_of_candidates_and_escapes_refused() {
     let copy = &reports(&events)[0];
     assert_eq!(copy.phase, WorkspacePhase::Copy);
     assert!(!copy.ok, "a refused glob fails the copy");
-    assert_eq!(
-        copy.copied,
-        [".env", ".env.local", "config/deep/app.local.json"]
-    );
+    assert_eq!(copy.copied, [".env", ".env.local", "config"]);
     let refused = copy.refused.join("\n");
     assert!(
         refused.contains(".env.link: is a symbolic link"),
@@ -166,10 +163,7 @@ fn untracked_files_are_copied_and_kept_out_of_candidates_and_escapes_refused() {
     );
     let info = f.yard.workspace("copies-ok").unwrap();
     assert!(info.ready);
-    assert_eq!(
-        info.copied,
-        [".env", ".env.local", "config/deep/app.local.json"]
-    );
+    assert_eq!(info.copied, [".env", ".env.local", "config"]);
 }
 
 #[test]
@@ -615,4 +609,41 @@ fn a_delegated_child_gets_its_parents_workspace_in_its_own_worktree() {
     let kid = f.yard.workspace("kid").unwrap();
     assert!(kid.ready && kid.worktree.join(".env").is_file());
     assert_ne!(kid.port, f.yard.workspace("root").unwrap().port);
+}
+
+#[test]
+fn a_copied_directory_the_branch_also_tracks_never_hides_the_agents_edits() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.root.join("config")).unwrap();
+    fs::write(f.root.join("config/tracked.txt"), "old\n").unwrap();
+    f.git(&["add", "."]);
+    f.git(&["commit", "-q", "-m", "config"]);
+    fs::write(f.root.join("config/local.json"), "{}\n").unwrap();
+    fs::create_dir_all(f.root.join("cache/deep")).unwrap();
+    fs::write(f.root.join("cache/deep/blob"), "x\n").unwrap();
+    let spec = WorkspaceSpec {
+        copy: vec!["config".into(), "cache".into()],
+        ..WorkspaceSpec::default()
+    };
+    let branch = f
+        .yard
+        .task("WRITE config/tracked.txt=new")
+        .options(with(&f, spec))
+        .name("tracked-dir")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Ready);
+    // Only a directory the branch tracks nothing in is named whole.
+    assert_eq!(
+        f.yard.workspace("tracked-dir").unwrap().copied,
+        ["cache", "config/local.json"]
+    );
+    let candidate = branch.info().candidate.clone().unwrap();
+    let files = f.git(&[
+        "diff",
+        "--name-only",
+        &branch.info().base,
+        &candidate.commit,
+    ]);
+    assert_eq!(files.trim(), "config/tracked.txt");
 }

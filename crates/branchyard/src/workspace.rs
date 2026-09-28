@@ -117,7 +117,8 @@ pub(crate) struct WorkspaceState {
     /// false runs them (again) first.
     #[serde(default)]
     pub ready: bool,
-    /// The files copied, relative to the worktree; left out of snapshots.
+    /// The paths copied (a matched directory once), relative to the
+    /// worktree; left out of snapshots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copied: Vec<String>,
 }
@@ -165,7 +166,8 @@ pub struct WorkspaceReport {
     /// The commands that ran, in order, up to and including one that failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
-    /// Files copied, relative to the repository root.
+    /// Paths copied, relative to the repository root; a directory a glob
+    /// matched is named once for everything copied under it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copied: Vec<String>,
     /// Paths or globs not copied, each with why.
@@ -240,7 +242,7 @@ pub struct WorkspaceInfo {
     pub spec: Option<WorkspaceSpec>,
     /// Copy and setup completed.
     pub ready: bool,
-    /// Files copied, relative to the worktree.
+    /// Paths copied, relative to the worktree (a matched directory once).
     pub copied: Vec<String>,
     /// The branch's reserved port, if one is reserved.
     pub port: Option<u16>,
@@ -479,6 +481,7 @@ pub(crate) fn copy(
         require_literal_leading_dot: false,
     };
     let mut found = BTreeSet::new();
+    let mut matched_dirs = BTreeSet::new();
     for pattern in globs {
         if let Err(why) = check_glob(pattern) {
             report.ok = false;
@@ -498,21 +501,50 @@ pub(crate) fn copy(
             }
         };
         for path in paths.flatten() {
+            let is_dir = fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+            if let (true, Ok(rel)) = (is_dir, path.strip_prefix(&root)) {
+                matched_dirs.insert(rel.display().to_string());
+            }
             collect(&root, &path, &mut found, &mut report.refused);
         }
     }
     let tracked = tracked(&root, &found);
+    let mut copied = Vec::new();
     for rel in found.into_iter().filter(|rel| !tracked.contains(rel)) {
         match copy_one(&root, &worktree, &rel) {
-            Ok(()) => report.copied.push(rel),
+            Ok(()) => copied.push(rel),
             Err(why) => {
                 report.ok = false;
                 report.refused.push(format!("{rel}: {why}"));
             }
         }
     }
+    // A directory is named whole only when the branch tracks nothing in
+    // it: leaving it out of a snapshot must never drop the agent's edits.
+    let whole: BTreeSet<String> = matched_dirs
+        .into_iter()
+        .filter(|dir| tracks_nothing(&worktree, dir))
+        .collect();
+    report.copied = collapse(copied, &whole);
     report.duration_ms = started.elapsed().as_millis() as u64;
     report
+}
+
+/// `files` with those under a directory a glob matched named once, by
+/// that directory: what the event lists and what snapshots leave out, so
+/// a copied `node_modules` is one path, not thousands.
+fn collapse(files: Vec<String>, dirs: &BTreeSet<String>) -> Vec<String> {
+    let under = |file: &str| {
+        dirs.iter()
+            .filter(|dir| file.starts_with(&format!("{dir}/")))
+            .min_by_key(|dir| dir.len())
+            .cloned()
+    };
+    let mut named = BTreeSet::new();
+    for file in files {
+        named.insert(under(&file).unwrap_or(file));
+    }
+    named.into_iter().collect()
 }
 
 /// Why a copy glob is refused, if it is: it must stay inside the
@@ -612,6 +644,18 @@ fn tracked(root: &Path, paths: &BTreeSet<String>) -> BTreeSet<String> {
         }
     }
     tracked
+}
+
+/// Whether the worktree's branch tracks no file under `dir`.
+fn tracks_nothing(worktree: &Path, dir: &str) -> bool {
+    Command::new("git")
+        .args(["ls-files", "-z", "--cached", "--"])
+        .arg(format!(":(literal){dir}"))
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| out.status.success() && out.stdout.is_empty())
 }
 
 fn copy_one(root: &Path, worktree: &Path, rel: &str) -> Result<(), String> {
@@ -823,6 +867,18 @@ mod tests {
         }
         assert_eq!(next_port(high), low);
         assert_eq!(next_port(low), low + 1);
+    }
+
+    #[test]
+    fn files_under_a_matched_directory_are_named_by_it() {
+        let dirs: BTreeSet<String> = ["config".into(), "config/deep".into()].into();
+        let files = vec![
+            ".env".into(),
+            "config/a.json".into(),
+            "config/deep/b.json".into(),
+            "configx/c.json".into(),
+        ];
+        assert_eq!(collapse(files, &dirs), [".env", "config", "configx/c.json"]);
     }
 
     #[test]
