@@ -137,6 +137,12 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     }
     let steps = store.backend().steps(&row.branch, row.turn)?;
     let step = |name: &str| steps.iter().find(|s| s.step == name);
+    // A rewind is finished from its journaled intent, never left half-done.
+    if let Some(rewind) = step(crate::checkpoint::STEP_REWIND) {
+        let recovery = crate::checkpoint::recover(yard, lease, record, &rewind.intent, why)?;
+        crate::graph::settled(yard, &row.branch, None);
+        return Ok(Some(recovery));
+    }
     // What carries the start's marker: a harness spawned just before the
     // engine stopped, whose pid was never recorded, and anything that left
     // the harness's process group.

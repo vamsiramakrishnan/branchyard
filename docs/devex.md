@@ -61,6 +61,8 @@ Superset: press ⌘N again with the same prompt and a different agent, and you g
 
 **Take:** the review step after a fan-out. A `by compare` (or a view in `by watch`) should put the attempts side by side (diff stats, check results, cost, turns) and merge the chosen one with one keystroke.
 
+**Done** ([checkpoints](checkpoints.md#compare-attempts)): `by compare <branch>...` or `--fan <name>` shows status, turns, cost, tokens, time, check, diff stats and the files only each attempt changed (`--json` too); `--check` runs each check on its exact candidate; `--diff A B`; `--pick` merges through the validated merge, and `--discard-others` removes the rest after confirmation. Works with `by --remote` except `--check` and `--diff`. **Remains:** the `by watch` view and its keystroke, which bind to `Yard::compare`.
+
 ### 4. Work survives closing the app
 
 emdash autosaves terminal state and resumes agents where they left off ([tasks](https://emdash.com/docs/tasks)). Superset's terminals are backed by a daemon, so scrollback and processes survive restarts and updates.
@@ -100,6 +102,8 @@ Conductor snapshots each agent turn. Hovering a message and choosing revert disc
 - `by rewind <branch> --to N` (or `by fork <branch> --at N` for a non-destructive version).
 - Rewinding a harness's native session is not always possible, so where resume cannot follow, the rewound branch starts a fresh session with a summary, and says so.
 
+**Done** ([checkpoints](checkpoints.md)): every turn records `refs/branchyard/<branch>/<incarnation>/turn-N` as a journaled step and a `Checkpoint` event, listed by `by show` and `by log` and removed with the branch. `by fork <branch> --at N` branches from any checkpoint; `by rewind <branch> --to N` resets the branch, journaled so recovery finishes one cut short, and keeps later checkpoints so it can be undone by rewinding forward. The harness's own session continues only when it ended at that checkpoint; otherwise a fresh session starts with a summary of the turns before, and the `Rewound` or `ForkedAt` event and the output say which. **Remains:** rewind and `fork --at` through the server API, and the keys in `by watch`.
+
 ### 7. Try the agent's branch in the app already running
 
 Conductor's Spotlight commits a workspace's tracked changes as a checkpoint and checks them out at the repository root, where the user's dev server and Docker stack are already running with hot reload. It syncs one way and restores the root when turned off ([spotlight testing](https://www.conductor.build/docs/reference/scripts/spotlight-testing)).
@@ -108,6 +112,8 @@ Conductor's Spotlight commits a workspace's tracked changes as a checkpoint and 
 - It applies the branch's diff to the main checkout only when that checkout is clean.
 - Branchyard records what it changed, so `--off` restores the checkout exactly.
 - It refuses when the user has uncommitted work.
+
+**Done** ([checkpoints](checkpoints.md#try-a-branch-in-this-checkout)): `by try <branch>` applies the candidate's diff with `git apply` (all or nothing) to a clean checkout only, saving each touched path's prior entry and permission bits in `.branchyard/try/state.json` first; `by try --off` restores them byte for byte, refusing when a tried file changed since unless `--force`; `by try <other>` swaps; `--status` reports; a try cut short is rolled back by the next call. Local mode only. **Remains:** a one-key toggle in `by watch`.
 
 ### 8. One MCP definition, written into every agent's own config
 
@@ -184,5 +190,5 @@ In order of what a user would feel first:
    - notifications;
    - `by open`;
    - a keyboard sheet and actions.
-5. **Compare and choose** after a fan-out (§3).
-6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7).
+5. **Compare and choose** after a fan-out (§3). Done: `by compare` ([checkpoints](checkpoints.md#compare-attempts)); the `by watch` view remains.
+6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7). Done in local mode ([checkpoints](checkpoints.md)); remote rewind and `fork --at` remain.

@@ -120,6 +120,17 @@ On a terminal it is a live dashboard (ratatui): the tree with each status in its
 
 `by log --follow <branch>` prints a branch's events as they are recorded. In [Herdr](https://github.com/herdrdev/herdr), the [Branchyard plugin](plugins/herdr/README.md) follows a server's event stream and gives each branch a tab running `by log --follow`, with the branch's state in Herdr's agent sidebar (`working`, `blocked` on a waiting permission request, `idle` with what happened) and actions to merge, cancel or send to the focused branch. It is tested against a fake `herdr`, not yet against Herdr itself.
 
+## Checkpoints, try and compare
+
+Every turn leaves a checkpoint, `refs/branchyard/<branch>/<incarnation>/turn-N`, listed by `by show` and `by log`. `by fork <branch> --at N` starts a new branch from any of them; `by rewind <branch> --to N` resets the branch itself (confirmed, journaled, and undone by rewinding forward, since later checkpoints stay). The harness's own session continues only where it ended; otherwise the next turn starts fresh with a summary of the turns before, and says so. `by try <branch>` applies a branch's changes to your clean checkout, where your dev server runs, and `by try --off` restores it byte for byte. After a `by fan`, `by compare --fan <name>` puts the attempts side by side (status, turns, cost, tokens, time, check, diff stats, unique files), `--diff A B` compares two, and `--pick <branch> --discard-others` merges one and removes the rest. See [checkpoints](docs/checkpoints.md).
+
+```sh
+by rewind fix-the-flaky-test --to 2
+by try fix-the-flaky-test && by try --off
+by compare --fan speed-up-the-parser --check
+by compare --fan speed-up-the-parser --pick speed-up-the-parser-codex --discard-others
+```
+
 ## Sandbox providers
 
 A harness runs through a sandbox provider. The default **local** provider is the local mode above. The **Microsandbox** provider runs each turn's harness in a microVM booted from an OCI image with the harness installed: the branch's worktree is mounted at `/workspace`, the harness gets only `HOME` and the variables you name with `--pass-env`, and the microVM is destroyed when the turn ends.

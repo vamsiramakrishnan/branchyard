@@ -46,6 +46,8 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | `submit` | each | the prompt | the harness's turn number | Recorded intent means the prompt may have reached the harness: never submitted again |
 | `turn_end` | each | whether a prompt was submitted | how the turn ended | Finished as the engine would have |
 | `snapshot` | each | the commit message | the candidate, or the error | A recorded snapshot is used, not taken again |
+| `checkpoint` | each that submitted its prompt, after `snapshot` | the turn's number | the checkpoint (turn, commit, ref), or why none was written | A recorded checkpoint is used; a pending one is written again (the ref update is idempotent). See [checkpoints](checkpoints.md) |
+| `rewind` | the rewind's own lease | target checkpoint and commit, the head before, the session decision and summary | the commit | Finished from the intent: the reset is repeated and the record settled, with `Recovered` and `Rewound` |
 | `merge <target> <candidate>` | 0 | target, candidate, expected target revision | the merge | A pending merge whose candidate is already in the target is recorded as done instead of repeated |
 | `remove` | 0 | none | none (the branch is deleted) | A removal cut short can be repeated |
 

@@ -1496,3 +1496,46 @@ fn the_server_comes_from_flags_after_the_command_or_the_environment() {
         text(&flag_wins.stderr)
     );
 }
+
+#[test]
+fn compare_works_remotely_and_local_only_commands_say_so() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    for (name, prompt) in [("one", "WRITE a.txt=1"), ("two", "WRITE b.txt=2")] {
+        let args = with_agent(&["run", prompt, "--name", name, "--yes"]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let ran = server.by(&dir.0, &args);
+        assert!(ran.status.success(), "{}", text(&ran.stderr));
+    }
+    let table = server.by(&dir.0, &["compare", "one", "two"]);
+    assert!(table.status.success(), "{}", text(&table.stderr));
+    let table = text(&table.stdout);
+    assert!(table.contains("UNIQUE FILES"), "{table}");
+    assert!(table.lines().nth(1).unwrap().starts_with("one"), "{table}");
+    let json: Value = serde_json::from_slice(
+        &server
+            .by(&dir.0, &["compare", "one", "two", "--json"])
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(json[1]["unique_files"], serde_json::json!(["b.txt"]));
+    let show = text(&server.by(&dir.0, &["show", "one"]).stdout);
+    assert!(
+        show.contains("checkpoints") && show.contains("* 1  "),
+        "{show}"
+    );
+    for args in [
+        &["try", "one"][..],
+        &["rewind", "one", "--to", "0", "--yes"],
+        &["compare", "one", "two", "--diff", "one", "two"],
+    ] {
+        let refused = server.by(&dir.0, args);
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(
+            text(&refused.stderr).contains("remote mode"),
+            "{args:?}: {}",
+            text(&refused.stderr)
+        );
+    }
+}

@@ -38,5 +38,5 @@ mod repo;
 pub use branch::{BranchName, InvalidBranchName, BRANCH_PREFIX};
 pub use check::{Check, OUTPUT_TAIL_BYTES};
 pub use git::GitError;
-pub use integrate::{Integrated, IntegrationError};
+pub use integrate::{CheckResult, Integrated, IntegrationError};
 pub use repo::{Candidate, Commit, DiffStat, Repository, Workspace};

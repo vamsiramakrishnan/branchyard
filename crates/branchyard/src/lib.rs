@@ -96,6 +96,8 @@
 
 mod broker;
 mod bundle;
+mod checkpoint;
+mod compare;
 #[cfg(test)]
 mod conformance;
 mod delegation;
@@ -118,6 +120,7 @@ mod record;
 mod recover;
 mod run;
 mod seats;
+mod spotlight;
 mod sqlite;
 mod state;
 mod steer;
@@ -141,6 +144,8 @@ pub use branchyard_provision::{
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
+pub use checkpoint::{recorded as recorded_checkpoints, CheckpointEntry, Checkpoints, Rewound};
+pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, CheckRun};
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
@@ -153,6 +158,7 @@ pub use inbox::{DeliveryHook, SteerDelivery};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
+pub use spotlight::{TryEntry, TryFile, TryState};
 use std::collections::BTreeMap;
 pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
 
@@ -391,6 +397,52 @@ impl Yard {
     /// [`Yard::remove`], with options.
     pub fn remove_with(&self, branch: &str, options: &RemoveOptions) -> Result<(), Error> {
         ops::remove(self, branch, options)
+    }
+
+    /// The named branches side by side: status, turns, cost, tokens, time,
+    /// diff stats and the files only each one changed; with `run_checks`,
+    /// each branch's check run on its exact candidate in a private
+    /// worktree. See `docs/checkpoints.md`.
+    pub fn compare(&self, branches: &[String], run_checks: bool) -> Result<Vec<Attempt>, Error> {
+        compare::compare(self, branches, run_checks)
+    }
+
+    /// The branches one `by fan` started as `<name>-<harness>`.
+    pub fn fan_branches(&self, name: &str) -> Result<Vec<String>, Error> {
+        compare::fan(self, name)
+    }
+
+    /// The diff from branch `a`'s candidate (or base) to `b`'s.
+    pub fn diff_between(&self, a: &str, b: &str) -> Result<String, Error> {
+        compare::between(self, a, b)
+    }
+
+    /// Apply `branch`'s candidate diff to this checkout, which must be
+    /// clean, recording what it changed under `.branchyard/try/` so
+    /// [`Yard::try_off`] restores it exactly. A try of another branch is
+    /// turned off first. Refused, with nothing applied, when the diff does
+    /// not apply. See `docs/checkpoints.md`.
+    pub fn try_on(&self, branch: &str) -> Result<TryState, Error> {
+        spotlight::on(self, branch)
+    }
+
+    /// Restore the checkout to what it held before [`Yard::try_on`].
+    /// Refused when a tried file changed since, or `HEAD` moved, unless
+    /// `force`. `None` when nothing was tried.
+    pub fn try_off(&self, force: bool) -> Result<Option<TryState>, Error> {
+        spotlight::off(self, force)
+    }
+
+    /// The try in effect, if any.
+    pub fn try_status(&self) -> Result<Option<TryState>, Error> {
+        spotlight::status(self)
+    }
+
+    /// Roll back a try a stopped process left half-applied or
+    /// half-restored; says what was done. Every `try_*` call does this
+    /// first.
+    pub fn try_recover(&self) -> Result<Option<String>, Error> {
+        spotlight::recover(self)
     }
 
     /// Known harness profiles, whether their executable is on `PATH`, and
@@ -910,7 +962,48 @@ impl Branch {
         fresh_session: bool,
         options: TaskOptions,
     ) -> Result<Branch, Error> {
-        run::fork(&self.yard, &self.info.name, prompt, fresh_session, &options)
+        run::fork(
+            &self.yard,
+            &self.info.name,
+            prompt,
+            fresh_session,
+            None,
+            &options,
+        )
+    }
+
+    /// A new branch from this branch's checkpoint `turn` (0 is its base),
+    /// leaving this branch as it is. The harness session is forked natively
+    /// only when it ended at that checkpoint and the harness can fork;
+    /// otherwise the new branch starts a fresh session whose first prompt
+    /// begins with a generated summary of the turns that led there, and an
+    /// [`Activity::ForkedAt`] on the new branch says which. See
+    /// `docs/checkpoints.md`.
+    pub fn fork_at(&self, turn: u32, prompt: &str, options: TaskOptions) -> Result<Branch, Error> {
+        run::fork(
+            &self.yard,
+            &self.info.name,
+            prompt,
+            false,
+            Some(turn),
+            &options,
+        )
+    }
+
+    /// Reset this branch, its worktree and its candidate to checkpoint
+    /// `turn` (0 is its base). Refused while a turn runs, for a merged
+    /// branch, and when the worktree holds changes no checkpoint has.
+    /// Later checkpoints are kept, so rewinding to one of them undoes this.
+    /// The next turn resumes the harness's own session only if it ended at
+    /// that checkpoint; otherwise it starts fresh with a summary. Journaled:
+    /// an engine that stops mid-rewind leaves it for recovery to finish.
+    pub fn rewind(&self, turn: u32) -> Result<Rewound, Error> {
+        checkpoint::rewind(&self.yard, &self.info.name, turn)
+    }
+
+    /// This branch's checkpoints, oldest first, and the one it is at.
+    pub fn checkpoints(&self) -> Result<Checkpoints, Error> {
+        checkpoint::list(&self.yard, &self.info.name)
     }
 
     /// A new branch from this branch's latest candidate, always with a
@@ -1418,6 +1511,95 @@ pub enum Activity {
     /// Inbox messages reached this branch's turn, and by which path; see
     /// `docs/delegation.md#delivery`. Each message is delivered once.
     MessagesDelivered { ids: Vec<u64>, via: DeliveredVia },
+    /// A turn ended and its worktree was recorded as a checkpoint ref; see
+    /// `docs/checkpoints.md`.
+    Checkpoint(Checkpoint),
+    /// The branch was rewound to an earlier (or, after a rewind, a later)
+    /// checkpoint by [`Branch::rewind`].
+    Rewound {
+        /// The checkpoint the branch was at, when known.
+        from: Option<u32>,
+        to: u32,
+        /// The commit the branch and its worktree were reset to.
+        commit: String,
+        /// How the branch's next turn continues the conversation.
+        session: SessionContinuity,
+    },
+    /// This branch was forked from another's checkpoint by
+    /// [`Branch::fork_at`]; recorded on the new branch before its turn.
+    ForkedAt {
+        branch: String,
+        turn: u32,
+        commit: String,
+        session: SessionContinuity,
+    },
+}
+
+/// A turn's checkpoint: the branch's commit when the turn ended, kept as the
+/// ref `refs/branchyard/<branch>/<incarnation>/turn-<N>`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// The turn's number, from 1; turn 0 is the branch's base and has no ref.
+    pub turn: u32,
+    pub commit: String,
+    pub git_ref: String,
+    /// The checkpoint the turn started from: `Some(0)` for the base, the
+    /// rewound-to checkpoint after a rewind, `None` when not recorded.
+    pub after: Option<u32>,
+    /// The harness session when the turn ended.
+    pub session: Option<String>,
+    /// Against the branch's base.
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+/// How a rewound or forked-at branch's conversation continues. Serialized as
+/// an object tagged by `mode`, such as `{"mode": "native", "session": "..."}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SessionContinuity {
+    /// The harness's own session is resumed (a rewind) or forked (a fork):
+    /// it ended exactly at that checkpoint.
+    Native { session: String },
+    /// A fresh session, whose first prompt carries a generated summary of
+    /// these turns, because the native session could not continue from the
+    /// checkpoint, for `reason`.
+    Summary { turns: Vec<u32>, reason: String },
+    /// A fresh session with no summary: nothing ran before the checkpoint
+    /// (turn 0, the base).
+    Fresh { reason: String },
+}
+
+impl SessionContinuity {
+    /// One line for people: what the next turn continues.
+    pub fn describe(&self) -> String {
+        match self {
+            SessionContinuity::Native { session } => {
+                format!("continues the harness's own session {session}")
+            }
+            SessionContinuity::Summary { turns, reason } => {
+                let turns = match (turns.first(), turns.last()) {
+                    (Some(first), Some(last)) if first != last => {
+                        format!("turns {}", checkpoint::turn_list(turns))
+                    }
+                    (Some(only), _) => format!("turn {only}"),
+                    _ => "no earlier turns".to_owned(),
+                };
+                format!("starts a fresh session with a summary of {turns}: {reason}")
+            }
+            SessionContinuity::Fresh { reason } => {
+                format!("starts a fresh session: {reason}")
+            }
+        }
+    }
+
+    /// Whether the harness's own session continues.
+    pub fn native(&self) -> bool {
+        matches!(self, SessionContinuity::Native { .. })
+    }
 }
 
 /// How [`Activity::MessagesDelivered`] messages reached a turn. Serialized

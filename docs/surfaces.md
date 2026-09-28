@@ -35,6 +35,11 @@ Surfaces:
 | Steer a running turn ([harness support](harness-integration.md#steering-a-running-turn)) | `Branch::steer`, `Yard::steer_as`; `steer_state`, `wait_steer` follow it | `send --steer` | yes, as the server's caller | `POST …/steer` | `steer` | `steer` (`by send --steer`, `branchyard.steer`, `Delegate::steer`, MCP), descendants only |
 | Harness profiles | `Yard::harnesses` | `harnesses` | yes, the server's `PATH` | `GET /v1/harnesses` | `harnesses` | no |
 | Recover stopped turns | `Yard::recover`, `Yard::open` | on every open | the server, at start and every 30 s | n/a | n/a | n/a |
+| List checkpoints ([checkpoints](checkpoints.md)) | `Branch::checkpoints`; `recorded_checkpoints` from events | `show`, `log` | yes, from the event log | the `checkpoint` events | `events` | no: `events` shows them |
+| Fork at a checkpoint | `Branch::fork_at` | `fork --at N` | no: needs an API operation; refused with a message | no | no | no: children start from a revision |
+| Rewind to a checkpoint | `Branch::rewind` | `rewind --to N` | no: needs an API operation; refused with a message | no | no | no: not a delegation operation |
+| Try a branch in this checkout | `Yard::try_on`, `try_off`, `try_status`, `try_recover` | `try`, `try --off`, `try --status` | no: the server's checkout is not yours; refused | no | no | no |
+| Compare attempts | `Yard::compare`, `fan_branches`, `diff_between`; `compare_attempt`, `mark_unique`, `diff_files` | `compare` | yes, but not `--check` or `--diff` | from branches, events and diffs | the same | no |
 
 ## Task options
 
@@ -200,6 +205,17 @@ Setup and configuration are the CLI's: they write files for `by` and the server 
 | `by config show`, `path`, `validate`, `schema` | none | the effective configuration with each value's source, where the files are, a strict check, the schema; clap subcommands, `--json` before or after the action |
 | `by serve --check`, `branchyard-server --check` | none | load and validate a configuration as serving would, without serving or writing anything; a flag of the server's clap parser, which `by serve` forwards like the rest; `branchyard.toml`'s `[serve] config` is added as `--config` only when the server's parser reports no `--config`/`-c` on the command line |
 | The `setup` skill and `/branchyard:setup` | the plugin had the `delegate` skill only | `plugins/branchyard/skills/setup` drives `by init --json` with the harness's own question tool; the Claude plugin's `commands/setup.md` starts it; `install_skill.py --skill setup`; `by init plugin` installs both skills |
+
+## Added with checkpoints
+
+| Surface | Before | Now |
+|---|---|---|
+| `Activity::Checkpoint`, `Rewound`, `ForkedAt`; `Checkpoint`, `SessionContinuity` (`schema/contract.json`) | none | a checkpoint per turn and how a rewound or forked-at branch's session continues ([checkpoints](checkpoints.md)); new variants of the event enum, so a strict reader of older events is unaffected and one of newer events must accept them |
+| `by show --json` | the branch | also `checkpoints` (`current`, `base`, the list) |
+| `by fork --at N` | none | fork from checkpoint N; conflicts with `--fresh-session` |
+| `by rewind`, `by try`, `by compare` | none | new commands in *Work on branches* |
+| `Repository::check_commit`, `CheckResult` (`branchyard-workspace`) | none | a check on an exact commit in a private worktree |
+| `refs/branchyard/<branch>/<incarnation>/turn-N`, `refs/branchyard-try/*`, `.branchyard/try/` | none | checkpoint refs (deleted by `rm`), and a try's pins and saved state |
 
 ## Changed from 4609ca1
 

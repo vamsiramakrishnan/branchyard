@@ -90,6 +90,17 @@ pub(crate) struct Record {
     /// parent's branch as it is when it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_base: Option<String>,
+    /// The checkpoint the branch is at: `Some(0)` for its base, the last
+    /// turn's after a turn, the rewound-to one after a rewind. `None` for a
+    /// branch created before checkpoints were recorded. See
+    /// `crate::checkpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<u32>,
+    /// A summary of earlier turns that the next turn's prompt starts with,
+    /// because a rewind could not continue the harness's own session.
+    /// Cleared once a turn submits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current

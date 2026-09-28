@@ -4,6 +4,7 @@
 //! mode (`--remote URL`).
 
 mod args;
+mod attempts;
 mod commands;
 mod config_cmd;
 mod console;
@@ -161,8 +162,54 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             branch,
             prompt,
             fresh_session,
+            at: None,
             task,
         } => commands::fork(env, target, &branch, &prompt, fresh_session, &task),
+        Command::Fork {
+            branch,
+            prompt,
+            at: Some(turn),
+            task,
+            ..
+        } => commands::fork_at(env, target, &branch, turn, &prompt, &task),
+        Command::Rewind {
+            branch,
+            to,
+            yes,
+            json,
+        } => attempts::rewind(env, target, &branch, to, yes, json),
+        Command::Try {
+            branch,
+            off,
+            status,
+            force,
+            json,
+        } => attempts::try_branch(env, target, branch.as_deref(), off, status, force, json),
+        Command::Compare {
+            branches,
+            fan,
+            check,
+            diff,
+            pick,
+            into,
+            discard_others,
+            yes,
+            json,
+        } => attempts::compare(
+            env,
+            target,
+            &attempts::CompareArgs {
+                branches,
+                fan,
+                check,
+                diff,
+                pick,
+                into,
+                discard_others,
+                yes,
+                json,
+            },
+        ),
         Command::Reincarnate { branch, task } => commands::reincarnate(env, target, &branch, &task),
         Command::Ls { json } => commands::ls(env, target, json),
         Command::Show { branch, json } => commands::show(env, target, &branch, json),
