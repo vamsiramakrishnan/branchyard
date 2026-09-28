@@ -33,6 +33,9 @@ use crate::rig::{Fallback, RigPlan};
 pub struct Remote {
     pub client: Client,
     pub repo: Repo,
+    /// The global flags that reach this server and repository, for a `by`
+    /// this one starts (as `by watch`'s actions do).
+    pub args: Vec<String>,
 }
 
 impl Remote {
@@ -70,7 +73,18 @@ impl Remote {
             }
         };
         let repo = client.repo(&name);
-        Ok(Remote { client, repo })
+        let mut args = vec![
+            "--remote".to_owned(),
+            url.to_owned(),
+            "--token-file".to_owned(),
+            token_file.to_owned(),
+            "--repo".to_owned(),
+            name,
+        ];
+        if let Some(ca) = &globals.ca_file {
+            args.extend(["--ca-file".to_owned(), ca.clone()]);
+        }
+        Ok(Remote { client, repo, args })
     }
 
     /// Where commands run, for messages.

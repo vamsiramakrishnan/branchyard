@@ -118,6 +118,22 @@ docs          gemini-cli   no changes      1      -   9m  The docs already cover
 
 On a terminal it is a live dashboard (ratatui): the tree with each status in its own color (an interrupted branch in black on yellow, since its work is stopped mid-turn), and beside or below it the selected branch's detail: its latest events, cost and tokens, unread inbox messages, children, prompt and the commands to run next. `j`/`k` or the arrows move, Enter focuses the selected branch's subtree, `/` filters by name, harness, status or prompt, `?` lists every key, and `q`, Esc or Ctrl-C exits and restores the terminal (as does a panic). Piped, it prints one line per change instead. It reads event logs incrementally, and works the same with `--remote`, where it follows the server's event stream.
 
+It is also a cockpit: keys act on the selected branch by running the `by` command they name, with the same `--remote` and other global flags, and the footer lists the ones that apply to it.
+
+| Key | Does | Runs |
+|---|---|---|
+| `s` | Send a follow-up prompt, typed in a box | `by send` in the background |
+| `S` | Steer the running turn | `by send --steer` |
+| `R` | Resume an interrupted branch in its own session, with one key | `by send` with a "continue where you left off" prompt |
+| `x` | Cancel the running turn and its descendants', after a yes | `by cancel` |
+| `m` | Merge, after a yes; a pane then shows the result of the check | `by merge` |
+| `f` | Fork, with a prompt | `by fork` in the background |
+| `d` / `l` | The candidate's diff, or the whole log (following new events), in a scrollable pane | `by diff`, `by log` |
+| `y` / `Y` | Copy the branch's name, or its worktree's path, through the terminal (OSC 52) | |
+| `p` `o` `r` `c` `t` | Reserved for `by pr`, `by open`, `by rewind`, `by compare` and `by try` | |
+
+Commands that run a turn start detached (their output goes to `.branchyard/watch/` in the repository), so they carry on if the dashboard quits; a result or a refusal (such as `R` on a branch that is not interrupted) appears in the status line. With no terminal to ask on, those turns get the permissions `branchyard.toml` sets, and requests are otherwise denied. Remotely, an action that needs this machine (copying a worktree's path) is refused with the reason. The keys come from one table, `crates/branchyard-cli/src/watch/actions.rs`, which also generates the `?` sheet.
+
 `by log --follow <branch>` prints a branch's events as they are recorded. In [Herdr](https://github.com/herdrdev/herdr), the [Branchyard plugin](plugins/herdr/README.md) follows a server's event stream and gives each branch a tab running `by log --follow`, with the branch's state in Herdr's agent sidebar (`working`, `blocked` on a waiting permission request, `idle` with what happened) and actions to merge, cancel or send to the focused branch. It is tested against a fake `herdr`, not yet against Herdr itself.
 
 ## Sandbox providers

@@ -74,6 +74,8 @@ emdash autosaves terminal state and resumes agents where they left off ([tasks](
 - `by watch` should show interrupted branches prominently, with a one-key resume (a `by send` to the branch, which resumes its native session).
 - With a server running (`by serve` or `by worker`), local turns should outlive the terminal that started them. This is the daemon behaviour Superset has.
 
+**Status:** the first is done. `by watch` draws an interrupted branch in black on yellow, counts them in its header, and `R` resumes the selected one with one key (`by send` with a "continue where you left off" prompt, which resumes the harness's native session). A turn started from `by watch` runs in its own process group, detached from the dashboard, so it outlives `by watch` and the terminal. What remains is the second: `by run` in a terminal still ties its turn to that terminal unless it goes through a server.
+
 ### 5. Review, PR and CI without leaving the tool
 
 - **emdash:**
@@ -149,6 +151,8 @@ Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a
 - `/` to filter;
 - keys to send, steer, merge, open, fork and resume without leaving the view.
 
+**Status:** done except `open`. `by watch` has the `?` sheet and `/` filter, and keys on the selected branch: `s` send (an input box), `S` steer, `R` resume, `x` cancel and `m` merge (each after a yes; the merge's check result is shown), `f` fork, `d` diff and `l` log in scrollable panes, `y`/`Y` copy the name or worktree path. Each runs the existing `by` command. The keys live in one table (`crates/branchyard-cli/src/watch/actions.rs`) that drives the handling, the footer and the `?` sheet, and reserves `p`, `o`, `r`, `c` and `t` for `by pr`, `by open`, `by rewind`, `by compare` and `by try`, so binding each is a one-row change. Not done: a command palette and remappable keys.
+
 ## What they struggle with, and Branchyard already handles
 
 | Their weak spot | Evidence | Branchyard |
@@ -180,9 +184,9 @@ In order of what a user would feel first:
    - `by pr` and `by pr --watch`, which routes CI failures and review comments back into the branch;
    - a merge-readiness line.
 4. **`by watch` as the cockpit** (§4, §10, §11, §12):
-   - interrupted branches with one-key resume;
+   - interrupted branches with one-key resume (done);
    - notifications;
-   - `by open`;
-   - a keyboard sheet and actions.
+   - `by open` (its key, `o`, is reserved in the action table);
+   - a keyboard sheet and actions (done).
 5. **Compare and choose** after a fan-out (§3).
 6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7).
