@@ -472,33 +472,10 @@ pub fn mcp_config(servers: &[McpServer], remote: &[RemoteMcpServer]) -> String {
     json!({ "mcpServers": servers }).to_string()
 }
 
-/// A random version 4 UUID from the standard library's seeded hasher.
+/// A random version 4 UUID, hyphenated and lowercase: a fresh session ID
+/// that another process cannot guess.
 fn uuid_v4() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut bytes = [0u8; 16];
-    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u128(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos()),
-        );
-        hasher.write_usize(i);
-        chunk.copy_from_slice(&hasher.finish().to_le_bytes());
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..]
-    )
+    uuid::Uuid::new_v4().to_string()
 }
 
 impl Driver for ClaudeCode {
@@ -675,6 +652,13 @@ impl Driver for ClaudeCode {
         Ok(vec![self.control_request(Pending::Interrupt(turn), request)])
     }
 
+    fn steer_boundary(&self) -> &'static str {
+        // Queued as a stream-json `user` message, delivered before the next
+        // model call (`docs/harness-integration.md` "Steering a running
+        // turn").
+        "claude_next_model_call"
+    }
+
     fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
         if !self.ready {
             return Err(Rejected::NotReady);
@@ -729,4 +713,21 @@ fn user_message(text: &str, uuid: &str) -> Frame {
         "session_id": "",
         "uuid": uuid,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn session_ids_are_distinct_hyphenated_version_4_uuids() {
+        let a = super::uuid_v4();
+        assert_eq!(a.len(), 36);
+        let groups: Vec<usize> = a.split('-').map(str::len).collect();
+        assert_eq!(groups, [8, 4, 4, 4, 12]);
+        assert!(a
+            .chars()
+            .all(|c| c == '-' || c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert_eq!(&a[14..15], "4");
+        assert!("89ab".contains(&a[19..20]), "{a}");
+        assert_ne!(a, super::uuid_v4());
+    }
 }

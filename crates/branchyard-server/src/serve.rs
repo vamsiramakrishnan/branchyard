@@ -17,10 +17,10 @@ use tokio::sync::{watch, Notify};
 use tokio_rustls::TlsAcceptor;
 
 use crate::api::{self, App, RepoState};
-use crate::auth::Tokens;
+use crate::auth::Credentials;
 use crate::config::{Config, TlsFiles};
 use crate::feed::Feed;
-use crate::ops::Registry;
+use crate::ops::{Options, Registry};
 use crate::store::{OperationStore, SqliteStore};
 use crate::webhook;
 
@@ -39,8 +39,11 @@ pub struct Running {
     accept: tokio::task::JoinHandle<()>,
     pollers: Vec<tokio::task::JoinHandle<()>>,
     webhooks: Vec<tokio::task::JoinHandle<()>>,
-    /// Held until the server has stopped: one server per data directory.
-    _lock: branchyard::DirLock,
+    /// Held until the server has stopped: one server per data directory,
+    /// unless its operations are in PostgreSQL, which several servers may
+    /// share.
+    _lock: Option<branchyard::DirLock>,
+    worker: bool,
 }
 
 /// How a shutdown went.
@@ -52,8 +55,15 @@ pub struct Stopped {
 }
 
 impl Running {
+    /// The bound address; for a worker, which binds none, the configured
+    /// one.
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Whether this only runs operations, with no HTTP listener.
+    pub fn is_worker(&self) -> bool {
+        self.worker
     }
 
     /// `http://` or `https://` and the bound address.
@@ -92,7 +102,7 @@ impl Running {
         }
         let registry = self.registry.clone();
         let grace = self.grace;
-        let idle = tokio::task::spawn_blocking(move || registry.wait_idle(grace));
+        let idle = tokio::task::spawn_blocking(move || registry.wait_running(grace));
         tokio::select! {
             _ = idle => {}
             _ = self.force.notified() => {}
@@ -163,8 +173,16 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?;
-    let lock = branchyard::DirLock::acquire(&config.data_dir, "a Branchyard server")
-        .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?;
+    // With PostgreSQL, operations, their queue and branch locks are in the
+    // database, which several servers may share; otherwise they are in the
+    // data directory's SQLite, which one server owns.
+    let lock = match config.database {
+        Some(_) => None,
+        None => Some(
+            branchyard::DirLock::acquire(&config.data_dir, "a Branchyard server")
+                .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?,
+        ),
+    };
     let tls = match &config.tls {
         Some(files) => Some(tls_acceptor(files)?),
         None => None,
@@ -175,32 +193,59 @@ pub async fn start(config: Config) -> Result<Running, String> {
         tokio::task::spawn_blocking(move || open_state(&config))
     };
     let (repos, registry) = setup.await.map_err(|e| e.to_string())??;
-    let listener = TcpListener::bind(config.listen)
-        .await
-        .map_err(|e| format!("cannot listen on {}: {e}", config.listen))?;
-    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let worker = config.worker_only;
+    let listener = match worker {
+        true => None,
+        false => Some(
+            TcpListener::bind(config.listen)
+                .await
+                .map_err(|e| format!("cannot listen on {}: {e}", config.listen))?,
+        ),
+    };
+    let addr = match &listener {
+        Some(listener) => listener.local_addr().map_err(|e| e.to_string())?,
+        None => config.listen,
+    };
     let pollers = repos
         .values()
         .map(|repo| {
             tokio::spawn(poll(
                 repo.clone(),
                 config.poll_interval,
+                config.recover_interval,
                 shutdown_rx.clone(),
             ))
         })
         .collect();
-    let webhooks = start_webhooks(&config, &repos, shutdown_rx.clone())?;
+    let webhooks = match worker {
+        true => Vec::new(),
+        false => start_webhooks(&config, &repos, shutdown_rx.clone())?,
+    };
     let grace = config.shutdown_grace;
     let app = Arc::new(App {
         repos,
         registry: registry.clone(),
-        tokens: Tokens::new(config.tokens.clone()),
+        credentials: Credentials::new(config.all_credentials()),
         config,
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),
     });
-    let router = api::router(app);
-    let accept = tokio::spawn(accept_loop(listener, tls.clone(), router, shutdown_rx));
+    registry
+        .start(Arc::new(crate::work::AppExecutor(app.clone())))
+        .map_err(|e| format!("could not start the operation dispatcher: {e}"))?;
+    let accept = match listener {
+        Some(listener) => {
+            let router = api::router(app);
+            tokio::spawn(accept_loop(listener, tls.clone(), router, shutdown_rx))
+        }
+        None => {
+            let mut shutdown = shutdown_rx;
+            tokio::spawn(async move {
+                let _app = app;
+                let _ = shutdown.wait_for(|stop| *stop).await;
+            })
+        }
+    };
     Ok(Running {
         addr,
         tls: tls.is_some(),
@@ -212,6 +257,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         pollers,
         webhooks,
         _lock: lock,
+        worker,
     })
 }
 
@@ -233,9 +279,11 @@ fn start_webhooks(
     let mut tasks = Vec::new();
     for repo in repos.values() {
         for webhook in &config.webhooks {
-            eprintln!(
-                "branchyard-server: notifying {} of {}'s activity, cursor in {place}",
-                webhook.url, repo.name
+            tracing::info!(
+                webhook = %webhook.url,
+                repo = %repo.name,
+                cursor = %place,
+                "notifying webhook of repo activity"
             );
             tasks.push(webhook::spawn(
                 repo.clone(),
@@ -269,8 +317,15 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         );
     }
     let (store, place) = operation_store(config)?;
-    let registry = Registry::open(store, config.max_running)
-        .map_err(|e| format!("operation registry {place}: {e}"))?;
+    let options = Options {
+        max_running: config.max_running,
+        lease: config.operation_lease,
+        poll: config.poll_interval,
+        repos: config.repos.iter().map(|(name, _)| name.clone()).collect(),
+        exclusive: config.database.is_none(),
+    };
+    let registry =
+        Registry::open(store, options).map_err(|e| format!("operation registry {place}: {e}"))?;
     Ok((repos, registry))
 }
 
@@ -316,14 +371,21 @@ fn operation_store(config: &Config) -> Result<(Store, String), String> {
     Ok((Box::new(store), place))
 }
 
-/// How often the server looks for branches whose engine stopped, such as a
-/// local `by run` that was killed.
-const RECOVER_EVERY: Duration = Duration::from_secs(30);
+/// How often, by default, the server looks for branches whose engine
+/// stopped, such as a local `by run` that was killed, and for waiting
+/// dependents whose prerequisites settled; [`Config::recover_interval`].
+pub const RECOVER_EVERY: Duration = Duration::from_secs(30);
 
 /// Publish a repository's feed head when the engine reports activity, and
 /// otherwise every `interval`, which picks up other processes' activity.
-/// Every [`RECOVER_EVERY`], recover branches whose engine stopped.
-async fn poll(repo: RepoState, interval: Duration, mut shutdown: watch::Receiver<bool>) {
+/// Every `recover_every`, recover branches whose engine stopped and start
+/// waiting dependents whose prerequisites settled.
+async fn poll(
+    repo: RepoState,
+    interval: Duration,
+    recover_every: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let mut recovered = tokio::time::Instant::now();
     loop {
         tokio::select! {
@@ -331,31 +393,51 @@ async fn poll(repo: RepoState, interval: Duration, mut shutdown: watch::Receiver
             _ = tokio::time::sleep(interval) => {}
             _ = shutdown.changed() => {}
         }
-        let recover = recovered.elapsed() >= RECOVER_EVERY;
+        let recover = recovered.elapsed() >= recover_every;
         if recover {
             recovered = tokio::time::Instant::now();
         }
         let (feed, yard) = (repo.feed.clone(), repo.yard.clone());
+        let wake = repo.wake.clone();
         let polled = tokio::task::spawn_blocking(move || {
             let recovered = match recover {
                 true => yard.recover().map(|r| r.len()),
                 false => Ok(0),
             };
+            // A dependent whose prerequisite settled while no engine here
+            // could start it: with the options of the proposal that made
+            // it, when this server applied that, else the default policy,
+            // deny. See docs/graph.md.
+            if recover {
+                let options = branchyard::TaskOptions {
+                    observer: Some(crate::api::observer(&wake)),
+                    ..branchyard::TaskOptions::default()
+                };
+                match yard.resume_graph(&options) {
+                    Ok(started) if started.is_empty() => {}
+                    Ok(started) => tracing::info!(
+                        started = %started.join(", "),
+                        "started branch(es) whose prerequisites had settled"
+                    ),
+                    Err(e) => tracing::error!(error = %e, "resuming graphs"),
+                }
+            }
             (feed.sync(), recovered)
         })
         .await;
         match polled {
             Ok((synced, recovered)) => {
                 if let Err(e) = synced {
-                    eprintln!("branchyard-server: feed of {}: {e}", repo.name);
+                    tracing::error!(repo = %repo.name, error = %e, "syncing the feed");
                 }
                 match recovered {
                     Ok(0) => {}
-                    Ok(n) => eprintln!(
-                        "branchyard-server: recovered {n} branch(es) of {} whose engine stopped",
-                        repo.name
+                    Ok(n) => tracing::info!(
+                        repo = %repo.name,
+                        recovered = n,
+                        "recovered branch(es) whose engine stopped"
                     ),
-                    Err(e) => eprintln!("branchyard-server: recovering {}: {e}", repo.name),
+                    Err(e) => tracing::error!(repo = %repo.name, error = %e, "recovering"),
                 }
             }
             Err(_) => return,
@@ -397,7 +479,7 @@ async fn accept_loop(
                 }
                 Err(e) => {
                     // Such as too many open files: back off rather than spin.
-                    eprintln!("branchyard-server: accept: {e}");
+                    tracing::error!(error = %e, "accept");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             },

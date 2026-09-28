@@ -537,6 +537,13 @@ impl Driver for Pi {
         Ok(frames)
     }
 
+    fn steer_boundary(&self) -> &'static str {
+        // The `steer` command, queued and delivered before the next model
+        // call within the same run (`docs/harness-integration.md` "Steering
+        // a running turn").
+        "pi_steer"
+    }
+
     fn steer(&mut self, text: &str) -> Result<Vec<Frame>, Rejected> {
         if !self.ready {
             return Err(Rejected::NotReady);

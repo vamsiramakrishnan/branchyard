@@ -9,6 +9,7 @@ use branchyard::{
     TurnOutcome, Usage,
 };
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::args::shell_quote;
 
@@ -67,14 +68,37 @@ const BRANCH_TONES: [Tone; 5] = [
     Tone::Blue,
 ];
 
-/// Shorten `text` to `max` characters, marking the cut with an ellipsis.
+/// How many terminal columns `text` takes: two for a wide (East Asian)
+/// character, none for a combining mark, one otherwise.
+pub fn width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// Shorten `text` to `max` terminal columns, marking the cut with an
+/// ellipsis. A wide character that would straddle the limit is dropped
+/// whole.
 pub fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if width(text) <= max {
         return text.to_owned();
     }
-    let mut short: String = text.chars().take(max.saturating_sub(1)).collect();
+    let room = max.saturating_sub(1);
+    let mut short = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        used += w;
+        short.push(c);
+    }
     short.push('…');
     short
+}
+
+/// `text` followed by spaces up to `columns` terminal columns.
+fn pad_right(text: &str, columns: usize) -> String {
+    format!("{text}{}", " ".repeat(columns.saturating_sub(width(text))))
 }
 
 /// A tool invocation's input as one short line: the field a person would
@@ -110,7 +134,7 @@ pub fn usd(value: f64) -> String {
     }
 }
 
-fn tokens(count: u64) -> String {
+pub fn tokens(count: u64) -> String {
     match count {
         0..=999 => count.to_string(),
         1_000..=999_999 => format!("{:.1}k", count as f64 / 1e3),
@@ -350,9 +374,11 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(", ");
             let via = match via {
-                branchyard::DeliveredVia::TurnStart => "at the turn's start".to_owned(),
-                branchyard::DeliveredVia::Steer { steer } => {
-                    format!("into the running turn (steered input {steer})")
+                branchyard::DeliveredVia::TurnStart { boundary } => {
+                    format!("at the turn's start ({boundary})")
+                }
+                branchyard::DeliveredVia::Steer { steer, boundary } => {
+                    format!("into the running turn (steered input {steer}, {boundary})")
                 }
             };
             style.paint(Tone::Cyan, &format!("delivered {ids} {via}"))
@@ -418,7 +444,7 @@ impl Renderer {
         for branch in branches {
             let next = BRANCH_TONES[self.tones.len() % BRANCH_TONES.len()];
             self.tones.entry(branch.clone()).or_insert(next);
-            self.width = self.width.max(branch.chars().count());
+            self.width = self.width.max(width(branch));
         }
     }
 
@@ -483,8 +509,8 @@ impl Renderer {
         }
         let next = BRANCH_TONES[self.tones.len() % BRANCH_TONES.len()];
         let tone = *self.tones.entry(branch.to_owned()).or_insert(next);
-        self.width = self.width.max(branch.chars().count());
-        let label = format!("{branch:<width$} │", width = self.width);
+        self.width = self.width.max(width(branch));
+        let label = format!("{} │", pad_right(branch, self.width));
         format!("{} ", self.style.paint(tone, &label))
     }
 }
@@ -535,7 +561,7 @@ pub fn table(columns: &[Column], rows: &[Vec<Cell>], style: Style) -> String {
         .map(|(i, column)| {
             cells
                 .iter()
-                .map(|row| row[i].0.chars().count())
+                .map(|row| width(&row[i].0))
                 .chain([column.header.len()])
                 .max()
                 .unwrap_or(0)
@@ -549,7 +575,7 @@ pub fn table(columns: &[Column], rows: &[Vec<Cell>], style: Style) -> String {
     for row in std::iter::once(&header).chain(&cells) {
         let mut line = String::new();
         for (i, ((text, tone), column)) in row.iter().zip(columns).enumerate() {
-            let pad = " ".repeat(widths[i] - text.chars().count());
+            let pad = " ".repeat(widths[i].saturating_sub(width(text)));
             let painted = match tone {
                 Some(tone) => style.paint(*tone, text),
                 None => text.clone(),
@@ -582,6 +608,8 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
         BranchStatus::BudgetExceeded { limit } => (format!("over budget: {limit}"), Tone::Yellow),
         BranchStatus::Failed { reason } => (format!("failed: {reason}"), Tone::Red),
         BranchStatus::Merged { target, .. } => (format!("merged into {target}"), Tone::Blue),
+        BranchStatus::Waiting => ("waiting".into(), Tone::Dim),
+        BranchStatus::Blocked { reason } => (format!("blocked: {reason}"), Tone::Red),
     }
 }
 
@@ -831,6 +859,10 @@ pub fn next_commands(info: &BranchInfo) -> Vec<String> {
         ],
         BranchStatus::Running => vec![format!("by log {name}")],
         BranchStatus::Merged { .. } => vec![format!("by rm {name}")],
+        BranchStatus::Waiting | BranchStatus::Blocked { .. } => {
+            let parent = info.parent.as_deref().map(shell_quote).unwrap_or_default();
+            vec![format!("by graph show {parent}"), format!("by rm {name}")]
+        }
         BranchStatus::Interrupted
         | BranchStatus::BudgetExceeded { .. }
         | BranchStatus::Failed { .. } => {
@@ -943,10 +975,97 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         };
         pairs.push(("seat", format!("{seat}; spawns seats: {spawns}")));
     }
+    if !i.depends_on.is_empty() {
+        pairs.push(("depends on", dependencies_text(&i.depends_on)));
+    }
+    if !i.bindings.is_empty() {
+        pairs.push(("bindings", bindings_text(&i.bindings)));
+    }
+    if i.graph_revision > 0 {
+        pairs.push(("graph revision", i.graph_revision.to_string()));
+    }
     if !i.last_message.is_empty() {
         pairs.push(("last message", i.last_message.trim_end().to_owned()));
     }
     key_values(&pairs, style)
+}
+
+fn dependencies_text(dependencies: &[branchyard::Dependency]) -> String {
+    dependencies
+        .iter()
+        .map(|d| match d.after {
+            branchyard::After::Settled => d.prerequisite.clone(),
+            branchyard::After::Integrated => format!("{} (integrated)", d.prerequisite),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn bindings_text(bindings: &[branchyard::Binding]) -> String {
+    bindings
+        .iter()
+        .map(|b| format!("{} ({})", b.scratch, b.access))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `by graph show`: each child, its status and what it waits for.
+pub fn graph(g: &branchyard::Graph, style: Style) -> String {
+    let mut out = format!("{}'s graph, revision {}\n", g.branch, g.revision);
+    if g.children.is_empty() {
+        out.push_str("  no children\n");
+        return out;
+    }
+    let width = g.children.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for child in &g.children {
+        let (status, tone) = status_text(&child.status);
+        let waits: Vec<branchyard::Dependency> = g
+            .dependencies
+            .iter()
+            .filter(|d| d.dependent == child.name)
+            .cloned()
+            .collect();
+        let mut line = format!(
+            "  {:width$}  {}",
+            child.name,
+            style.paint(tone, &status),
+            width = width
+        );
+        if !waits.is_empty() {
+            line.push_str(&format!("  after {}", dependencies_text(&waits)));
+        }
+        if !child.bindings.is_empty() {
+            line.push_str(&format!("  binds {}", bindings_text(&child.bindings)));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// `by graph apply`: what the proposal created, and the revision.
+pub fn graph_applied(a: &branchyard::GraphApplied, style: Style) -> String {
+    let mut out = format!("{}'s graph is at revision {}\n", a.branch, a.revision);
+    for spawned in &a.spawned {
+        let (status, tone) = status_text(&spawned.status);
+        out.push_str(&format!(
+            "  {} {}\n",
+            spawned.name,
+            style.paint(tone, &status)
+        ));
+    }
+    if !a.dependencies.is_empty() {
+        out.push_str(&format!(
+            "  {} dependenc{}\n",
+            a.dependencies.len(),
+            if a.dependencies.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ));
+    }
+    out
 }
 
 /// `by show`.
@@ -1043,6 +1162,36 @@ pub fn log_text(events: &[RecordedEvent], style: Style) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widths_count_terminal_columns() {
+        assert_eq!(width("abc"), 3);
+        assert_eq!(width("日本語"), 6);
+        assert_eq!(width("e\u{301}"), 1);
+        assert_eq!(truncate("日本語のテキスト", 7), "日本語…");
+        assert_eq!(width(&truncate("日本語のテキスト", 8)), 7);
+        assert_eq!(truncate("abcdef", 4), "abc…");
+        assert_eq!(truncate("abc", 3), "abc");
+        let columns = [
+            Column {
+                header: "NAME",
+                max: 20,
+                right: false,
+            },
+            Column {
+                header: "N",
+                max: 5,
+                right: true,
+            },
+        ];
+        let rows = vec![
+            vec![Cell::plain("日本"), Cell::plain("1")],
+            vec![Cell::plain("abcdef"), Cell::plain("22")],
+        ];
+        let text = table(&columns, &rows, Style::PLAIN);
+        let ends: Vec<usize> = text.lines().map(width).collect();
+        assert_eq!(ends, [10, 10, 10], "{text}");
+    }
     use branchyard::{NativeSession, PermissionKey, PermissionRequest};
     use serde_json::json;
     use std::path::PathBuf;

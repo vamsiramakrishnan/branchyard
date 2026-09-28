@@ -115,12 +115,19 @@ fn a_child_reports_and_asks_its_parent_across_both_event_logs() {
     // kid's HANG turn is running and the fake agent takes steering, so the
     // answer was steered straight into it, not left for its next turn.
     assert!(inbox.messages[0].delivered, "steered into the running turn");
-    let kid_log = f.yard.branch("kid").unwrap().events().unwrap();
-    assert!(
-        kid_log.iter().any(|e| matches!(&e.activity,
-            Activity::MessagesDelivered { ids, via: DeliveredVia::Steer { .. } } if ids == &[answer.id])),
-        "{kid_log:?}"
-    );
+    // The engine records the delivery event just after it settles the
+    // steer that marked the message delivered; wait for the entry.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let kid_log = f.yard.branch("kid").unwrap().events().unwrap();
+        if kid_log.iter().any(|e| matches!(&e.activity,
+            Activity::MessagesDelivered { ids, via: DeliveredVia::Steer { .. } } if ids == &[answer.id]))
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{kid_log:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     // A fresh question, answered from a background thread while `ask`
     // blocks for it: the wait sees the answer across processes' writes,
@@ -175,7 +182,7 @@ fn a_child_reports_and_asks_its_parent_across_both_event_logs() {
     assert!(prompt.ends_with("WHOAMI"), "{prompt}");
     // root had no running turn when they were sent: delivered at the start.
     assert!(events.iter().any(|e| matches!(&e.activity,
-        Activity::MessagesDelivered { via: DeliveredVia::TurnStart, ids } if ids.len() == 3)));
+        Activity::MessagesDelivered { via: DeliveredVia::TurnStart { .. }, ids } if ids.len() == 3)));
 
     let now_delivered = root_delegate.inbox().unwrap();
     assert!(
@@ -406,7 +413,12 @@ fn a_message_waits_for_the_next_turn_when_the_parent_cannot_steer() {
     );
     assert_eq!(
         delivered(&log),
-        [(vec![question.id], DeliveredVia::TurnStart)]
+        [(
+            vec![question.id],
+            DeliveredVia::TurnStart {
+                boundary: "turn_start".to_owned()
+            }
+        )]
     );
     assert!(root_inbox().messages[0].delivered);
     let root = root.send("WHOAMI", options).unwrap();

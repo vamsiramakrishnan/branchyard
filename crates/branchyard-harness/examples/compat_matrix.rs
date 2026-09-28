@@ -83,6 +83,80 @@ fn yes(value: bool) -> &'static str {
     }
 }
 
+/// The two-gate interception columns say what Branchyard can intercept
+/// mid-turn — a tool permission request it can answer, and input it can
+/// steer into a running turn — and how strongly that is evidenced, never
+/// overstating it: `live-tested` (a real installed binary, from a
+/// qualification report or `docs/harness-integration.md`'s recorded
+/// evidence), `recorded-fixture` (a captured real transcript replayed,
+/// short of a fresh live run), `contract-only` (only the conformance
+/// kit's mocked protocol test, `assert_contract_greeted`/
+/// `assert_steer_contract`, run for every profile regardless), or
+/// `not verified` for a claimed capability with none of these. A
+/// capability the driver does not offer at all is `—`: there is nothing
+/// to intercept, so no evidence question applies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Evidence {
+    LiveTested,
+    ContractOnly,
+    NotVerified,
+}
+
+impl Evidence {
+    fn cell(offered: bool, evidence: Option<Evidence>) -> &'static str {
+        if !offered {
+            return "—";
+        }
+        match evidence {
+            Some(Evidence::LiveTested) => "live-tested",
+            Some(Evidence::ContractOnly) => "contract-only",
+            Some(Evidence::NotVerified) | None => "not verified",
+        }
+    }
+}
+
+/// Tool permission interception evidence: qualified means a live run
+/// against the real binary, whose required Policy-area cases
+/// (`docs/harness-integration.md`'s qualification suite table) include a
+/// denied tool the driver must answer through Branchyard. Every offered
+/// profile at least passes the conformance kit's own permission-answering
+/// contract (`assert_contract_greeted`, `every_profile_follows_the_driver_contract`
+/// in `tests/conformance.rs`), so an offered, unqualified profile is
+/// `contract-only`, never `not verified`.
+fn permission_evidence(
+    profile_id: &str,
+    offered: bool,
+    qualified: &BTreeMap<String, Qualified>,
+) -> &'static str {
+    let evidence = if qualified.contains_key(profile_id) {
+        Some(Evidence::LiveTested)
+    } else {
+        Some(Evidence::ContractOnly)
+    };
+    Evidence::cell(offered, evidence)
+}
+
+/// Mid-turn steer interception evidence, from
+/// `docs/harness-integration.md` "Steering a running turn", which records
+/// exactly which profiles were checked against a real installed binary
+/// (fixtures under `crates/branchyard-harness/tests/fixtures`) versus
+/// negotiated only (an ACP agent other than claude-agent-acp, which
+/// advertises the extension but was never run here): that document is the
+/// evidence, not a guess from this table alone.
+fn steer_evidence(profile_id: &str, offered: bool) -> &'static str {
+    let evidence = match profile_id {
+        "claude-code-stream-json" | "codex-app-server" | "pi-rpc" | "claude-code-acp" => {
+            Some(Evidence::LiveTested)
+        }
+        // Every offered profile passes `assert_steer_contract`, but an ACP
+        // agent other than claude-agent-acp advertising the steering
+        // extension has never been run against a real binary here.
+        _ if offered => Some(Evidence::NotVerified),
+        _ => None,
+    };
+    Evidence::cell(offered, evidence)
+}
+
 /// The matrix as Markdown.
 pub fn render() -> String {
     let qualified = qualifications();
@@ -95,8 +169,10 @@ pub fn render() -> String {
          \n\
          Capabilities are what the driver offers before negotiation. ACP resume is used only when the agent advertises `session/resume` or `session/load`; a session that cannot resume fails to open rather than starting fresh. \"Checked against\" names the harness version whose transcript or generated schema the driver's frames were compared with. \"Reasons\" names why each `no` capability (and any `yes`/`if advertised` with a real caveat) is that way, quoted from the driver's own refusal message or documentation; `not verified` marks a gap with no such evidence yet, never a guess.\n\
          \n\
-         | Harness | Profile | Protocol | Role | Resume | Fork | Cancel | Approvals | Usage | Checked against | Live qualification | Reasons |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|\n",
+         \"Perm. answered\" and \"Steer\" are the two gates Branchyard can intercept mid-turn: a tool permission request it answers, and input it delivers into a running turn without ending it. Each is `—` when the driver does not offer it at all (nothing to intercept); otherwise `live-tested` (checked against a real installed binary — a qualification report's Policy area for permissions, or `docs/harness-integration.md` \"Steering a running turn\"'s recorded evidence for steer), `contract-only` (only the conformance kit's own mocked protocol test, run for every profile regardless of qualification), or `not verified` (offered, but neither) — never overstated.\n\
+         \n\
+         | Harness | Profile | Protocol | Role | Resume | Fork | Cancel | Approvals | Perm. answered | Steer | Usage | Checked against | Live qualification | Reasons |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     // Integration targets, then any other registered harness with a profile.
     let rows = HARNESSES
@@ -115,7 +191,7 @@ pub fn render() -> String {
                 .map(|(_, reason)| *reason)
                 .unwrap_or_else(|| panic!("{} is neither implemented nor explained", target.id));
             out += &format!(
-                "| {name} | — | — | — | — | — | — | — | — | — | not implemented: {} | — |\n",
+                "| {name} | — | — | — | — | — | — | — | — | — | — | — | not implemented: {} | — |\n",
                 reason.replace('|', "\\|")
             );
             continue;
@@ -144,8 +220,12 @@ pub fn render() -> String {
             } else {
                 reason_notes.join("; ").replace('|', "\\|")
             };
+            let permission_evidence =
+                permission_evidence(profile.id, capabilities.tool_approvals, &qualified);
+            let steer_evidence = steer_evidence(profile.id, capabilities.steer);
             out += &format!(
-                "| {name} | `{}` | {} | {} | {resume} | {} | {} | {} | {} | {} | {live} | {reason_notes} |\n",
+                "| {name} | `{}` | {} | {} | {resume} | {} | {} | {} | {permission_evidence} | \
+                 {steer_evidence} | {} | {} | {live} | {reason_notes} |\n",
                 profile.id,
                 protocol(profile.protocol),
                 if index == 0 { "default" } else { "alternate" },

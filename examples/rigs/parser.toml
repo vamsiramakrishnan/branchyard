@@ -1,3 +1,4 @@
+#:schema ../../schema/rig.json
 # Three levels: a lead, two kinds of implementer in a pod that shares
 # guidance, and a tester below the tokenizer seat.
 #

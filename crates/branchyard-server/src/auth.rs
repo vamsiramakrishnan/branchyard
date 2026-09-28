@@ -1,27 +1,32 @@
-//! Bearer-token authentication. Every configured token is compared on
-//! every request in time independent of where they differ, and a token is
-//! never logged or echoed.
+//! Bearer-token authentication. A presented token is hashed and every
+//! configured credential's hash is compared on every request in time
+//! independent of where they differ; the verifier holds only hashes, never
+//! a plaintext token, and nothing here logs or echoes one.
 
-use crate::config::Token;
+use crate::config::{sha256_hex, Credential, Principal};
 
-pub struct Tokens {
-    tokens: Vec<Token>,
+pub struct Credentials {
+    credentials: Vec<Credential>,
 }
 
-impl Tokens {
-    pub fn new(tokens: Vec<Token>) -> Tokens {
-        Tokens { tokens }
+impl Credentials {
+    pub fn new(credentials: Vec<Credential>) -> Credentials {
+        Credentials { credentials }
     }
 
-    /// The name of the token an `Authorization` header presents.
-    pub fn verify(&self, header: Option<&str>) -> Option<&str> {
-        let presented = header?.strip_prefix("Bearer ")?.trim().as_bytes();
+    /// The principal an `Authorization` header's bearer token verifies as.
+    pub fn verify(&self, header: Option<&str>) -> Option<&Principal> {
+        let presented = header?.strip_prefix("Bearer ")?.trim();
+        if presented.is_empty() {
+            return None;
+        }
+        let digest = sha256_hex(presented.as_bytes());
         let mut found = None;
-        // No early exit: the comparison takes as long whichever token (if
-        // any) matches.
-        for token in &self.tokens {
-            if constant_time_eq(presented, token.secret.as_bytes()) {
-                found = Some(token.name.as_str());
+        // No early exit: the comparison takes as long whichever credential
+        // (if any) matches.
+        for credential in &self.credentials {
+            if constant_time_eq(digest.as_bytes(), credential.token_sha256.as_bytes()) {
+                found = Some(&credential.principal);
             }
         }
         found
@@ -42,20 +47,27 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Principal;
+
+    fn credential(name: &str, secret: &str) -> Credential {
+        Credential {
+            token_sha256: sha256_hex(secret.as_bytes()),
+            principal: Principal::default_for(name),
+        }
+    }
 
     #[test]
-    fn verifies_by_name_and_refuses_everything_else() {
-        let tokens = Tokens::new(vec![
-            Token {
-                name: "a".into(),
-                secret: "0123456789abcdef".into(),
-            },
-            Token {
-                name: "b".into(),
-                secret: "fedcba9876543210".into(),
-            },
+    fn verifies_by_principal_and_refuses_everything_else() {
+        let credentials = Credentials::new(vec![
+            credential("a", "0123456789abcdef"),
+            credential("b", "fedcba9876543210"),
         ]);
-        assert_eq!(tokens.verify(Some("Bearer fedcba9876543210")), Some("b"));
+        assert_eq!(
+            credentials
+                .verify(Some("Bearer fedcba9876543210"))
+                .map(|p| p.name.as_str()),
+            Some("b")
+        );
         for bad in [
             None,
             Some(""),
@@ -66,9 +78,15 @@ mod tests {
             Some("Bearer 0123456789abcdef0"),
             Some("Bearer 0123456789abcde"),
         ] {
-            assert_eq!(tokens.verify(bad), None, "{bad:?}");
+            assert!(credentials.verify(bad).is_none(), "{bad:?}");
         }
         assert!(constant_time_eq(b"", b""));
         assert!(!constant_time_eq(b"a", b""));
+    }
+
+    #[test]
+    fn the_verifier_never_holds_a_plaintext_token() {
+        let credentials = Credentials::new(vec![credential("a", "0123456789abcdef")]);
+        assert!(!format!("{:?}", credentials.credentials[0]).contains("0123456789abcdef"));
     }
 }

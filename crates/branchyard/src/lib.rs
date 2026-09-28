@@ -95,11 +95,13 @@
 //! stops honest mistakes, not a hostile harness.
 
 mod broker;
+mod bundle;
 #[cfg(test)]
 mod conformance;
 mod delegation;
 mod engine;
 mod git;
+mod graph;
 mod harness;
 mod inbox;
 mod lock;
@@ -120,6 +122,7 @@ mod sqlite;
 mod state;
 mod steer;
 mod storage;
+mod tarball;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -137,9 +140,14 @@ pub use branchyard_provision::{
     SecretSource, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
+pub use bundle::BundleEntry;
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
+};
+pub use graph::{
+    Access, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphEdit, GraphNode,
+    GraphProposal, SpawnSpec, MAX_EDITS,
 };
 pub use inbox::{DeliveryHook, SteerDelivery};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
@@ -147,6 +155,25 @@ pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
+
+/// This process as the engine names a lease's holder: its host and boot,
+/// its pid, and its start time. For leases kept outside the engine, such as
+/// the server's claims on queued operations.
+pub fn process_identity() -> (String, u32, String) {
+    (
+        proc::host().to_owned(),
+        std::process::id(),
+        proc::own_start().to_owned(),
+    )
+}
+
+/// Whether the process `pid` that started at `start` on `host`, as
+/// [`process_identity`] named it, is known to be gone: it ran on this host
+/// and boot and is not running now. Never true for another host, or when
+/// the start time is unknown.
+pub fn process_gone(host: &str, pid: u32, start: &str) -> bool {
+    !start.is_empty() && state::gone(host, pid, start)
+}
 
 /// A repository with Branchyard state. Cheap to clone; clones share state.
 #[derive(Clone, Debug)]
@@ -196,6 +223,25 @@ impl Yard {
         recover::all(self)
     }
 
+    /// Start every `waiting` branch whose prerequisites have all settled,
+    /// its first turn on a thread of this process under `options`' policy,
+    /// observer and tools (its limits and denials are its own), and mark
+    /// `blocked` every one a prerequisite failed. The engine that settles a
+    /// prerequisite does this for its dependents; this is for a
+    /// prerequisite whose engine stopped before it could, and is what a
+    /// server does on its recovery interval. Returns the branches started;
+    /// wait for them before this process exits, as for any child
+    /// ([`Branch::wait_subtree`] on their parent). See `docs/graph.md`.
+    pub fn resume_graph(&self, options: &TaskOptions) -> Result<Vec<String>, Error> {
+        graph::resume(self, options)
+    }
+
+    /// `branch`'s graph: its children, the dependencies among them, and its
+    /// graph revision.
+    pub fn graph(&self, branch: &str) -> Result<Graph, Error> {
+        graph::show(&self.store(), branch)
+    }
+
     /// Ask `branch`'s running turn, and every running turn delegated below
     /// it, to stop; each ends `interrupted`. The request is durable and is
     /// observed by the engine running the turn in any process using this
@@ -207,7 +253,7 @@ impl Yard {
     /// [`Yard::cancel`] on behalf of `by`, whom each cancelled branch's
     /// event log names.
     pub fn cancel_as(&self, branch: &str, by: &str) -> Result<Vec<String>, Error> {
-        delegation::cancel_tree(&self.store(), branch, by)
+        delegation::cancel_tree(self, branch, by)
     }
 
     /// Deliver `text` into `branch`'s running turn as input from `by`,
@@ -391,6 +437,36 @@ impl Yard {
         storage::share_artifact(self, actor, id, to)
     }
 
+    /// Export every artifact in `ids` that `reader` may read into a
+    /// portable, deterministic tar bundle at `out`: the same artifacts
+    /// always produce byte-identical bytes, and each member is checked
+    /// against its own recorded digest before being written. See
+    /// [`Yard::import_artifacts`] and `docs/storage.md` "Portable
+    /// bundles".
+    pub fn export_artifacts(
+        &self,
+        reader: &str,
+        ids: &[String],
+        out: impl AsRef<Path>,
+    ) -> Result<Vec<BundleEntry>, Error> {
+        bundle::export_artifacts(self, reader, ids, out.as_ref())
+    }
+
+    /// Import a bundle written by [`Yard::export_artifacts`], publishing
+    /// each member as a new artifact owned by `branch`. Every member is
+    /// verified against the bundle's index and its own content digest; a
+    /// tampered, missing or unindexed extra member refuses the whole
+    /// import, before anything is published. Each imported artifact's
+    /// labels record its original provenance (`bundle.origin_id`,
+    /// `bundle.origin_publisher`, `bundle.origin_created_at`).
+    pub fn import_artifacts(
+        &self,
+        branch: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<Vec<ArtifactRef>, Error> {
+        bundle::import_artifacts(self, branch, path.as_ref())
+    }
+
     /// Create scratch area `name`, a shared directory owned by `owner`,
     /// visible to its authorized branches at [`Yard::scratch_path`]. See
     /// `docs/storage.md`.
@@ -443,6 +519,7 @@ pub fn harness_profile(id: &str) -> Result<HarnessProfile, Error> {
 }
 
 /// A harness profile as [`harness_profile`] resolves it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessProfile {
     pub harness: String,
@@ -556,6 +633,7 @@ pub struct TaskOptions {
 ///
 /// Serialized as an object tagged by `kind`, such as `{"kind": "local"}` or
 /// `{"kind": "microsandbox", "image": "...", ...}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 // One per branch, built once per command: the size does not matter, and
@@ -575,6 +653,7 @@ pub enum Provider {
 }
 
 /// A sandboxed harness's image, limits and credentials.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SandboxOptions {
     /// OCI image reference. The harness executable must be installed in it
@@ -596,6 +675,7 @@ pub struct SandboxOptions {
 /// worktree into it at [`SubstrateOptions::workdir`] and the branch's private
 /// home to [`SubstrateOptions::home`], runs the harness there through the
 /// bridge, copies both back and deletes the actor. See `docs/substrate.md`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SubstrateOptions {
     /// The `Control` API, as `https://host:port`, or `http://host:port` on
@@ -935,6 +1015,22 @@ impl Branch {
         self.yard.read_artifact(&self.info.name, id, out)
     }
 
+    /// Export artifacts this branch may read into a portable bundle; see
+    /// [`Yard::export_artifacts`].
+    pub fn export_artifacts(
+        &self,
+        ids: &[String],
+        out: impl AsRef<Path>,
+    ) -> Result<Vec<BundleEntry>, Error> {
+        self.yard.export_artifacts(&self.info.name, ids, out)
+    }
+
+    /// Import a bundle, owned by this branch; see
+    /// [`Yard::import_artifacts`].
+    pub fn import_artifacts(&self, path: impl AsRef<Path>) -> Result<Vec<ArtifactRef>, Error> {
+        self.yard.import_artifacts(&self.info.name, path)
+    }
+
     /// Wait until no descendant of this branch is running a turn, then
     /// return the descendants' records. Descendants on threads of this
     /// process are joined; one another process drives is waited for through
@@ -946,6 +1042,7 @@ impl Branch {
 }
 
 /// A branch's durable record.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchInfo {
     pub name: String,
@@ -988,6 +1085,7 @@ pub struct BranchInfo {
     pub superseded_by: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CandidateInfo {
     pub commit: String,
@@ -998,10 +1096,21 @@ pub struct CandidateInfo {
 
 /// Serialized as an object tagged by `state`, such as
 /// `{"state": "failed", "reason": "..."}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum BranchStatus {
     Running,
+    /// A delegated child created with prerequisites that have not all
+    /// settled yet: it has no worktree and has run no turn. See
+    /// `docs/graph.md`.
+    Waiting,
+    /// A child that will not start because a prerequisite failed, was
+    /// interrupted, stopped at a limit, is blocked itself or was removed.
+    /// Changing its dependencies with a graph proposal reopens it.
+    Blocked {
+        reason: String,
+    },
     /// The last turn completed and produced a candidate.
     Ready,
     /// The last turn completed without changing any file.
@@ -1070,6 +1179,7 @@ impl Budget {
 }
 
 /// What a detected stall does to the turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StallAction {
@@ -1205,6 +1315,7 @@ impl Policy {
 }
 
 /// What answered a permission request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DecisionSource {
@@ -1223,6 +1334,7 @@ pub enum DecisionSource {
 ///
 /// Serialized with the variant as the key in snake case, such as
 /// `{"harness": {"type": "ready"}}` or `{"warning": "..."}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activity {
@@ -1309,18 +1421,45 @@ pub enum Activity {
 }
 
 /// How [`Activity::MessagesDelivered`] messages reached a turn. Serialized
-/// as an object tagged by `path`, such as `{"path": "steer", "steer": 3}`.
+/// as an object tagged by `path`, such as
+/// `{"path": "steer", "steer": 3, "boundary": "codex_turn_steer"}`.
+///
+/// `boundary` names the protocol boundary the message actually landed at,
+/// per harness (Straitjacket's relay names an equivalent boundary for its
+/// own capsules; see `docs/comparison.md`): `"turn_start"` for every
+/// profile's turn start, or a driver-specific name such as
+/// `"claude_next_model_call"`, `"codex_turn_steer"`, `"pi_steer"` or
+/// `"acp_session_steering"` for a steer, from
+/// [`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before
+/// this field existed deserialize with `"not_recorded"`, never a guess.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "path", rename_all = "snake_case")]
 pub enum DeliveredVia {
     /// Prepended to the prompt at the start of the turn.
-    TurnStart,
+    TurnStart {
+        #[serde(default = "boundary_turn_start")]
+        boundary: String,
+    },
     /// Steered into the running turn as input `steer` ([`Steer::id`]).
-    Steer { steer: u64 },
+    Steer {
+        steer: u64,
+        #[serde(default = "boundary_not_recorded")]
+        boundary: String,
+    },
+}
+
+fn boundary_turn_start() -> String {
+    "turn_start".to_owned()
+}
+
+fn boundary_not_recorded() -> String {
+    "not_recorded".to_owned()
 }
 
 /// Input for a branch's running turn, and what became of it; see
 /// [`Branch::steer`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Steer {
     /// Unique in the repository's store.
@@ -1336,6 +1475,7 @@ pub struct Steer {
 
 /// Where a [`Steer`] is. Serialized as an object tagged by `state`, such as
 /// `{"state": "refused", "reason": "..."}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SteerState {
@@ -1356,6 +1496,7 @@ pub enum SteerState {
 /// too, or further up an ancestor its rig seat's `escalates_to` names; an
 /// `answer` goes from a branch to one of its own descendants, and normally
 /// carries `in_reply_to` a question's id.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
@@ -1398,6 +1539,7 @@ impl std::str::FromStr for MessageKind {
 
 /// One harness-to-harness message, durable in the store; see
 /// `docs/delegation.md#inbox`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     /// Assigned by the store when it is sent; counts from 1 across the
@@ -1427,6 +1569,7 @@ pub struct BranchEvent {
 }
 
 /// Activity as recorded in `.branchyard/`, with its observation time.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RecordedEvent {
     /// Milliseconds since the Unix epoch.
@@ -1435,6 +1578,7 @@ pub struct RecordedEvent {
 }
 
 /// A page of one branch's events; see [`Branch::events_since`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub events: Vec<RecordedEvent>,
@@ -1444,6 +1588,7 @@ pub struct Page {
 }
 
 /// A page of the repository's feed; see [`Yard::events_since`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedPage {
     pub events: Vec<FeedEvent>,
@@ -1453,6 +1598,7 @@ pub struct FeedPage {
 }
 
 /// One event in the repository's feed.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedEvent {
     /// Position in the feed, from 1.
@@ -1462,6 +1608,7 @@ pub struct FeedEvent {
 }
 
 /// A branch [`Yard::recover`] took over.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Recovery {
     pub branch: String,
@@ -1472,6 +1619,7 @@ pub struct Recovery {
     pub killed: Vec<u32>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Merged {
     pub branch: String,
@@ -1480,7 +1628,15 @@ pub struct Merged {
     pub commit: String,
 }
 
+/// Known harness profiles, whether their executable is on `PATH`, and
+/// their live qualification status, without opening a repository (what
+/// [`Yard::harnesses`] returns).
+pub fn harnesses() -> Vec<HarnessInfo> {
+    harness::list()
+}
+
 /// Known harness profile and local availability.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub harness: String,
@@ -1552,6 +1708,13 @@ pub enum Error {
     /// This engine lost the branch's lease to another, which recovered or
     /// took over the branch; its writes are refused.
     Fenced(String),
+    /// A graph proposal was made against a revision of the branch's graph
+    /// that is no longer current; read the graph and propose again.
+    StaleRevision {
+        branch: String,
+        expected: u64,
+        actual: u64,
+    },
     /// An error the engine running a delegating turn returned through its
     /// broker, with the [`Error::kind`] it had there.
     Remote {
@@ -1613,6 +1776,15 @@ impl fmt::Display for Error {
             Error::Running(name) => write!(f, "branch {name} is running a turn"),
             Error::NotRunning(name) => write!(f, "branch {name} is not running a turn"),
             Error::Fenced(why) => write!(f, "fenced: {why}"),
+            Error::StaleRevision {
+                branch,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "stale graph revision: {branch}'s graph is at revision {actual}, not \
+                 {expected}; read it again and propose against the current revision"
+            ),
             Error::Remote { message, .. } => f.write_str(message),
             Error::Git(message) => write!(f, "git: {message}"),
             Error::Harness(message) => write!(f, "harness: {message}"),
@@ -1649,6 +1821,7 @@ impl Error {
             Error::Running(_) => "running",
             Error::NotRunning(_) => "not_running",
             Error::Fenced(_) => "fenced",
+            Error::StaleRevision { .. } => "stale_revision",
             Error::Remote { kind, .. } => kind,
             Error::Git(_) => "git",
             Error::Harness(_) => "harness",

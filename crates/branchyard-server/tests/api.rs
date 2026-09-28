@@ -787,6 +787,7 @@ fn a_rigs_seats_are_checked_when_its_task_is_submitted() {
         delegates_to: Vec::new(),
         escalates_to: Vec::new(),
         instances: 1,
+        bindings: Vec::new(),
     };
     let seats = branchyard::Seats {
         rig: "team".into(),
@@ -833,4 +834,49 @@ fn a_rigs_seats_are_checked_when_its_task_is_submitted() {
     // A seat's secrets are the server's to define, like a task's.
     let error = submit(&client, seats, true);
     assert_eq!(error.code(), Some("secret_not_allowed"), "{error}");
+}
+
+#[test]
+fn an_operation_queued_at_shutdown_runs_after_a_restart_and_is_found_by_its_key() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.max_running = 1;
+    config.shutdown_grace = Duration::ZERO;
+    let server = Server::start(config.clone());
+    let client = server.client();
+    let repo = client.repo("app");
+    let mut long = task("HANG", "long");
+    long.budget.max_seconds = Some(2.0);
+    let long = repo.submit_task(&long, &new_key()).unwrap();
+    eventually("the long turn to start", || {
+        client.operation(&long.id).unwrap().state == OperationState::Running
+    });
+    let key = new_key();
+    let queued = repo
+        .submit_task(&task("WRITE q.txt=q", "queued"), &key)
+        .unwrap();
+    assert_eq!(queued.state, OperationState::Queued);
+    // Only the running operation is interrupted; the queued one stays in
+    // the durable queue.
+    assert_eq!(server.stop().interrupted, 1);
+
+    let server = Server::start(config);
+    let client = server.client();
+    let done = wait(&client, &queued.id);
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    assert_eq!(client.operation_by_key(&key).unwrap(), done);
+    let missing = client.operation_by_key("no-such-key").unwrap_err();
+    assert_eq!(missing.code(), Some("unknown_operation"));
+    let (status, _, _) = raw(server.addr, &get("/v1/operations", Some(TOKEN)));
+    assert_eq!(status, 400);
+    assert_eq!(
+        client.operation(&long.id).unwrap().state,
+        OperationState::Interrupted
+    );
+    eventually("the orphaned turn to end", || {
+        client
+            .repo("app")
+            .branch("long")
+            .is_ok_and(|b| b.status != BranchStatus::Running)
+    });
 }

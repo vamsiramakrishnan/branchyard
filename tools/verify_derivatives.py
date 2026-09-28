@@ -38,6 +38,12 @@ def blob(path):
     return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
 
 
+def _header(path):
+    header = "".join(line for line in path.read_text().splitlines(True)[:20]
+                     if line.startswith("//"))
+    return re.sub(r"\s*\n//\s*", " ", header)
+
+
 def verify_scion():
     manifest = json.loads((ROOT / "patches/scion-provision.json").read_text())
     commit, prefix = manifest["commit"], manifest["vendor"]
@@ -45,9 +51,7 @@ def verify_scion():
     problems = []
     for derived in manifest["derivatives"]:
         path = ROOT / derived["path"]
-        header = "".join(line for line in path.read_text().splitlines(True)[:20]
-                         if line.startswith("//"))
-        header = re.sub(r"\s*\n//\s*", " ", header)
+        header = _header(path)
         for needed in ("GoogleCloudPlatform/scion", commit, "Apache License, Version 2.0",
                        "Modified for Branchyard"):
             if needed not in header:
@@ -62,11 +66,27 @@ def verify_scion():
             elif blob(vendored) != recorded:
                 problems.append(f"{source} changed upstream since {derived['path']} was "
                                 "translated: review the change, port it, and record the new blob")
+    # A `rewritten` file was once translated line for line from these
+    # sources, like a `derivatives` entry, but has since been rebuilt on a
+    # real library instead of following them: its header must still credit
+    # Scion, but a vendored source changing no longer means it needs
+    # review, so (unlike `derivatives`) its blob is not tracked.
+    for rewritten in manifest.get("rewritten", []):
+        path = ROOT / rewritten["path"]
+        header = _header(path)
+        for needed in ("GoogleCloudPlatform/scion", commit, "Apache License, Version 2.0",
+                       "Rewritten for Branchyard"):
+            if needed not in header:
+                problems.append(f"{rewritten['path']}: its header does not name {needed!r}")
+        for source in rewritten.get("originally_from", []):
+            if source not in header:
+                problems.append(f"{rewritten['path']}: its header does not name {source}")
     if problems:
         raise SystemExit("Scion derivatives out of date:\n  " + "\n  ".join(problems))
     count = sum(len(d["from"]) for d in manifest["derivatives"])
+    rewritten = len(manifest.get("rewritten", []))
     print(f"Verified {len(manifest['derivatives'])} Scion derivatives against {count} "
-          f"vendored sources at {commit[:7]}.")
+          f"vendored sources at {commit[:7]}, and {rewritten} rewritten file(s)' attribution.")
 
 
 def main():

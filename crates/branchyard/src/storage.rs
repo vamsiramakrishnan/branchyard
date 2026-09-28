@@ -51,6 +51,7 @@ pub const DEFAULT_ARTIFACT_LIMIT: u64 = 512 * 1024 * 1024;
 /// the SDK and the server report it. `id` identifies this publish; `digest`
 /// is the blake3 hash (hex, lower case) of its bytes, the artifact's content
 /// identity, checked on every read.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactRef {
     pub id: String,
@@ -71,6 +72,7 @@ pub struct ArtifactRef {
 /// ancestor survives the publisher's own later removal (its own record, and
 /// so its `parent` field, is gone once it is removed). Names are for
 /// display; grants are decided on the incarnations.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ArtifactRow {
     pub artifact: ArtifactRef,
@@ -85,6 +87,7 @@ pub(crate) struct ArtifactRow {
 
 /// A new artifact's provenance, before the backend assigns its `id` and
 /// `created_at`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct NewArtifact {
     pub digest: String,
@@ -100,6 +103,7 @@ pub(crate) struct NewArtifact {
 }
 
 /// A scratch area's record, as `by scratch` and the SDK report it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScratchArea {
     pub name: String,
@@ -107,6 +111,7 @@ pub struct ScratchArea {
     pub created_at: u64,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ScratchRow {
     pub area: ScratchArea,
@@ -152,6 +157,7 @@ pub(crate) struct Identity {
 }
 
 /// A scratch area's writer lock, as granted or found held.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScratchLock {
     pub name: String,
@@ -274,7 +280,7 @@ impl Lineage {
     /// Whether `descendant` is `ancestor` or descends from it, walking up
     /// from `descendant` through live branches; the walk may end on a
     /// removed parent, so `ancestor` itself need not be live.
-    fn descends(&self, ancestor: i64, descendant: i64) -> bool {
+    pub(crate) fn descends(&self, ancestor: i64, descendant: i64) -> bool {
         let mut cur = descendant;
         loop {
             if cur == ancestor {
@@ -730,6 +736,11 @@ fn reachable_scratch(store: &Store, branch: &str, name: &str) -> Result<i64, Err
         ));
     }
     Ok(me)
+}
+
+/// Fail unless `branch` may reach scratch area `name`.
+pub(crate) fn check_readable(yard: &Yard, branch: &str, name: &str) -> Result<(), Error> {
+    reachable_scratch(&yard.store(), branch, name).map(|_| ())
 }
 
 /// Share scratch area `name`, owned or already shared to `actor`, with

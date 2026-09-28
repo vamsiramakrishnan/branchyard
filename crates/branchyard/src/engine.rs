@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::delegation;
+use crate::graph;
 use crate::placement::Placement;
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
@@ -163,15 +164,18 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Interrupted;
         } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
             record.info.status = BranchStatus::BudgetExceeded { limit };
+        } else if let Err(reason) = graph::bind(turn.yard, &record) {
+            record.info.status = BranchStatus::Failed { reason };
         } else {
-            let driven = drive(&mut recorder, &turn, &record, &bounds, &lease)?;
+            let driven = drive(&mut recorder, &turn, &record, &bounds, &lease);
+            graph::unbind(turn.yard, &record);
             conclude(
                 turn.yard,
                 turn.prompt,
                 &fence,
                 &mut record,
                 &mut recorder,
-                driven,
+                driven?,
             )?;
         }
         Ok(())
@@ -180,7 +184,7 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         Ok(()) => recorder.finish(lease, &record),
         Err(error) => Err(error),
     };
-    match result {
+    let result = match result {
         Ok(()) => Ok(Branch {
             yard: turn.yard.clone(),
             info: record.info,
@@ -193,7 +197,10 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             let _ = store.backend().finish(&fence, Some(&record), None);
             Err(error)
         }
-    }
+    };
+    // Siblings waiting for this branch may start, or be blocked, now.
+    graph::settled(turn.yard, &fence.branch, Some(turn.options));
+    result
 }
 
 /// Journal a step whose intent and outcome are recorded together, after
@@ -393,7 +400,11 @@ fn run(
         ..Open::new(turn.mode.clone(), placement.cwd())
     };
     let driver = turn.profile.driver_with(turn.command.clone());
-    let mut steering = Steering::new(turn.profile.id, driver.capabilities().steer);
+    let mut steering = Steering::new(
+        turn.profile.id,
+        driver.capabilities().steer,
+        driver.steer_boundary(),
+    );
     // Journaled before the spawn: every process of a local harness carries
     // this marker, so recovery finds them even if this engine stops before
     // the harness's pid is recorded below.
@@ -634,7 +645,9 @@ fn run(
                 if !submission.delivered.is_empty() {
                     recorder.record(Activity::MessagesDelivered {
                         ids: submission.delivered.clone(),
-                        via: DeliveredVia::TurnStart,
+                        via: DeliveredVia::TurnStart {
+                            boundary: "turn_start".to_owned(),
+                        },
                     })?;
                 }
                 recorder.record(Activity::Prompt(submission.prompt.clone()))?;
@@ -829,6 +842,10 @@ struct Steering {
     profile: &'static str,
     /// Whether the driver can take input mid-turn at all.
     offered: bool,
+    /// The protocol boundary a delivered steer landed at
+    /// ([`branchyard_harness::Driver::steer_boundary`]), recorded on
+    /// [`DeliveredVia::Steer`].
+    boundary: &'static str,
     /// Store IDs of the input written to the driver, in the driver's
     /// numbering from 1.
     written: Vec<u64>,
@@ -836,10 +853,11 @@ struct Steering {
 }
 
 impl Steering {
-    fn new(profile: &'static str, offered: bool) -> Steering {
+    fn new(profile: &'static str, offered: bool, boundary: &'static str) -> Steering {
         Steering {
             profile,
             offered,
+            boundary,
             written: Vec::new(),
             next_poll: Instant::now(),
         }
@@ -862,12 +880,21 @@ impl Steering {
             .map(|_| ())
     }
 
-    /// Record that steered input `steer` delivered inbox message `message`.
-    fn delivered(recorder: &mut Recorder, steer: u64, message: Option<u64>) -> Result<(), Error> {
+    /// Record that steered input `steer` delivered inbox message `message`,
+    /// naming the protocol boundary it landed at.
+    fn delivered(
+        &self,
+        recorder: &mut Recorder,
+        steer: u64,
+        message: Option<u64>,
+    ) -> Result<(), Error> {
         match message {
             Some(id) => recorder.record(Activity::MessagesDelivered {
                 ids: vec![id],
-                via: DeliveredVia::Steer { steer },
+                via: DeliveredVia::Steer {
+                    steer,
+                    boundary: self.boundary.to_owned(),
+                },
             }),
             None => Ok(()),
         }
@@ -915,7 +942,7 @@ impl Steering {
                             store
                                 .backend()
                                 .settle_steer(fence, row.id, &SteerState::Delivered)?;
-                        Self::delivered(recorder, row.id, message)?;
+                        self.delivered(recorder, row.id, message)?;
                         None
                     }
                     // The harness cannot take it yet; the next poll retries.
@@ -953,7 +980,7 @@ impl Steering {
         match index.and_then(|i| self.written.get(i)) {
             Some(id) => {
                 let message = store.backend().settle_steer(fence, *id, &state)?;
-                Self::delivered(recorder, *id, message)
+                self.delivered(recorder, *id, message)
             }
             None => Ok(()),
         }

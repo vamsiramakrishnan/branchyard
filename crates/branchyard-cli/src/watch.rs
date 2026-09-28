@@ -1,17 +1,18 @@
 //! `by watch`: a live tree of every branch with its status, harness,
 //! current activity, cost, turns and age.
 //!
-//! On a terminal it redraws in place with plain ANSI on the alternate
-//! screen, reading keys through `stty` (no terminal library): `q` or
-//! Ctrl-C exits and restores the terminal. Otherwise it appends one line
-//! per change. Activity comes from the repository's event feed from a
-//! cursor: locally through [`Yard::events_since`], remotely from the
-//! server's event stream.
+//! On a terminal it is a ratatui dashboard ([`tui`]): the tree, a detail
+//! pane for the selected branch, a filter, subtree focus and a help sheet;
+//! `q`, Esc or Ctrl-C exits and restores the terminal, as a panic does.
+//! Otherwise it appends one line per change, and `--once` prints one
+//! frame. Activity comes from the repository's event feed from a cursor:
+//! locally through [`Yard::events_since`], remotely from the server's
+//! event stream.
+
+mod tui;
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::process::{Command, Stdio};
+use std::io::{self, IsTerminal, Read};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -143,7 +144,7 @@ const COLUMNS: [Column; 6] = [
 const MIN_ACTIVITY: usize = 12;
 
 fn pad(text: &str, width: usize, right: bool) -> String {
-    let fill = " ".repeat(width.saturating_sub(text.chars().count()));
+    let fill = " ".repeat(width.saturating_sub(render::width(text)));
     match right {
         true => format!("{fill}{text}"),
         false => format!("{text}{fill}"),
@@ -194,7 +195,7 @@ pub fn rows(
         .map(|(i, column)| {
             cells
                 .iter()
-                .map(|(fixed, _, _)| fixed[i].chars().count())
+                .map(|(fixed, _, _)| render::width(&fixed[i]))
                 .chain([column.header.len()])
                 .max()
                 .unwrap_or(0)
@@ -215,7 +216,7 @@ pub fn rows(
                 break;
             }
             let padded = render::truncate(&padded, room);
-            visible += sep.len() + padded.chars().count();
+            visible += sep.len() + render::width(&padded);
             out.push_str(sep);
             match (i, tone) {
                 (2, Some(tone)) => out.push_str(&style.paint(tone, &padded)),
@@ -401,65 +402,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// The controlling terminal in no-echo, byte-at-a-time mode with signals
-/// off (so Ctrl-C arrives as a key), showing the alternate screen. Dropping
-/// it restores everything.
-struct Screen {
-    tty: File,
-    saved: String,
-}
-
-fn stty(tty: &File, args: &[&str]) -> Option<String> {
-    let output = Command::new("stty")
-        .args(args)
-        .stdin(Stdio::from(tty.try_clone().ok()?))
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-impl Screen {
-    fn enter() -> Option<Screen> {
-        let tty = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-            .ok()?;
-        let saved = stty(&tty, &["-g"])?;
-        stty(
-            &tty,
-            &["-icanon", "-echo", "-isig", "min", "1", "time", "0"],
-        )?;
-        let mut stdout = io::stdout();
-        let _ = stdout.write_all(b"\x1b[?1049h\x1b[?25l");
-        let _ = stdout.flush();
-        Some(Screen { tty, saved })
-    }
-
-    /// Rows and columns.
-    fn size(&self) -> Option<(usize, usize)> {
-        let text = stty(&self.tty, &["size"])?;
-        let mut parts = text.split_whitespace().map(|n| n.parse::<usize>().ok());
-        match (parts.next()??, parts.next()??) {
-            (rows, cols) if rows > 0 && cols > 0 => Some((rows, cols)),
-            _ => None,
-        }
-    }
-}
-
-impl Drop for Screen {
-    fn drop(&mut self) {
-        let mut stdout = io::stdout();
-        let _ = stdout.write_all(b"\x1b[?25h\x1b[?1049l");
-        let _ = stdout.flush();
-        stty(&self.tty, &[&self.saved]);
-    }
-}
-
 /// Bytes from `reader`, on a thread, until it ends.
 fn keys(mut reader: impl Read + Send + 'static) -> Receiver<u8> {
     let (tx, rx) = mpsc::channel();
@@ -501,11 +443,22 @@ fn wait(keys: Option<&Receiver<u8>>, interval: Duration) -> bool {
     }
 }
 
-fn columns_from_env() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|c| c.parse().ok())
-        .filter(|c| *c > 0)
+/// The width `--once` draws to: the terminal's, else `COLUMNS` (as a
+/// pager or script sets it), else 120.
+fn once_width() -> usize {
+    let terminal = io::stdout()
+        .is_terminal()
+        .then(|| ratatui::crossterm::terminal::size().ok())
+        .flatten()
+        .map(|(columns, _)| usize::from(columns))
+        .filter(|c| *c > 0);
+    terminal
+        .or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|c| c.parse().ok())
+                .filter(|c| *c > 0)
+        })
         .unwrap_or(120)
 }
 
@@ -542,14 +495,7 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
         }
         let infos = update(&mut source, &mut doing)?;
         let title = format!("by watch · {}", source.label());
-        let lines = frame(
-            &title,
-            &infos,
-            &doing,
-            now_ms() / 1000,
-            columns_from_env(),
-            style,
-        );
+        let lines = frame(&title, &infos, &doing, now_ms() / 1000, once_width(), style);
         return commands::print(&(lines.join("\n") + "\n"));
     }
     if !env.stdout_tty {
@@ -566,40 +512,20 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
             }
         }
     }
-    let screen = Screen::enter();
-    let input = match &screen {
-        Some(screen) => screen.tty.try_clone().ok().map(keys),
-        None => Some(keys(io::stdin())),
+    let label = source.label();
+    let refresh = || -> Result<tui::Snapshot, Failure> {
+        let infos = source.branches()?;
+        let events = source.events(&infos);
+        Ok(tui::Snapshot {
+            label: source.label(),
+            infos,
+            events,
+            now_ms: now_ms(),
+        })
     };
-    loop {
-        let infos = update(&mut source, &mut doing)?;
-        let (rows, cols) = screen
-            .as_ref()
-            .and_then(Screen::size)
-            .unwrap_or((40, columns_from_env()));
-        let title = format!("by watch · {} · q to quit", source.label());
-        let mut lines = frame(&title, &infos, &doing, now_ms() / 1000, cols, style);
-        if lines.len() > rows.max(2) {
-            let hidden = lines.len() - (rows.max(2) - 1);
-            lines.truncate(rows.max(2) - 1);
-            lines.push(format!(
-                "… {hidden} more lines; widen or heighten the terminal"
-            ));
-        }
-        let mut text = String::from("\x1b[H");
-        for line in &lines {
-            text.push_str(line);
-            text.push_str("\x1b[K\r\n");
-        }
-        text.push_str("\x1b[J");
-        if screen.is_none() {
-            // Without the alternate screen, start from a clean one.
-            text.insert_str(0, "\x1b[2J");
-        }
-        commands::print(&text)?;
-        if wait(input.as_ref(), interval) {
-            return Ok(());
-        }
+    match tui::run(label, interval, refresh) {
+        Ok(outcome) => outcome,
+        Err(error) => Err(error.into()),
     }
 }
 

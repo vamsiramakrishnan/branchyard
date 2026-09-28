@@ -6,12 +6,12 @@ There is one set of operations and one authority model. Four surfaces reach them
 
 | Surface | Use it when |
 |---|---|
-| `by spawn`, `by inspect`, `by events`, `by send` (and `by send --steer`), `by integrate`, `by cancel`, `by children` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
+| `by spawn`, `by inspect`, `by events`, `by send` (and `by send --steer`), `by integrate`, `by cancel`, `by children`, `by graph` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
 | The Python module `branchyard` | The harness writes Python to orchestrate: loops, fan-out, waiting. It runs `by --json` for you. |
 | The Rust SDK, `branchyard::Delegate` | You write the meta-harness in Rust, in or out of a harness. |
 | Branchyard's MCP server (`by mcp`) | The harness cannot run commands, or its shell cannot reach the repository, but it can call MCP tools. |
 
-Each surface calls the same operations in the engine that runs the harness's turn, so they give the same answers and refusals. The same four surfaces also reach [artifacts and scratch areas](storage.md) (`by artifact`, `by scratch`, `branchyard.publish`/`create_scratch`, `Delegate::publish_artifact`, the MCP `publish_artifact`/`create_scratch` tools and their siblings): shared storage a branch's descendants and ancestors can read without a merge, tested the same way.
+Each surface calls the same operations in the engine that runs the harness's turn, so they give the same answers and refusals. Children may depend on one another, and a branch can change its graph of children in one atomic proposal; see [task graphs](graph.md). The same four surfaces also reach [artifacts and scratch areas](storage.md) (`by artifact`, `by scratch`, `branchyard.publish`/`create_scratch`, `Delegate::publish_artifact`, the MCP `publish_artifact`/`create_scratch` tools and their siblings): shared storage a branch's descendants and ancestors can read without a merge, tested the same way.
 
 ## Turning it on
 
@@ -61,7 +61,7 @@ Inside a delegating harness, each command acts as the harness's branch, on its d
 
 | Command | Inside a harness | Outside a harness |
 |---|---|---|
-| `by spawn "<prompt>" [--seat S] [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--wait]` | Creates a child of this branch and returns once it has started; `--wait` waits for its turn to end | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
+| `by spawn "<prompt>" [--seat S] [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--depends-on A,B [--after integrated]] [--bind SCRATCH:ACCESS] [--wait]` | Creates a child of this branch and returns once it has started (or, with `--depends-on`, once it is created waiting); `--wait` waits for its turn to end | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
 | `by inspect [<branch>]` | This branch, or a descendant | Any branch |
 | `by events [<branch>] [--cursor N] [--limit N]` | Same | Any branch |
 | `by send <branch> "<prompt>"` | Starts a descendant's next turn and returns | Runs the turn in the foreground, as before |
@@ -69,6 +69,7 @@ Inside a delegating harness, each command acts as the harness's branch, on its d
 | `by integrate <branch>` | Merges a descendant into this branch | Merges a delegated child into its parent |
 | `by cancel <branch>` | Stops a descendant's turn and every turn below it | Any branch and its subtree |
 | `by children [<branch>]` | This branch's descendants | Any branch's |
+| `by graph show [<branch>]`, `by graph apply FILE \| --edits JSON --expected-revision N` | This branch's graph of children, or a descendant's; applies a proposal to this branch's children ([task graphs](graph.md)) | `graph show` any branch's; `graph apply` needs `--parent <branch>` and waits for the children; `by graph resume [--yes]` starts dependents no engine started |
 
 Every command takes `--json`. With it, stdout holds exactly one JSON value, and harness activity goes to stderr. A failure prints `{"error": {"kind": "...", "message": "..."}}` and exits 1. Kinds are stable: `denied` (envelope, budget or authority), `running`, `not_running`, `steer_refused`, `unknown_branch`, `no_candidate`, `conflict`, `check_failed`, `target_moved`, `dirty_target`, `unsupported`, `state`, and the rest of `branchyard::Error::kind`.
 
@@ -86,12 +87,14 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 | `integrate` | `Merged`: `{branch, target, previous, commit}` |
 | `cancel` | `Cancelled`: `{cancelled: [branch]}` |
 | `children` | `Children`: `{branch, descendants: [BranchInfo]}` |
+| `graph show` / `graph` | `Graph`: `{branch, revision, children: [{name, status, depends_on, bindings, seat}], dependencies: [{dependent, prerequisite, after}]}` |
+| `graph apply` / `apply_graph` | `GraphApplied`: `{branch, revision, spawned: [Spawned], dependencies}`; a stale revision is the error `stale_revision` |
 
-`status` is `{"state": "running" | "ready" | "no_changes" | "interrupted" | "budget_exceeded" | "failed" | "merged", ...}`. `candidate` is `{commit, files_changed, insertions, deletions}` or null. `events` without `--cursor` returns the most recent; pass `next_cursor` back to continue.
+`status` is `{"state": "running" | "waiting" | "ready" | "no_changes" | "interrupted" | "budget_exceeded" | "failed" | "blocked" | "merged", ...}`; `waiting` and `blocked` are for a child with prerequisites ([task graphs](graph.md#dependencies)). `Spawned` has `depends_on`, and `Inspection` `graph_revision`, `depends_on` and `bindings`, each omitted when empty. `candidate` is `{commit, files_changed, insertions, deletions}` or null. `events` without `--cursor` returns the most recent; pass `next_cursor` back to continue.
 
 ## Python
 
-The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError` or `BranchyardError`, each with the `kind`. `branchyard.steer(branch, text)` adds to a running child's turn.
+The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError`, `StaleRevisionError` or `BranchyardError`, each with the `kind`. `branchyard.steer(branch, text)` adds to a running child's turn; `branchyard.graph()` and `branchyard.apply_graph(edits, expected_revision)` reach [task graphs](graph.md), and `spawn` takes `depends_on`, `after` and `bindings`.
 
 ```python
 import branchyard
@@ -127,7 +130,7 @@ me.integrate(&done.name)?;
 
 ## MCP tools
 
-`spawn`, `inspect`, `events`, `send`, `steer` (`{branch, text}`), `propose_integration`, `cancel`, `children`, the storage tools (`publish_artifact`, `list_artifacts`, `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`, `share_scratch`, `lock_scratch`, `unlock_scratch`; see [storage](storage.md)), `ask`, `report`, `escalate`, `answer` and `inbox`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses` and `deny` are arrays; `seat` names a rig seat; `ask`'s `wait_seconds` blocks for an answer). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
+`spawn`, `inspect`, `events`, `send`, `steer` (`{branch, text}`), `propose_integration`, `cancel`, `children`, `apply_graph` (`{expected_revision, edits}`) and `graph` (`{branch?}`) ([task graphs](graph.md)), the storage tools (`publish_artifact`, `list_artifacts`, `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`, `share_scratch`, `lock_scratch`, `unlock_scratch`; see [storage](storage.md)), `ask`, `report`, `escalate`, `answer` and `inbox`, with the arguments of the CLI flags (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses`, `deny` and `depends_on` are arrays; `seat` names a rig seat; `bindings` is `[{scratch, access}]`; `ask`'s `wait_seconds` blocks for an answer). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
 
 ## Inbox
 
@@ -157,7 +160,9 @@ Outside a harness, each of these needs `--as <branch>` (there is no other way to
 
 ### Delivery
 
-A message sits *pending* until it is acknowledged. Acknowledging it (marking it delivered) is the same store write as handing it to a turn, so a crash never delivers a message twice and never silently drops one — the same intent-before-effect discipline as [durable turns](durability.md). There are two paths, and each records `Activity::MessagesDelivered { ids, via }` on the recipient's log, `via` being `{"path": "steer", "steer": <id>}` or `{"path": "turn_start"}`; `by log` shows it as `delivered #7 into the running turn (steered input 3)` or `delivered #7 at the turn's start`.
+A message sits *pending* until it is acknowledged. Acknowledging it (marking it delivered) is the same store write as handing it to a turn, so a crash never delivers a message twice and never silently drops one — the same intent-before-effect discipline as [durable turns](durability.md). There are two paths, and each records `Activity::MessagesDelivered { ids, via }` on the recipient's log, `via` being `{"path": "steer", "steer": <id>, "boundary": <name>}` or `{"path": "turn_start", "boundary": "turn_start"}`; `by log` shows it as `delivered #7 into the running turn (steered input 3, claude_next_model_call)` or `delivered #7 at the turn's start (turn_start)`. For a steered message the event follows the state by a moment: the engine records it just after the store marks the message delivered, so a reader can briefly see a message delivered whose event has not been appended yet.
+
+`boundary` names the protocol boundary the message actually landed at, per harness, from [`Driver::steer_boundary`](../crates/branchyard-harness/src/lib.rs) — the same mechanisms `docs/harness-integration.md` "Steering a running turn" documents (idea from Straitjacket's cross-harness relay, `docs/comparison.md` Absorption plan → Straitjacket): `claude_next_model_call` (queued as a stream-json `user` message, delivered before the next model call), `codex_turn_steer` (`turn/steer`, recorded once the model response in progress finishes), `pi_steer` (the `steer` command, delivered before the next model call within the same run), or `acp_session_steering` (the `_session/steering` extension, only when the agent advertises it). A driver that cannot steer at all reports `unsupported` (never reachable, since [`try_deliver_now`](../crates/branchyard/src/inbox.rs) never delivers through it); `turn_start` is the same for every profile, since prepending to the prompt is not protocol-specific. The field is additive and defaults on read (`"not_recorded"` for a `steer` row logged before this field existed, `"turn_start"` for `turn_start`), so an older event log still deserializes.
 
 **Into a running turn, by steering.** Every `Yard` — so the SDK, `by` and `by serve` alike — starts with one `DeliveryHook`, `SteerDelivery`. When a message is sent and its recipient has a running turn, the hook queues it as [steered input](#how-it-runs) for that turn from the sender (`Activity::Steered { by: <sender> }` on the recipient's log), rendered as the same `<branchyard-inbox>` block as below with one message in it, and waits up to 2 seconds for the engine running the turn, in whichever process, to write it to the harness. The steer is linked to the message in the same store transaction that queues it, and the engine marks the message delivered in the same transaction that settles the steer as written or accepted; if the harness then refuses it, the same settle returns the message to pending. So `delivered` flips exactly when the running turn has the text, whether or not the sender was still waiting. No running turn (`NotRunning`), a profile that cannot take input mid-turn (`Unsupported`), or a harness that refuses it at runtime (an ACP agent without the `_session/steering` extension, say) leaves the message pending for the next turn's start.
 
@@ -180,7 +185,7 @@ A message sits *pending* until it is acknowledged. Acknowledging it (marking it 
 
 A child's limits and denials are stored with it and bound every later turn, whoever sends it.
 
-Branchyard also ships an opt-in permission rule, `Policy::allow_delegation_commands(by_path)` or `--allow-delegation`. It allows exactly the harness's shell commands that run `by` (by name, or the exposed path) with one of the seven delegation subcommands, as a single simple command: plain or quoted words, no variables, substitutions, globs, redirections, pipes or command lists. It looks through one `sh -c` or `bash -lc` wrapper, which is how Codex reports commands. Like any rule it is ordered, so an earlier deny, such as one a parent imposed, still wins. The subcommands act within the envelope, so the rule grants nothing beyond it. It trusts `PATH` to resolve `by` to the one the engine put first; a harness that can rewrite its `PATH` can already run anything.
+Branchyard also ships an opt-in permission rule, `Policy::allow_delegation_commands(by_path)` or `--allow-delegation`. It allows exactly the harness's shell commands that run `by` (by name, or the exposed path) with one of the eight delegation subcommands (`spawn`, `inspect`, `events`, `send`, `integrate`, `cancel`, `children`, `graph`), as a single simple command: plain or quoted words, no variables, substitutions, globs, redirections, pipes or command lists. It looks through one `sh -c` or `bash -lc` wrapper, which is how Codex reports commands. Like any rule it is ordered, so an earlier deny, such as one a parent imposed, still wins. The subcommands act within the envelope, so the rule grants nothing beyond it. It trusts `PATH` to resolve `by` to the one the engine put first; a harness that can rewrite its `PATH` can already run anything.
 
 ## Seats
 
@@ -206,7 +211,7 @@ by --remote URL inspect kid --json; by --remote URL events kid --cursor 0 --json
 by --remote URL children root --json; by --remote URL integrate kid --json
 ```
 
-A person reaches the same operations remotely, with the server's authority, exactly as they act locally outside a harness: `spawn` needs `--parent` and is bounded by the parent's envelope, `integrate` merges a child into the branch that delegated it, and `inspect`, `events` and `children` read any branch. `by --remote … send --json` prints `Sent` once the turn and its subtree have ended on the server. The JSON is the same as local mode's, and refusals print the same `{"error": {"kind", "message"}}`. The HTTP routes are in [the server reference](server.md#api-reference).
+A person reaches the same operations remotely, with the server's authority, exactly as they act locally outside a harness: `spawn` and `graph apply` need `--parent` and are bounded by the parent's envelope, `integrate` merges a child into the branch that delegated it, and `inspect`, `events` and `children` read any branch. `by --remote … send --json` prints `Sent` once the turn and its subtree have ended on the server. The JSON is the same as local mode's, and refusals print the same `{"error": {"kind", "message"}}`. The HTTP routes are in [the server reference](server.md#api-reference).
 
 Without `--allow-delegation`, the server refuses an envelope, `allow_delegation`, a spawn, and a send to a branch that was given an envelope (`403 delegation_not_allowed`); reading and integrating need no opt-in.
 

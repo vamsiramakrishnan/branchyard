@@ -1,4 +1,4 @@
-//! `branchyard-server`: see [`branchyard_server::cli::USAGE`].
+//! `branchyard-server`: see [`branchyard_server::cli::help`].
 
 use std::process::ExitCode;
 

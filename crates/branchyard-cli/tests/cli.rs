@@ -82,6 +82,11 @@ impl Repo {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("NO_COLOR", "1")
+            // Never a person's own ~/.config/branchyard/config.toml.
+            .env(
+                "BRANCHYARD_USER_CONFIG",
+                "/nonexistent/branchyard-config.toml",
+            )
             .env("PAGER", "cat");
         // Never inherit a delegating harness's identity from whoever runs
         // the tests.
@@ -369,6 +374,10 @@ fn errors_exit_nonzero() {
     let outside = Command::new(env!("CARGO_BIN_EXE_by"))
         .args(["ls"])
         .current_dir(&repo.dir)
+        .env(
+            "BRANCHYARD_USER_CONFIG",
+            "/nonexistent/branchyard-config.toml",
+        )
         .output()
         .unwrap();
     assert_eq!(outside.status.code(), Some(1));
@@ -1224,4 +1233,281 @@ fn artifact_and_scratch_commands_follow_the_delegation_tree() {
     assert!(stderr(&denied).contains("may not"), "{}", stderr(&denied));
     let out = repo.by(&["scratch", "unlock", "cache", "--branch", "root"]);
     assert!(out.status.success(), "{}", stderr(&out));
+}
+
+/// A harness builds a graph of its children with `by graph` in its shell
+/// and with the Python module; both reach the same operation.
+#[test]
+fn a_harness_applies_a_graph_with_by_and_python() {
+    let repo = Repo::new();
+    let edits = r#"[{"kind":"spawn","prompt":"WRITE a.txt=1","name":"a"},{"kind":"spawn","prompt":"WRITE b.txt=1","name":"b","depends_on":["a"]}]"#;
+    let script = "import branchyard as b; g = b.graph(); print('python rev', g.revision); \
+                  a = b.apply_graph([{'kind': 'spawn', 'prompt': 'WRITE c.txt=1', 'name': 'c', \
+                  'depends_on': ['b']}], g.revision); \
+                  print('python applied', a.revision, a.spawned[0].status['state'], a.spawned[0].depends_on); \
+                  d = b.wait('c', timeout=60, poll=0.05); \
+                  print('python waited', d.status['state'], d.depends_on[0]['prerequisite']); \
+                  exec('try:\\n b.apply_graph([{\\'kind\\': \\'add_dependency\\', \\'dependent\\': \\'c\\', \\'prerequisite\\': \\'a\\'}], 0)\\nexcept b.StaleRevisionError as e:\\n print(\\'python stale\\', e.kind)')";
+    let prompt = [
+        "SH by graph show --json".to_owned(),
+        format!("SH by graph apply --edits '{edits}' --expected-revision 0 --json"),
+        format!("SH python3 -c \"{script}\""),
+        "SH by graph show --json".to_owned(),
+        "SH by graph apply --edits '[]' --expected-revision 0 --json".to_owned(),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "\"revision\": 0",
+        "\"state\": \"waiting\"",
+        "python rev 1",
+        "python applied 2 waiting ['b']",
+        "python waited ready b",
+        "python stale stale_revision",
+        "\"kind\": \"denied\"",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    let graph = repo.json(&["graph", "show", "root", "--json"]);
+    assert_eq!(graph["revision"], 2);
+    assert_eq!(graph["dependencies"].as_array().unwrap().len(), 2);
+    for child in graph["children"].as_array().unwrap() {
+        assert_eq!(child["status"]["state"], "ready", "{graph}");
+    }
+    let text = stdout(&repo.by(&["graph", "show", "root"]));
+    assert!(text.contains("root's graph, revision 2"), "{text}");
+    assert!(text.contains("after a"), "{text}");
+}
+
+/// A person applies a graph from a file outside a harness: the command
+/// waits for the children and what they start; a spawn with --depends-on
+/// waits for its sibling; a failed prerequisite blocks.
+#[test]
+fn a_person_applies_a_graph_and_spawns_dependents() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let proposal = repo.dir.join("proposal.json");
+    fs::write(
+        &proposal,
+        r#"{"expected_revision": 0, "edits": [
+            {"kind": "spawn", "prompt": "EXIT", "name": "bad"},
+            {"kind": "spawn", "prompt": "WRITE n.txt=1", "name": "next", "depends_on": ["bad"]}
+        ]}"#,
+    )
+    .unwrap();
+    let applied = repo.json(&[
+        "graph",
+        "apply",
+        proposal.to_str().unwrap(),
+        "--parent",
+        "root",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(applied["revision"], 1);
+    assert_eq!(applied["spawned"][1]["status"]["state"], "waiting");
+    let next = repo.json(&["inspect", "next", "--json"]);
+    assert_eq!(next["status"]["state"], "blocked", "{next}");
+    assert!(next["status"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("its prerequisite bad failed"));
+    // The same file again is stale now, and changes nothing.
+    let stale = repo.by(&[
+        "graph",
+        "apply",
+        proposal.to_str().unwrap(),
+        "--parent",
+        "root",
+        "--json",
+    ]);
+    assert_eq!(stale.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&stale.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "stale_revision");
+    assert_eq!(
+        repo.json(&["graph", "show", "root", "--json"])["revision"],
+        1
+    );
+    // by spawn --depends-on: created waiting, started when its sibling
+    // settles, before the command returns.
+    let spawned = repo.json(&[
+        "spawn",
+        "WRITE s.txt=1",
+        "--parent",
+        "root",
+        "--name",
+        "after-next",
+        "--depends-on",
+        "next",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(spawned["status"]["state"], "blocked", "{spawned}");
+    let spawned = repo.json(&[
+        "spawn",
+        "WRITE t.txt=1",
+        "--parent",
+        "root",
+        "--name",
+        "later",
+        "--depends-on",
+        "after-next",
+        "--after",
+        "integrated",
+        "--json",
+    ]);
+    assert_eq!(spawned["status"]["state"], "blocked", "{spawned}");
+    let usage = repo.by(&["graph", "apply", "--parent", "root"]);
+    assert_eq!(usage.status.code(), Some(2));
+    let usage = repo.by(&["spawn", "x", "--parent", "root", "--after", "soon"]);
+    assert_eq!(usage.status.code(), Some(2));
+}
+
+#[test]
+fn help_version_typos_and_exit_codes() {
+    let repo = Repo::new();
+    let help = repo.by(&["--help"]);
+    assert!(help.status.success());
+    let text = stdout(&help);
+    for heading in [
+        "Work on branches:",
+        "Inspect:",
+        "Servers:",
+        "Options:",
+        "Examples:",
+    ] {
+        assert!(text.contains(heading), "{heading}: {text}");
+    }
+    assert_eq!(stdout(&repo.by(&[])), text, "no command prints the help");
+    assert_eq!(stdout(&repo.by(&["help"])), text);
+    assert_eq!(
+        stdout(&repo.by(&["-V"])),
+        format!("by {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    let run = repo.by(&["help", "run"]);
+    assert!(run.status.success());
+    assert!(stdout(&run).contains("Usage: by run [OPTIONS] <PROMPT>"));
+    assert_eq!(stdout(&repo.by(&["run", "--help"])), stdout(&run));
+    let nested = repo.by(&["help", "graph", "apply"]);
+    assert!(
+        stdout(&nested).contains("Usage: by graph apply"),
+        "{}",
+        stdout(&nested)
+    );
+
+    let typo = repo.by(&["mrege", "b"]);
+    assert_eq!(typo.status.code(), Some(2));
+    assert!(stdout(&typo).is_empty());
+    assert!(
+        stderr(&typo).contains("tip: a similar subcommand exists: 'merge'"),
+        "{}",
+        stderr(&typo)
+    );
+    let flag = repo.by(&["run", "go", "--budget", "1"]);
+    assert_eq!(flag.status.code(), Some(2));
+    assert!(
+        stderr(&flag).contains("'--budget-usd'"),
+        "{}",
+        stderr(&flag)
+    );
+    let checked = repo.by(&["run", "go", "--image", "alpine"]);
+    assert_eq!(checked.status.code(), Some(2));
+    assert!(stderr(&checked).contains("error: --image needs --provider microsandbox"));
+    assert!(stderr(&checked).contains("Usage: by run"));
+}
+
+#[test]
+fn completions_and_the_man_page_print() {
+    let repo = Repo::new();
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let out = repo.by(&["completions", shell]);
+        assert!(out.status.success(), "{shell}: {}", stderr(&out));
+        let script = stdout(&out);
+        assert!(
+            script.contains("spawn") && script.contains("budget-usd"),
+            "{shell}"
+        );
+    }
+    assert_eq!(repo.by(&["completions", "tcsh"]).status.code(), Some(2));
+    let man = repo.by(&["man"]);
+    assert!(man.status.success());
+    assert!(stdout(&man).starts_with(".ie"), "{}", &stdout(&man)[..80]);
+    assert!(stdout(&man).contains(".TH by"));
+}
+
+#[test]
+fn global_options_come_from_anywhere_and_blank_variables_are_unset() {
+    let repo = Repo::new();
+    // Before or after the command, the same check: remote options need a
+    // server.
+    for args in [&["--repo", "app", "ls"][..], &["ls", "--repo", "app"]] {
+        let out = repo.by(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(stderr(&out).contains("apply to remote mode"), "{args:?}");
+    }
+    let from_env = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .arg("ls")
+        .env("BRANCHYARD_REMOTE", "http://127.0.0.1:9")
+        .env_remove("BRANCHYARD_TOKEN_FILE")
+        .output()
+        .unwrap();
+    assert_eq!(from_env.status.code(), Some(1));
+    assert!(
+        stderr(&from_env).contains("remote mode needs a token"),
+        "{}",
+        stderr(&from_env)
+    );
+    let blank = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["ls", "--json"])
+        .env("BRANCHYARD_REMOTE", " ")
+        .env("BRANCHYARD_REPO", "")
+        .output()
+        .unwrap();
+    assert!(blank.status.success(), "{}", stderr(&blank));
+    assert_eq!(stdout(&blank).trim(), "[]");
+    let empty_flag = repo.by(&["--remote=", "ls"]);
+    assert_eq!(empty_flag.status.code(), Some(2));
+}
+
+#[test]
+fn serve_and_worker_hand_their_arguments_to_the_server() {
+    let repo = Repo::new();
+    for (args, usage) in [
+        (&["help", "serve"][..], "Usage: by serve [OPTIONS]"),
+        (&["serve", "--help"], "Usage: by serve [OPTIONS]"),
+        (&["worker", "--help"], "Usage: by worker [OPTIONS]"),
+        (
+            &["--repo", "x", "help", "worker"],
+            "Usage: by worker [OPTIONS]",
+        ),
+    ] {
+        let out = repo.by(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+        assert!(stdout(&out).contains(usage), "{args:?}: {}", stdout(&out));
+        assert!(stdout(&out).contains("--webhook-events <KINDS>"));
+    }
+    // `--repo` after `serve` is the server's own NAME=PATH, not by's.
+    let bad = repo.by(&["serve", "--repo", "nopath"]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(stderr(&bad).contains("needs NAME=PATH"), "{}", stderr(&bad));
+    let token = repo.by(&[
+        "serve", "token", "new", "--tenant", "acme", "--scopes", "read",
+    ]);
+    assert!(token.status.success(), "{}", stderr(&token));
+    let credential: Value = serde_json::from_slice(&token.stdout).unwrap();
+    assert_eq!(credential["tenant"], "acme");
+    assert_eq!(credential["scopes"], serde_json::json!(["read"]));
+    let remote = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .env("BRANCHYARD_REMOTE", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    assert_eq!(remote.status.code(), Some(2));
+    assert!(stderr(&remote).contains("does not take --remote"));
 }

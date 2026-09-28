@@ -1,10 +1,59 @@
-//! Command-line parsing for `by`.
+//! Command-line parsing for `by`, with clap's derive API.
 //!
-//! Hand-written to avoid a dependency. Each command declares its positionals
-//! and flags once in [`COMMANDS`]; parsing and help text both read from it.
+//! [`Cli`] is the whole command line: [`Globals`], which choose where
+//! commands run and may come before or after the command, and one
+//! [`Command`]. `by --help`, `by help <command>`, typo suggestions, shell
+//! completions (`by completions`) and the man page (`by man`) are all
+//! generated from these types.
+//!
+//! # Adding a command
+//!
+//! 1. Add a variant to [`Command`]. Its doc comment is its one-line summary
+//!    in `by --help`; `#[command(display_order = N)]` files it under the
+//!    group [`GROUPS`] names for `N / 100` (without one it is listed under
+//!    "Other commands"). Its fields are its positionals and flags, as in any
+//!    clap derive: a `json: bool` with `#[arg(long)]` for `--json`, the
+//!    flag groups below ([`Limits`], [`Perms`], ...) flattened where they
+//!    fit, and a nested `#[command(subcommand)]` enum for actions.
+//! 2. Add one arm for it to `dispatch` in `main.rs` (or to `run` there, when
+//!    it needs no repository or server).
+//!
+//! For example, `by config` in the "Shell and setup" group, with its
+//! actions as a nested subcommand:
+//!
+//! ```ignore
+//! /// Show, locate or validate branchyard.toml and the user configuration
+//! #[command(display_order = 603, subcommand_required = true)]
+//! Config {
+//!     /// Print JSON
+//!     #[arg(long, global = true)]
+//!     json: bool,
+//!     #[command(subcommand)]
+//!     action: ConfigAction,
+//! },
+//! // and in main.rs `run`, since it needs no repository or server:
+//! Command::Config { json, action } => return config_cmd::main(&action, json),
+//! ```
+//!
+//! Conflicts between flags go in clap attributes where clap can say them
+//! (`conflicts_with`, `requires`, an `ArgGroup`, as [`InitFlags`] does).
+//! Validation clap cannot express goes in a [`Flags`] impl, flattened into
+//! the variant as [`Checked<F>`]: it then fails as a usage error (exit 2)
+//! that names the command, before anything runs.
 
+use std::ffi::OsString;
 use std::fmt;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::time::Duration;
+
+use clap::builder::styling::Style;
+use clap::builder::{PossibleValue, StringValueParser, TypedValueParser};
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::{
+    ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+    ValueHint,
+};
 
 /// How tool permission requests are answered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,14 +143,6 @@ pub struct SubstrateArgs {
     pub insecure: bool,
 }
 
-/// Which `--provider` was chosen, with its options.
-#[derive(Clone, Debug, PartialEq)]
-enum Chosen {
-    Local,
-    Microsandbox(SandboxArgs),
-    Substrate(Box<SubstrateArgs>),
-}
-
 /// Options of `by spawn`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpawnArgs {
@@ -114,6 +155,29 @@ pub struct SpawnArgs {
     pub deny: Vec<String>,
     /// `--seat`: the rig seat the child fills.
     pub seat: Option<String>,
+    /// `--depends-on`: siblings the child waits for.
+    pub depends_on: Vec<String>,
+    /// `--after`: when each of them counts as done.
+    pub after: branchyard::After,
+    /// `--bind NAME:ACCESS`, repeatable.
+    pub bindings: Vec<branchyard::Binding>,
+    pub json: bool,
+}
+
+/// `by graph show|apply|resume ...`; see `docs/graph.md`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphArgs {
+    pub action: String,
+    /// `show`'s branch, or `apply`'s proposal file (`-` for stdin).
+    pub arg: Option<String>,
+    /// The branch whose graph `apply` changes, outside a harness.
+    pub parent: Option<String>,
+    /// `--edits JSON`: the edits inline, instead of a file.
+    pub edits: Option<String>,
+    /// `--expected-revision N`, overriding a file's.
+    pub expected_revision: Option<u64>,
+    /// Permissions for the children's turns, outside a harness.
+    pub task: TaskArgs,
     pub json: bool,
 }
 
@@ -132,12 +196,14 @@ pub struct RigArgs {
     pub json: bool,
 }
 
-/// `by artifact publish|list|get|share ...`; see `docs/storage.md`.
+/// `by artifact publish|list|get|share|export|import ...`; see `docs/storage.md`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArtifactArgs {
     pub action: String,
-    /// `publish`'s file, or `get`/`share`'s id.
+    /// `publish`'s file, `get`/`share`'s id, or `import`'s bundle file.
     pub arg: Option<String>,
+    /// `export`'s artifact ids, one or more.
+    pub ids: Vec<String>,
     pub name: Option<String>,
     pub media_type: Option<String>,
     pub labels: Vec<(String, String)>,
@@ -157,1927 +223,2158 @@ pub struct ScratchArgs {
     pub json: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Command {
-    Run {
-        prompt: String,
-        task: TaskArgs,
-    },
-    Fan {
-        prompt: String,
-        harnesses: Vec<String>,
-        task: TaskArgs,
-    },
-    Send {
-        branch: String,
-        prompt: String,
-        task: TaskArgs,
-        /// `--steer`: into the running turn rather than a new one.
-        steer: bool,
-        wait: bool,
-        json: bool,
-    },
-    Fork {
-        branch: String,
-        prompt: String,
-        fresh_session: bool,
-        task: TaskArgs,
-    },
-    Reincarnate {
-        branch: String,
-        task: TaskArgs,
-    },
-    Ls {
-        json: bool,
-    },
-    Show {
-        branch: String,
-        json: bool,
-    },
-    Diff {
-        branch: String,
-    },
-    Log {
-        branch: String,
-        json: bool,
-        follow: bool,
-    },
-    Merge {
-        branch: String,
-        into: Option<String>,
-    },
-    Rm {
-        branch: String,
-        keep_credentials: bool,
-    },
-    Harnesses {
-        json: bool,
-    },
-    Watch {
-        /// Seconds between refreshes.
-        interval: Duration,
-        /// Print one frame and exit.
-        once: bool,
-    },
-    /// `by serve`: arguments for the server's own parser.
-    Serve {
-        args: Vec<String>,
-    },
-    /// `by mcp`: the arguments for Branchyard's MCP server.
-    Mcp {
-        args: Vec<String>,
-    },
-    Spawn {
-        prompt: String,
-        spawn: SpawnArgs,
-    },
-    Inspect {
-        branch: Option<String>,
-        json: bool,
-    },
-    Events {
-        branch: Option<String>,
-        cursor: Option<usize>,
-        limit: Option<usize>,
-        json: bool,
-    },
-    Integrate {
-        branch: String,
-        json: bool,
-    },
-    Cancel {
-        branch: String,
-        json: bool,
-    },
-    Children {
-        branch: Option<String>,
-        json: bool,
-    },
-    Ask {
-        as_branch: Option<String>,
-        text: String,
-        wait_seconds: Option<f64>,
-        json: bool,
-    },
-    Report {
-        as_branch: Option<String>,
-        text: String,
-        json: bool,
-    },
-    Escalate {
-        as_branch: Option<String>,
-        text: String,
-        json: bool,
-    },
-    Answer {
-        as_branch: Option<String>,
-        message_id: u64,
-        text: String,
-        json: bool,
-    },
-    Inbox {
-        as_branch: Option<String>,
-        unread: bool,
-        json: bool,
-    },
-    Rig(RigArgs),
-    Artifact(ArtifactArgs),
-    Scratch(ScratchArgs),
-    /// General help, or one command's.
-    Help {
-        topic: Option<&'static Spec>,
-    },
-    Version,
-}
+/// The variables behind [`Globals`], each also a `--flag`.
+pub const GLOBAL_ENV: [&str; 4] = [
+    "BRANCHYARD_REMOTE",
+    "BRANCHYARD_TOKEN_FILE",
+    "BRANCHYARD_REPO",
+    "BRANCHYARD_CA_FILE",
+];
 
-/// A usage error: exit code 2.
-#[derive(Clone, Debug, PartialEq)]
-pub struct UsageError {
-    pub message: String,
-    /// The command whose help would explain the mistake.
-    pub command: Option<&'static str>,
-}
-
-impl fmt::Display for UsageError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-/// Options before the command, choosing where commands run.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Options choosing where commands run, before or after the command. A
+/// flag wins over its variable; a blank variable counts as unset (see
+/// [`unset_blank_env`]).
+#[derive(Args, Clone, Debug, Default, PartialEq, Eq)]
+#[command(next_help_heading = "Global options")]
 pub struct Globals {
-    /// Server URL: run against a Branchyard server instead of locally.
+    /// Run commands on a Branchyard server at URL instead of locally
+    #[arg(
+        long,
+        global = true,
+        display_order = 1,
+        value_name = "URL",
+        env = "BRANCHYARD_REMOTE",
+        hide_env_values = true,
+        value_parser = non_blank
+    )]
     pub remote: Option<String>,
+    /// The server's bearer token, on the first line of FILE
+    #[arg(
+        long,
+        global = true,
+        display_order = 2,
+        value_name = "FILE",
+        env = "BRANCHYARD_TOKEN_FILE",
+        hide_env_values = true,
+        value_parser = non_blank
+    )]
     pub token_file: Option<String>,
-    /// Repository name on the server.
+    /// Repository on the server, when it serves several
+    #[arg(
+        long,
+        global = true,
+        display_order = 3,
+        value_name = "NAME",
+        env = "BRANCHYARD_REPO",
+        hide_env_values = true,
+        value_parser = non_blank
+    )]
     pub repo: Option<String>,
-    /// Extra CA certificates for `https`.
+    /// Also trust this CA certificate for https
+    #[arg(
+        long,
+        global = true,
+        display_order = 4,
+        value_name = "FILE",
+        env = "BRANCHYARD_CA_FILE",
+        hide_env_values = true,
+        value_parser = non_blank
+    )]
     pub ca_file: Option<String>,
 }
 
-impl Globals {
-    /// Fill what the command line left unset from `BRANCHYARD_REMOTE`,
-    /// `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO` and `BRANCHYARD_CA_FILE`.
-    pub fn with_env(mut self, get: impl Fn(&str) -> Option<String>) -> Globals {
-        let get = |name: &str| get(name).filter(|v| !v.trim().is_empty());
-        self.remote = self.remote.or_else(|| get("BRANCHYARD_REMOTE"));
-        self.token_file = self.token_file.or_else(|| get("BRANCHYARD_TOKEN_FILE"));
-        self.repo = self.repo.or_else(|| get("BRANCHYARD_REPO"));
-        self.ca_file = self.ca_file.or_else(|| get("BRANCHYARD_CA_FILE"));
-        self
+/// Unset each of [`GLOBAL_ENV`] that is set but blank, so that clap, which
+/// reads them, treats it as unset rather than as an empty value. Call before
+/// [`command`], while the process has one thread.
+pub fn unset_blank_env() {
+    for name in GLOBAL_ENV {
+        if std::env::var_os(name).is_some_and(|v| v.to_string_lossy().trim().is_empty()) {
+            std::env::remove_var(name);
+        }
     }
 }
 
-const GLOBALS: [(&str, &str); 4] = [
-    ("remote", "URL"),
-    ("token-file", "FILE"),
-    ("repo", "NAME"),
-    ("ca-file", "FILE"),
+/// The whole `by` command line.
+#[derive(Parser, Debug, Clone, PartialEq)]
+#[command(
+    name = "by",
+    version,
+    about = "Delegate coding work to agent harnesses on git branches, and merge only validated \
+             results.",
+    after_help = GENERAL_AFTER_HELP,
+    // Commands without a `display_order` go under "Other commands".
+    next_display_order = None,
+)]
+pub struct Cli {
+    #[command(flatten)]
+    pub globals: Globals,
+    /// `None` prints the general help.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// The groups of `by --help`'s command list, by `display_order / 100`.
+pub const GROUPS: &[(usize, &str)] = &[
+    (1, "Work on branches"),
+    (2, "Inspect"),
+    (3, "Delegate and coordinate (usually from inside a harness)"),
+    (4, "Rigs and shared storage"),
+    (5, "Servers"),
+    (6, "Shell and setup"),
 ];
 
-/// Split leading global options from the command's arguments.
-pub fn parse_globals(args: &[String]) -> Result<(Globals, &[String]), UsageError> {
-    let mut globals = Globals::default();
-    let mut rest = args;
-    while let Some(arg) = rest.first() {
-        let Some(long) = arg.strip_prefix("--") else {
-            break;
+const GENERAL_AFTER_HELP: &str = "\
+Examples:
+  by run \"fix the flaky test\" --check \"cargo test\" --yes
+  by fan \"speed up the parser\" --harness claude-code,codex
+  by ls && by diff fix-the-flaky-test && by merge fix-the-flaky-test
+  by --remote https://ci.example:8421 --token-file ~/.by-token ls
+
+Run 'by help <command>' or 'by <command> --help' for its options.
+Local mode: harnesses run as your operating-system user, with no other
+isolation. State lives in .branchyard/ at the repository root. Remote mode:
+harnesses run as the server's user, with no other isolation.";
+
+const RUN_EXAMPLES: &str = "\
+Examples:
+  by run \"fix the flaky test\" --check \"cargo test -p core\" --yes
+  by run \"add a --verbose flag\" -n verbose --harness codex --budget-usd 2
+  by run \"port the build\" --provider microsandbox --image ghcr.io/me/claude:1 \\
+      --pass-env ANTHROPIC_API_KEY
+  by run -- \"--explain is a prompt here\"";
+
+const FAN_EXAMPLES: &str = "\
+Examples:
+  by fan \"speed up the parser\" --harness claude-code,codex,gemini-cli --check \"cargo test\"
+  by ls";
+
+const SEND_EXAMPLES: &str = "\
+Examples:
+  by send fix-the-flaky-test \"now add a regression test\"
+  by send fix-the-flaky-test \"also cover Windows\" --steer";
+
+const FORK_EXAMPLES: &str = "\
+Examples:
+  by fork fix-the-flaky-test \"try a lock instead\" -n with-lock";
+
+const SPAWN_EXAMPLES: &str = "\
+Examples (inside a harness, the parent is the harness's own branch):
+  by spawn \"write the tokenizer\" --harness codex --budget-usd 1 --wait
+  by spawn \"write the parser\" --depends-on tokenizer --after integrated
+  by spawn \"fix it\" --parent root --yes            # outside a harness";
+
+const MERGE_EXAMPLES: &str = "\
+Examples:
+  by merge fix-the-flaky-test
+  by merge fix-the-flaky-test --into release";
+
+const WATCH_EXAMPLES: &str = "\
+Examples:
+  by watch
+  by watch --interval 250ms
+  by watch --once | less";
+
+const INIT_EXAMPLES: &str = "\
+Examples:
+  by init                                            # the wizard, on a terminal
+  by init server --defaults                          # the wizard, every default taken
+  by init --json                                     # the topics
+  by init project --json --next --answers answers.json
+  by init project --answers answers.json --dry-run
+  by init project --answers - --apply --json < answers.json
+  by init server --defaults --apply --force
+
+Answers name where a secret is (a variable, or @file), never its value.
+Generated tokens are written 0600 and printed nowhere. See docs/setup.md.";
+
+const CONFIG_EXAMPLES: &str = "\
+Files: ~/.config/branchyard/config.toml (BRANCHYARD_USER_CONFIG overrides the
+path), then branchyard.toml at or above the current directory, up to the
+repository root. The project file overrides the user file key by key;
+BRANCHYARD_REMOTE, BRANCHYARD_TOKEN_FILE, BRANCHYARD_REPO and
+BRANCHYARD_CA_FILE override both; flags override everything. Neither file is
+read inside a harness running on a branch (BRANCHYARD_BRANCH set).
+Write one with `by init project`.
+
+Examples:
+  by config show
+  by config show --json
+  by config validate
+  by config validate ~/.config/branchyard/config.toml
+  by config schema > branchyard.config.json";
+
+const COMPLETIONS_EXAMPLES: &str = "\
+Examples:
+  by completions bash > ~/.local/share/bash-completion/completions/by
+  by completions zsh > \"${fpath[1]}/_by\"
+  by completions fish > ~/.config/fish/completions/by.fish
+  by completions powershell >> $PROFILE";
+
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum Command {
+    /// Run a task on a new branch
+    #[command(display_order = 100, after_help = RUN_EXAMPLES)]
+    Run {
+        /// The task for the harness; quote it
+        prompt: String,
+        #[command(flatten)]
+        task: Checked<RunFlags>,
+    },
+    /// Run a task on several harnesses in parallel, then compare
+    #[command(display_order = 101, after_help = FAN_EXAMPLES)]
+    Fan {
+        /// The task for every harness; quote it
+        prompt: String,
+        /// Harnesses to run on, one branch each
+        #[arg(
+            long = "harness",
+            value_name = "ID,ID,...",
+            required = true,
+            value_parser = harness_list
+        )]
+        harnesses: List,
+        #[command(flatten)]
+        task: Checked<FanFlags>,
+    },
+    /// Continue a branch's session with another prompt
+    #[command(display_order = 102, after_help = SEND_EXAMPLES)]
+    Send {
+        branch: String,
+        /// The next prompt; quote it
+        prompt: String,
+        /// Add the prompt to the branch's running turn without interrupting it, instead of
+        /// starting a new turn; refused when no turn runs or the harness cannot take it
+        #[arg(long)]
+        steer: bool,
+        /// Wait for the turn to end and show it (outside a harness, send always waits)
+        #[arg(long)]
+        wait: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        task: Checked<SendFlags>,
+    },
+    /// Start a new branch from a branch's candidate and conversation
+    #[command(display_order = 103, after_help = FORK_EXAMPLES)]
+    Fork {
+        branch: String,
+        /// The new branch's prompt; quote it
+        prompt: String,
+        /// Start a new session if the harness cannot fork its conversation
+        #[arg(long)]
+        fresh_session: bool,
+        #[command(flatten)]
+        task: Checked<ForkFlags>,
+    },
+    /// Fork a branch's candidate into a fresh session with a generated handoff brief
+    #[command(display_order = 104)]
+    Reincarnate {
+        branch: String,
+        #[command(flatten)]
+        task: Checked<ReincarnateFlags>,
+    },
+    /// Merge a branch's candidate after its check passes
+    #[command(display_order = 105, after_help = MERGE_EXAMPLES)]
+    Merge {
+        branch: String,
+        /// Local branch to merge into (default: the current branch)
+        #[arg(long, value_name = "TARGET")]
+        into: Option<String>,
+    },
+    /// Remove a branch's worktree and record
+    #[command(display_order = 106)]
+    Rm {
+        branch: String,
+        /// Keep the credential files provisioning wrote in a home a fork still uses
+        #[arg(long)]
+        keep_credentials: bool,
+    },
+    /// List branches
+    #[command(display_order = 200)]
+    Ls {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one branch
+    #[command(display_order = 201)]
+    Show {
+        branch: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a branch's candidate diff against its base
+    #[command(display_order = 202)]
+    Diff { branch: String },
+    /// Show a branch's recorded events
+    #[command(display_order = 203)]
+    Log {
+        branch: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        /// Keep printing events as they are recorded, until interrupted; with --json, one
+        /// object per line
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Watch every branch live: status, activity, cost
+    #[command(display_order = 204, after_help = WATCH_EXAMPLES)]
+    Watch {
+        /// Time between refreshes: seconds, or with a unit such as 250ms or 2s
+        #[arg(long, value_name = "SECS", default_value = "1", value_parser = watch_interval)]
+        interval: Duration,
+        /// Print the tree once and exit
+        #[arg(long)]
+        once: bool,
+    },
+    /// List harness profiles and whether they are installed
+    #[command(display_order = 205)]
+    Harnesses {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delegate to a new child branch of this branch
+    #[command(display_order = 300, after_help = SPAWN_EXAMPLES)]
+    Spawn {
+        /// The child's task; quote it
+        prompt: String,
+        #[command(flatten)]
+        spawn: Checked<SpawnFlags>,
+    },
+    /// Show a branch's status, candidate, cost, budget and last message
+    #[command(display_order = 301)]
+    Inspect {
+        /// Default: this harness's own branch
+        branch: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a branch's recorded events from a cursor
+    #[command(display_order = 302)]
+    Events {
+        /// Default: this harness's own branch
+        branch: Option<String>,
+        /// Start at event N (default: the most recent)
+        #[arg(long, value_name = "N")]
+        cursor: Option<usize>,
+        /// At most N events (default 50, at most 200)
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Merge a delegated child into its parent's branch after its check passes
+    #[command(display_order = 303)]
+    Integrate {
+        branch: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop a branch's running turn and every turn delegated below it
+    #[command(display_order = 304)]
+    Cancel {
+        branch: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the branches a branch delegated to
+    #[command(display_order = 305)]
+    Children {
+        /// Default: this harness's own branch
+        branch: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a branch's children and their dependencies, or apply a graph proposal
+    /// (see docs/graph.md)
+    #[command(display_order = 306, subcommand_required = true)]
+    Graph {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: GraphAction,
+    },
+    /// Ask this branch's parent a question
+    #[command(display_order = 307)]
+    Ask {
+        /// Act as this branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long = "as", value_name = "BRANCH")]
+        as_branch: Option<String>,
+        text: String,
+        /// Block up to SECS seconds for an answer (default: return once the question is sent)
+        #[arg(long = "wait", value_name = "SECS", value_parser = seconds, allow_negative_numbers = true)]
+        wait_seconds: Option<f64>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report to this branch's parent
+    #[command(display_order = 308)]
+    Report {
+        /// Act as this branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long = "as", value_name = "BRANCH")]
+        as_branch: Option<String>,
+        text: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Escalate to this branch's parent, or further up if its rig seat allows
+    #[command(display_order = 309)]
+    Escalate {
+        /// Act as this branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long = "as", value_name = "BRANCH")]
+        as_branch: Option<String>,
+        text: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer a message (usually a question) from a descendant
+    #[command(display_order = 310)]
+    Answer {
+        /// Act as this branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long = "as", value_name = "BRANCH")]
+        as_branch: Option<String>,
+        message_id: u64,
+        text: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List messages addressed to this branch
+    #[command(display_order = 311)]
+    Inbox {
+        /// Act as this branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long = "as", value_name = "BRANCH")]
+        as_branch: Option<String>,
+        /// Only messages not yet delivered to a turn
+        #[arg(long)]
+        unread: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a rig spec and print its plan, or run its root seat with a prompt
+    #[command(display_order = 400, subcommand_required = true)]
+    Rig {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: RigAction,
+    },
+    /// Publish, list, read, share, export or import an artifact (see docs/storage.md)
+    #[command(display_order = 401, subcommand_required = true)]
+    Artifact {
+        /// Act as this branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long, global = true, value_name = "NAME")]
+        branch: Option<String>,
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: ArtifactAction,
+    },
+    /// Create, list, lock, unlock or share a scratch area (see docs/storage.md)
+    #[command(display_order = 402, subcommand_required = true)]
+    Scratch {
+        /// Act as this branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long, global = true, value_name = "NAME")]
+        branch: Option<String>,
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: ScratchAction,
+    },
+    /// Serve repositories over an authenticated HTTP API (see 'by serve --help')
+    // Its options are the server's own: `main` hands everything after `serve`
+    // to `branchyard_server::cli` (see `server_call`) before this parser runs.
+    #[command(display_order = 500, disable_help_flag = true)]
+    Serve {
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "SERVER_OPTIONS"
+        )]
+        args: Vec<String>,
+    },
+    /// Run operations servers queued in a PostgreSQL database (see 'by worker --help')
+    // `by serve --worker`; like `serve`, handed to the server's own parser.
+    #[command(display_order = 501, disable_help_flag = true)]
+    Worker {
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "SERVER_OPTIONS"
+        )]
+        args: Vec<String>,
+    },
+    /// Serve a branch's delegation tools over MCP on stdio (started by the engine)
+    #[command(display_order = 502)]
+    Mcp {
+        /// Repository root
+        #[arg(long, value_name = "DIR")]
+        root: String,
+        /// The branch whose turn this server serves
+        #[arg(long, value_name = "NAME")]
+        branch: String,
+    },
+    /// Print a shell completion script for by
+    #[command(display_order = 600, after_help = COMPLETIONS_EXAMPLES)]
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Print by's man page (roff), for `man -l -` or a man directory
+    #[command(display_order = 601)]
+    Man,
+    /// Set up Branchyard by interview: project defaults, a server, a rig, a deployment, skills
+    #[command(display_order = 602, after_help = INIT_EXAMPLES)]
+    Init {
+        #[command(flatten)]
+        init: Checked<InitFlags>,
+    },
+    /// Show, locate or validate branchyard.toml and the user configuration
+    #[command(display_order = 603, subcommand_required = true, after_help = CONFIG_EXAMPLES)]
+    Config {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// `by config ...`.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum ConfigAction {
+    /// Every effective value and where it came from
+    Show,
+    /// The user and project files, and whether they exist
+    Path,
+    /// Load FILE, or every file by reads, strictly
+    Validate {
+        /// One file to check (default: the user and project files, and their merge)
+        #[arg(value_hint = ValueHint::FilePath)]
+        file: Option<String>,
+    },
+    /// The JSON Schema of the file (schema/branchyard.config.json)
+    Schema,
+}
+
+/// Which step of the JSON protocol `by init` takes; none runs the wizard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitStep {
+    /// `--next`: the next batch of questions, or the plan.
+    Next,
+    /// `--dry-run`: the plan, writing nothing.
+    DryRun,
+    /// `--apply`: write the plan.
+    Apply,
+}
+
+/// `by init`, checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InitArgs {
+    pub topic: Option<branchyard_setup::Topic>,
+    pub step: Option<InitStep>,
+    pub json: bool,
+    /// `--answers FILE`, or `-` for stdin.
+    pub answers: Option<String>,
+    pub defaults: bool,
+    pub force: bool,
+}
+
+/// `by init`'s options. At most one step; a step needs a topic; `--answers`
+/// needs a step and `--force` needs `--apply`: all clap's to enforce.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(group(ArgGroup::new("step").args(["next", "dry_run", "apply"]).requires("topic")))]
+pub struct InitFlags {
+    /// What to set up (default: the wizard asks)
+    #[arg(value_name = "TOPIC", value_parser = TopicParser)]
+    topic: Option<branchyard_setup::Topic>,
+    /// Print JSON (schema/setup.protocol.json): the topics, or the step's result
+    #[arg(long)]
+    json: bool,
+    /// Print the next batch of at most four questions given the answers so far, or the plan
+    /// when none remain
+    #[arg(long, help_heading = "Protocol steps (for harnesses and scripts)")]
+    next: bool,
+    /// Print the plan: files, diffs and validation; write nothing
+    #[arg(long, help_heading = "Protocol steps (for harnesses and scripts)")]
+    dry_run: bool,
+    /// Write the plan; refuses to replace a file that differs
+    #[arg(long, help_heading = "Protocol steps (for harnesses and scripts)")]
+    apply: bool,
+    /// With --apply: replace files that differ (shown as diffs)
+    #[arg(
+        long,
+        requires = "apply",
+        // A requirement that conflicts with a given argument is not
+        // enforced, so the other steps are refused by name.
+        conflicts_with_all = ["next", "dry_run"],
+        help_heading = "Protocol steps (for harnesses and scripts)"
+    )]
+    force: bool,
+    /// A JSON object of answers by question id; - reads stdin
+    #[arg(
+        long,
+        value_name = "FILE|-",
+        requires = "step",
+        value_hint = ValueHint::FilePath,
+        help_heading = "Protocol steps (for harnesses and scripts)"
+    )]
+    answers: Option<String>,
+    /// Take the default for every unanswered question
+    #[arg(long)]
+    defaults: bool,
+}
+
+impl Flags for InitFlags {
+    type Output = InitArgs;
+    fn check(self) -> Result<InitArgs, String> {
+        let step = match (self.next, self.dry_run, self.apply) {
+            (true, _, _) => Some(InitStep::Next),
+            (_, true, _) => Some(InitStep::DryRun),
+            (_, _, true) => Some(InitStep::Apply),
+            _ => None,
         };
-        let (name, inline) = match long.split_once('=') {
-            Some((name, value)) => (name, Some(value.to_owned())),
-            None => (long, None),
-        };
-        let Some((name, placeholder)) = GLOBALS.iter().find(|(n, _)| *n == name) else {
-            break;
-        };
-        let error = |message: String| UsageError {
-            message,
-            command: None,
-        };
-        let (value, used) = match inline {
-            Some(value) => (value, 1),
-            None => match rest.get(1) {
-                Some(value) => (value.clone(), 2),
-                None => return Err(error(format!("--{name} needs a value {placeholder}"))),
-            },
-        };
-        if value.is_empty() {
-            return Err(error(format!("--{name} needs a value {placeholder}")));
+        if self.json && self.topic.is_some() && step.is_none() {
+            return Err("with --json and a topic, give --next, --dry-run or --apply".into());
         }
-        let slot = match *name {
-            "remote" => &mut globals.remote,
-            "token-file" => &mut globals.token_file,
-            "repo" => &mut globals.repo,
-            _ => &mut globals.ca_file,
-        };
-        if slot.is_some() {
-            return Err(error(format!("--{name} given twice")));
-        }
-        *slot = Some(value);
-        rest = &rest[used..];
+        Ok(InitArgs {
+            topic: self.topic,
+            step,
+            json: self.json,
+            answers: self.answers,
+            defaults: self.defaults,
+            force: self.force,
+        })
     }
-    Ok((globals, rest))
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Flag {
-    pub long: &'static str,
-    /// Value placeholder; `None` for a switch. A placeholder in brackets,
-    /// such as `[=DEPTH]`, is an optional value given only as `--flag=value`.
-    pub value: Option<&'static str>,
-    pub help: &'static str,
+/// `by init`'s topics, from [`branchyard_setup::Topic::ALL`]: completed by
+/// every shell, listed in the man page, and refused with the list.
+#[derive(Clone, Copy, Debug)]
+struct TopicParser;
+
+impl TypedValueParser for TopicParser {
+    type Value = branchyard_setup::Topic;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let known = |text: String| {
+            branchyard_setup::Topic::parse(&text).ok_or_else(|| {
+                let ids: Vec<&str> = branchyard_setup::Topic::ALL
+                    .iter()
+                    .map(|t| t.id())
+                    .collect();
+                format!("unknown topic '{text}'; use {}", ids.join(", "))
+            })
+        };
+        StringValueParser::new()
+            .try_map(known)
+            .parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new(
+            branchyard_setup::Topic::ALL
+                .into_iter()
+                .map(|t| PossibleValue::new(t.id()).help(t.summary())),
+        ))
+    }
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Spec {
-    pub name: &'static str,
-    pub positionals: &'static [&'static str],
-    pub summary: &'static str,
-    pub flags: &'static [Flag],
+/// `by graph ...`.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum GraphAction {
+    /// Show a branch's children, their dependencies and the graph's revision
+    Show {
+        /// Default: this harness's own branch
+        branch: Option<String>,
+    },
+    /// Apply a graph proposal to a branch's children, atomically
+    #[command(group(
+        clap::ArgGroup::new("proposal").required(true).args(["file", "edits"])
+    ))]
+    Apply {
+        /// The proposal, {"expected_revision", "edits"}; - for stdin
+        file: Option<String>,
+        /// The branch whose graph changes (outside a harness; inside one, it is the
+        /// harness's own)
+        #[arg(long, value_name = "BRANCH")]
+        parent: Option<String>,
+        /// The proposal's edits inline, as a JSON array, instead of a file
+        #[arg(long, value_name = "JSON", requires = "expected_revision")]
+        edits: Option<String>,
+        /// The graph revision the proposal was made against (by graph show); overrides the
+        /// file's
+        #[arg(long, value_name = "N")]
+        expected_revision: Option<u64>,
+        #[command(flatten)]
+        perms: Perms,
+    },
+    /// Start dependents whose prerequisites settled while no engine was running
+    Resume {
+        #[command(flatten)]
+        perms: Perms,
+    },
 }
 
-impl Spec {
-    pub fn usage(&self) -> String {
-        let mut usage = format!("by {}", self.name);
-        for positional in self.positionals {
-            match positional.strip_suffix('?') {
-                Some(optional) => usage.push_str(&format!(" [<{optional}>]")),
-                None => usage.push_str(&format!(" <{positional}>")),
+impl GraphAction {
+    pub fn into_args(self, json: bool) -> GraphArgs {
+        let mut args = GraphArgs {
+            json,
+            ..GraphArgs::default()
+        };
+        let perms = match self {
+            GraphAction::Show { branch } => {
+                args.action = "show".into();
+                args.arg = branch;
+                return args;
             }
-        }
-        if !self.flags.is_empty() {
-            usage.push_str(" [options]");
-        }
-        usage
-    }
-}
-
-const HARNESS: Flag = Flag {
-    long: "harness",
-    value: Some("ID"),
-    help: "Harness or profile ID (default: claude-code)",
-};
-const HARNESS_LIST: Flag = Flag {
-    long: "harness",
-    value: Some("ID,ID,..."),
-    help: "Harnesses to run on, one branch each (required)",
-};
-const NAME: Flag = Flag {
-    long: "name",
-    value: Some("NAME"),
-    help: "Branch name (default: a slug of the prompt)",
-};
-const BASE: Flag = Flag {
-    long: "base",
-    value: Some("REV"),
-    help: "Base revision (default: HEAD)",
-};
-const CHECK: Flag = Flag {
-    long: "check",
-    value: Some("\"CMD ARGS\""),
-    help: "Check to pass before merging; split like a shell, run without one",
-};
-const BUDGET_USD: Flag = Flag {
-    long: "budget-usd",
-    value: Some("X"),
-    help: "Stop once the harness's own cost estimate exceeds X dollars",
-};
-const MAX_TURNS: Flag = Flag {
-    long: "max-turns",
-    value: Some("N"),
-    help: "Stop after N turns",
-};
-const MAX_MINUTES: Flag = Flag {
-    long: "max-minutes",
-    value: Some("N"),
-    help: "Interrupt the turn after N minutes",
-};
-const STALL_AFTER: Flag = Flag {
-    long: "stall-after",
-    value: Some("N"),
-    help: "Mark the branch stalled after N minutes with no harness activity",
-};
-const STALL_ACTION: Flag = Flag {
-    long: "stall-action",
-    value: Some("notify|interrupt"),
-    help: "What a stall does (default: notify); needs --stall-after",
-};
-const ISOLATED: Flag = Flag {
-    long: "isolated",
-    value: None,
-    help: "Scrubbed environment and a private HOME; the harness is then usually not logged in",
-};
-const COMMAND: Flag = Flag {
-    long: "command",
-    value: Some("\"PATH ARGS\""),
-    help: "Launch this instead of the profile's executable, for development and testing",
-};
-const PROVIDER: Flag = Flag {
-    long: "provider",
-    value: Some("local|microsandbox|substrate"),
-    help: "Where the harness runs (default: local, or the branch's own)",
-};
-const IMAGE: Flag = Flag {
-    long: "image",
-    value: Some("REF"),
-    help: "OCI image with the harness installed (microsandbox)",
-};
-const CPUS: Flag = Flag {
-    long: "cpus",
-    value: Some("N"),
-    help: "Virtual CPUs for the sandbox (microsandbox)",
-};
-const MEMORY: Flag = Flag {
-    long: "memory",
-    value: Some("MIB"),
-    help: "Sandbox memory in MiB (microsandbox)",
-};
-const PASS_ENV: Flag = Flag {
-    long: "pass-env",
-    value: Some("NAME,NAME,..."),
-    help: "Variables to copy into the sandbox, such as API keys; nothing else is",
-};
-const SUBSTRATE_ENDPOINT: Flag = Flag {
-    long: "substrate-endpoint",
-    value: Some("URL"),
-    help: "Agent Substrate Control API, https://HOST:PORT (substrate)",
-};
-const SUBSTRATE_ROUTER: Flag = Flag {
-    long: "substrate-router",
-    value: Some("URL"),
-    help: "Router URL of an actor's bridge, with {atespace} and {actor} (substrate)",
-};
-const SUBSTRATE_TEMPLATE: Flag = Flag {
-    long: "substrate-template",
-    value: Some("NAME"),
-    help: "Actor template that runs branchyard-bridge and the harness (substrate)",
-};
-const SUBSTRATE_KEY: Flag = Flag {
-    long: "substrate-key",
-    value: Some("FILE"),
-    help: "Bridge signing key from `branchyard-bridge keygen` (substrate)",
-};
-const SUBSTRATE_ATESPACE: Flag = Flag {
-    long: "substrate-atespace",
-    value: Some("NAME"),
-    help: "Atespace for the actors (substrate; default: default)",
-};
-const SUBSTRATE_WORKDIR: Flag = Flag {
-    long: "substrate-workdir",
-    value: Some("PATH"),
-    help: "Where the worktree is copied in the actor (substrate; default: /workspace)",
-};
-const SUBSTRATE_HOME: Flag = Flag {
-    long: "substrate-home",
-    value: Some("PATH"),
-    help: "The harness's HOME in the actor (substrate; default: /branchyard/home)",
-};
-const SUBSTRATE_CA: Flag = Flag {
-    long: "substrate-ca",
-    value: Some("FILE"),
-    help: "PEM authorities for the TLS Control API, and the router (substrate)",
-};
-const SUBSTRATE_CLIENT_CERT: Flag = Flag {
-    long: "substrate-client-cert",
-    value: Some("FILE"),
-    help: "PEM client certificate for the Control API, mutual TLS (substrate)",
-};
-const SUBSTRATE_CLIENT_KEY: Flag = Flag {
-    long: "substrate-client-key",
-    value: Some("FILE"),
-    help: "PEM key of --substrate-client-cert (substrate)",
-};
-const SUBSTRATE_ROUTER_CA: Flag = Flag {
-    long: "substrate-router-ca",
-    value: Some("FILE"),
-    help: "PEM authorities for the TLS router, if not --substrate-ca (substrate)",
-};
-const SUBSTRATE_INSECURE: Flag = Flag {
-    long: "substrate-insecure",
-    value: None,
-    help: "Allow http:// or ws:// to hosts other than loopback (substrate)",
-};
-const YES: Flag = Flag {
-    long: "yes",
-    value: None,
-    help: "Allow every tool permission request",
-};
-const ASK: Flag = Flag {
-    long: "ask",
-    value: None,
-    help: "Ask on the terminal for each tool permission request",
-};
-const FRESH_SESSION: Flag = Flag {
-    long: "fresh-session",
-    value: None,
-    help: "Start a new session if the harness cannot fork its conversation",
-};
-const STEER: Flag = Flag {
-    long: "steer",
-    value: None,
-    help: "Add the prompt to the branch's running turn without interrupting it, instead of \
-           starting a new turn; refused when no turn runs or the harness cannot take it",
-};
-const JSON: Flag = Flag {
-    long: "json",
-    value: None,
-    help: "Print JSON",
-};
-const FOLLOW: Flag = Flag {
-    long: "follow",
-    value: None,
-    help: "Keep printing events as they are recorded, until interrupted; with --json, one object per line",
-};
-const INTERVAL: Flag = Flag {
-    long: "interval",
-    value: Some("SECS"),
-    help: "Seconds between refreshes (default: 1)",
-};
-const ONCE: Flag = Flag {
-    long: "once",
-    value: None,
-    help: "Print the tree once and exit",
-};
-const DELEGATE: Flag = Flag {
-    long: "delegate",
-    value: Some("[=DEPTH]"),
-    help: "Let the harness create child branches through Branchyard's MCP tools, DEPTH levels deep (default 1)",
-};
-const ROOT: Flag = Flag {
-    long: "root",
-    value: Some("DIR"),
-    help: "Repository root",
-};
-const BRANCH: Flag = Flag {
-    long: "branch",
-    value: Some("NAME"),
-    help: "The branch whose turn this server serves",
-};
-const ALLOW_UNAPPROVED_TOOLS: Flag = Flag {
-    long: "allow-unapproved-tools",
-    value: None,
-    help: "Run a profile that does not route tool permission requests to Branchyard (Antigravity, Pi, Amp); its tools run under the harness's own configuration",
-};
-const ALLOW_DELEGATION: Flag = Flag {
-    long: "allow-delegation",
-    value: None,
-    help: "Allow the harness's own `by spawn|inspect|events|send|integrate|cancel|children` commands without asking; nothing else",
-};
-const PARENT: Flag = Flag {
-    long: "parent",
-    value: Some("BRANCH"),
-    help: "The delegating branch (outside a harness; inside one, it is the harness's own)",
-};
-const WAIT: Flag = Flag {
-    long: "wait",
-    value: None,
-    help: "Wait for the turn to end and show it (outside a harness, spawn and send always wait)",
-};
-const MAX_DEPTH: Flag = Flag {
-    long: "max-depth",
-    value: Some("N"),
-    help: "Levels the child may delegate below itself (default: one fewer than the parent)",
-};
-const DENY: Flag = Flag {
-    long: "deny",
-    value: Some("TOOL,TOOL,..."),
-    help: "Tools the child is denied outright; a trailing * matches a prefix",
-};
-const SEAT: Flag = Flag {
-    long: "seat",
-    value: Some("NAME"),
-    help: "In a rig, the seat the child fills; it sets the child's harness, limits, check and instructions",
-};
-const AS_BRANCH: Flag = Flag {
-    long: "as",
-    value: Some("BRANCH"),
-    help: "Act as this branch (outside a harness; inside one, it is the harness's own)",
-};
-const WAIT_SECONDS: Flag = Flag {
-    long: "wait",
-    value: Some("SECS"),
-    help: "Block up to SECS seconds for an answer (default: return once the question is sent)",
-};
-const UNREAD: Flag = Flag {
-    long: "unread",
-    value: None,
-    help: "Only messages not yet delivered to a turn",
-};
-const CURSOR: Flag = Flag {
-    long: "cursor",
-    value: Some("N"),
-    help: "Start at event N (default: the most recent)",
-};
-const LIMIT: Flag = Flag {
-    long: "limit",
-    value: Some("N"),
-    help: "At most N events (default 50, at most 200)",
-};
-const KEEP_CREDENTIALS: Flag = Flag {
-    long: "keep-credentials",
-    value: None,
-    help: "Keep the credential files provisioning wrote in a home a fork still uses",
-};
-const ACT_AS: Flag = Flag {
-    long: "branch",
-    value: Some("NAME"),
-    help: "Act as this branch (outside a harness; inside one, it is the harness's own)",
-};
-const ARTIFACT_LABEL: Flag = Flag {
-    long: "label",
-    value: Some("KEY=VALUE"),
-    help: "A label on the published artifact; repeatable",
-};
-const ARTIFACT_OUT: Flag = Flag {
-    long: "out",
-    value: Some("PATH"),
-    help: "Where to write the artifact's bytes",
-};
-const ARTIFACT_TO: Flag = Flag {
-    long: "to",
-    value: Some("BRANCH"),
-    help: "The branch to share with",
-};
-const MEDIA_TYPE: Flag = Flag {
-    long: "media-type",
-    value: Some("TYPE"),
-    help: "The artifact's media type (default: application/octet-stream)",
-};
-const INTO: Flag = Flag {
-    long: "into",
-    value: Some("TARGET"),
-    help: "Local branch to merge into (default: the current branch)",
-};
-
-const SECRET: Flag = Flag {
-    long: "secret",
-    value: Some("NAME[=VAR|=@FILE]"),
-    help: "A credential for the harness, such as ANTHROPIC_API_KEY, from the variable of that name, VAR, or FILE; written only into its private home (--isolated or a sandbox). Repeatable",
-};
-const AUTH: Flag = Flag {
-    long: "auth",
-    value: Some("METHOD"),
-    help: "The authentication method when the secrets allow several: api-key, oauth-token, auth-file, vertex-ai",
-};
-const MCP: Flag = Flag {
-    long: "mcp",
-    value: Some("NAME=COMMAND"),
-    help: "A stdio MCP server for the harness, COMMAND an absolute path with its arguments. Repeatable",
-};
-const INSTRUCTIONS: Flag = Flag {
-    long: "instructions",
-    value: Some("FILE"),
-    help: "Standing instructions for the harness, read from FILE",
-};
-const MODEL: Flag = Flag {
-    long: "model",
-    value: Some("NAME"),
-    help: "The model, or a size alias (small, medium, large, extra-large) where the harness defines one",
-};
-const EFFORT: Flag = Flag {
-    long: "effort",
-    value: Some("LEVEL"),
-    help: "Reasoning effort: low, medium, high, xhigh, or 0-100",
-};
-const TELEMETRY: Flag = Flag {
-    long: "telemetry",
-    value: Some("URL|off"),
-    help: "Send the harness's OpenTelemetry to this OTLP/gRPC collector, or turn it off",
-};
-
-/// Flags that may be given more than once.
-const REPEATABLE: &[&str] = &["secret", "mcp", "label"];
-
-pub static COMMANDS: &[Spec] = &[
-    Spec {
-        name: "run",
-        positionals: &["prompt"],
-        summary: "Run a task on a new branch",
-        flags: &[
-            HARNESS,
-            NAME,
-            BASE,
-            CHECK,
-            BUDGET_USD,
-            MAX_TURNS,
-            MAX_MINUTES,
-            STALL_AFTER,
-            STALL_ACTION,
-            YES,
-            ASK,
-            ISOLATED,
-            COMMAND,
-            PROVIDER,
-            IMAGE,
-            CPUS,
-            MEMORY,
-            PASS_ENV,
-            SUBSTRATE_ENDPOINT,
-            SUBSTRATE_ROUTER,
-            SUBSTRATE_TEMPLATE,
-            SUBSTRATE_KEY,
-            SUBSTRATE_ATESPACE,
-            SUBSTRATE_WORKDIR,
-            SUBSTRATE_HOME,
-            SUBSTRATE_CA,
-            SUBSTRATE_CLIENT_CERT,
-            SUBSTRATE_CLIENT_KEY,
-            SUBSTRATE_ROUTER_CA,
-            SUBSTRATE_INSECURE,
-            DELEGATE,
-            ALLOW_DELEGATION,
-            ALLOW_UNAPPROVED_TOOLS,
-            SECRET,
-            AUTH,
-            MCP,
-            INSTRUCTIONS,
-            MODEL,
-            EFFORT,
-            TELEMETRY,
-        ],
-    },
-    Spec {
-        name: "fan",
-        positionals: &["prompt"],
-        summary: "Run a task on several harnesses in parallel, then compare",
-        flags: &[
-            HARNESS_LIST,
-            NAME,
-            BASE,
-            CHECK,
-            BUDGET_USD,
-            MAX_TURNS,
-            MAX_MINUTES,
-            STALL_AFTER,
-            STALL_ACTION,
-            YES,
-            ASK,
-            ISOLATED,
-            COMMAND,
-            PROVIDER,
-            IMAGE,
-            CPUS,
-            MEMORY,
-            PASS_ENV,
-            SUBSTRATE_ENDPOINT,
-            SUBSTRATE_ROUTER,
-            SUBSTRATE_TEMPLATE,
-            SUBSTRATE_KEY,
-            SUBSTRATE_ATESPACE,
-            SUBSTRATE_WORKDIR,
-            SUBSTRATE_HOME,
-            SUBSTRATE_CA,
-            SUBSTRATE_CLIENT_CERT,
-            SUBSTRATE_CLIENT_KEY,
-            SUBSTRATE_ROUTER_CA,
-            SUBSTRATE_INSECURE,
-            DELEGATE,
-            ALLOW_DELEGATION,
-            ALLOW_UNAPPROVED_TOOLS,
-            SECRET,
-            AUTH,
-            MCP,
-            INSTRUCTIONS,
-            MODEL,
-            EFFORT,
-            TELEMETRY,
-        ],
-    },
-    Spec {
-        name: "send",
-        positionals: &["branch", "prompt"],
-        summary: "Continue a branch's session with another prompt",
-        flags: &[
-            STEER,
-            CHECK,
-            BUDGET_USD,
-            MAX_TURNS,
-            MAX_MINUTES,
-            STALL_AFTER,
-            STALL_ACTION,
-            YES,
-            ASK,
-            COMMAND,
-            DELEGATE,
-            ALLOW_DELEGATION,
-            ALLOW_UNAPPROVED_TOOLS,
-            SECRET,
-            AUTH,
-            MCP,
-            INSTRUCTIONS,
-            MODEL,
-            EFFORT,
-            TELEMETRY,
-            WAIT,
-            JSON,
-        ],
-    },
-    Spec {
-        name: "fork",
-        positionals: &["branch", "prompt"],
-        summary: "Start a new branch from a branch's candidate and conversation",
-        flags: &[
-            NAME,
-            FRESH_SESSION,
-            CHECK,
-            BUDGET_USD,
-            MAX_TURNS,
-            MAX_MINUTES,
-            STALL_AFTER,
-            STALL_ACTION,
-            YES,
-            ASK,
-            ISOLATED,
-            COMMAND,
-            PROVIDER,
-            IMAGE,
-            CPUS,
-            MEMORY,
-            PASS_ENV,
-            SUBSTRATE_ENDPOINT,
-            SUBSTRATE_ROUTER,
-            SUBSTRATE_TEMPLATE,
-            SUBSTRATE_KEY,
-            SUBSTRATE_ATESPACE,
-            SUBSTRATE_WORKDIR,
-            SUBSTRATE_HOME,
-            SUBSTRATE_CA,
-            SUBSTRATE_CLIENT_CERT,
-            SUBSTRATE_CLIENT_KEY,
-            SUBSTRATE_ROUTER_CA,
-            SUBSTRATE_INSECURE,
-            DELEGATE,
-            ALLOW_DELEGATION,
-            ALLOW_UNAPPROVED_TOOLS,
-            SECRET,
-            AUTH,
-            MCP,
-            INSTRUCTIONS,
-            MODEL,
-            EFFORT,
-            TELEMETRY,
-        ],
-    },
-    Spec {
-        name: "reincarnate",
-        positionals: &["branch"],
-        summary: "Fork a branch's candidate into a fresh session with a generated handoff brief",
-        flags: &[
-            NAME,
-            HARNESS,
-            CHECK,
-            BUDGET_USD,
-            MAX_TURNS,
-            MAX_MINUTES,
-            STALL_AFTER,
-            STALL_ACTION,
-            YES,
-            ASK,
-            ISOLATED,
-            COMMAND,
-            PROVIDER,
-            IMAGE,
-            CPUS,
-            MEMORY,
-            PASS_ENV,
-            SUBSTRATE_ENDPOINT,
-            SUBSTRATE_ROUTER,
-            SUBSTRATE_TEMPLATE,
-            SUBSTRATE_KEY,
-            SUBSTRATE_ATESPACE,
-            SUBSTRATE_WORKDIR,
-            SUBSTRATE_HOME,
-            SUBSTRATE_CA,
-            SUBSTRATE_CLIENT_CERT,
-            SUBSTRATE_CLIENT_KEY,
-            SUBSTRATE_ROUTER_CA,
-            SUBSTRATE_INSECURE,
-            DELEGATE,
-            ALLOW_DELEGATION,
-            ALLOW_UNAPPROVED_TOOLS,
-            SECRET,
-            AUTH,
-            MCP,
-            INSTRUCTIONS,
-            MODEL,
-            EFFORT,
-            TELEMETRY,
-        ],
-    },
-    Spec {
-        name: "ls",
-        positionals: &[],
-        summary: "List branches",
-        flags: &[JSON],
-    },
-    Spec {
-        name: "show",
-        positionals: &["branch"],
-        summary: "Show one branch",
-        flags: &[JSON],
-    },
-    Spec {
-        name: "diff",
-        positionals: &["branch"],
-        summary: "Show a branch's candidate diff against its base",
-        flags: &[],
-    },
-    Spec {
-        name: "log",
-        positionals: &["branch"],
-        summary: "Show a branch's recorded events",
-        flags: &[JSON, FOLLOW],
-    },
-    Spec {
-        name: "merge",
-        positionals: &["branch"],
-        summary: "Merge a branch's candidate after its check passes",
-        flags: &[INTO],
-    },
-    Spec {
-        name: "rm",
-        positionals: &["branch"],
-        summary: "Remove a branch's worktree and record",
-        flags: &[KEEP_CREDENTIALS],
-    },
-    Spec {
-        name: "harnesses",
-        positionals: &[],
-        summary: "List harness profiles and whether they are installed",
-        flags: &[JSON],
-    },
-    Spec {
-        name: "watch",
-        positionals: &[],
-        summary: "Watch every branch live: status, activity, cost",
-        flags: &[INTERVAL, ONCE],
-    },
-    Spec {
-        name: "serve",
-        positionals: &[],
-        summary: "Serve repositories over an authenticated HTTP API",
-        flags: &[],
-    },
-    Spec {
-        name: "spawn",
-        positionals: &["prompt"],
-        summary: "Delegate to a new child branch of this branch",
-        flags: &[
-            PARENT,
-            SEAT,
-            HARNESS,
-            NAME,
-            BASE,
-            CHECK,
-            BUDGET_USD,
-            MAX_TURNS,
-            MAX_MINUTES,
-            STALL_AFTER,
-            STALL_ACTION,
-            MAX_DEPTH,
-            DENY,
-            ALLOW_UNAPPROVED_TOOLS,
-            WAIT,
-            YES,
-            ASK,
-            JSON,
-        ],
-    },
-    Spec {
-        name: "inspect",
-        positionals: &["branch?"],
-        summary: "Show a branch's status, candidate, cost, budget and last message",
-        flags: &[JSON],
-    },
-    Spec {
-        name: "events",
-        positionals: &["branch?"],
-        summary: "Show a branch's recorded events from a cursor",
-        flags: &[CURSOR, LIMIT, JSON],
-    },
-    Spec {
-        name: "integrate",
-        positionals: &["branch"],
-        summary: "Merge a delegated child into its parent's branch after its check passes",
-        flags: &[JSON],
-    },
-    Spec {
-        name: "cancel",
-        positionals: &["branch"],
-        summary: "Stop a branch's running turn and every turn delegated below it",
-        flags: &[JSON],
-    },
-    Spec {
-        name: "children",
-        positionals: &["branch?"],
-        summary: "List the branches a branch delegated to",
-        flags: &[JSON],
-    },
-    Spec {
-        name: "ask",
-        positionals: &["text"],
-        summary: "Ask this branch's parent a question",
-        flags: &[AS_BRANCH, WAIT_SECONDS, JSON],
-    },
-    Spec {
-        name: "report",
-        positionals: &["text"],
-        summary: "Report to this branch's parent",
-        flags: &[AS_BRANCH, JSON],
-    },
-    Spec {
-        name: "escalate",
-        positionals: &["text"],
-        summary: "Escalate to this branch's parent, or further up if its rig seat allows",
-        flags: &[AS_BRANCH, JSON],
-    },
-    Spec {
-        name: "answer",
-        positionals: &["message-id", "text"],
-        summary: "Answer a message (usually a question) from a descendant",
-        flags: &[AS_BRANCH, JSON],
-    },
-    Spec {
-        name: "inbox",
-        positionals: &[],
-        summary: "List messages addressed to this branch",
-        flags: &[AS_BRANCH, UNREAD, JSON],
-    },
-    Spec {
-        name: "rig",
-        positionals: &["check|run", "file", "prompt?"],
-        summary: "Check a rig spec and print its plan, or run its root seat with a prompt",
-        flags: &[NAME, BASE, COMMAND, ALLOW_UNAPPROVED_TOOLS, JSON],
-    },
-    Spec {
-        name: "artifact",
-        positionals: &["publish|list|get|share", "arg?"],
-        summary: "Publish, list, read or share an immutable artifact (see docs/storage.md)",
-        flags: &[
-            NAME,
-            MEDIA_TYPE,
-            ARTIFACT_LABEL,
-            ARTIFACT_OUT,
-            ARTIFACT_TO,
-            ACT_AS,
-            JSON,
-        ],
-    },
-    Spec {
-        name: "scratch",
-        positionals: &["create|list|lock|unlock|share", "name?"],
-        summary: "Create, list, lock, unlock or share a scratch area (see docs/storage.md)",
-        flags: &[ARTIFACT_TO, ACT_AS, JSON],
-    },
-    Spec {
-        name: "mcp",
-        positionals: &[],
-        summary: "Serve a branch's delegation tools over MCP on stdio (started by the engine)",
-        flags: &[ROOT, BRANCH],
-    },
-    Spec {
-        name: "help",
-        positionals: &[],
-        summary: "Show help for by or one command",
-        flags: &[],
-    },
-];
-
-pub fn spec(name: &str) -> Option<&'static Spec> {
-    COMMANDS.iter().find(|spec| spec.name == name)
-}
-
-/// Parse the arguments after the program name.
-pub fn parse(args: &[String]) -> Result<Command, UsageError> {
-    let Some(first) = args.first() else {
-        return Ok(Command::Help { topic: None });
-    };
-    match first.as_str() {
-        "help" | "-h" | "--help" => return help(args.get(1..).unwrap_or_default()),
-        "-V" | "--version" => return Ok(Command::Version),
-        _ => {}
-    }
-    if first == "serve" {
-        // The server parses its own options, and prints its own help.
-        return Ok(Command::Serve {
-            args: args[1..].to_vec(),
-        });
-    }
-    let spec = spec(first).ok_or_else(|| UsageError {
-        message: format!("unknown command '{first}'"),
-        command: None,
-    })?;
-    let m = Matches::parse(spec, &args[1..])?;
-    if m.help {
-        return Ok(Command::Help { topic: Some(spec) });
-    }
-    let mut positionals = m.positionals.iter().cloned();
-    let mut optional = positionals.clone().skip(
-        spec.positionals
-            .iter()
-            .filter(|p| !p.ends_with('?'))
-            .count(),
-    );
-    let mut next = || positionals.next().expect("arity checked in Matches::parse");
-    Ok(match spec.name {
-        "run" => Command::Run {
-            prompt: next(),
-            task: m.task()?,
-        },
-        "fan" => {
-            let list = m
-                .value("harness")
-                .ok_or_else(|| m.error("--harness is required"))?;
-            Command::Fan {
-                prompt: next(),
-                harnesses: harness_list(list).map_err(|e| m.error(e))?,
-                task: m.task()?,
-            }
-        }
-        "send" => Command::Send {
-            branch: next(),
-            prompt: next(),
-            task: m.task()?,
-            steer: m.switch("steer"),
-            wait: m.switch("wait"),
-            json: m.switch("json"),
-        },
-        "fork" => Command::Fork {
-            branch: next(),
-            prompt: next(),
-            fresh_session: m.switch("fresh-session"),
-            task: m.task()?,
-        },
-        "reincarnate" => Command::Reincarnate {
-            branch: next(),
-            task: m.task()?,
-        },
-        "ls" => Command::Ls {
-            json: m.switch("json"),
-        },
-        "show" => Command::Show {
-            branch: next(),
-            json: m.switch("json"),
-        },
-        "diff" => Command::Diff { branch: next() },
-        "log" => Command::Log {
-            branch: next(),
-            json: m.switch("json"),
-            follow: m.switch("follow"),
-        },
-        "merge" => Command::Merge {
-            branch: next(),
-            into: m.value("into").map(str::to_owned),
-        },
-        "rm" => Command::Rm {
-            branch: next(),
-            keep_credentials: m.switch("keep-credentials"),
-        },
-        "harnesses" => Command::Harnesses {
-            json: m.switch("json"),
-        },
-        "watch" => Command::Watch {
-            interval: match m.value("interval") {
-                None => Duration::from_secs(1),
-                Some(text) => text
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|s| s.is_finite() && *s >= 0.05 && *s <= 3600.0)
-                    .map(Duration::from_secs_f64)
-                    .ok_or_else(|| {
-                        m.error(format!(
-                            "--interval needs a number of seconds from 0.05 to 3600, not '{text}'"
-                        ))
-                    })?,
-            },
-            once: m.switch("once"),
-        },
-        "spawn" => Command::Spawn {
-            prompt: next(),
-            spawn: SpawnArgs {
-                task: m.task()?,
-                parent: m.value("parent").map(str::to_owned),
-                wait: m.switch("wait"),
-                max_depth: m.number("max-depth")?,
-                deny: match m.value("deny") {
-                    Some(list) => {
-                        harness_list(list).map_err(|e| m.error(e.replace("--harness", "--deny")))?
-                    }
-                    None => Vec::new(),
-                },
-                seat: m.value("seat").map(str::to_owned),
-                json: m.switch("json"),
-            },
-        },
-        "inspect" => Command::Inspect {
-            branch: optional.next(),
-            json: m.switch("json"),
-        },
-        "events" => Command::Events {
-            branch: optional.next(),
-            cursor: m.number("cursor")?,
-            limit: m.number("limit")?,
-            json: m.switch("json"),
-        },
-        "integrate" => Command::Integrate {
-            branch: next(),
-            json: m.switch("json"),
-        },
-        "cancel" => Command::Cancel {
-            branch: next(),
-            json: m.switch("json"),
-        },
-        "children" => Command::Children {
-            branch: optional.next(),
-            json: m.switch("json"),
-        },
-        "ask" => Command::Ask {
-            as_branch: m.value("as").map(str::to_owned),
-            text: next(),
-            wait_seconds: m.number("wait")?,
-            json: m.switch("json"),
-        },
-        "report" => Command::Report {
-            as_branch: m.value("as").map(str::to_owned),
-            text: next(),
-            json: m.switch("json"),
-        },
-        "escalate" => Command::Escalate {
-            as_branch: m.value("as").map(str::to_owned),
-            text: next(),
-            json: m.switch("json"),
-        },
-        "answer" => {
-            let message_id_text = next();
-            let message_id = message_id_text.parse::<u64>().map_err(|_| {
-                m.error(format!(
-                    "message-id must be a whole number, not '{message_id_text}'"
-                ))
-            })?;
-            Command::Answer {
-                as_branch: m.value("as").map(str::to_owned),
-                message_id,
-                text: next(),
-                json: m.switch("json"),
-            }
-        }
-        "inbox" => Command::Inbox {
-            as_branch: m.value("as").map(str::to_owned),
-            unread: m.switch("unread"),
-            json: m.switch("json"),
-        },
-        "rig" => {
-            let action = next();
-            let file = next();
-            let prompt = optional.next();
-            let prompt = match (action.as_str(), prompt) {
-                ("check", None) => None,
-                ("check", Some(extra)) => {
-                    return Err(m.error(format!(
-                        "rig check takes a file only, not '{extra}'; to run it, use rig run"
-                    )))
-                }
-                ("run", Some(prompt)) if !prompt.trim().is_empty() => Some(prompt),
-                ("run", _) => return Err(m.error("rig run needs a prompt for the root seat")),
-                (other, _) => {
-                    return Err(m.error(format!("unknown rig action '{other}'; use check or run")))
-                }
-            };
-            if prompt.is_none() {
-                for flag in ["name", "base", "command", "allow-unapproved-tools"] {
-                    if m.switch(flag) {
-                        return Err(m.error(format!("--{flag} applies to rig run")));
-                    }
-                }
-            }
-            let command = match m.value("command") {
-                None => None,
-                Some(line) => {
-                    let argv = split_words(line).map_err(|e| m.error(format!("--command: {e}")))?;
-                    if argv.is_empty() {
-                        return Err(m.error("--command needs an executable"));
-                    }
-                    Some(argv)
-                }
-            };
-            Command::Rig(RigArgs {
-                prompt,
+            GraphAction::Apply {
                 file,
-                name: m.value("name").map(str::to_owned),
-                base: m.value("base").map(str::to_owned),
-                command,
-                unapproved_tools: m.switch("allow-unapproved-tools"),
-                json: m.switch("json"),
-            })
-        }
-        "artifact" => {
-            let action = next();
-            let arg = optional.next();
-            let labels = m
-                .values("label")
-                .iter()
-                .map(|kv| match kv.split_once('=') {
-                    Some((k, v)) => Ok((k.to_owned(), v.to_owned())),
-                    None => Err(m.error(format!("--label needs KEY=VALUE, not '{kv}'"))),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            match action.as_str() {
-                "publish" | "list" | "get" | "share" => {}
-                other => {
-                    return Err(m.error(format!(
-                        "unknown artifact action '{other}'; use publish, list, get or share"
-                    )))
-                }
+                parent,
+                edits,
+                expected_revision,
+                perms,
+            } => {
+                args.action = "apply".into();
+                args.arg = file;
+                args.parent = parent;
+                args.edits = edits;
+                args.expected_revision = expected_revision;
+                perms
             }
-            if action == "publish" && arg.is_none() {
-                return Err(m.error("artifact publish needs a file"));
+            GraphAction::Resume { perms } => {
+                args.action = "resume".into();
+                perms
             }
-            if (action == "get" || action == "share") && arg.is_none() {
-                return Err(m.error(format!("artifact {action} needs an id")));
-            }
-            if action == "get" && m.value("out").is_none() {
-                return Err(m.error("artifact get needs --out PATH"));
-            }
-            if action == "share" && m.value("to").is_none() {
-                return Err(m.error("artifact share needs --to BRANCH"));
-            }
-            Command::Artifact(ArtifactArgs {
-                action,
-                arg,
-                name: m.value("name").map(str::to_owned),
-                media_type: m.value("media-type").map(str::to_owned),
-                labels,
-                out: m.value("out").map(str::to_owned),
-                to: m.value("to").map(str::to_owned),
-                branch: m.value("branch").map(str::to_owned),
-                json: m.switch("json"),
-            })
-        }
-        "scratch" => {
-            let action = next();
-            let name = optional.next();
-            match action.as_str() {
-                "create" | "list" | "lock" | "unlock" | "share" => {}
-                other => {
-                    return Err(m.error(format!(
-                        "unknown scratch action '{other}'; use create, list, lock, unlock or share"
-                    )))
-                }
-            }
-            if action != "list" && name.is_none() {
-                return Err(m.error(format!("scratch {action} needs a name")));
-            }
-            if action == "share" && m.value("to").is_none() {
-                return Err(m.error("scratch share needs --to BRANCH"));
-            }
-            Command::Scratch(ScratchArgs {
-                action,
-                name,
-                to: m.value("to").map(str::to_owned),
-                branch: m.value("branch").map(str::to_owned),
-                json: m.switch("json"),
-            })
-        }
-        "mcp" => {
-            let mut args = Vec::new();
-            for flag in ["root", "branch"] {
-                let value = m
-                    .value(flag)
-                    .ok_or_else(|| m.error(format!("--{flag} is required")))?;
-                args.extend([format!("--{flag}"), value.to_owned()]);
-            }
-            Command::Mcp { args }
-        }
-        other => unreachable!("command {other} has a spec but no parser"),
-    })
-}
-
-fn help(rest: &[String]) -> Result<Command, UsageError> {
-    match rest {
-        [] => Ok(Command::Help { topic: None }),
-        [topic] => match spec(topic) {
-            Some(spec) => Ok(Command::Help { topic: Some(spec) }),
-            None => Err(UsageError {
-                message: format!("unknown command '{topic}'"),
-                command: None,
-            }),
-        },
-        [_, extra, ..] => Err(UsageError {
-            message: format!("unexpected argument '{extra}'"),
-            command: Some("help"),
-        }),
-    }
-}
-
-/// Raw flags and positionals, checked against a command's spec.
-struct Matches {
-    spec: &'static Spec,
-    positionals: Vec<String>,
-    flags: Vec<(&'static str, Option<String>)>,
-    help: bool,
-}
-
-impl Matches {
-    fn parse(spec: &'static Spec, args: &[String]) -> Result<Matches, UsageError> {
-        let mut m = Matches {
-            spec,
-            positionals: Vec::new(),
-            flags: Vec::new(),
-            help: false,
         };
-        let mut args = args.iter();
-        let mut only_positionals = false;
-        while let Some(arg) = args.next() {
-            if only_positionals {
-                m.positionals.push(arg.clone());
-                continue;
+        perms.apply(&mut args.task);
+        args
+    }
+}
+
+/// `by rig ...`.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum RigAction {
+    /// Check a rig spec and print its plan
+    Check {
+        /// The rig spec, TOML (see docs/rigs.md)
+        file: String,
+    },
+    /// Run a rig's root seat with a prompt
+    Run {
+        /// The rig spec, TOML (see docs/rigs.md)
+        file: String,
+        /// The root seat's task; quote it
+        #[arg(value_parser = prompt_text)]
+        prompt: String,
+        /// The root branch's name (default: the rig's)
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Base revision (default: HEAD)
+        #[arg(short, long, value_name = "REV")]
+        base: Option<String>,
+        /// Launch this instead of the root's executable, for development and testing
+        #[arg(long, value_name = "CMD", value_parser = command_argv)]
+        command: Option<Argv>,
+        /// Run a profile that does not route tool permission requests to Branchyard
+        #[arg(long)]
+        allow_unapproved_tools: bool,
+    },
+}
+
+impl RigAction {
+    pub fn into_args(self, json: bool) -> RigArgs {
+        match self {
+            RigAction::Check { file } => RigArgs {
+                file,
+                json,
+                ..RigArgs::default()
+            },
+            RigAction::Run {
+                file,
+                prompt,
+                name,
+                base,
+                command,
+                allow_unapproved_tools,
+            } => RigArgs {
+                prompt: Some(prompt),
+                file,
+                name,
+                base,
+                command: command.map(|argv| argv.0),
+                unapproved_tools: allow_unapproved_tools,
+                json,
+            },
+        }
+    }
+}
+
+/// `by artifact ...`.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum ArtifactAction {
+    /// Publish a file as a new artifact of the acting branch
+    Publish {
+        file: String,
+        /// The artifact's name (default: the file's)
+        #[arg(short, long)]
+        name: Option<String>,
+        /// The artifact's media type (default: application/octet-stream)
+        #[arg(long, value_name = "TYPE")]
+        media_type: Option<String>,
+        /// A label on the artifact; repeatable
+        #[arg(long = "label", value_name = "KEY=VALUE", value_parser = label)]
+        labels: Vec<(String, String)>,
+    },
+    /// List the artifacts the acting branch may read
+    List,
+    /// Write an artifact's bytes to a file
+    Get {
+        id: String,
+        /// Where to write the artifact's bytes
+        #[arg(short, long, value_name = "PATH")]
+        out: String,
+    },
+    /// Let another branch read an artifact
+    Share {
+        id: String,
+        /// The branch to share with
+        #[arg(long, value_name = "BRANCH")]
+        to: String,
+    },
+    /// Write artifacts into one verified, deterministic tar bundle (local only)
+    Export {
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// Where to write the bundle's tar
+        #[arg(short, long, value_name = "PATH")]
+        out: String,
+    },
+    /// Publish every artifact of a bundle as new artifacts (local only)
+    Import {
+        /// A bundle from 'by artifact export'
+        file: String,
+    },
+}
+
+impl ArtifactAction {
+    pub fn into_args(self, branch: Option<String>, json: bool) -> ArtifactArgs {
+        let mut args = ArtifactArgs {
+            branch,
+            json,
+            ..ArtifactArgs::default()
+        };
+        args.action = match self {
+            ArtifactAction::Publish {
+                file,
+                name,
+                media_type,
+                labels,
+            } => {
+                args.arg = Some(file);
+                args.name = name;
+                args.media_type = media_type;
+                args.labels = labels;
+                "publish"
             }
-            match arg.as_str() {
-                "--" => only_positionals = true,
-                "-h" | "--help" => m.help = true,
-                long if long.starts_with("--") => {
-                    let (name, inline) = match long[2..].split_once('=') {
-                        Some((name, value)) => (name, Some(value.to_owned())),
-                        None => (&long[2..], None),
-                    };
-                    let flag = spec
-                        .flags
-                        .iter()
-                        .find(|flag| flag.long == name)
-                        .ok_or_else(|| m.error(format!("unknown option --{name}")))?;
-                    if m.flags.iter().any(|(seen, _)| *seen == flag.long)
-                        && !REPEATABLE.contains(&flag.long)
-                    {
-                        return Err(m.error(format!("--{name} given twice")));
-                    }
-                    let value = match (flag.value, inline) {
-                        (None, None) => None,
-                        (None, Some(_)) => return Err(m.error(format!("--{name} takes no value"))),
-                        (Some(_), Some(value)) => Some(value),
-                        (Some(placeholder), None) if placeholder.starts_with('[') => None,
-                        (Some(placeholder), None) => {
-                            Some(args.next().cloned().ok_or_else(|| {
-                                m.error(format!("--{name} needs a value {placeholder}"))
-                            })?)
-                        }
-                    };
-                    m.flags.push((flag.long, value));
-                }
-                short if short.starts_with('-') && short.len() > 1 => {
-                    return Err(m.error(format!("unknown option {short}")));
-                }
-                _ => m.positionals.push(arg.clone()),
+            ArtifactAction::List => "list",
+            ArtifactAction::Get { id, out } => {
+                args.arg = Some(id);
+                args.out = Some(out);
+                "get"
+            }
+            ArtifactAction::Share { id, to } => {
+                args.arg = Some(id);
+                args.to = Some(to);
+                "share"
+            }
+            ArtifactAction::Export { ids, out } => {
+                args.arg = ids.first().cloned();
+                args.ids = ids;
+                args.out = Some(out);
+                "export"
+            }
+            ArtifactAction::Import { file } => {
+                args.arg = Some(file);
+                "import"
             }
         }
-        if m.help {
-            return Ok(m);
-        }
-        let expected = spec.positionals;
-        if let Some(missing) = expected
-            .get(m.positionals.len())
-            .filter(|p| !p.ends_with('?'))
-        {
-            return Err(m.error(format!("missing <{missing}>")));
-        }
-        if let Some(extra) = m.positionals.get(expected.len()) {
-            let hint = if expected.contains(&"prompt") {
-                " (quote a prompt that contains spaces)"
-            } else {
-                ""
-            };
-            return Err(m.error(format!("unexpected argument '{extra}'{hint}")));
-        }
-        Ok(m)
+        .into();
+        args
     }
+}
 
-    fn error(&self, message: impl Into<String>) -> UsageError {
-        UsageError {
-            message: message.into(),
-            command: Some(self.spec.name),
-        }
-    }
+/// `by scratch ...`.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum ScratchAction {
+    /// Create a scratch area owned by the acting branch
+    Create { name: String },
+    /// List the scratch areas the acting branch may reach
+    List,
+    /// Take a scratch area's writer lock
+    Lock { name: String },
+    /// Release a scratch area's writer lock
+    Unlock { name: String },
+    /// Let another branch reach a scratch area
+    Share {
+        name: String,
+        /// The branch to share with
+        #[arg(long, value_name = "BRANCH")]
+        to: String,
+    },
+}
 
-    /// Every value of a repeatable flag, in order.
-    fn values(&self, name: &str) -> Vec<&str> {
-        self.flags
-            .iter()
-            .filter(|(flag, _)| *flag == name)
-            .filter_map(|(_, value)| value.as_deref())
-            .collect()
-    }
-
-    fn value(&self, name: &str) -> Option<&str> {
-        self.flags
-            .iter()
-            .find(|(flag, _)| *flag == name)
-            .and_then(|(_, value)| value.as_deref())
-    }
-
-    fn switch(&self, name: &str) -> bool {
-        self.flags.iter().any(|(flag, _)| *flag == name)
-    }
-
-    /// A whole number given to `--name`, if it was given.
-    fn number<T: std::str::FromStr>(&self, name: &str) -> Result<Option<T>, UsageError> {
-        match self.value(name) {
-            None => Ok(None),
-            Some(text) => text
-                .parse()
-                .map(Some)
-                .map_err(|_| self.error(format!("--{name} needs a whole number, not '{text}'"))),
+impl ScratchAction {
+    pub fn into_args(self, branch: Option<String>, json: bool) -> ScratchArgs {
+        let (action, name, to) = match self {
+            ScratchAction::Create { name } => ("create", Some(name), None),
+            ScratchAction::List => ("list", None, None),
+            ScratchAction::Lock { name } => ("lock", Some(name), None),
+            ScratchAction::Unlock { name } => ("unlock", Some(name), None),
+            ScratchAction::Share { name, to } => ("share", Some(name), Some(to)),
+        };
+        ScratchArgs {
+            action: action.into(),
+            name,
+            to,
+            branch,
+            json,
         }
     }
+}
 
-    fn task(&self) -> Result<TaskArgs, UsageError> {
-        let permissions = match (self.switch("yes"), self.switch("ask")) {
-            (true, true) => return Err(self.error("--yes and --ask conflict; pick one")),
-            (true, false) => Permissions::Yes,
+/// Flags whose combination is checked after clap parses them, producing
+/// [`Flags::Output`]; flattened into a command as [`Checked<Self>`].
+pub trait Flags: Args + FromArgMatches {
+    type Output;
+    /// The checked value, or the usage error's message.
+    fn check(self) -> Result<Self::Output, String>;
+}
+
+/// `F`, checked while parsing: a failed [`Flags::check`] is a usage error
+/// like any other. Dereferences to the checked value.
+pub struct Checked<F: Flags>(F::Output, PhantomData<fn() -> F>);
+
+impl<F: Flags> Checked<F> {
+    pub fn new(output: F::Output) -> Checked<F> {
+        Checked(output, PhantomData)
+    }
+
+    #[cfg(test)]
+    pub fn into_inner(self) -> F::Output {
+        self.0
+    }
+}
+
+impl<F: Flags> Deref for Checked<F> {
+    type Target = F::Output;
+    fn deref(&self) -> &F::Output {
+        &self.0
+    }
+}
+
+/// `branchyard.toml` defaults fill what the flags left unset
+/// (`crate::defaults`).
+impl<F: Flags> DerefMut for Checked<F> {
+    fn deref_mut(&mut self) -> &mut F::Output {
+        &mut self.0
+    }
+}
+
+impl<F: Flags> Clone for Checked<F>
+where
+    F::Output: Clone,
+{
+    fn clone(&self) -> Self {
+        Checked::new(self.0.clone())
+    }
+}
+
+impl<F: Flags> fmt::Debug for Checked<F>
+where
+    F::Output: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<F: Flags> PartialEq for Checked<F>
+where
+    F::Output: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<F: Flags> FromArgMatches for Checked<F> {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let flags = F::from_arg_matches(matches)?;
+        flags
+            .check()
+            .map(Checked::new)
+            .map_err(|message| clap::Error::raw(ErrorKind::ArgumentConflict, message))
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl<F: Flags> Args for Checked<F> {
+    fn group_id() -> Option<clap::Id> {
+        F::group_id()
+    }
+
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        F::augment_args(cmd)
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        F::augment_args_for_update(cmd)
+    }
+}
+
+/// An argument vector split from one string like a shell (`--check`,
+/// `--command`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Argv(pub Vec<String>);
+
+/// A comma-separated list, trimmed, without empty or repeated entries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct List(pub Vec<String>);
+
+impl Deref for List {
+    type Target = Vec<String>;
+    fn deref(&self) -> &Vec<String> {
+        &self.0
+    }
+}
+
+/// `--stall-action`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum StallActionArg {
+    /// Record the stall and keep running (default)
+    Notify,
+    /// Record the stall, then interrupt the turn
+    Interrupt,
+}
+
+impl From<StallActionArg> for branchyard::StallAction {
+    fn from(action: StallActionArg) -> Self {
+        match action {
+            StallActionArg::Notify => branchyard::StallAction::Notify,
+            StallActionArg::Interrupt => branchyard::StallAction::Interrupt,
+        }
+    }
+}
+
+/// `--after`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AfterArg {
+    /// Its last turn ended ready or no_changes, or it was merged (default)
+    Settled,
+    /// It was integrated into the parent
+    Integrated,
+}
+
+impl From<AfterArg> for branchyard::After {
+    fn from(after: AfterArg) -> Self {
+        match after {
+            AfterArg::Settled => branchyard::After::Settled,
+            AfterArg::Integrated => branchyard::After::Integrated,
+        }
+    }
+}
+
+/// `--provider`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ProviderArg {
+    /// A process on this host (the default for a new branch)
+    Local,
+    /// A Microsandbox microVM; needs --image
+    Microsandbox,
+    /// An Agent Substrate actor; needs the --substrate-* endpoints and key
+    Substrate,
+}
+
+/// `--check`, the budget, turn and time limits, and stall detection.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Checks and limits")]
+pub struct Limits {
+    /// Check to pass before merging, such as "cargo test"; split like a shell, run without one
+    #[arg(long, value_name = "CMD", value_parser = check_argv)]
+    check: Option<Argv>,
+    /// Stop once the harness's own cost estimate exceeds X dollars
+    #[arg(long, value_name = "X", value_parser = usd, allow_negative_numbers = true)]
+    budget_usd: Option<f64>,
+    /// Stop after N turns
+    #[arg(long, value_name = "N", value_parser = positive_turns, allow_negative_numbers = true)]
+    max_turns: Option<u32>,
+    /// Interrupt the turn after N minutes (or a duration such as 90s or 2h)
+    #[arg(long, value_name = "N", value_parser = max_minutes, allow_negative_numbers = true)]
+    max_minutes: Option<Duration>,
+    /// Mark the branch stalled after N minutes with no harness activity (or 90s, 2h, ...)
+    #[arg(long, value_name = "N", value_parser = stall_after, allow_negative_numbers = true)]
+    stall_after: Option<Duration>,
+    /// What a stall does
+    #[arg(long, value_name = "ACTION", requires = "stall_after")]
+    stall_action: Option<StallActionArg>,
+}
+
+impl Limits {
+    fn apply(self, task: &mut TaskArgs) {
+        task.check = self.check.map(|argv| argv.0);
+        task.budget_usd = self.budget_usd;
+        task.max_turns = self.max_turns;
+        task.max_duration = self.max_minutes;
+        task.stall_after = self.stall_after;
+        task.stall_action = self.stall_action.map(Into::into).unwrap_or_default();
+    }
+}
+
+/// How tool permission requests are answered.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Permissions")]
+pub struct Perms {
+    /// Allow every tool permission request
+    #[arg(short, long, conflicts_with = "ask")]
+    yes: bool,
+    /// Ask on the terminal for each tool permission request
+    #[arg(long)]
+    ask: bool,
+    /// Run a profile that does not route tool permission requests to Branchyard (Antigravity,
+    /// Pi, Amp); its tools run under the harness's own configuration
+    #[arg(long)]
+    allow_unapproved_tools: bool,
+}
+
+impl Perms {
+    fn apply(self, task: &mut TaskArgs) {
+        task.permissions = match (self.yes, self.ask) {
+            (true, _) => Permissions::Yes,
             (false, true) => Permissions::Ask,
             (false, false) => Permissions::Unset,
         };
-        let check = match self.value("check") {
-            None => None,
-            Some(line) => {
-                let argv = split_words(line).map_err(|e| self.error(format!("--check: {e}")))?;
-                if argv.is_empty() {
-                    return Err(self.error("--check needs a command"));
-                }
-                Some(argv)
+        task.unapproved_tools = self.allow_unapproved_tools;
+    }
+}
+
+/// Where and how the harness is launched.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Launch")]
+pub struct Launch {
+    /// Scrubbed environment and a private HOME; the harness is then usually not logged in
+    #[arg(long)]
+    isolated: bool,
+    /// Launch this instead of the profile's executable, for development and testing
+    #[arg(long, value_name = "CMD", value_parser = command_argv)]
+    command: Option<Argv>,
+    /// Where the harness runs (default: local, or the branch's own)
+    #[arg(long, value_name = "PROVIDER")]
+    provider: Option<ProviderArg>,
+    /// Variables to copy into the sandbox, such as API keys; nothing else is
+    #[arg(long, value_name = "NAME,NAME,...", value_parser = variable_names)]
+    pass_env: Option<List>,
+    #[command(flatten)]
+    microsandbox: MicrosandboxFlags,
+    #[command(flatten)]
+    substrate: SubstrateFlags,
+}
+
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Microsandbox provider (--provider microsandbox)")]
+pub struct MicrosandboxFlags {
+    /// OCI image with the harness installed
+    #[arg(long, value_name = "REF")]
+    image: Option<String>,
+    /// Virtual CPUs for the sandbox
+    #[arg(long, value_name = "N", value_parser = cpus)]
+    cpus: Option<u8>,
+    /// Sandbox memory in MiB
+    #[arg(long, value_name = "MIB", value_parser = memory)]
+    memory: Option<u32>,
+}
+
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Substrate provider (--provider substrate)")]
+pub struct SubstrateFlags {
+    /// Agent Substrate Control API, https://HOST:PORT
+    #[arg(long, value_name = "URL")]
+    substrate_endpoint: Option<String>,
+    /// Router URL of an actor's bridge, with {atespace} and {actor}
+    #[arg(long, value_name = "URL")]
+    substrate_router: Option<String>,
+    /// Actor template that runs branchyard-bridge and the harness
+    #[arg(long, value_name = "NAME")]
+    substrate_template: Option<String>,
+    /// Bridge signing key from `branchyard-bridge keygen`
+    #[arg(long, value_name = "FILE")]
+    substrate_key: Option<String>,
+    /// Atespace for the actors (default: default)
+    #[arg(long, value_name = "NAME")]
+    substrate_atespace: Option<String>,
+    /// Where the worktree is copied in the actor (default: /workspace)
+    #[arg(long, value_name = "PATH")]
+    substrate_workdir: Option<String>,
+    /// The harness's HOME in the actor (default: /branchyard/home)
+    #[arg(long, value_name = "PATH")]
+    substrate_home: Option<String>,
+    /// PEM authorities for the TLS Control API, and the router
+    #[arg(long, value_name = "FILE")]
+    substrate_ca: Option<String>,
+    /// PEM client certificate for the Control API, mutual TLS
+    #[arg(long, value_name = "FILE")]
+    substrate_client_cert: Option<String>,
+    /// PEM key of --substrate-client-cert
+    #[arg(long, value_name = "FILE")]
+    substrate_client_key: Option<String>,
+    /// PEM authorities for the TLS router, if not --substrate-ca
+    #[arg(long, value_name = "FILE")]
+    substrate_router_ca: Option<String>,
+    /// Allow http:// or ws:// to hosts other than loopback
+    #[arg(long)]
+    substrate_insecure: bool,
+}
+
+impl SubstrateFlags {
+    /// The first substrate flag given, for "needs --provider substrate".
+    fn first_given(&self) -> Option<&'static str> {
+        [
+            ("substrate-endpoint", self.substrate_endpoint.is_some()),
+            ("substrate-router", self.substrate_router.is_some()),
+            ("substrate-template", self.substrate_template.is_some()),
+            ("substrate-key", self.substrate_key.is_some()),
+            ("substrate-atespace", self.substrate_atespace.is_some()),
+            ("substrate-workdir", self.substrate_workdir.is_some()),
+            ("substrate-home", self.substrate_home.is_some()),
+            ("substrate-ca", self.substrate_ca.is_some()),
+            (
+                "substrate-client-cert",
+                self.substrate_client_cert.is_some(),
+            ),
+            ("substrate-client-key", self.substrate_client_key.is_some()),
+            ("substrate-router-ca", self.substrate_router_ca.is_some()),
+            ("substrate-insecure", self.substrate_insecure),
+        ]
+        .into_iter()
+        .find_map(|(flag, given)| given.then_some(flag))
+    }
+}
+
+impl Launch {
+    fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
+        task.isolated = self.isolated;
+        task.command = self.command.map(|argv| argv.0);
+        let chosen = self.provider;
+        let micro = &self.microsandbox;
+        if chosen != Some(ProviderArg::Microsandbox) {
+            let given = [
+                ("image", micro.image.is_some()),
+                ("cpus", micro.cpus.is_some()),
+                ("memory", micro.memory.is_some()),
+            ]
+            .into_iter()
+            .find_map(|(flag, given)| given.then_some(flag));
+            if let Some(flag) = given {
+                return Err(format!("--{flag} needs --provider microsandbox"));
             }
-        };
-        let budget_usd = match self.value("budget-usd") {
-            None => None,
-            Some(text) => match text.parse::<f64>() {
-                Ok(usd) if usd.is_finite() && usd > 0.0 => Some(usd),
-                _ => {
-                    return Err(self.error(format!(
-                        "--budget-usd needs a positive number of dollars, not '{text}'"
-                    )))
-                }
-            },
-        };
-        let max_turns = match self.value("max-turns") {
-            None => None,
-            Some(text) => match text.parse::<u32>() {
-                Ok(turns) if turns > 0 => Some(turns),
-                _ => {
-                    return Err(self.error(format!(
-                        "--max-turns needs a positive whole number, not '{text}'"
-                    )))
-                }
-            },
-        };
-        let max_duration = match self.value("max-minutes") {
-            None => None,
-            Some(text) => match text
-                .parse::<f64>()
-                .ok()
-                .filter(|m| m.is_finite() && *m > 0.0)
-            {
-                Some(minutes) => Some(
-                    Duration::try_from_secs_f64(minutes * 60.0)
-                        .map_err(|_| self.error(format!("--max-minutes {text} is too large")))?,
-                ),
-                None => {
-                    return Err(self.error(format!(
-                        "--max-minutes needs a positive number of minutes, not '{text}'"
-                    )))
-                }
-            },
-        };
-        let stall_after = match self.value("stall-after") {
-            None => None,
-            Some(text) => match text
-                .parse::<f64>()
-                .ok()
-                .filter(|m| m.is_finite() && *m > 0.0)
-            {
-                Some(minutes) => Some(
-                    Duration::try_from_secs_f64(minutes * 60.0)
-                        .map_err(|_| self.error(format!("--stall-after {text} is too large")))?,
-                ),
-                None => {
-                    return Err(self.error(format!(
-                        "--stall-after needs a positive number of minutes, not '{text}'"
-                    )))
-                }
-            },
-        };
-        let stall_action = match self.value("stall-action") {
-            None => branchyard::StallAction::Notify,
-            Some("notify") => branchyard::StallAction::Notify,
-            Some("interrupt") => branchyard::StallAction::Interrupt,
-            Some(text) => {
-                return Err(self.error(format!(
-                    "--stall-action must be 'notify' or 'interrupt', not '{text}'"
-                )))
-            }
-        };
-        if self.value("stall-action").is_some() && stall_after.is_none() {
-            return Err(self.error("--stall-action needs --stall-after"));
         }
-        let command = match self.value("command") {
-            None => None,
-            Some(line) => {
-                let argv = split_words(line).map_err(|e| self.error(format!("--command: {e}")))?;
-                if argv.is_empty() {
-                    return Err(self.error("--command needs an executable"));
-                }
-                Some(argv)
+        if chosen != Some(ProviderArg::Substrate) {
+            if let Some(flag) = self.substrate.first_given() {
+                return Err(format!("--{flag} needs --provider substrate"));
             }
+        }
+        if matches!(chosen, None | Some(ProviderArg::Local)) && self.pass_env.is_some() {
+            return Err("--pass-env needs --provider microsandbox or substrate".into());
+        }
+        let pass_env = self.pass_env.map(|list| list.0).unwrap_or_default();
+        match chosen {
+            None => {}
+            Some(ProviderArg::Local) => task.local = true,
+            Some(ProviderArg::Microsandbox) => {
+                let image = self
+                    .microsandbox
+                    .image
+                    .filter(|image| !image.trim().is_empty())
+                    .ok_or("--provider microsandbox needs --image")?;
+                task.sandbox = Some(SandboxArgs {
+                    image,
+                    cpus: self.microsandbox.cpus,
+                    memory_mib: self.microsandbox.memory,
+                    pass_env,
+                });
+            }
+            Some(ProviderArg::Substrate) => {
+                let s = self.substrate;
+                let required = |value: Option<String>, flag: &str| {
+                    value
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| format!("--provider substrate needs --{flag}"))
+                };
+                task.substrate = Some(SubstrateArgs {
+                    endpoint: required(s.substrate_endpoint, "substrate-endpoint")?,
+                    router: required(s.substrate_router, "substrate-router")?,
+                    template: required(s.substrate_template, "substrate-template")?,
+                    key: required(s.substrate_key, "substrate-key")?,
+                    atespace: s.substrate_atespace,
+                    workdir: s.substrate_workdir,
+                    home: s.substrate_home,
+                    pass_env,
+                    ca: s.substrate_ca,
+                    client_cert: s.substrate_client_cert,
+                    client_key: s.substrate_client_key,
+                    router_ca: s.substrate_router_ca,
+                    insecure: s.substrate_insecure,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Letting the harness delegate.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Delegation")]
+pub struct Delegation {
+    /// Let the harness create child branches through Branchyard's MCP tools, DEPTH levels
+    /// deep (default 1)
+    #[arg(
+        long,
+        value_name = "DEPTH",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "1",
+        value_parser = delegate_depth
+    )]
+    delegate: Option<u32>,
+    /// Allow the harness's own `by spawn|inspect|events|send|integrate|cancel|children`
+    /// commands without asking; nothing else
+    #[arg(long)]
+    allow_delegation: bool,
+}
+
+impl Delegation {
+    fn apply(self, task: &mut TaskArgs) {
+        task.delegate = self.delegate;
+        task.allow_delegation = self.allow_delegation;
+    }
+}
+
+/// Provisioning the harness's private home.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Provisioning")]
+pub struct Provision {
+    /// A credential for the harness, such as ANTHROPIC_API_KEY, from the variable of that name,
+    /// VAR, or FILE; written only into its private home (--isolated or a sandbox). Repeatable
+    #[arg(long = "secret", value_name = "NAME[=VAR|=@FILE]", value_parser = branchyard::SecretSource::parse)]
+    secrets: Vec<branchyard::SecretSource>,
+    /// The authentication method when the secrets allow several: api-key, oauth-token,
+    /// auth-file, vertex-ai
+    #[arg(long, value_name = "METHOD")]
+    auth: Option<String>,
+    /// A stdio MCP server for the harness, COMMAND an absolute path with its arguments.
+    /// Repeatable
+    #[arg(long = "mcp", value_name = "NAME=COMMAND", value_parser = branchyard::McpServerSpec::parse)]
+    mcp_servers: Vec<branchyard::McpServerSpec>,
+    /// Standing instructions for the harness, read from FILE
+    #[arg(long, value_name = "FILE")]
+    instructions: Option<String>,
+    /// The model, or a size alias (small, medium, large, extra-large) where the harness
+    /// defines one
+    #[arg(long, value_name = "NAME", value_parser = non_blank)]
+    model: Option<String>,
+    /// Reasoning effort: low, medium, high, xhigh, or 0-100
+    #[arg(long, value_name = "LEVEL", value_parser = branchyard::Effort::parse)]
+    effort: Option<branchyard::Effort>,
+    /// Send the harness's OpenTelemetry to this OTLP/gRPC collector, or turn it off
+    #[arg(long, value_name = "URL|off", value_parser = branchyard::Telemetry::parse)]
+    telemetry: Option<branchyard::Telemetry>,
+}
+
+impl Provision {
+    fn apply(self, task: &mut TaskArgs) {
+        let spec = branchyard::Provisioning {
+            secrets: self.secrets,
+            mcp_servers: self.mcp_servers,
+            auth: self.auth,
+            model: self.model,
+            effort: self.effort,
+            telemetry: self.telemetry,
+            ..branchyard::Provisioning::default()
         };
-        let provider = self.provider()?;
-        let delegate = match (self.switch("delegate"), self.value("delegate")) {
-            (false, _) => None,
-            (true, None) => Some(1),
-            (true, Some(text)) => match text.parse::<u32>() {
-                Ok(depth) if depth > 0 => Some(depth),
-                _ => {
-                    return Err(self.error(format!(
-                        "--delegate=DEPTH needs a positive whole number, not '{text}'"
-                    )))
-                }
-            },
+        task.provision = (!spec.is_empty() || self.instructions.is_some()).then_some(spec);
+        task.instructions = self.instructions;
+    }
+}
+
+/// `by run`'s options.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct RunFlags {
+    /// Harness or profile ID (default: claude-code)
+    #[arg(long, value_name = "ID")]
+    harness: Option<String>,
+    /// Branch name (default: a slug of the prompt)
+    #[arg(short, long)]
+    name: Option<String>,
+    /// Base revision (default: HEAD)
+    #[arg(short, long, value_name = "REV")]
+    base: Option<String>,
+    #[command(flatten)]
+    limits: Limits,
+    #[command(flatten)]
+    perms: Perms,
+    #[command(flatten)]
+    launch: Launch,
+    #[command(flatten)]
+    delegation: Delegation,
+    #[command(flatten)]
+    provision: Provision,
+}
+
+impl Flags for RunFlags {
+    type Output = TaskArgs;
+    fn check(self) -> Result<TaskArgs, String> {
+        let mut task = TaskArgs {
+            harness: self.harness,
+            name: self.name,
+            base: self.base,
+            ..TaskArgs::default()
         };
-        let provision = self.provision()?;
-        // `fan` reads `--harness` as a list; it is not one harness.
-        let harness = match self.spec.name {
-            "fan" => None,
-            _ => self.value("harness").map(str::to_owned),
+        self.limits.apply(&mut task);
+        self.perms.apply(&mut task);
+        self.launch.apply(&mut task)?;
+        self.delegation.apply(&mut task);
+        self.provision.apply(&mut task);
+        Ok(task)
+    }
+}
+
+/// `by fan`'s options: `run`'s, with `--harness` a list, taken by the
+/// command itself.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct FanFlags {
+    /// Branch name prefix (default: a slug of the prompt)
+    #[arg(short, long)]
+    name: Option<String>,
+    /// Base revision (default: HEAD)
+    #[arg(short, long, value_name = "REV")]
+    base: Option<String>,
+    #[command(flatten)]
+    limits: Limits,
+    #[command(flatten)]
+    perms: Perms,
+    #[command(flatten)]
+    launch: Launch,
+    #[command(flatten)]
+    delegation: Delegation,
+    #[command(flatten)]
+    provision: Provision,
+}
+
+impl Flags for FanFlags {
+    type Output = TaskArgs;
+    fn check(self) -> Result<TaskArgs, String> {
+        RunFlags {
+            harness: None,
+            name: self.name,
+            base: self.base,
+            limits: self.limits,
+            perms: self.perms,
+            launch: self.launch,
+            delegation: self.delegation,
+            provision: self.provision,
+        }
+        .check()
+    }
+}
+
+/// `by send`'s task options: the branch keeps its harness, workspace and
+/// provider.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct SendFlags {
+    #[command(flatten)]
+    limits: Limits,
+    #[command(flatten)]
+    perms: Perms,
+    /// Launch this instead of the profile's executable, for development and testing
+    #[arg(long, value_name = "CMD", value_parser = command_argv, help_heading = "Launch")]
+    command: Option<Argv>,
+    #[command(flatten)]
+    delegation: Delegation,
+    #[command(flatten)]
+    provision: Provision,
+}
+
+impl Flags for SendFlags {
+    type Output = TaskArgs;
+    fn check(self) -> Result<TaskArgs, String> {
+        let mut task = TaskArgs {
+            command: self.command.map(|argv| argv.0),
+            ..TaskArgs::default()
         };
-        Ok(TaskArgs {
-            harness,
-            name: self.value("name").map(str::to_owned),
-            base: self.value("base").map(str::to_owned),
-            check,
-            budget_usd,
-            max_turns,
-            max_duration,
-            stall_after,
-            stall_action,
-            permissions,
-            isolated: self.switch("isolated"),
-            command,
-            sandbox: match &provider {
-                Some(Chosen::Microsandbox(args)) => Some(args.clone()),
-                _ => None,
-            },
-            substrate: match &provider {
-                Some(Chosen::Substrate(args)) => Some(SubstrateArgs::clone(args)),
-                _ => None,
-            },
-            local: provider == Some(Chosen::Local),
-            delegate,
-            allow_delegation: self.switch("allow-delegation"),
-            unapproved_tools: self.switch("allow-unapproved-tools"),
-            provision,
-            instructions: self.value("instructions").map(str::to_owned),
+        self.limits.apply(&mut task);
+        self.perms.apply(&mut task);
+        self.delegation.apply(&mut task);
+        self.provision.apply(&mut task);
+        Ok(task)
+    }
+}
+
+/// `by fork`'s task options.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct ForkFlags {
+    /// The new branch's name (default: derived from the branch's)
+    #[arg(short, long)]
+    name: Option<String>,
+    #[command(flatten)]
+    limits: Limits,
+    #[command(flatten)]
+    perms: Perms,
+    #[command(flatten)]
+    launch: Launch,
+    #[command(flatten)]
+    delegation: Delegation,
+    #[command(flatten)]
+    provision: Provision,
+}
+
+impl Flags for ForkFlags {
+    type Output = TaskArgs;
+    fn check(self) -> Result<TaskArgs, String> {
+        RunFlags {
+            harness: None,
+            name: self.name,
+            base: None,
+            limits: self.limits,
+            perms: self.perms,
+            launch: self.launch,
+            delegation: self.delegation,
+            provision: self.provision,
+        }
+        .check()
+    }
+}
+
+/// `by reincarnate`'s task options.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct ReincarnateFlags {
+    /// The new branch's name (default: derived from the branch's)
+    #[arg(short, long)]
+    name: Option<String>,
+    /// Harness or profile ID (default: the branch's)
+    #[arg(long, value_name = "ID")]
+    harness: Option<String>,
+    #[command(flatten)]
+    limits: Limits,
+    #[command(flatten)]
+    perms: Perms,
+    #[command(flatten)]
+    launch: Launch,
+    #[command(flatten)]
+    delegation: Delegation,
+    #[command(flatten)]
+    provision: Provision,
+}
+
+impl Flags for ReincarnateFlags {
+    type Output = TaskArgs;
+    fn check(self) -> Result<TaskArgs, String> {
+        RunFlags {
+            harness: self.harness,
+            name: self.name,
+            base: None,
+            limits: self.limits,
+            perms: self.perms,
+            launch: self.launch,
+            delegation: self.delegation,
+            provision: self.provision,
+        }
+        .check()
+    }
+}
+
+/// `by spawn`'s options.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct SpawnFlags {
+    /// The delegating branch (outside a harness; inside one, it is the harness's own)
+    #[arg(long, value_name = "BRANCH")]
+    parent: Option<String>,
+    /// In a rig, the seat the child fills; it sets the child's harness, limits, check and
+    /// instructions
+    #[arg(long, value_name = "NAME")]
+    seat: Option<String>,
+    /// Harness or profile ID (default: claude-code)
+    #[arg(long, value_name = "ID")]
+    harness: Option<String>,
+    /// Branch name (default: a slug of the prompt)
+    #[arg(short, long)]
+    name: Option<String>,
+    /// Base revision (default: the parent's candidate)
+    #[arg(short, long, value_name = "REV")]
+    base: Option<String>,
+    /// Wait for the turn to end and show it (outside a harness, spawn always waits)
+    #[arg(long)]
+    wait: bool,
+    /// Print JSON
+    #[arg(long)]
+    json: bool,
+    #[command(flatten)]
+    limits: Limits,
+    #[command(flatten)]
+    graph: SpawnGraph,
+    #[command(flatten)]
+    perms: Perms,
+}
+
+/// Where a spawned child sits among its siblings.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Delegation")]
+pub struct SpawnGraph {
+    /// Levels the child may delegate below itself (default: one fewer than the parent)
+    #[arg(long, value_name = "N")]
+    max_depth: Option<u32>,
+    /// Tools the child is denied outright; a trailing * matches a prefix
+    #[arg(long, value_name = "TOOL,TOOL,...", value_parser = harness_list)]
+    deny: Option<List>,
+    /// Siblings the child waits for: it is created waiting and starts once they have settled
+    #[arg(long, value_name = "BRANCH,BRANCH,...", value_parser = harness_list)]
+    depends_on: Option<List>,
+    /// When each --depends-on branch counts as done
+    #[arg(long, value_name = "WHEN")]
+    after: Option<AfterArg>,
+    /// Bind the child to a scratch area, ACCESS read_only or exclusive_write (which holds its
+    /// writer lock for each turn); repeatable
+    #[arg(long = "bind", value_name = "SCRATCH:ACCESS", value_parser = branchyard::Binding::parse)]
+    bindings: Vec<branchyard::Binding>,
+}
+
+impl Flags for SpawnFlags {
+    type Output = SpawnArgs;
+    fn check(self) -> Result<SpawnArgs, String> {
+        let mut task = TaskArgs {
+            harness: self.harness,
+            name: self.name,
+            base: self.base,
+            ..TaskArgs::default()
+        };
+        self.limits.apply(&mut task);
+        self.perms.apply(&mut task);
+        Ok(SpawnArgs {
+            task,
+            parent: self.parent,
+            wait: self.wait,
+            max_depth: self.graph.max_depth,
+            deny: self.graph.deny.map(|list| list.0).unwrap_or_default(),
+            seat: self.seat,
+            depends_on: self.graph.depends_on.map(|list| list.0).unwrap_or_default(),
+            after: self.graph.after.map(Into::into).unwrap_or_default(),
+            bindings: self.graph.bindings,
+            json: self.json,
         })
     }
-
-    /// The provisioning flags; `None` when none was given. `--instructions`
-    /// is read later, from its file.
-    fn provision(&self) -> Result<Option<branchyard::Provisioning>, UsageError> {
-        use branchyard::{Effort, McpServerSpec, Provisioning, SecretSource, Telemetry};
-        let mut spec = Provisioning::default();
-        for text in self.values("secret") {
-            spec.secrets
-                .push(SecretSource::parse(text).map_err(|e| self.error(format!("--secret: {e}")))?);
-        }
-        for text in self.values("mcp") {
-            spec.mcp_servers
-                .push(McpServerSpec::parse(text).map_err(|e| self.error(format!("--mcp: {e}")))?);
-        }
-        spec.auth = self.value("auth").map(str::to_owned);
-        spec.model = match self.value("model") {
-            Some(model) if model.trim().is_empty() => {
-                return Err(self.error("--model needs a model name"))
-            }
-            model => model.map(str::to_owned),
-        };
-        if let Some(text) = self.value("effort") {
-            spec.effort =
-                Some(Effort::parse(text).map_err(|e| self.error(format!("--effort: {e}")))?);
-        }
-        if let Some(text) = self.value("telemetry") {
-            spec.telemetry =
-                Some(Telemetry::parse(text).map_err(|e| self.error(format!("--telemetry: {e}")))?);
-        }
-        Ok((!spec.is_empty() || self.switch("instructions")).then_some(spec))
-    }
-
-    /// The chosen provider and its options; `None` when `--provider` was
-    /// not given.
-    fn provider(&self) -> Result<Option<Chosen>, UsageError> {
-        let micro_flags = ["image", "cpus", "memory"];
-        let substrate_flags = [
-            "substrate-endpoint",
-            "substrate-router",
-            "substrate-template",
-            "substrate-key",
-            "substrate-atespace",
-            "substrate-workdir",
-            "substrate-home",
-            "substrate-ca",
-            "substrate-client-cert",
-            "substrate-client-key",
-            "substrate-router-ca",
-            "substrate-insecure",
-        ];
-        let given = |flags: &[&'static str]| -> Option<&'static str> {
-            flags.iter().copied().find(|flag| self.switch(flag))
-        };
-        let chosen = self.value("provider");
-        if chosen != Some("microsandbox") {
-            if let Some(flag) = given(&micro_flags) {
-                return Err(self.error(format!("--{flag} needs --provider microsandbox")));
-            }
-        }
-        if chosen != Some("substrate") {
-            if let Some(flag) = given(&substrate_flags) {
-                return Err(self.error(format!("--{flag} needs --provider substrate")));
-            }
-        }
-        if matches!(chosen, None | Some("local")) && self.switch("pass-env") {
-            return Err(self.error("--pass-env needs --provider microsandbox or substrate"));
-        }
-        let mut pass_env = Vec::new();
-        if let Some(list) = self.value("pass-env") {
-            for name in list.split(',').map(str::trim) {
-                if name.is_empty() || name.contains('=') {
-                    return Err(
-                        self.error(format!("--pass-env takes variable names, not '{list}'"))
-                    );
-                }
-                pass_env.push(name.to_owned());
-            }
-        }
-        match chosen {
-            None => Ok(None),
-            Some("local") => Ok(Some(Chosen::Local)),
-            Some("microsandbox") => {
-                let image = self
-                    .value("image")
-                    .filter(|image| !image.trim().is_empty())
-                    .ok_or_else(|| self.error("--provider microsandbox needs --image"))?;
-                let cpus = match self.value("cpus") {
-                    None => None,
-                    Some(text) => match text.parse::<u8>() {
-                        Ok(cpus) if cpus > 0 => Some(cpus),
-                        _ => {
-                            return Err(self.error(format!(
-                                "--cpus needs a whole number from 1 to 255, not '{text}'"
-                            )))
-                        }
-                    },
-                };
-                let memory_mib = match self.value("memory") {
-                    None => None,
-                    Some(text) => match text.parse::<u32>() {
-                        Ok(mib) if mib > 0 => Some(mib),
-                        _ => {
-                            return Err(self.error(format!(
-                                "--memory needs a positive whole number of MiB, not '{text}'"
-                            )))
-                        }
-                    },
-                };
-                Ok(Some(Chosen::Microsandbox(SandboxArgs {
-                    image: image.to_owned(),
-                    cpus,
-                    memory_mib,
-                    pass_env,
-                })))
-            }
-            Some("substrate") => {
-                let required = |flag: &str| -> Result<String, UsageError> {
-                    self.value(flag)
-                        .filter(|value| !value.trim().is_empty())
-                        .map(str::to_owned)
-                        .ok_or_else(|| self.error(format!("--provider substrate needs --{flag}")))
-                };
-                let optional = |flag: &str| self.value(flag).map(str::to_owned);
-                Ok(Some(Chosen::Substrate(Box::new(SubstrateArgs {
-                    endpoint: required("substrate-endpoint")?,
-                    router: required("substrate-router")?,
-                    template: required("substrate-template")?,
-                    key: required("substrate-key")?,
-                    atespace: optional("substrate-atespace"),
-                    workdir: optional("substrate-workdir"),
-                    home: optional("substrate-home"),
-                    pass_env,
-                    ca: optional("substrate-ca"),
-                    client_cert: optional("substrate-client-cert"),
-                    client_key: optional("substrate-client-key"),
-                    router_ca: optional("substrate-router-ca"),
-                    insecure: self.switch("substrate-insecure"),
-                }))))
-            }
-            Some(other) => Err(self.error(format!(
-                "--provider is local, microsandbox or substrate, not '{other}'"
-            ))),
-        }
-    }
 }
 
-/// Split `claude-code,codex` into harness IDs. Duplicates are refused because
-/// branch names derive from the harness.
-fn harness_list(list: &str) -> Result<Vec<String>, String> {
-    let mut harnesses: Vec<String> = Vec::new();
-    for id in list.split(',').map(str::trim) {
-        if id.is_empty() {
-            return Err(format!("--harness has an empty entry in '{list}'"));
-        }
-        if harnesses.iter().any(|seen| seen == id) {
-            return Err(format!("--harness lists {id} twice"));
-        }
-        harnesses.push(id.to_owned());
-    }
-    Ok(harnesses)
+/// `by`'s command, with the grouped command list in its help.
+pub fn command() -> clap::Command {
+    let cmd = Cli::command();
+    let header = *cmd.get_styles().get_header();
+    let listing = command_listing(&cmd);
+    cmd.help_template(format!(
+        "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{listing}\
+         {header}Options:{header:#}\n{{options}}{{after-help}}"
+    ))
 }
 
-/// Split a command line into words the way a POSIX shell quotes them: single
-/// quotes, double quotes and backslash escapes. There is no variable, glob
-/// or operator expansion; the result runs without a shell.
+/// The commands of `by --help`, under [`GROUPS`].
+fn command_listing(cmd: &clap::Command) -> String {
+    let mut built = cmd.clone();
+    built.build();
+    let styles = built.get_styles();
+    let (header, literal): (Style, Style) = (*styles.get_header(), *styles.get_literal());
+    let commands: Vec<&clap::Command> = built
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set())
+        .collect();
+    let width = commands
+        .iter()
+        .map(|c| c.get_name().len())
+        .max()
+        .unwrap_or(0);
+    let group = |c: &clap::Command| match c.get_name() {
+        "help" => GROUPS.last().map_or(9, |(group, _)| *group),
+        _ => c.get_display_order() / 100,
+    };
+    let mut groups: Vec<(usize, &str)> = GROUPS.to_vec();
+    groups.push((usize::MAX, "Other commands"));
+    let mut text = String::new();
+    for (number, title) in groups {
+        let mut members: Vec<&&clap::Command> = commands
+            .iter()
+            .filter(|c| {
+                let g = group(c);
+                g == number || (number == usize::MAX && !GROUPS.iter().any(|(n, _)| *n == g))
+            })
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        members.sort_by_key(|c| (c.get_display_order(), c.get_name()));
+        text.push_str(&format!("{header}{title}:{header:#}\n"));
+        for c in members {
+            let about = c.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let name = c.get_name();
+            let pad = " ".repeat(width - name.len());
+            text.push_str(&format!("  {literal}{name}{literal:#}{pad}  {about}\n"));
+        }
+        text.push('\n');
+    }
+    text
+}
+
+/// Parse `by`'s command line, program name first.
+pub fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
+    let mut cmd = command();
+    let matches = cmd
+        .try_get_matches_from_mut(argv.iter().cloned())
+        .map_err(|error| with_step_tip(with_prompt_tip(error, &cmd, &argv)))?;
+    Cli::from_arg_matches(&matches).map_err(|error| {
+        // Checked flags fail here, after clap's own checks; format the
+        // error with the command whose usage explains it.
+        let mut sub = &mut cmd;
+        let mut m = &matches;
+        while let Some((name, next)) = m.subcommand() {
+            sub = sub
+                .find_subcommand_mut(name)
+                .expect("matched subcommands exist");
+            m = next;
+        }
+        error.format(sub)
+    })
+}
+
+/// A stray word after a prompt is most likely an unquoted prompt.
+fn with_prompt_tip(mut error: clap::Error, cmd: &clap::Command, argv: &[OsString]) -> clap::Error {
+    if error.kind() != ErrorKind::UnknownArgument {
+        return error;
+    }
+    match error.get(ContextKind::InvalidArg) {
+        Some(ContextValue::String(extra)) if !extra.starts_with('-') => {}
+        _ => return error,
+    }
+    let takes_prompt = argv.iter().skip(1).find_map(|arg| {
+        let sub = cmd.find_subcommand(arg.to_str()?)?;
+        Some(
+            sub.get_positionals()
+                .any(|p| matches!(p.get_id().as_str(), "prompt" | "text")),
+        )
+    });
+    if takes_prompt == Some(true) {
+        error.insert(
+            ContextKind::Suggested,
+            ContextValue::StyledStrs(vec!["quote a prompt that contains spaces".into()]),
+        );
+    }
+    error
+}
+
+/// `by init`'s protocol steps are one per call: say so beside clap's
+/// conflict, and name the topics when a step lacks one.
+fn with_step_tip(mut error: clap::Error) -> clap::Error {
+    let steps = ["--next", "--dry-run", "--apply"];
+    let names = |kind| match error.get(kind) {
+        Some(ContextValue::String(arg)) => vec![arg.clone()],
+        Some(ContextValue::Strings(args)) => args.clone(),
+        _ => Vec::new(),
+    };
+    let is_step = |arg: &String| steps.iter().any(|s| arg.starts_with(s));
+    let tip = match error.kind() {
+        ErrorKind::ArgumentConflict
+            if names(ContextKind::InvalidArg).iter().any(is_step)
+                && names(ContextKind::PriorArg).iter().any(is_step) =>
+        {
+            "--next, --dry-run and --apply are separate steps; give one".to_owned()
+        }
+        ErrorKind::MissingRequiredArgument
+            if names(ContextKind::InvalidArg)
+                .iter()
+                .any(|a| a == "<TOPIC>") =>
+        {
+            let ids: Vec<&str> = branchyard_setup::Topic::ALL
+                .iter()
+                .map(|t| t.id())
+                .collect();
+            format!("give a topic: {}", ids.join(", "))
+        }
+        _ => return error,
+    };
+    error.insert(
+        ContextKind::Suggested,
+        ContextValue::StyledStrs(vec![tip.into()]),
+    );
+    error
+}
+
+/// Where `by serve`, `by worker` or `by help serve|worker` hands over to
+/// the server's own parser; see [`server_call`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerCall {
+    /// How many leading arguments (after the program name) are `by`'s own
+    /// to parse: global options, and the command unless `help`.
+    pub prefix: usize,
+    /// `by serve` or `by worker`, naming the server in its messages.
+    pub program: &'static str,
+    /// The server's arguments, `--worker` first for `by worker`.
+    pub args: Vec<String>,
+    /// `by help serve|worker`: print the server's help instead.
+    pub help: bool,
+}
+
+/// `by [GLOBALS] serve|worker ARGS...`, `by [GLOBALS] help serve|worker`:
+/// the server parses its own options (some share names with `by`'s global
+/// ones, such as `--repo`), so they are handed over whole. `args` are after
+/// the program name.
+pub fn server_call(args: &[OsString]) -> Option<ServerCall> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at).and_then(|a| a.to_str()) {
+        let Some(long) = arg.strip_prefix("--") else {
+            break;
+        };
+        let name = long.split_once('=').map_or(long, |(name, _)| name);
+        if !["remote", "token-file", "repo", "ca-file"].contains(&name) {
+            break;
+        }
+        at += if long.contains('=') { 1 } else { 2 };
+    }
+    let rest: Vec<&str> = args
+        .get(at..)?
+        .iter()
+        .map(|a| a.to_str())
+        .collect::<Option<_>>()?;
+    let (help, name) = match rest.as_slice() {
+        ["help", name, ..] => (true, *name),
+        [name, ..] => (false, *name),
+        [] => return None,
+    };
+    let program = match name {
+        "serve" => "by serve",
+        "worker" => "by worker",
+        _ => return None,
+    };
+    let mut server_args = Vec::new();
+    if name == "worker" {
+        server_args.push("--worker".to_owned());
+    }
+    if !help {
+        server_args.extend(rest[1..].iter().map(|a| (*a).to_owned()));
+    }
+    Some(ServerCall {
+        prefix: if help { at } else { at + 1 },
+        program,
+        args: server_args,
+        help,
+    })
+}
+
+/// Split a command line into words the way a POSIX shell quotes them:
+/// single quotes, double quotes, backslash escapes, and `#` comments. There
+/// is no variable, glob or operator expansion; the result runs without a
+/// shell.
 pub fn split_words(line: &str) -> Result<Vec<String>, String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => break,
-                        Some(c) => word.push(c),
-                        None => return Err("unterminated single quote".into()),
-                    }
-                }
-            }
-            '"' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('"') => break,
-                        Some('\\') => match chars.next() {
-                            Some(c @ ('"' | '\\' | '$' | '`')) => word.push(c),
-                            Some(c) => {
-                                word.push('\\');
-                                word.push(c);
-                            }
-                            None => return Err("unterminated double quote".into()),
-                        },
-                        Some(c) => word.push(c),
-                        None => return Err("unterminated double quote".into()),
-                    }
-                }
-            }
-            '\\' => {
-                in_word = true;
-                word.push(chars.next().ok_or("trailing backslash")?);
-            }
-            c if c.is_whitespace() => {
-                if in_word {
-                    words.push(std::mem::take(&mut word));
-                    in_word = false;
-                }
-            }
-            c => {
-                in_word = true;
-                word.push(c);
-            }
-        }
-    }
-    if in_word {
-        words.push(word);
-    }
-    Ok(words)
+    shlex::split(line).ok_or_else(|| "unterminated quote or trailing backslash".to_owned())
 }
 
 /// Quote `word` for a POSIX shell, leaving plain words as they are.
 pub fn shell_quote(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./:@%+=,".contains(c));
-    if plain {
-        word.to_owned()
-    } else {
-        format!("'{}'", word.replace('\'', r"'\''"))
+    // Only a NUL byte cannot be quoted; no branch name holds one.
+    shlex::try_quote(&word.replace('\0', ""))
+        .map(|quoted| quoted.into_owned())
+        .unwrap_or_default()
+}
+
+// Value parsers. Each error reads after "invalid value 'X' for '--flag
+// <VALUE>': ".
+
+fn non_blank(text: &str) -> Result<String, String> {
+    match text.trim().is_empty() {
+        true => Err("needs a value".into()),
+        false => Ok(text.to_owned()),
     }
 }
 
-/// Help for `by` itself.
-pub fn general_help() -> String {
-    let mut text = String::from(
-        "by: delegate coding work to agent harnesses on git branches, and merge\n\
-         only validated results.\n\nUsage: by <command> [options]\n\nCommands:\n",
-    );
-    for spec in COMMANDS {
-        text.push_str(&format!("  {:<10} {}\n", spec.name, spec.summary));
+fn prompt_text(text: &str) -> Result<String, String> {
+    match text.trim().is_empty() {
+        true => Err("needs a prompt".into()),
+        false => Ok(text.to_owned()),
     }
-    text.push_str(
-        "\nGlobal options, before the command:\n\
-         \x20 --remote URL       Run commands on a Branchyard server (or BRANCHYARD_REMOTE)\n\
-         \x20 --token-file FILE  The server's bearer token (or BRANCHYARD_TOKEN_FILE)\n\
-         \x20 --repo NAME        Repository on the server, when it serves several\n\
-         \x20                    (or BRANCHYARD_REPO)\n\
-         \x20 --ca-file FILE     Also trust this CA for https (or BRANCHYARD_CA_FILE)\n\
-         \nRun 'by help <command>' or 'by <command> --help' for its options.\n\
-         Local mode: harnesses run as your operating-system user, with no other\n\
-         isolation. State lives in .branchyard/ at the repository root. Remote mode:\n\
-         harnesses run as the server's user, with no other isolation.\n",
-    );
-    text
 }
 
-/// Help for one command.
-pub fn command_help(spec: &Spec) -> String {
-    let mut text = format!("{}\n\nUsage: {}\n", spec.summary, spec.usage());
-    if !spec.flags.is_empty() {
-        text.push_str("\nOptions:\n");
-        let label = |flag: &Flag| match flag.value {
-            Some(value) if value.starts_with('[') => format!("--{}{value}", flag.long),
-            Some(value) => format!("--{} {value}", flag.long),
-            None => format!("--{}", flag.long),
-        };
-        let width = spec.flags.iter().map(|f| label(f).len()).max().unwrap_or(0);
-        for flag in spec.flags {
-            text.push_str(&format!("  {:<width$}  {}\n", label(flag), flag.help));
+fn check_argv(line: &str) -> Result<Argv, String> {
+    let argv = split_words(line)?;
+    match argv.is_empty() {
+        true => Err("needs a command".into()),
+        false => Ok(Argv(argv)),
+    }
+}
+
+fn command_argv(line: &str) -> Result<Argv, String> {
+    let argv = split_words(line)?;
+    match argv.is_empty() {
+        true => Err("needs an executable".into()),
+        false => Ok(Argv(argv)),
+    }
+}
+
+/// Dollars, with or without a leading `$`.
+fn usd(text: &str) -> Result<f64, String> {
+    match text.trim().trim_start_matches('$').parse::<f64>() {
+        Ok(usd) if usd.is_finite() && usd > 0.0 => Ok(usd),
+        _ => Err("needs a positive number of dollars, such as 2.50".into()),
+    }
+}
+
+fn positive_turns(text: &str) -> Result<u32, String> {
+    match text.parse::<u32>() {
+        Ok(turns) if turns > 0 => Ok(turns),
+        _ => Err("needs a positive whole number".into()),
+    }
+}
+
+fn delegate_depth(text: &str) -> Result<u32, String> {
+    match text.parse::<u32>() {
+        Ok(depth) if depth > 0 => Ok(depth),
+        _ => Err("needs a positive whole number".into()),
+    }
+}
+
+fn cpus(text: &str) -> Result<u8, String> {
+    match text.parse::<u8>() {
+        Ok(cpus) if cpus > 0 => Ok(cpus),
+        _ => Err("needs a whole number from 1 to 255".into()),
+    }
+}
+
+fn memory(text: &str) -> Result<u32, String> {
+    match text.parse::<u32>() {
+        Ok(mib) if mib > 0 => Ok(mib),
+        _ => Err("needs a positive whole number of MiB".into()),
+    }
+}
+
+/// Non-negative seconds.
+fn seconds(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(secs) if secs.is_finite() && secs >= 0.0 => Ok(secs),
+        _ => Err("needs a number of seconds".into()),
+    }
+}
+
+/// `text` as a duration: a number in `unit` seconds, or with a unit of its
+/// own: `ms`, `s`, `m` or `h`. `None` unless finite and positive.
+fn duration(text: &str, unit: f64) -> Option<Result<Duration, String>> {
+    let text = text.trim();
+    // A trailing unit only: "1e3" is a number.
+    let number = text.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = &text[number.len()..];
+    let scale = match suffix {
+        "" => unit,
+        "ms" => 0.001,
+        "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        _ => return None,
+    };
+    let value = number.trim().parse::<f64>().ok()?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    Some(Duration::try_from_secs_f64(value * scale).map_err(|_| "is too large".to_owned()))
+}
+
+fn minutes(text: &str) -> Result<Duration, String> {
+    duration(text, 60.0).unwrap_or_else(|| {
+        Err("needs a positive number of minutes, or a duration such as 90s or 2h".into())
+    })
+}
+
+fn max_minutes(text: &str) -> Result<Duration, String> {
+    minutes(text)
+}
+
+fn stall_after(text: &str) -> Result<Duration, String> {
+    minutes(text)
+}
+
+fn watch_interval(text: &str) -> Result<Duration, String> {
+    duration(text, 1.0)
+        .and_then(Result::ok)
+        .filter(|d| (0.05..=3600.0).contains(&d.as_secs_f64()))
+        .ok_or_else(|| "needs a number of seconds from 0.05 to 3600, such as 0.5 or 250ms".into())
+}
+
+/// Split `claude-code,codex` into IDs. Duplicates are refused because
+/// branch names derive from the harness.
+fn harness_list(list: &str) -> Result<List, String> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in list.split(',').map(str::trim) {
+        if id.is_empty() {
+            return Err(format!("has an empty entry in '{list}'"));
         }
+        if ids.iter().any(|seen| seen == id) {
+            return Err(format!("lists {id} twice"));
+        }
+        ids.push(id.to_owned());
     }
-    text
+    Ok(List(ids))
+}
+
+fn variable_names(list: &str) -> Result<List, String> {
+    let names: Vec<String> = list.split(',').map(|n| n.trim().to_owned()).collect();
+    if names.iter().any(|n| n.is_empty() || n.contains('=')) {
+        return Err("takes variable names, such as ANTHROPIC_API_KEY,GH_TOKEN".into());
+    }
+    Ok(List(names))
+}
+
+fn label(text: &str) -> Result<(String, String), String> {
+    text.split_once('=')
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .ok_or_else(|| "needs KEY=VALUE".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn parse_str(line: &str) -> Result<Command, UsageError> {
-        parse(&split_words(line).unwrap())
+    fn parse_str(line: &str) -> Result<Command, clap::Error> {
+        let mut argv = vec!["by".to_owned()];
+        argv.extend(split_words(line).unwrap());
+        parse_from(argv).map(|cli| cli.command.expect("a command"))
     }
 
     fn err(line: &str) -> String {
-        parse_str(line).unwrap_err().message
+        match parse_str(line) {
+            Ok(command) => panic!("{line}: parsed as {command:?}"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    fn kind(line: &str) -> ErrorKind {
+        parse_str(line).unwrap_err().kind()
+    }
+
+    fn task(line: &str) -> TaskArgs {
+        match parse_str(line).unwrap() {
+            Command::Run { task, .. } => task.into_inner(),
+            Command::Fan { task, .. } => task.into_inner(),
+            Command::Fork { task, .. } => task.into_inner(),
+            Command::Reincarnate { task, .. } => task.into_inner(),
+            Command::Send { task, .. } => task.into_inner(),
+            other => panic!("{other:?} has no task"),
+        }
+    }
+
+    #[test]
+    fn the_command_tree_is_consistent() {
+        command().debug_assert();
     }
 
     #[test]
     fn run_takes_every_task_option() {
-        let command = parse_str(
+        let Command::Run { prompt, task } = parse_str(
             "run 'fix the flaky test' --harness codex --name flaky --base main \
              --check 'cargo test -p core' --budget-usd 2.5 --max-turns 3 --yes \
              --max-minutes 1.5 --isolated --command '/opt/codex/bin/codex --flag'",
         )
-        .unwrap();
+        .unwrap() else {
+            panic!("not run")
+        };
+        assert_eq!(prompt, "fix the flaky test");
         assert_eq!(
-            command,
-            Command::Run {
-                prompt: "fix the flaky test".into(),
-                task: TaskArgs {
-                    harness: Some("codex".into()),
-                    name: Some("flaky".into()),
-                    base: Some("main".into()),
-                    check: Some(vec![
-                        "cargo".into(),
-                        "test".into(),
-                        "-p".into(),
-                        "core".into()
-                    ]),
-                    budget_usd: Some(2.5),
-                    max_turns: Some(3),
-                    max_duration: Some(Duration::from_secs(90)),
-                    stall_after: None,
-                    stall_action: branchyard::StallAction::Notify,
-                    permissions: Permissions::Yes,
-                    isolated: true,
-                    command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
-                    sandbox: None,
-                    substrate: None,
-                    local: false,
-                    delegate: None,
-                    allow_delegation: false,
-                    unapproved_tools: false,
-                    provision: None,
-                    instructions: None,
-                },
+            *task,
+            TaskArgs {
+                harness: Some("codex".into()),
+                name: Some("flaky".into()),
+                base: Some("main".into()),
+                check: Some(vec![
+                    "cargo".into(),
+                    "test".into(),
+                    "-p".into(),
+                    "core".into()
+                ]),
+                budget_usd: Some(2.5),
+                max_turns: Some(3),
+                max_duration: Some(Duration::from_secs(90)),
+                stall_after: None,
+                stall_action: branchyard::StallAction::Notify,
+                permissions: Permissions::Yes,
+                isolated: true,
+                command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
+                sandbox: None,
+                substrate: None,
+                local: false,
+                delegate: None,
+                allow_delegation: false,
+                unapproved_tools: false,
+                provision: None,
+                instructions: None,
             }
         );
     }
 
     #[test]
+    fn short_flags_and_value_formats() {
+        let short = task("run go -n flaky -b main -y --budget-usd $1.25 --max-minutes 90s");
+        assert_eq!(short.name.as_deref(), Some("flaky"));
+        assert_eq!(short.base.as_deref(), Some("main"));
+        assert_eq!(short.permissions, Permissions::Yes);
+        assert_eq!(short.budget_usd, Some(1.25));
+        assert_eq!(short.max_duration, Some(Duration::from_secs(90)));
+        let stall = task("run go --stall-after 2h --stall-action interrupt");
+        assert_eq!(stall.stall_after, Some(Duration::from_secs(7200)));
+        assert_eq!(stall.stall_action, branchyard::StallAction::Interrupt);
+        assert!(err("run go --stall-action interrupt").contains("--stall-after"));
+        assert!(err("run go --stall-after 1 --stall-action later").contains("[possible values"));
+        assert!(err("run go --max-minutes 5d").contains("positive number of minutes"));
+    }
+
+    #[test]
     fn provisioning_flags_repeat_and_parse() {
-        let Command::Run { task, .. } = parse_str(
+        let task = task(
             "run go --isolated --secret ANTHROPIC_API_KEY --secret CODEX_AUTH=@/run/auth.json \
              --secret OPENAI_API_KEY=MY_KEY --mcp 'docs=/usr/bin/docs-mcp --stdio' \
              --auth api-key --model large --effort 80 --telemetry http://127.0.0.1:4317 \
              --instructions rules.md",
-        )
-        .unwrap() else {
-            panic!("not run")
-        };
+        );
         let spec = task.provision.unwrap();
         assert_eq!(spec.secrets.len(), 3);
         assert_eq!(
@@ -2091,32 +2388,34 @@ mod tests {
         assert_eq!(spec.effort, Some(branchyard::Effort::Xhigh));
         assert_eq!(spec.telemetry.unwrap().endpoint(), "http://127.0.0.1:4317");
         assert_eq!(task.instructions.as_deref(), Some("rules.md"));
-        let Command::Send { task, .. } = parse_str("send b go").unwrap() else {
-            panic!("not send")
-        };
-        assert!(task.provision.is_none());
+        assert!(self::task("send b go").provision.is_none());
+        assert!(self::task("send b go --instructions r.md")
+            .provision
+            .is_some());
         for (line, error) in [
             ("run go --mcp docs=relative", "absolute command"),
             ("run go --secret 1BAD", "--secret"),
             ("run go --effort max", "--effort"),
             ("run go --telemetry collector:4317", "--telemetry"),
-            ("run go --model a --model b", "--model given twice"),
+            ("run go --model ' '", "--model"),
         ] {
             assert!(err(line).contains(error), "{line}: {}", err(line));
         }
+        assert_eq!(
+            kind("run go --model a --model b"),
+            ErrorKind::ArgumentConflict
+        );
+        assert!(err("run go --model a --model b").contains("cannot be used multiple times"));
     }
 
     #[test]
     fn substrate_flags_configure_tls_and_the_insecure_escape() {
-        let Command::Run { task, .. } = parse_str(
+        let task = task(
             "run go --provider substrate --substrate-endpoint https://control:443 \
              --substrate-router 'wss://router/{atespace}/{actor}/' --substrate-template t \
              --substrate-key k --substrate-ca ca.pem --substrate-client-cert c.pem \
              --substrate-client-key c.key --substrate-router-ca router-ca.pem",
-        )
-        .unwrap() else {
-            panic!("not run")
-        };
+        );
         let substrate = task.substrate.unwrap();
         assert_eq!(substrate.endpoint, "https://control:443");
         assert_eq!(substrate.ca.as_deref(), Some("ca.pem"));
@@ -2124,35 +2423,31 @@ mod tests {
         assert_eq!(substrate.client_key.as_deref(), Some("c.key"));
         assert_eq!(substrate.router_ca.as_deref(), Some("router-ca.pem"));
         assert!(!substrate.insecure);
-        let Command::Fork { task, .. } = parse_str(
+        let task = self::task(
             "fork b go --provider substrate --substrate-endpoint http://10.0.0.1:8080 \
              --substrate-router 'http://10.0.0.2/{actor}/' --substrate-template t \
              --substrate-key k --substrate-insecure",
-        )
-        .unwrap() else {
-            panic!("not fork")
-        };
+        );
         let substrate = task.substrate.unwrap();
         assert!(substrate.insecure && substrate.ca.is_none());
+        assert!(err("run go --substrate-insecure")
+            .contains("--substrate-insecure needs --provider substrate"));
+        assert!(err("run go --provider local --substrate-ca ca.pem")
+            .contains("--substrate-ca needs --provider substrate"));
+        assert!(err("run go --provider substrate --substrate-endpoint e")
+            .contains("--provider substrate needs --substrate-router"));
         assert_eq!(
-            err("run go --substrate-insecure"),
-            "--substrate-insecure needs --provider substrate"
-        );
-        assert_eq!(
-            err("run go --provider local --substrate-ca ca.pem"),
-            "--substrate-ca needs --provider substrate"
+            kind("run go --substrate-insecure"),
+            ErrorKind::ArgumentConflict
         );
     }
 
     #[test]
     fn provider_flags_select_and_configure_a_sandbox() {
-        let Command::Run { task, .. } = parse_str(
+        let task = task(
             "run go --provider microsandbox --image ghcr.io/x/claude:1 --cpus 2 \
              --memory 4096 --pass-env 'ANTHROPIC_API_KEY, GH_TOKEN'",
-        )
-        .unwrap() else {
-            panic!("not run")
-        };
+        );
         assert_eq!(
             task.sandbox,
             Some(SandboxArgs {
@@ -2163,50 +2458,45 @@ mod tests {
             })
         );
         assert!(!task.local);
-        let Command::Fork { task, .. } = parse_str("fork b go --provider local").unwrap() else {
-            panic!("not fork")
-        };
+        let task = self::task("fork b go --provider local");
         assert!(task.local && task.sandbox.is_none());
-        assert_eq!(
-            err("run go --provider microsandbox"),
-            "--provider microsandbox needs --image"
+        assert!(
+            err("run go --provider microsandbox").contains("--provider microsandbox needs --image")
         );
-        assert_eq!(
-            err("run go --image alpine"),
-            "--image needs --provider microsandbox"
+        assert!(err("run go --image alpine").contains("--image needs --provider microsandbox"));
+        assert!(err("run go --provider local --cpus 2")
+            .contains("--cpus needs --provider microsandbox"));
+        assert!(err("run go --provider local --pass-env A")
+            .contains("--pass-env needs --provider microsandbox or substrate"));
+        let docker = err("run go --provider docker");
+        assert!(
+            docker.contains("[possible values: local, microsandbox, substrate]"),
+            "{docker}"
         );
-        assert_eq!(
-            err("run go --provider local --cpus 2"),
-            "--cpus needs --provider microsandbox"
-        );
-        assert!(err("run go --provider docker").contains("local, microsandbox or substrate"));
         assert!(err("run go --provider microsandbox --image a --cpus 0").contains("--cpus"));
         assert!(err("run go --provider microsandbox --image a --memory 1g").contains("--memory"));
         assert!(err("run go --provider microsandbox --image a --pass-env A=1").contains("names"));
         assert_eq!(
-            err("send b go --provider local"),
-            "unknown option --provider"
+            kind("send b go --provider local"),
+            ErrorKind::UnknownArgument
         );
     }
 
     #[test]
     fn delegate_takes_an_optional_inline_depth() {
-        let depth = |line: &str| match parse_str(line).unwrap() {
-            Command::Run { task, .. } | Command::Send { task, .. } => task.delegate,
-            other => panic!("{other:?}"),
+        assert_eq!(task("run go").delegate, None);
+        assert_eq!(task("run go --delegate").delegate, Some(1));
+        let Command::Run { prompt, task } = parse_str("run --delegate go").unwrap() else {
+            panic!("not run")
         };
-        assert_eq!(depth("run go"), None);
-        assert_eq!(depth("run go --delegate"), Some(1));
-        assert_eq!(
-            depth("run --delegate go"),
-            Some(1),
-            "the prompt is not a depth"
-        );
-        assert_eq!(depth("run go --delegate=3"), Some(3));
-        assert_eq!(depth("send b go --delegate=2"), Some(2));
+        assert_eq!(prompt, "go", "the prompt is not a depth");
+        assert_eq!(task.delegate, Some(1));
+        assert_eq!(self::task("run go --delegate=3").delegate, Some(3));
+        assert_eq!(self::task("send b go --delegate=2").delegate, Some(2));
         assert!(err("run go --delegate=0").contains("positive whole number"));
         assert!(err("run go --delegate=x").contains("positive whole number"));
-        assert!(command_help(spec("run").unwrap()).contains("--delegate[=DEPTH]"));
+        let help = help("run");
+        assert!(help.contains("--delegate[=<DEPTH>]"), "{help}");
     }
 
     #[test]
@@ -2227,6 +2517,20 @@ mod tests {
         assert_eq!(spawn.max_depth, Some(0));
         assert_eq!(spawn.deny, ["Bash", "mcp__*"]);
         assert!(spawn.wait && spawn.json);
+        let Command::Spawn { spawn, .. } = parse_str(
+            "spawn go --parent p --depends-on a,b --after integrated --bind cache:read_only \
+             --bind out:exclusive_write --seat worker",
+        )
+        .unwrap() else {
+            panic!("not spawn")
+        };
+        assert_eq!(spawn.depends_on, ["a", "b"]);
+        assert_eq!(spawn.after, branchyard::After::Integrated);
+        assert_eq!(spawn.bindings.len(), 2);
+        assert_eq!(spawn.seat.as_deref(), Some("worker"));
+        assert!(err("spawn go --after soon").contains("[possible values: settled, integrated]"));
+        assert!(err("spawn go --bind cache").contains("--bind"));
+        assert!(err("spawn go --depends-on a,a").contains("lists a twice"));
         assert_eq!(
             parse_str("inspect").unwrap(),
             Command::Inspect {
@@ -2271,23 +2575,45 @@ mod tests {
                 json: false
             }
         );
-        assert_eq!(err("integrate"), "missing <branch>");
-        assert_eq!(err("inspect a b"), "unexpected argument 'b'");
-        assert!(err("events --cursor x").contains("whole number"));
+        assert_eq!(kind("integrate"), ErrorKind::MissingRequiredArgument);
+        assert!(err("integrate").contains("<BRANCH>"));
+        assert!(err("inspect a b").contains("unexpected argument 'b'"));
+        assert!(err("events --cursor x").contains("invalid digit"));
+        assert!(help("inspect").contains("Usage: by inspect [OPTIONS] [BRANCH]"));
+        assert!(task("run go --delegate --allow-delegation").allow_delegation);
+        assert!(task("send b go --allow-unapproved-tools").unapproved_tools);
+    }
+
+    #[test]
+    fn messages_take_text_and_an_acting_branch() {
         assert_eq!(
-            spec("inspect").unwrap().usage(),
-            "by inspect [<branch>] [options]"
+            parse_str("ask 'which lock?' --as kid --wait 2.5 --json").unwrap(),
+            Command::Ask {
+                as_branch: Some("kid".into()),
+                text: "which lock?".into(),
+                wait_seconds: Some(2.5),
+                json: true
+            }
         );
-        let Command::Run { task, .. } = parse_str("run go --delegate --allow-delegation").unwrap()
-        else {
-            panic!("not run")
-        };
-        assert!(task.allow_delegation);
-        let Command::Send { task, .. } = parse_str("send b go --allow-unapproved-tools").unwrap()
-        else {
-            panic!("not send")
-        };
-        assert!(task.unapproved_tools);
+        assert_eq!(
+            parse_str("answer 7 'the mutex'").unwrap(),
+            Command::Answer {
+                as_branch: None,
+                message_id: 7,
+                text: "the mutex".into(),
+                json: false
+            }
+        );
+        assert_eq!(
+            parse_str("inbox --unread").unwrap(),
+            Command::Inbox {
+                as_branch: None,
+                unread: true,
+                json: false
+            }
+        );
+        assert!(err("answer x hi").contains("<MESSAGE_ID>"));
+        assert!(err("ask hi --wait -1").contains("needs a number of seconds"));
     }
 
     #[test]
@@ -2299,7 +2625,7 @@ mod tests {
             panic!("not send")
         };
         assert!(steer && json);
-        assert_eq!(task, TaskArgs::default());
+        assert_eq!(*task, TaskArgs::default());
         let Command::Send { steer, .. } = parse_str("send b go").unwrap() else {
             panic!("not send")
         };
@@ -2311,10 +2637,12 @@ mod tests {
         assert_eq!(
             parse_str("mcp --root /r --branch b").unwrap(),
             Command::Mcp {
-                args: vec!["--root".into(), "/r".into(), "--branch".into(), "b".into()]
+                root: "/r".into(),
+                branch: "b".into()
             }
         );
-        assert_eq!(err("mcp --root /r"), "--branch is required");
+        assert_eq!(kind("mcp --root /r"), ErrorKind::MissingRequiredArgument);
+        assert!(err("mcp --root /r").contains("--branch <NAME>"));
     }
 
     #[test]
@@ -2326,10 +2654,7 @@ mod tests {
         assert_eq!(prompt, "do it");
         assert_eq!(task.name.as_deref(), Some("x"));
         assert_eq!(task.permissions, Permissions::Ask);
-        let Command::Run { task, .. } = parse_str("run go").unwrap() else {
-            panic!("not run")
-        };
-        assert_eq!(task, TaskArgs::default());
+        assert_eq!(self::task("run go"), TaskArgs::default());
     }
 
     #[test]
@@ -2340,51 +2665,64 @@ mod tests {
         else {
             panic!("not fan")
         };
-        assert_eq!(harnesses, ["claude-code", "codex"]);
+        assert_eq!(*harnesses, ["claude-code", "codex"]);
         assert_eq!(task.harness, None);
         assert_eq!(task.max_turns, Some(2));
-        assert_eq!(err("fan go"), "--harness is required");
-        assert_eq!(
-            err("fan go --harness codex,codex"),
-            "--harness lists codex twice"
-        );
+        assert_eq!(kind("fan go"), ErrorKind::MissingRequiredArgument);
+        assert!(err("fan go").contains("--harness <ID,ID,...>"));
+        assert!(err("fan go --harness codex,codex").contains("lists codex twice"));
         assert!(err("fan go --harness codex,").contains("empty entry"));
     }
 
     #[test]
     fn send_and_fork_take_a_branch_and_a_prompt() {
+        let Command::Send {
+            branch,
+            prompt,
+            task,
+            steer,
+            wait,
+            json,
+        } = parse_str("send flaky 'now add a test' --yes").unwrap()
+        else {
+            panic!("not send")
+        };
         assert_eq!(
-            parse_str("send flaky 'now add a test' --yes").unwrap(),
-            Command::Send {
-                branch: "flaky".into(),
-                prompt: "now add a test".into(),
-                task: TaskArgs {
-                    permissions: Permissions::Yes,
-                    ..TaskArgs::default()
-                },
-                steer: false,
-                wait: false,
-                json: false,
+            (branch.as_str(), prompt.as_str()),
+            ("flaky", "now add a test")
+        );
+        assert_eq!(
+            *task,
+            TaskArgs {
+                permissions: Permissions::Yes,
+                ..TaskArgs::default()
             }
         );
+        assert!(!steer && !wait && !json);
+        let Command::Fork {
+            branch,
+            prompt,
+            fresh_session,
+            task,
+        } = parse_str("fork flaky 'try another way' --fresh-session --name alt").unwrap()
+        else {
+            panic!("not fork")
+        };
         assert_eq!(
-            parse_str("fork flaky 'try another way' --fresh-session --name alt").unwrap(),
-            Command::Fork {
-                branch: "flaky".into(),
-                prompt: "try another way".into(),
-                fresh_session: true,
-                task: TaskArgs {
-                    name: Some("alt".into()),
-                    ..TaskArgs::default()
-                },
+            (branch.as_str(), prompt.as_str()),
+            ("flaky", "try another way")
+        );
+        assert!(fresh_session);
+        assert_eq!(
+            *task,
+            TaskArgs {
+                name: Some("alt".into()),
+                ..TaskArgs::default()
             }
         );
-        assert_eq!(err("send flaky"), "missing <prompt>");
-        assert_eq!(err("fork"), "missing <branch>");
-        assert_eq!(
-            err("send flaky go --harness codex"),
-            "unknown option --harness"
-        );
+        assert!(err("send flaky").contains("<PROMPT>"));
+        assert!(err("fork").contains("<BRANCH>"));
+        assert!(err("send flaky go --harness codex").contains("unexpected argument '--harness'"));
     }
 
     #[test]
@@ -2411,7 +2749,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_str("log --follow b").unwrap(),
+            parse_str("log -f b").unwrap(),
             Command::Log {
                 branch: "b".into(),
                 json: false,
@@ -2422,7 +2760,7 @@ mod tests {
             parse_str("harnesses --json").unwrap(),
             Command::Harnesses { json: true }
         );
-        assert_eq!(err("diff b --json"), "unknown option --json");
+        assert!(err("diff b --json").contains("unexpected argument '--json'"));
     }
 
     #[test]
@@ -2442,125 +2780,125 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_str("rm b").unwrap(),
-            Command::Rm {
-                branch: "b".into(),
-                keep_credentials: false
-            }
-        );
-        assert_eq!(
             parse_str("rm b --keep-credentials").unwrap(),
             Command::Rm {
                 branch: "b".into(),
                 keep_credentials: true
             }
         );
-        assert_eq!(err("merge b --into"), "--into needs a value TARGET");
+        assert!(err("merge b --into").contains("a value is required for '--into <TARGET>'"));
     }
 
     #[test]
     fn help_and_version() {
-        assert_eq!(parse(&[]).unwrap(), Command::Help { topic: None });
-        assert_eq!(parse_str("help").unwrap(), Command::Help { topic: None });
-        assert_eq!(parse_str("--help").unwrap(), Command::Help { topic: None });
+        let cli = |line: &str| parse_from(format!("by {line}").split_whitespace());
+        assert_eq!(parse_from(["by"]).unwrap().command, None);
+        for (line, kind) in [
+            ("help", ErrorKind::DisplayHelp),
+            ("--help", ErrorKind::DisplayHelp),
+            ("-h", ErrorKind::DisplayHelp),
+            ("help merge", ErrorKind::DisplayHelp),
+            ("help graph apply", ErrorKind::DisplayHelp),
+            ("fan -h", ErrorKind::DisplayHelp),
+            ("--version", ErrorKind::DisplayVersion),
+            ("-V", ErrorKind::DisplayVersion),
+        ] {
+            let error = cli(line).unwrap_err();
+            assert_eq!(error.kind(), kind, "{line}");
+            assert_eq!(error.exit_code(), 0, "{line}");
+        }
+        // --help wins over missing arguments, and over anything after it.
         assert_eq!(
-            parse_str("help merge").unwrap(),
-            Command::Help {
-                topic: spec("merge")
-            }
+            cli("run --help --bogus").unwrap_err().kind(),
+            ErrorKind::DisplayHelp
         );
-        // --help wins over otherwise invalid arguments.
-        assert_eq!(
-            parse_str("run --help").unwrap(),
-            Command::Help { topic: spec("run") }
+        assert!(cli("help merge")
+            .unwrap_err()
+            .to_string()
+            .contains("Usage: by merge [OPTIONS] <BRANCH>"));
+        assert!(cli("-V").unwrap_err().to_string().starts_with("by "));
+        assert!(err("help nope").contains("unrecognized subcommand 'nope'"));
+    }
+
+    #[test]
+    fn typos_get_suggestions_and_usage_errors_exit_2() {
+        let error = parse_str("mrege b").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error
+                .to_string()
+                .contains("a similar subcommand exists: 'merge'"),
+            "{error}"
         );
-        assert_eq!(
-            parse_str("fan -h").unwrap(),
-            Command::Help { topic: spec("fan") }
-        );
-        assert_eq!(parse_str("--version").unwrap(), Command::Version);
-        assert_eq!(parse_str("-V").unwrap(), Command::Version);
-        assert_eq!(err("help nope"), "unknown command 'nope'");
+        assert!(err("run go --budget 2").contains("a similar argument exists: '--budget-usd'"));
+        assert!(err("graph shwo").contains("a similar subcommand exists: 'show'"));
     }
 
     #[test]
     fn flag_errors_name_the_command() {
-        let error = parse_str("run go --bogus").unwrap_err();
-        assert_eq!(error.message, "unknown option --bogus");
-        assert_eq!(error.command, Some("run"));
-        assert_eq!(err("nope"), "unknown command 'nope'");
-        assert_eq!(err("run go -x"), "unknown option -x");
-        assert_eq!(
-            err("run go --yes --ask"),
-            "--yes and --ask conflict; pick one"
-        );
-        assert_eq!(err("run go --yes=1"), "--yes takes no value");
-        assert_eq!(err("run go --name a --name b"), "--name given twice");
-        assert_eq!(err("run go --harness"), "--harness needs a value ID");
+        let error = parse_str("run go --bogus").unwrap_err().to_string();
+        assert!(error.contains("unexpected argument '--bogus'"), "{error}");
+        assert!(error.contains("Usage: by run"), "{error}");
+        assert!(err("nope").contains("unrecognized subcommand 'nope'"));
+        assert!(err("run go -x").contains("unexpected argument '-x'"));
+        assert!(err("run go --yes --ask").contains("'--yes' cannot be used with '--ask'"));
+        assert!(err("run go --yes=1").contains("unexpected value '1' for '--yes'"));
+        assert!(err("run go --name a --name b").contains("cannot be used multiple times"));
+        assert!(err("run go --harness").contains("a value is required for '--harness <ID>'"));
         assert!(err("run go --budget-usd -1").contains("positive number"));
         assert!(err("run go --budget-usd NaN").contains("positive number"));
         assert!(err("run go --max-turns 0").contains("positive whole number"));
         assert!(err("run go --max-turns 1.5").contains("positive whole number"));
         assert!(err("run go --max-minutes 0").contains("positive number of minutes"));
         assert!(err("run go --max-minutes 1e300").contains("too large"));
-        assert_eq!(err("run go --command ''"), "--command needs an executable");
-        assert_eq!(err("send b go --isolated"), "unknown option --isolated");
-        assert_eq!(err("run go --check ''"), "--check needs a command");
-        assert_eq!(
-            err("run go --check '\"cargo'"),
-            "--check: unterminated double quote"
+        assert!(err("run go --command ''").contains("needs an executable"));
+        assert!(err("send b go --isolated").contains("unexpected argument '--isolated'"));
+        assert!(err("run go --check ''").contains("needs a command"));
+        assert!(err("run go --check '\"cargo'").contains("unterminated quote"));
+        let spaces = err("run fix the test");
+        assert!(spaces.contains("unexpected argument 'the'"), "{spaces}");
+        assert!(
+            spaces.contains("tip: quote a prompt that contains spaces"),
+            "{spaces}"
         );
-        assert_eq!(
-            err("run fix the test"),
-            "unexpected argument 'the' (quote a prompt that contains spaces)"
-        );
-        assert_eq!(err("ls extra"), "unexpected argument 'extra'");
+        let ls = err("ls extra");
+        assert!(ls.contains("unexpected argument 'extra'") && !ls.contains("quote"));
+        // A checked flag's error names its own command's usage.
+        assert!(err("fork b go --image x").contains("Usage: by fork"));
     }
 
     #[test]
-    fn globals_come_before_the_command_and_fall_back_to_the_environment() {
-        let argv = split_words("--remote http://h:1 --token-file=t --repo app ls --json").unwrap();
-        let (globals, rest) = parse_globals(&argv).unwrap();
-        assert_eq!(
-            globals,
-            Globals {
-                remote: Some("http://h:1".into()),
-                token_file: Some("t".into()),
-                repo: Some("app".into()),
-                ca_file: None,
-            }
-        );
-        assert_eq!(parse(rest).unwrap(), Command::Ls { json: true });
-        // After the command they are the command's options.
-        let argv = split_words("ls --remote x").unwrap();
-        let (globals, rest) = parse_globals(&argv).unwrap();
-        assert_eq!(globals, Globals::default());
-        assert_eq!(parse(rest).unwrap_err().message, "unknown option --remote");
-        let env = |name: &str| match name {
-            "BRANCHYARD_REMOTE" => Some("http://env:2".to_owned()),
-            "BRANCHYARD_REPO" => Some(" ".to_owned()),
-            _ => None,
+    fn globals_go_before_or_after_the_command() {
+        let before = parse_from(
+            split_words("by --remote http://h:1 --token-file=t --repo app ls --json").unwrap(),
+        )
+        .unwrap();
+        let expected = Globals {
+            remote: Some("http://h:1".into()),
+            token_file: Some("t".into()),
+            repo: Some("app".into()),
+            ca_file: None,
         };
-        let merged = Globals {
-            token_file: Some("f".into()),
-            ..Globals::default()
-        }
-        .with_env(env);
-        assert_eq!(merged.remote.as_deref(), Some("http://env:2"));
-        assert_eq!(merged.repo, None, "blank variables are unset");
-        let flag_wins = Globals {
-            remote: Some("http://flag:3".into()),
-            ..Globals::default()
-        }
-        .with_env(env);
-        assert_eq!(flag_wins.remote.as_deref(), Some("http://flag:3"));
+        assert_eq!(before.globals, expected);
+        assert_eq!(before.command, Some(Command::Ls { json: true }));
+        let after = parse_from(
+            split_words("by ls --json --remote http://h:1 --repo app --token-file t").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after, before);
+        let nested = parse_from(split_words("by artifact list --ca-file ca.pem").unwrap()).unwrap();
+        assert_eq!(nested.globals.ca_file.as_deref(), Some("ca.pem"));
         for (line, error) in [
-            ("--remote", "--remote needs a value URL"),
-            ("--remote= ls", "--remote needs a value URL"),
-            ("--repo a --repo b ls", "--repo given twice"),
+            ("by --remote", "a value is required for '--remote <URL>'"),
+            ("by --remote= ls", "needs a value"),
+            ("by --repo a --repo b ls", "cannot be used multiple times"),
+            ("by ls --repo a --repo b", "cannot be used multiple times"),
         ] {
-            let argv = split_words(line).unwrap();
-            assert_eq!(parse_globals(&argv).unwrap_err().message, error, "{line}");
+            let got = parse_from(split_words(line).unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(got.contains(error), "{line}: {got}");
         }
     }
 
@@ -2580,19 +2918,162 @@ mod tests {
                 once: true
             }
         );
-        assert!(err("watch --interval 0").contains("--interval needs"));
         assert_eq!(
-            parse_str("serve --listen 127.0.0.1:0 --help").unwrap(),
-            Command::Serve {
-                args: vec!["--listen".into(), "127.0.0.1:0".into(), "--help".into()]
+            parse_str("watch --interval 250ms").unwrap(),
+            Command::Watch {
+                interval: Duration::from_millis(250),
+                once: false
             }
         );
+        assert!(err("watch --interval 0").contains("from 0.05 to 3600"));
+        assert!(err("watch --interval 2h").contains("from 0.05 to 3600"));
+        let call = |line: &str| {
+            let args: Vec<OsString> = split_words(line)
+                .unwrap()
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            server_call(&args)
+        };
         assert_eq!(
-            parse_str("help serve").unwrap(),
-            Command::Help {
-                topic: spec("serve")
+            call("serve --listen 127.0.0.1:0 --repo a=/r --help"),
+            Some(ServerCall {
+                prefix: 1,
+                program: "by serve",
+                args: vec![
+                    "--listen".into(),
+                    "127.0.0.1:0".into(),
+                    "--repo".into(),
+                    "a=/r".into(),
+                    "--help".into()
+                ],
+                help: false,
+            })
+        );
+        assert_eq!(
+            call("--remote=x --repo app worker --database postgres://h/d"),
+            Some(ServerCall {
+                prefix: 4,
+                program: "by worker",
+                args: vec![
+                    "--worker".into(),
+                    "--database".into(),
+                    "postgres://h/d".into()
+                ],
+                help: false,
+            })
+        );
+        assert_eq!(
+            call("--repo a help worker").map(|c| (c.prefix, c.help, c.program)),
+            Some((2, true, "by worker"))
+        );
+        assert_eq!(call("ls serve"), None);
+        assert_eq!(call("run serve"), None);
+        assert_eq!(call("help merge"), None);
+        assert_eq!(call(""), None);
+    }
+
+    #[test]
+    fn nested_commands_map_to_their_actions() {
+        let graph = |line: &str| match parse_str(line).unwrap() {
+            Command::Graph { json, action } => action.into_args(json),
+            other => panic!("{other:?}"),
+        };
+        let show = graph("graph show root --json");
+        assert_eq!(
+            (show.action.as_str(), show.arg.as_deref(), show.json),
+            ("show", Some("root"), true)
+        );
+        // The Python module puts --json before the action.
+        assert!(graph("graph --json show").json);
+        let apply = graph("graph apply --edits [] --expected-revision 3 --parent p --yes");
+        assert_eq!(apply.action, "apply");
+        assert_eq!(apply.edits.as_deref(), Some("[]"));
+        assert_eq!(apply.expected_revision, Some(3));
+        assert_eq!(apply.parent.as_deref(), Some("p"));
+        assert_eq!(apply.task.permissions, Permissions::Yes);
+        assert_eq!(graph("graph apply - --parent p").arg.as_deref(), Some("-"));
+        assert_eq!(
+            graph("graph resume --ask").task.permissions,
+            Permissions::Ask
+        );
+        assert!(err("graph apply --parent p").contains("<FILE|--edits <JSON>>"));
+        assert!(err("graph apply f --edits []").contains("cannot be used with"));
+        assert!(err("graph apply --edits []").contains("--expected-revision"));
+        assert!(err("graph").contains("Usage: by graph"));
+
+        let rig = |line: &str| match parse_str(line).unwrap() {
+            Command::Rig { json, action } => action.into_args(json),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            rig("rig check team.toml --json"),
+            RigArgs {
+                file: "team.toml".into(),
+                json: true,
+                ..RigArgs::default()
             }
         );
+        let run = rig("rig run team.toml 'build it' -n t --command '/bin/agent -x'");
+        assert_eq!(run.prompt.as_deref(), Some("build it"));
+        assert_eq!(run.name.as_deref(), Some("t"));
+        assert_eq!(run.command, Some(vec!["/bin/agent".into(), "-x".into()]));
+        assert!(err("rig run team.toml").contains("<PROMPT>"));
+        assert!(err("rig run team.toml ' '").contains("needs a prompt"));
+        assert!(err("rig check team.toml extra").contains("unexpected argument 'extra'"));
+        assert!(err("rig check team.toml --name x").contains("unexpected argument '--name'"));
+        assert!(err("rig start team.toml").contains("unrecognized subcommand 'start'"));
+
+        let artifact = |line: &str| match parse_str(line).unwrap() {
+            Command::Artifact {
+                branch,
+                json,
+                action,
+            } => action.into_args(branch, json),
+            other => panic!("{other:?}"),
+        };
+        let publish =
+            artifact("artifact publish out.txt -n report --label k=v --label a=b=c --branch kid");
+        assert_eq!(publish.action, "publish");
+        assert_eq!(publish.arg.as_deref(), Some("out.txt"));
+        assert_eq!(publish.name.as_deref(), Some("report"));
+        assert_eq!(
+            publish.labels,
+            [("k".into(), "v".into()), ("a".into(), "b=c".into())]
+        );
+        assert_eq!(publish.branch.as_deref(), Some("kid"));
+        assert!(artifact("artifact --json list").json);
+        let export = artifact("artifact export 1 2 -o b.tar");
+        assert_eq!(export.ids, ["1", "2"]);
+        assert_eq!(export.out.as_deref(), Some("b.tar"));
+        assert!(err("artifact get 1").contains("--out <PATH>"));
+        assert!(err("artifact share 1").contains("--to <BRANCH>"));
+        assert!(err("artifact export -o b.tar").contains("<IDS>..."));
+        assert!(err("artifact publish").contains("<FILE>"));
+        assert!(err("artifact publish f --label novalue").contains("KEY=VALUE"));
+        assert!(err("artifact list --out x").contains("unexpected argument '--out'"));
+
+        let scratch = |line: &str| match parse_str(line).unwrap() {
+            Command::Scratch {
+                branch,
+                json,
+                action,
+            } => action.into_args(branch, json),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            scratch("scratch share cache --to buddy --branch me --json"),
+            ScratchArgs {
+                action: "share".into(),
+                name: Some("cache".into()),
+                to: Some("buddy".into()),
+                branch: Some("me".into()),
+                json: true,
+            }
+        );
+        assert_eq!(scratch("scratch list").name, None);
+        assert!(err("scratch lock").contains("<NAME>"));
+        assert!(err("scratch share cache").contains("--to <BRANCH>"));
     }
 
     #[test]
@@ -2617,37 +3098,302 @@ mod tests {
         assert_eq!(split(r#""keep \n literal""#), [r"keep \n literal"]);
         assert_eq!(split("''"), [""]);
         assert_eq!(split("a'b'\"c\""), ["abc"]);
+        assert_eq!(split("make test # a comment"), ["make", "test"]);
+        assert_eq!(split("grep a#b"), ["grep", "a#b"]);
         assert!(split("").is_empty());
-        assert_eq!(split_words("a\\").unwrap_err(), "trailing backslash");
-        assert_eq!(split_words("'a").unwrap_err(), "unterminated single quote");
+        assert!(split_words("a\\").is_err());
+        assert!(split_words("'a").is_err());
     }
 
     #[test]
     fn shell_quote_round_trips() {
         assert_eq!(shell_quote("fix-flaky_1.2"), "fix-flaky_1.2");
-        assert_eq!(shell_quote("it's here"), r"'it'\''s here'");
+        assert_eq!(shell_quote("it's here"), "\"it's here\"");
         assert_eq!(shell_quote(""), "''");
-        for word in ["plain", "two words", "it's", "$x", ""] {
-            assert_eq!(split_words(&shell_quote(word)).unwrap(), [word]);
+        for word in [
+            "plain",
+            "two words",
+            "it's",
+            "$x",
+            "",
+            "a\"b'c",
+            "tab\there",
+        ] {
+            assert_eq!(split_words(&shell_quote(word)).unwrap(), [word], "{word}");
+        }
+    }
+
+    fn help(name: &str) -> String {
+        let mut cmd = command();
+        cmd.build();
+        cmd.find_subcommand_mut(name)
+            .unwrap()
+            .render_help()
+            .to_string()
+    }
+
+    #[test]
+    fn help_lists_every_command_in_a_group() {
+        let general = command().render_help().to_string();
+        let mut cmd = command();
+        cmd.build();
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name();
+            assert!(
+                general.contains(&format!("\n  {name} ")),
+                "{name} missing from:\n{general}"
+            );
+            if name != "help" {
+                let order = sub.get_display_order();
+                assert!(
+                    GROUPS.iter().any(|(group, _)| *group == order / 100),
+                    "{name} is in no group ({order})"
+                );
+            }
+        }
+        for (_, title) in GROUPS {
+            assert!(general.contains(&format!("{title}:")), "{title}");
+        }
+        assert!(!general.contains("Other commands"));
+        assert!(general.contains("[env: BRANCHYARD_REMOTE]"), "{general}");
+        let run = help("run");
+        for heading in [
+            "Checks and limits:",
+            "Permissions:",
+            "Launch:",
+            "Microsandbox provider",
+            "Substrate provider",
+            "Delegation:",
+            "Provisioning:",
+            "Global options:",
+            "Examples:",
+        ] {
+            assert!(run.contains(heading), "{heading} missing from:\n{run}");
+        }
+        assert!(help("fork").contains("Usage: by fork [OPTIONS] <BRANCH> <PROMPT>"));
+        assert!(help("ls").contains("Usage: by ls [OPTIONS]"));
+        assert!(help("rm").contains("Usage: by rm [OPTIONS] <BRANCH>"));
+    }
+
+    #[test]
+    fn completions_and_the_man_page_generate() {
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Zsh,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::PowerShell,
+            clap_complete::Shell::Elvish,
+        ] {
+            let mut out = Vec::new();
+            clap_complete::generate(shell, &mut command(), "by", &mut out);
+            let script = String::from_utf8(out).unwrap();
+            for word in [
+                "spawn",
+                "budget-usd",
+                "remote",
+                "completions",
+                "init",
+                "dry-run",
+                "config",
+                "validate",
+            ] {
+                assert!(script.contains(word), "{shell}: {word}");
+            }
+        }
+        let mut page = Vec::new();
+        clap_mangen::Man::new(command()).render(&mut page).unwrap();
+        let page = String::from_utf8(page).unwrap();
+        assert!(page.contains(".TH by") && page.contains("remote"), "{page}");
+        assert!(
+            page.contains("by\\-init") && page.contains("by\\-config"),
+            "{page}"
+        );
+    }
+
+    fn init(line: &str) -> InitArgs {
+        match parse_str(line).unwrap() {
+            Command::Init { init } => init.into_inner(),
+            other => panic!("{line}: parsed as {other:?}"),
         }
     }
 
     #[test]
-    fn help_lists_every_command_and_option() {
-        let general = general_help();
-        for spec in COMMANDS {
-            assert!(general.contains(spec.name), "{}", spec.name);
-            let help = command_help(spec);
-            assert!(help.contains(&spec.usage()));
-            for flag in spec.flags {
-                assert!(help.contains(&format!("--{}", flag.long)));
+    fn init_takes_a_topic_and_one_protocol_step() {
+        use branchyard_setup::Topic;
+        assert_eq!(
+            init("init"),
+            InitArgs {
+                topic: None,
+                step: None,
+                json: false,
+                answers: None,
+                defaults: false,
+                force: false,
+            }
+        );
+        assert_eq!(init("init --json").step, None);
+        assert_eq!(init("init server --defaults").topic, Some(Topic::Server));
+        let next = init("init project --json --next --answers=a.json");
+        assert_eq!(next.topic, Some(Topic::Project));
+        assert_eq!(next.step, Some(InitStep::Next));
+        assert!(next.json);
+        assert_eq!(next.answers.as_deref(), Some("a.json"));
+        let apply = init("init rig --answers - --apply --force --defaults");
+        assert_eq!(apply.step, Some(InitStep::Apply));
+        assert!(apply.force && apply.defaults);
+        assert_eq!(apply.answers.as_deref(), Some("-"));
+        assert_eq!(init("init deploy --dry-run").step, Some(InitStep::DryRun));
+        // Globals still go anywhere.
+        assert_eq!(
+            init("init plugin --remote http://h:1 --next").topic,
+            Some(Topic::Plugin)
+        );
+        // Every topic the engine knows parses, in its order.
+        for topic in Topic::ALL {
+            assert_eq!(init(&format!("init {}", topic.id())).topic, Some(topic));
+        }
+    }
+
+    #[test]
+    fn init_refuses_conflicting_or_incomplete_steps_as_usage_errors() {
+        for (line, kind, text) in [
+            (
+                "init project --next --apply",
+                ErrorKind::ArgumentConflict,
+                "separate steps",
+            ),
+            (
+                "init project --dry-run --apply",
+                ErrorKind::ArgumentConflict,
+                "separate steps",
+            ),
+            (
+                "init project --next --dry-run",
+                ErrorKind::ArgumentConflict,
+                "separate steps",
+            ),
+            (
+                "init --next",
+                ErrorKind::MissingRequiredArgument,
+                "give a topic",
+            ),
+            (
+                "init project --force",
+                ErrorKind::MissingRequiredArgument,
+                "--apply",
+            ),
+            (
+                "init project --force --dry-run",
+                ErrorKind::ArgumentConflict,
+                "'--force' cannot be used with '--dry-run'",
+            ),
+            (
+                "init project --answers a.json",
+                ErrorKind::MissingRequiredArgument,
+                "--next",
+            ),
+            (
+                "init nope --next",
+                ErrorKind::ValueValidation,
+                "unknown topic 'nope'",
+            ),
+            (
+                "init project extra",
+                ErrorKind::UnknownArgument,
+                "unexpected argument",
+            ),
+            (
+                "init project --bogus",
+                ErrorKind::UnknownArgument,
+                "--bogus",
+            ),
+            (
+                "init project --json --json",
+                ErrorKind::ArgumentConflict,
+                "cannot be used multiple times",
+            ),
+            (
+                "init project --answers",
+                ErrorKind::InvalidValue,
+                "a value is required",
+            ),
+            (
+                "init project --json",
+                ErrorKind::ArgumentConflict,
+                "give --next, --dry-run or --apply",
+            ),
+            (
+                "init --json --apply=yes",
+                ErrorKind::TooManyValues,
+                "--apply",
+            ),
+        ] {
+            let error = parse_str(line).unwrap_err();
+            assert_eq!(error.kind(), kind, "{line}: {error}");
+            assert_eq!(error.exit_code(), 2, "{line}");
+            let text_of = error.to_string();
+            assert!(text_of.contains(text), "{line}: {text_of}");
+            // clap shows the usage line with every error but a bad value.
+            if !matches!(kind, ErrorKind::ValueValidation | ErrorKind::InvalidValue) {
+                assert!(text_of.contains("Usage: by init"), "{line}: {text_of}");
             }
         }
-        assert_eq!(
-            spec("fork").unwrap().usage(),
-            "by fork <branch> <prompt> [options]"
+        let help = help("init");
+        for word in [
+            "[TOPIC]",
+            "--next",
+            "--dry-run",
+            "--apply",
+            "--force",
+            "--answers <FILE|->",
+            "Examples:",
+        ] {
+            assert!(help.contains(word), "{word} missing from:\n{help}");
+        }
+        assert!(
+            help.contains("[possible values: project, server, rig, deploy, plugin]"),
+            "{help}"
         );
-        assert_eq!(spec("ls").unwrap().usage(), "by ls [options]");
-        assert_eq!(spec("rm").unwrap().usage(), "by rm <branch> [options]");
+    }
+
+    #[test]
+    fn config_has_four_actions() {
+        let config = |line: &str| match parse_str(line).unwrap() {
+            Command::Config { json, action } => (json, action),
+            other => panic!("{line}: parsed as {other:?}"),
+        };
+        assert_eq!(config("config show"), (false, ConfigAction::Show));
+        assert_eq!(config("config --json show"), (true, ConfigAction::Show));
+        assert_eq!(config("config path --json"), (true, ConfigAction::Path));
+        assert_eq!(
+            config("config validate"),
+            (false, ConfigAction::Validate { file: None })
+        );
+        assert_eq!(
+            config("config validate b.toml --json"),
+            (
+                true,
+                ConfigAction::Validate {
+                    file: Some("b.toml".into())
+                }
+            )
+        );
+        assert_eq!(config("config schema"), (false, ConfigAction::Schema));
+        for (line, kind) in [
+            (
+                "config",
+                ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+            ),
+            ("config shwo", ErrorKind::InvalidSubcommand),
+            ("config show extra", ErrorKind::UnknownArgument),
+            ("config validate a b", ErrorKind::UnknownArgument),
+            ("config schema --bogus", ErrorKind::UnknownArgument),
+        ] {
+            let error = parse_str(line).unwrap_err();
+            assert_eq!(error.kind(), kind, "{line}: {error}");
+            assert_eq!(error.exit_code(), 2, "{line}");
+        }
+        assert!(err("config shwo").contains("a similar subcommand exists: 'show'"));
+        assert!(help("config").contains("BRANCHYARD_USER_CONFIG"));
     }
 }

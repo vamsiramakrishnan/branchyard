@@ -14,6 +14,7 @@ members = [
     "crates/branchyard-runtime",
     "crates/branchyard-sandbox",
     "crates/branchyard-server",
+    "crates/branchyard-setup",
     "crates/branchyard-substrate",
     "crates/branchyard-workspace",
 ]

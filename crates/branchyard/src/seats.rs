@@ -16,6 +16,7 @@ use crate::delegation::ChildBudget;
 use crate::{harness, Envelope, Error, Provisioning};
 
 /// A child a rig's branch may spawn by name.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Seat {
@@ -49,6 +50,10 @@ pub struct Seat {
     /// ones until they are removed. At least 1.
     #[serde(default = "one")]
     pub instances: u32,
+    /// Scratch areas a child in this seat is bound to; see
+    /// `docs/graph.md`. A spawn may add others, never change these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<crate::graph::Binding>,
 }
 
 fn one() -> u32 {
@@ -60,6 +65,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// The seat a branch occupies in a rig and the seats it may fill.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Seats {
@@ -278,6 +284,7 @@ mod tests {
             delegates_to: below.iter().map(|s| (*s).to_owned()).collect(),
             escalates_to: Vec::new(),
             instances: 1,
+            bindings: Vec::new(),
         }
     }
 

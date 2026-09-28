@@ -16,6 +16,9 @@ path = "src/main.rs"
 microsandbox = ["branchyard/microsandbox"]
 # `by serve --database postgres://...`; see docs/server.md.
 postgres = ["branchyard-server/postgres"]
+# Derive schemars::JsonSchema on the rig spec's types and check that
+# schema/rig.json is what they generate; see docs/rigs.md.
+schema = ["dep:schemars"]
 
 [dependencies]
 branchyard = { path = "../branchyard" }
@@ -24,10 +27,28 @@ branchyard-server = { path = "../branchyard-server" }
 branchyard-mcp = { path = "../branchyard-mcp" }
 serde = "1"
 serde_json = "1"
-# `by rig` spec files. Already in Cargo.lock (through proc-macro-crate);
-# only its parser is used.
-toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+# `by rig` spec files: parsed, then deserialized with its serde support
+# (which keeps each value's span, so errors cite line and column).
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "serde"] }
+# The command line; `env` reads BRANCHYARD_REMOTE and the other globals.
+clap = { version = "4.6", features = ["derive", "env"] }
+# `by completions` and `by man`.
+clap_complete = "4.6"
+clap_mangen = "0.3.3"
+# `--check` and `--command` splitting. Already in Cargo.lock.
+shlex = "2"
+# `by init`'s interactive wizard, and the setup engine it drives.
+cliclack = "0.5.6"
+branchyard-setup = { version = "0.0.1", path = "../branchyard-setup" }
+dirs = "7"
+branchyard-harness = { version = "0.0.1", path = "../branchyard-harness" }
+schemars = { version = "1", optional = true }
+# `by watch`'s dashboard. On crossterm 0.29, already in Cargo.lock; ratatui
+# 0.30 needs Rust 1.88.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
+tempfile = "3.27.0"

@@ -199,7 +199,16 @@ fn dropping_a_session_kills_its_process_group() {
     let report = session.run_turn("BACKGROUND", &mut allow, WAIT).unwrap();
     let pid = background_pid(&report.text);
     drop(session);
-    assert!(!alive(pid), "the descendant is still running");
+    // Dropping signals the whole group; a grandchild dies asynchronously,
+    // so on a loaded machine give the kill a moment to land.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while alive(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the descendant is still running"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 #[test]

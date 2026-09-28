@@ -28,6 +28,17 @@ jobs:
       - run: cargo fetch --locked
       - run: cargo test --workspace --locked --offline
       - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+      - name: Verify schema/contract.json is generated and fresh
+        run: cargo test -p branchyard-client --locked --offline --features schema
+      - run: cargo clippy -p branchyard-client --all-targets --locked --offline --features schema -- -D warnings
+      - name: Verify schema/server.config.json is generated and fresh
+        run: cargo test -p branchyard-server --locked --offline --features schema
+      - run: cargo clippy -p branchyard-server --all-targets --locked --offline --features schema -- -D warnings
+      - name: Verify schema/rig.json is generated and fresh
+        run: cargo test -p branchyard-cli --locked --offline --features schema rig
+      - run: cargo clippy -p branchyard-cli --all-targets --locked --offline --features schema -- -D warnings
+      - run: python tests/test_distribution.py
+      - run: python tests/test_schema_validation.py
   postgres:
     # The PostgreSQL store: the shared backend conformance suite, the engine
     # and the server against a real database. The job above stays offline

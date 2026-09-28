@@ -3,7 +3,8 @@
 //! A rig spec is a TOML file naming a root seat and the seats below it,
 //! joined by `delegates_to` edges that form a tree. [`parse`] reads it
 //! strictly: an unknown field, a field Branchyard cannot honor, or a value
-//! of the wrong type is an error naming the field and its line. [`load`]
+//! of the wrong type is an error naming the field, its line and column.
+//! [`validate`] checks and plans a spec held in memory. [`load`]
 //! also reads the startup files the spec names. [`plan`] is pure: it
 //! checks the tree, the harnesses, the budgets and the isolation secrets
 //! need, and lowers the spec to the root branch's task options, its
@@ -22,8 +23,9 @@ use branchyard::{
     ChildBudget, Effort, Envelope, McpServerSpec, Provisioning, Seat, Seats, SecretSource,
     Telemetry,
 };
-use serde::Serialize;
-use toml_edit::{Document, Item, TableLike};
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
+use toml_edit::{Item, TableLike};
 
 /// The only spec version this build reads.
 pub const VERSION: i64 = 1;
@@ -38,14 +40,25 @@ const EPSILON_USD: f64 = 1e-9;
 /// digit; at most this long.
 const NAME_MAX: usize = 40;
 
-/// Why a spec was refused: the field, its line when known, and the reason.
+/// Why a spec was refused: the field, where it is when known, and the
+/// reason.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RigError {
-    /// The field's dotted path, such as `seats.lead.budget.max_usd`; empty
-    /// for the file as a whole.
+    /// The field's dotted path, such as `seats.lead.budget.max_usd` or
+    /// `startup.files[0]`; empty for the file as a whole.
     pub field: String,
+    /// 1-based.
     pub line: Option<usize>,
+    /// 1-based, in characters; known whenever `line` is.
+    pub column: Option<usize>,
     pub message: String,
+}
+
+/// A 1-based line and column in the spec's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pos {
+    line: usize,
+    column: usize,
 }
 
 impl fmt::Display for RigError {
@@ -60,10 +73,11 @@ impl fmt::Display for RigError {
     }
 }
 
-fn error(field: impl Into<String>, line: Option<usize>, message: impl Into<String>) -> RigError {
+fn error(field: impl Into<String>, at: Option<Pos>, message: impl Into<String>) -> RigError {
     RigError {
         field: field.into(),
-        line,
+        line: at.map(|at| at.line),
+        column: at.map(|at| at.column),
         message: message.into(),
     }
 }
@@ -75,7 +89,7 @@ pub struct RigSpec {
     pub description: Option<String>,
     /// The root seat's name.
     pub root: String,
-    pub root_line: Option<usize>,
+    root_at: Option<Pos>,
     /// Startup files for every seat.
     pub startup: Vec<StartupFile>,
     pub pods: BTreeMap<String, Pod>,
@@ -103,7 +117,7 @@ pub struct StartupFile {
     /// missing optional file.
     pub content: Option<String>,
     field: String,
-    line: Option<usize>,
+    at: Option<Pos>,
 }
 
 /// One seat as declared.
@@ -128,10 +142,13 @@ pub struct SeatSpec {
     /// `escalate` to.
     pub escalates_to: Vec<String>,
     pub instances: u32,
+    /// Scratch areas a child in this seat is bound to, as
+    /// `NAME:read_only` or `NAME:exclusive_write`.
+    pub bindings: Vec<branchyard::Binding>,
     pub startup: Vec<StartupFile>,
-    /// Lines of the seat's table and fields, by dotted field name
+    /// Where the seat's table and fields are, by dotted field name
     /// relative to the seat (`""` for the seat itself).
-    lines: BTreeMap<String, usize>,
+    lines: BTreeMap<String, Pos>,
 }
 
 impl SeatSpec {
@@ -142,12 +159,12 @@ impl SeatSpec {
         }
     }
 
-    fn line(&self, name: &str) -> Option<usize> {
+    fn at(&self, name: &str) -> Option<Pos> {
         self.lines.get(name).or_else(|| self.lines.get("")).copied()
     }
 
     fn error(&self, name: &str, message: impl Into<String>) -> RigError {
-        error(self.field(name), self.line(name), message)
+        error(self.field(name), self.at(name), message)
     }
 }
 
@@ -167,6 +184,7 @@ pub struct PolicySpec {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Fallback {
     Allow,
@@ -288,13 +306,46 @@ const REFUSED_SEAT: &[(&str, &str)] = &[
     ("prompt", "the root's prompt is the one by rig run is given; a child's is the one its parent spawns it with"),
 ];
 
-/// Parse a rig spec. Errors name the field and line.
+/// Startup-table fields refused with a reason.
+const REFUSED_STARTUP: &[(&str, &str)] = &[(
+    "actions",
+    "startup actions are not supported: the prompt you give is the first message, and drivers \
+     refuse slash commands",
+)];
+
+/// Startup-file fields refused with a reason.
+const REFUSED_FILE: &[(&str, &str)] = &[(
+    "delivery_hint",
+    "every startup file is delivered as standing instructions; skills and first-message text \
+     are not supported",
+)];
+
+/// Parse a rig spec. The file's shape (known fields, their types) is
+/// checked by deserializing it into the `Raw*` types below; the values
+/// are then checked in code. Either way, an error names the field, its
+/// line and its column.
 pub fn parse(text: &str) -> Result<RigSpec, RigError> {
-    let document = Document::parse(text).map_err(|e| {
-        let line = e.span().map(|span| line_of(text, span.start));
-        error("", line, format!("not valid TOML: {}", e.message().trim()))
+    let document = toml_edit::Document::parse(text).map_err(|e| {
+        let at = e.span().map(|span| pos_of(text, span.start));
+        error("", at, format!("not valid TOML: {}", e.message().trim()))
     })?;
-    Parser { text }.rig(document.as_table())
+    let fields = Fields::index(text, &document);
+    let raw = RawRig::deserialize(toml_edit::de::Deserializer::from(document))
+        .map_err(|e| fields.refusal(&e))?;
+    raw.check(&fields)
+}
+
+/// Check the spec `text` as `by rig check` does, without reading any
+/// file: parse it and lower it with [`plan`]. Startup files are not read,
+/// so the plan lists each of them in `skipped_files` and a missing
+/// required one is not an error here; `by rig check` (which uses
+/// [`load`]) catches that. For callers that hold a spec in memory, such
+/// as `by init rig` validating the file it is about to write.
+// Not yet called outside the tests; `by init` backs its rig validator
+// with it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn validate(text: &str) -> Result<RigPlan, RigError> {
+    plan(&parse(text)?)
 }
 
 /// Read and parse the spec at `path`, then read each startup file it
@@ -324,7 +375,7 @@ pub fn load(path: &Path) -> Result<RigSpec, RigError> {
             Err(e) => {
                 return Err(error(
                     file.field.clone(),
-                    file.line,
+                    file.at,
                     format!("could not read {}: {e}", full.display()),
                 ))
             }
@@ -333,104 +384,494 @@ pub fn load(path: &Path) -> Result<RigSpec, RigError> {
     Ok(spec)
 }
 
-fn line_of(text: &str, offset: usize) -> usize {
-    text[..offset.min(text.len())].matches('\n').count() + 1
+/// The 1-based line and column (in characters) of byte `offset`.
+fn pos_of(text: &str, offset: usize) -> Pos {
+    let before = &text[..floor_char_boundary(text, offset)];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    Pos {
+        line: before.matches('\n').count() + 1,
+        column: before[line_start..].chars().count() + 1,
+    }
 }
 
-struct Parser<'a> {
-    text: &'a str,
+fn floor_char_boundary(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
-/// A table's entries: key, item, line.
-type Entries<'t> = Vec<(String, &'t Item, Option<usize>)>;
+/// Where every key and array element of the document is, by dotted field
+/// name (`seats.lead.budget.max_usd`, `startup.files[0]`): the positions
+/// errors cite, and what a deserialization error's byte span is mapped
+/// back to.
+struct Fields {
+    entries: Vec<FieldSpan>,
+}
 
-impl Parser<'_> {
-    fn line(&self, span: Option<Range<usize>>) -> Option<usize> {
-        span.map(|span| line_of(self.text, span.start))
+struct FieldSpan {
+    path: String,
+    key: Option<Range<usize>>,
+    value: Option<Range<usize>>,
+    at: Option<Pos>,
+}
+
+impl Fields {
+    fn index(text: &str, document: &toml_edit::Document<&str>) -> Fields {
+        let mut fields = Fields {
+            entries: Vec::new(),
+        };
+        fields.table(text, document.as_table(), "");
+        fields
     }
 
-    /// The entries of `table`, refusing unknown and refused keys.
-    fn entries<'t>(
-        &self,
-        table: &'t dyn TableLike,
-        path: &str,
-        known: &[&str],
-        refused: &[(&str, &str)],
-    ) -> Result<Entries<'t>, RigError> {
-        let mut out = Vec::new();
+    fn table(&mut self, text: &str, table: &dyn TableLike, prefix: &str) {
         for (key, item) in table.iter() {
-            let line = table
-                .get_key_value(key)
-                .and_then(|(k, _)| self.line(k.span()))
-                .or_else(|| self.line(item.span()));
-            let field = join(path, key);
-            if let Some((_, why)) = refused.iter().find(|(name, _)| *name == key) {
-                return Err(error(field, line, format!("not supported: {why}")));
-            }
-            if !known.contains(&key) {
-                return Err(error(
-                    field,
-                    line,
-                    format!("unknown field; expected one of: {}", known.join(", ")),
-                ));
-            }
-            out.push((key.to_owned(), item, line));
-        }
-        Ok(out)
-    }
-
-    fn table<'t>(
-        &self,
-        item: &'t Item,
-        field: &str,
-        line: Option<usize>,
-    ) -> Result<&'t dyn TableLike, RigError> {
-        item.as_table_like()
-            .ok_or_else(|| error(field, line, format!("must be a table, not {}", kind(item))))
-    }
-
-    fn rig(&self, top: &toml_edit::Table) -> Result<RigSpec, RigError> {
-        let entries = self.entries(
-            top,
-            "",
-            &[
-                "version",
-                "name",
-                "description",
-                "root",
-                "startup",
-                "pods",
-                "seats",
-            ],
-            REFUSED_RIG,
-        )?;
-        let mut version = None;
-        let mut name = None;
-        let mut description = None;
-        let mut root = None;
-        let mut startup = Vec::new();
-        let mut pods = BTreeMap::new();
-        let mut seats = None;
-        for (key, item, line) in entries {
-            match key.as_str() {
-                "version" => version = Some((integer(item, &key, line)?, line)),
-                "name" => name = Some(named(string(item, &key, line)?, &key, line)?),
-                "description" => description = Some(string(item, &key, line)?),
-                "root" => root = Some((string(item, &key, line)?, line)),
-                "startup" => startup = self.startup(item, &key, line)?,
-                "pods" => {
-                    let table = self.table(item, &key, line)?;
-                    for (pod, item, line) in self.entries_any(table) {
-                        let field = join("pods", &pod);
-                        named(pod.clone(), &field, line)?;
-                        pods.insert(pod, self.pod(item, &field, line)?);
+            let path = join(prefix, key);
+            let key_span = table.get_key_value(key).and_then(|(k, _)| k.span());
+            let value_span = match item {
+                Item::Value(value) => value.span(),
+                _ => None,
+            };
+            self.push(text, path.clone(), key_span, value_span);
+            match item {
+                Item::Table(table) => self.table(text, table, &path),
+                Item::Value(value) => self.value(text, value, &path),
+                Item::ArrayOfTables(array) => {
+                    for (index, table) in array.iter().enumerate() {
+                        let path = format!("{path}[{index}]");
+                        self.push(text, path.clone(), None, table.span());
+                        self.table(text, table, &path);
                     }
                 }
-                "seats" => seats = Some((item, line)),
-                _ => unreachable!("checked against the known fields"),
+                Item::None => {}
             }
         }
-        match version {
+    }
+
+    fn value(&mut self, text: &str, value: &toml_edit::Value, path: &str) {
+        match value {
+            toml_edit::Value::Array(array) => {
+                for (index, value) in array.iter().enumerate() {
+                    let path = format!("{path}[{index}]");
+                    self.push(text, path.clone(), None, value.span());
+                    self.value(text, value, &path);
+                }
+            }
+            toml_edit::Value::InlineTable(table) => self.table(text, table, path),
+            _ => {}
+        }
+    }
+
+    fn push(
+        &mut self,
+        text: &str,
+        path: String,
+        key: Option<Range<usize>>,
+        value: Option<Range<usize>>,
+    ) {
+        let at = key
+            .as_ref()
+            .or(value.as_ref())
+            .map(|span| pos_of(text, span.start));
+        self.entries.push(FieldSpan {
+            path,
+            key,
+            value,
+            at,
+        });
+    }
+
+    /// Where field `path` is written, if it is.
+    fn at(&self, path: &str) -> Option<Pos> {
+        self.entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .and_then(|entry| entry.at)
+    }
+
+    /// Every position below `prefix`, by name relative to it.
+    fn below(&self, prefix: &str) -> BTreeMap<String, Pos> {
+        let dotted = format!("{prefix}.");
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let name = entry.path.strip_prefix(&dotted)?;
+                Some((name.to_owned(), entry.at?))
+            })
+            .collect()
+    }
+
+    /// The field whose key is at byte `offset`, or else the innermost
+    /// field whose value covers it.
+    fn covering(&self, offset: usize) -> Option<&FieldSpan> {
+        let covers = |span: &Option<Range<usize>>| {
+            span.as_ref()
+                .is_some_and(|span| span.contains(&offset) || span.start == offset)
+        };
+        let innermost = |key: bool| {
+            self.entries
+                .iter()
+                .filter(|entry| covers(if key { &entry.key } else { &entry.value }))
+                .max_by_key(|entry| entry.path.len())
+        };
+        innermost(true).or_else(|| innermost(false))
+    }
+
+    /// A deserialization error, as the field it is about and why.
+    fn refusal(&self, e: &toml_edit::de::Error) -> RigError {
+        let found = e.span().and_then(|span| self.covering(span.start));
+        let field = found.map(|entry| entry.path.clone()).unwrap_or_default();
+        let at = found.and_then(|entry| entry.at);
+        let message = describe(&field, e.message());
+        error(field, at, message)
+    }
+}
+
+/// The fields refused with a reason where `field` is.
+fn refused_at(field: &str) -> &'static [(&'static str, &'static str)] {
+    let parent = field.rsplit_once('.').map_or("", |(parent, _)| parent);
+    let seat = parent
+        .strip_prefix("seats.")
+        .is_some_and(|name| !name.contains(['.', '[']));
+    if parent.is_empty() {
+        REFUSED_RIG
+    } else if seat {
+        REFUSED_SEAT
+    } else if parent == "startup" || parent.ends_with(".startup") {
+        REFUSED_STARTUP
+    } else if parent.ends_with(']') && parent.contains("startup.files[") {
+        REFUSED_FILE
+    } else {
+        &[]
+    }
+}
+
+/// A deserializer's message in this module's words: an unknown field
+/// that is refused with a reason gives the reason, and a wrong type says
+/// what the field must be.
+fn describe(field: &str, message: &str) -> String {
+    if let Some(rest) = message.strip_prefix("unknown field `") {
+        let (key, rest) = rest.split_once('`').unwrap_or((rest, ""));
+        let refused = refused_at(field);
+        if let Some((_, why)) = refused.iter().find(|(name, _)| *name == key) {
+            return format!("not supported: {why}");
+        }
+        let expected: Vec<&str> = rest
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|name| !refused.iter().any(|(refused, _)| refused == name))
+            .collect();
+        return match expected.is_empty() {
+            true => "unknown field".to_owned(),
+            false => format!("unknown field; expected one of: {}", expected.join(", ")),
+        };
+    }
+    if let Some((got, expected)) = message
+        .strip_prefix("invalid type: ")
+        .and_then(|rest| rest.rsplit_once(", expected "))
+    {
+        let expected = match expected {
+            "a sequence" => "an array",
+            "a map" => "a table",
+            "a boolean" => "true or false",
+            "i64" | "u32" | "u64" => "a whole number",
+            "f64" => "a number",
+            other if other.starts_with("struct ") => "a table",
+            other => other,
+        };
+        let got = match got {
+            "sequence" => "array".to_owned(),
+            "map" => "table".to_owned(),
+            other => other.replacen("floating point", "float", 1),
+        };
+        return format!("must be {expected}, not {got}");
+    }
+    message.to_owned()
+}
+
+// The file's shape. Every table denies fields it does not declare; the
+// values are checked by `check` below, so the messages (and the lines
+// they cite) are this module's own. With the `schema` feature these types
+// also generate `schema/rig.json`; see `schema`.
+
+/// A Branchyard rig spec: a root seat and the seats below it, joined by
+/// `delegates_to` edges that form a tree. See docs/rigs.md.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Branchyard rig spec"))]
+#[serde(deny_unknown_fields)]
+struct RawRig {
+    /// The spec format's version; this build reads 1.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(required, schema_with = "schema::version")
+    )]
+    version: Option<i64>,
+    /// The rig's name, and the root branch's unless `by rig run --name`
+    /// gives one.
+    #[cfg_attr(feature = "schema", schemars(required, schema_with = "schema::name"))]
+    name: Option<String>,
+    description: Option<String>,
+    /// The name of the root seat, one of `seats`.
+    #[cfg_attr(feature = "schema", schemars(required, schema_with = "schema::name"))]
+    root: Option<String>,
+    /// Startup files for every seat.
+    startup: Option<RawStartup>,
+    /// Groups of seats sharing startup files, by name.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema::named::<RawPod>"))]
+    pods: Ordered<RawPod>,
+    /// The seats, by name: the root and those below it.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(required, schema_with = "schema::named::<RawSeat>")
+    )]
+    seats: Option<Ordered<RawSeat>>,
+}
+
+/// A group of seats sharing startup files.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "Pod"))]
+#[serde(deny_unknown_fields)]
+struct RawPod {
+    description: Option<String>,
+    /// Startup files for the pod's seats.
+    startup: Option<RawStartup>,
+}
+
+/// Files delivered to a harness as standing instructions, never written
+/// into a worktree.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "Startup"))]
+#[serde(deny_unknown_fields)]
+struct RawStartup {
+    /// Paths relative to the spec's directory, without `..`; a bare path
+    /// is required.
+    files: Option<Vec<RawFile>>,
+}
+
+/// A startup file: a path (required), or `{ path, required }`.
+enum RawFile {
+    Path(String),
+    Table(RawFileTable),
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "StartupFileTable"))]
+#[serde(deny_unknown_fields)]
+struct RawFileTable {
+    #[cfg_attr(feature = "schema", schemars(required, with = "String"))]
+    path: Option<String>,
+    /// A missing optional file is skipped; a missing required one (the
+    /// default) is an error.
+    required: Option<bool>,
+}
+
+/// One seat.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "Seat"))]
+#[serde(deny_unknown_fields)]
+struct RawSeat {
+    /// The seat's role, given to its harness and to the parent's.
+    description: Option<String>,
+    /// The pod whose startup files this seat also gets.
+    pod: Option<String>,
+    /// A harness or profile ID; a child defaults to its parent's, the
+    /// root to claude-code.
+    harness: Option<String>,
+    model: Option<String>,
+    /// low, medium, high, xhigh, or a level from 0 to 100.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema::effort"))]
+    effort: Option<RawEffort>,
+    /// A credential name the server resolves.
+    auth: Option<String>,
+    /// Names of secrets to write into the branch's private home; needs
+    /// isolated = true here or above.
+    secrets: Option<Vec<String>>,
+    /// Stdio MCP servers, as name = "command line".
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "schema::ordered::<String>")
+    )]
+    mcp: Option<Ordered<String>>,
+    /// `off`, or an http:// or https:// OTLP collector endpoint.
+    telemetry: Option<String>,
+    /// Run in a home private to the branch; inherited by the seats below.
+    isolated: Option<bool>,
+    budget: Option<RawBudget>,
+    /// The check a branch must pass to integrate: a command line, or its
+    /// words.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema::check"))]
+    check: Option<RawCheck>,
+    policy: Option<RawPolicy>,
+    /// The seats this seat may spawn.
+    delegates_to: Option<Vec<String>>,
+    /// Ancestor seats, besides its parent, this seat may escalate to.
+    escalates_to: Option<Vec<String>>,
+    /// How many of this seat may run at once; 1 by default.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    instances: Option<i64>,
+    /// Scratch areas, as NAME:read_only or NAME:exclusive_write.
+    bindings: Option<Vec<String>>,
+    /// Startup files for this seat.
+    startup: Option<RawStartup>,
+    /// Only on_demand: the root starts alone and fills seats as it spawns.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<schema::Start>"))]
+    start: Option<String>,
+    /// Only resume_if_possible: a send resumes the branch's session.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<schema::Restore>"))]
+    restore_policy: Option<String>,
+}
+
+/// Limits for one branch in this seat.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "Budget"))]
+#[serde(deny_unknown_fields)]
+struct RawBudget {
+    #[cfg_attr(feature = "schema", schemars(range(min = 0)))]
+    max_usd: Option<f64>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    max_turns: Option<i64>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 0)))]
+    max_minutes: Option<f64>,
+}
+
+/// How permission requests are answered. A child seat may set only deny.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "Policy"))]
+#[serde(deny_unknown_fields)]
+struct RawPolicy {
+    /// Requests no rule decides: allow, deny (the default) or ask.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<Fallback>"))]
+    default: Option<String>,
+    /// Tool names, or prefixes ending in *, denied outright.
+    deny: Option<Vec<String>>,
+    /// Tool names, or prefixes ending in *, allowed after deny.
+    allow: Option<Vec<String>>,
+    /// Allow the harness's own `by` delegation commands.
+    delegation_commands: Option<bool>,
+}
+
+/// `effort`: a name or a level.
+enum RawEffort {
+    Name(String),
+    Level(i64),
+}
+
+/// `check`: a command line, or its words.
+enum RawCheck {
+    Line(String),
+    Words(Vec<String>),
+}
+
+/// A table whose keys are names, in the order the file writes them.
+struct Ordered<T>(Vec<(String, T)>);
+
+impl<T> Default for Ordered<T> {
+    fn default() -> Self {
+        Ordered(Vec::new())
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Ordered<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Tables<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for Tables<T> {
+            type Value = Ordered<T>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a table")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Ordered<T>, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(entry) = map.next_entry()? {
+                    entries.push(entry);
+                }
+                Ok(Ordered(entries))
+            }
+        }
+        deserializer.deserialize_map(Tables(std::marker::PhantomData))
+    }
+}
+
+impl<'de> Deserialize<'de> for RawFile {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct File;
+        impl<'de> Visitor<'de> for File {
+            type Value = RawFile;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a path or {path, required}")
+            }
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<RawFile, E> {
+                Ok(RawFile::Path(text.to_owned()))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<RawFile, A::Error> {
+                RawFileTable::deserialize(de::value::MapAccessDeserializer::new(map))
+                    .map(RawFile::Table)
+            }
+        }
+        deserializer.deserialize_any(File)
+    }
+}
+
+impl<'de> Deserialize<'de> for RawEffort {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Level;
+        impl Visitor<'_> for Level {
+            type Value = RawEffort;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("low, medium, high, xhigh, or 0-100")
+            }
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<RawEffort, E> {
+                Ok(RawEffort::Name(text.to_owned()))
+            }
+            fn visit_i64<E: de::Error>(self, level: i64) -> Result<RawEffort, E> {
+                Ok(RawEffort::Level(level))
+            }
+        }
+        deserializer.deserialize_any(Level)
+    }
+}
+
+impl<'de> Deserialize<'de> for RawCheck {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Command;
+        impl<'de> Visitor<'de> for Command {
+            type Value = RawCheck;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a command line or an array of its words")
+            }
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<RawCheck, E> {
+                Ok(RawCheck::Line(text.to_owned()))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<RawCheck, A::Error> {
+                let mut words = Vec::new();
+                while let Some(word) = seq.next_element()? {
+                    words.push(word);
+                }
+                Ok(RawCheck::Words(words))
+            }
+        }
+        deserializer.deserialize_any(Command)
+    }
+}
+
+impl RawRig {
+    /// The values: versions, names, paths, limits, and what each field
+    /// may hold beyond its type.
+    fn check(self, fields: &Fields) -> Result<RigSpec, RigError> {
+        match self.version {
             None => {
                 return Err(error(
                     "version",
@@ -438,382 +879,255 @@ impl Parser<'_> {
                     format!("required; write version = {VERSION}"),
                 ))
             }
-            Some((v, _)) if v == VERSION => {}
-            Some((v, line)) => {
+            Some(VERSION) => {}
+            Some(v) => {
                 return Err(error(
                     "version",
-                    line,
+                    fields.at("version"),
                     format!("this by reads version {VERSION}, not {v}"),
                 ))
             }
         }
-        let name = name.ok_or_else(|| error("name", None, "required: the rig's name"))?;
-        let (root, root_line) =
-            root.ok_or_else(|| error("root", None, "required: the name of the root seat"))?;
-        let (seats_item, seats_line) =
-            seats.ok_or_else(|| error("seats", None, "required: at least the root seat"))?;
-        let table = self.table(seats_item, "seats", seats_line)?;
+        let name = self
+            .name
+            .ok_or_else(|| error("name", None, "required: the rig's name"))?;
+        let name = named(name, "name", fields.at("name"))?;
+        let root = self
+            .root
+            .ok_or_else(|| error("root", None, "required: the name of the root seat"))?;
+        let startup = startup(self.startup, "startup", fields)?;
+        let mut pods = BTreeMap::new();
+        for (pod, raw) in self.pods.0 {
+            let field = join("pods", &pod);
+            named(pod.clone(), &field, fields.at(&field))?;
+            let startup = startup_at(raw.startup, &field, fields)?;
+            pods.insert(
+                pod,
+                Pod {
+                    description: raw.description,
+                    startup,
+                },
+            );
+        }
+        let raw_seats = self
+            .seats
+            .ok_or_else(|| error("seats", None, "required: at least the root seat"))?;
         let mut seats = Vec::new();
-        for (seat, item, line) in self.entries_any(table) {
+        for (seat, raw) in raw_seats.0 {
             let field = join("seats", &seat);
-            named(seat.clone(), &field, line)?;
-            seats.push(self.seat(&seat, item, &field, line)?);
+            named(seat.clone(), &field, fields.at(&field))?;
+            seats.push(raw.check(seat, &field, fields)?);
         }
         Ok(RigSpec {
             name,
-            description,
+            description: self.description,
             root,
-            root_line,
+            root_at: fields.at("root"),
             startup,
             pods,
             seats,
         })
     }
+}
 
-    /// Entries whose keys are names, not fields.
-    fn entries_any<'t>(&self, table: &'t dyn TableLike) -> Entries<'t> {
-        table
-            .iter()
-            .map(|(key, item)| {
-                let line = table
-                    .get_key_value(key)
-                    .and_then(|(k, _)| self.line(k.span()))
-                    .or_else(|| self.line(item.span()));
-                (key.to_owned(), item, line)
-            })
-            .collect()
-    }
+/// The startup files of the table at `field` (`startup` below it).
+fn startup_at(
+    raw: Option<RawStartup>,
+    field: &str,
+    fields: &Fields,
+) -> Result<Vec<StartupFile>, RigError> {
+    startup(raw, &join(field, "startup"), fields)
+}
 
-    fn pod(&self, item: &Item, field: &str, line: Option<usize>) -> Result<Pod, RigError> {
-        let table = self.table(item, field, line)?;
-        let mut pod = Pod::default();
-        for (key, item, line) in self.entries(table, field, &["description", "startup"], &[])? {
-            let path = join(field, &key);
-            match key.as_str() {
-                "description" => pod.description = Some(string(item, &path, line)?),
-                _ => pod.startup = self.startup(item, &path, line)?,
+fn startup(
+    raw: Option<RawStartup>,
+    field: &str,
+    fields: &Fields,
+) -> Result<Vec<StartupFile>, RigError> {
+    let files = raw.and_then(|raw| raw.files).unwrap_or_default();
+    let mut out = Vec::new();
+    for (index, file) in files.into_iter().enumerate() {
+        let entry = format!("{field}.files[{index}]");
+        let at = fields.at(&entry);
+        let (path, required) = match file {
+            RawFile::Path(path) => (path, true),
+            RawFile::Table(table) => {
+                let path = table
+                    .path
+                    .ok_or_else(|| error(&entry, at, "needs a path"))?;
+                (path, table.required.unwrap_or(true))
             }
-        }
-        Ok(pod)
+        };
+        safe_path(&path, &entry, at)?;
+        out.push(StartupFile {
+            path,
+            required,
+            content: None,
+            field: entry,
+            at,
+        });
     }
+    Ok(out)
+}
 
-    fn startup(
-        &self,
-        item: &Item,
-        field: &str,
-        line: Option<usize>,
-    ) -> Result<Vec<StartupFile>, RigError> {
-        let table = self.table(item, field, line)?;
-        let refused = [(
-            "actions",
-            "startup actions are not supported: the prompt you give is the first message, and \
-             drivers refuse slash commands",
-        )];
-        let mut files = Vec::new();
-        for (key, item, line) in self.entries(table, field, &["files"], &refused)? {
-            let path = join(field, &key);
-            let Some(array) = item.as_array() else {
-                return Err(error(
-                    &path,
-                    line,
-                    format!("must be an array of paths, not {}", kind(item)),
-                ));
-            };
-            for (index, value) in array.iter().enumerate() {
-                let entry = format!("{path}[{index}]");
-                let line = self.line(value.span()).or(line);
-                let (file, required) = match value {
-                    toml_edit::Value::String(s) => (s.value().clone(), true),
-                    toml_edit::Value::InlineTable(t) => {
-                        let mut file = None;
-                        let mut required = true;
-                        for (key, item, line) in
-                            self.entries(t, &entry, &["path", "required"], &[
-                                ("delivery_hint", "every startup file is delivered as standing instructions; skills and first-message text are not supported"),
-                            ])?
-                        {
-                            let at = join(&entry, &key);
-                            match key.as_str() {
-                                "path" => file = Some(string(item, &at, line)?),
-                                _ => required = boolean(item, &at, line)?,
-                            }
-                        }
-                        let file = file.ok_or_else(|| error(&entry, line, "needs a path"))?;
-                        (file, required)
-                    }
-                    other => {
-                        return Err(error(
-                            &entry,
-                            line,
-                            format!(
-                                "must be a path or {{path, required}}, not {}",
-                                other.type_name()
-                            ),
-                        ))
-                    }
-                };
-                safe_path(&file, &entry, line)?;
-                files.push(StartupFile {
-                    path: file,
-                    required,
-                    content: None,
-                    field: entry,
-                    line,
-                });
-            }
+impl RawSeat {
+    fn check(self, name: String, field: &str, fields: &Fields) -> Result<SeatSpec, RigError> {
+        let mut lines = fields.below(field);
+        if let Some(at) = fields.at(field) {
+            lines.insert(String::new(), at);
         }
-        Ok(files)
-    }
-
-    fn seat(
-        &self,
-        name: &str,
-        item: &Item,
-        field: &str,
-        line: Option<usize>,
-    ) -> Result<SeatSpec, RigError> {
-        let table = self.table(item, field, line)?;
         let mut seat = SeatSpec {
-            name: name.to_owned(),
+            name,
             instances: 1,
+            lines,
             ..SeatSpec::default()
         };
-        if let Some(line) = self.line(item.span()).or(line) {
-            seat.lines.insert(String::new(), line);
-        }
-        let known = [
-            "description",
-            "pod",
-            "harness",
-            "model",
-            "effort",
-            "auth",
-            "secrets",
-            "mcp",
-            "telemetry",
-            "isolated",
-            "budget",
-            "check",
-            "policy",
-            "delegates_to",
-            "escalates_to",
-            "instances",
-            "startup",
-            "start",
-            "restore_policy",
-        ];
-        for (key, item, line) in self.entries(table, field, &known, REFUSED_SEAT)? {
-            let path = join(field, &key);
-            if let Some(line) = line {
-                seat.lines.insert(key.clone(), line);
+        let fail = |name: &str, message: String| {
+            error(join(field, name), fields.at(&join(field, name)), message)
+        };
+        seat.description = self.description;
+        seat.pod = self.pod;
+        seat.harness = nonempty(self.harness).map_err(|m| fail("harness", m))?;
+        seat.model = nonempty(self.model).map_err(|m| fail("model", m))?;
+        seat.auth = nonempty(self.auth).map_err(|m| fail("auth", m))?;
+        seat.effort = match self.effort {
+            None => None,
+            Some(RawEffort::Name(text)) => {
+                Some(Effort::parse(&text).map_err(|e| fail("effort", e))?)
             }
-            match key.as_str() {
-                "description" => seat.description = Some(string(item, &path, line)?),
-                "pod" => seat.pod = Some(string(item, &path, line)?),
-                "harness" => seat.harness = Some(nonempty(item, &path, line)?),
-                "model" => seat.model = Some(nonempty(item, &path, line)?),
-                "effort" => {
-                    seat.effort = Some(match (item.as_str(), item.as_integer()) {
-                        (Some(text), _) => {
-                            Effort::parse(text).map_err(|e| error(&path, line, e))?
-                        }
-                        (_, Some(level)) if (0..=100).contains(&level) => Effort::from_level(level),
-                        _ => {
-                            return Err(error(
-                                &path,
-                                line,
-                                "must be low, medium, high, xhigh, or 0-100",
-                            ))
-                        }
-                    })
+            Some(RawEffort::Level(level)) if (0..=100).contains(&level) => {
+                Some(Effort::from_level(level))
+            }
+            Some(RawEffort::Level(_)) => {
+                return Err(fail(
+                    "effort",
+                    "must be low, medium, high, xhigh, or 0-100".into(),
+                ))
+            }
+        };
+        for secret in self.secrets.unwrap_or_default() {
+            let parsed = SecretSource::parse(&secret).map_err(|e| fail("secrets", e))?;
+            if parsed.from.is_some() {
+                return Err(fail(
+                    "secrets",
+                    format!(
+                        "{secret}: a rig names secrets only; where each comes from is your \
+                         environment's (locally) or the server operator's"
+                    ),
+                ));
+            }
+            seat.secrets.push(secret);
+        }
+        for (server, command) in self.mcp.unwrap_or_default().0 {
+            let spec = McpServerSpec::parse(&format!("{server}={command}"))
+                .and_then(|spec| spec.check().map(|()| spec))
+                .map_err(|e| fail(&format!("mcp.{server}"), e))?;
+            seat.mcp.push(spec);
+        }
+        if let Some(text) = self.telemetry {
+            seat.telemetry = Some(Telemetry::parse(&text).map_err(|e| fail("telemetry", e))?);
+        }
+        seat.isolated = self.isolated.unwrap_or(false);
+        if let Some(budget) = self.budget {
+            let positive = |value: Option<f64>, name: &str| match value {
+                Some(value) if !(value.is_finite() && value > 0.0) => Err(fail(
+                    name,
+                    format!("must be a positive number, not {value}"),
+                )),
+                other => Ok(other),
+            };
+            seat.budget.max_usd = positive(budget.max_usd, "budget.max_usd")?;
+            seat.budget.max_minutes = positive(budget.max_minutes, "budget.max_minutes")?;
+            seat.budget.max_turns = budget
+                .max_turns
+                .map(|n| from_one(n).ok_or_else(|| fail("budget.max_turns", from_one_message())))
+                .transpose()?;
+        }
+        if let Some(check) = self.check {
+            let argv = match check {
+                RawCheck::Line(text) => {
+                    crate::args::split_words(&text).map_err(|e| fail("check", e))?
                 }
-                "auth" => seat.auth = Some(nonempty(item, &path, line)?),
-                "secrets" => {
-                    for secret in strings(item, &path, line)? {
-                        let parsed =
-                            SecretSource::parse(&secret).map_err(|e| error(&path, line, e))?;
-                        if parsed.from.is_some() {
-                            return Err(error(
-                                &path,
-                                line,
-                                format!(
-                                    "{secret}: a rig names secrets only; where each comes from \
-                                     is your environment's (locally) or the server operator's"
-                                ),
-                            ));
-                        }
-                        seat.secrets.push(secret);
-                    }
+                RawCheck::Words(words) => words,
+            };
+            if argv.is_empty() || argv[0].is_empty() {
+                return Err(fail("check", "needs a command".into()));
+            }
+            seat.check = Some(argv);
+        }
+        if let Some(policy) = self.policy {
+            seat.policy.default = match policy.default.as_deref() {
+                None => None,
+                Some("allow") => Some(Fallback::Allow),
+                Some("deny") => Some(Fallback::Deny),
+                Some("ask") => Some(Fallback::Ask),
+                Some(other) => {
+                    return Err(fail(
+                        "policy.default",
+                        format!(
+                            "must be allow, deny or ask, not {other}; Branchyard answers every \
+                             request and never bypasses permissions"
+                        ),
+                    ))
                 }
-                "mcp" => {
-                    let servers = self.table(item, &path, line)?;
-                    for (server, item, line) in self.entries_any(servers) {
-                        let at = join(&path, &server);
-                        let command = string(item, &at, line)?;
-                        let spec = McpServerSpec::parse(&format!("{server}={command}"))
-                            .and_then(|spec| spec.check().map(|()| spec))
-                            .map_err(|e| error(&at, line, e))?;
-                        seat.mcp.push(spec);
-                    }
-                }
-                "telemetry" => {
-                    let text = string(item, &path, line)?;
-                    seat.telemetry =
-                        Some(Telemetry::parse(&text).map_err(|e| error(&path, line, e))?);
-                }
-                "isolated" => seat.isolated = boolean(item, &path, line)?,
-                "budget" => seat.budget = self.budget(item, &path, line, &mut seat.lines)?,
-                "check" => {
-                    let argv = match item.as_str() {
-                        Some(text) => {
-                            crate::args::split_words(text).map_err(|e| error(&path, line, e))?
-                        }
-                        None => strings(item, &path, line)?,
-                    };
-                    if argv.is_empty() || argv[0].is_empty() {
-                        return Err(error(&path, line, "needs a command"));
-                    }
-                    seat.check = Some(argv);
-                }
-                "policy" => seat.policy = self.policy(item, &path, line, &mut seat.lines)?,
-                "delegates_to" => {
-                    seat.delegates_to = strings(item, &path, line)?;
-                    let mut seen = BTreeSet::new();
-                    for target in &seat.delegates_to {
-                        if !seen.insert(target) {
-                            return Err(error(&path, line, format!("{target} is listed twice")));
-                        }
-                    }
-                }
-                "escalates_to" => seat.escalates_to = strings(item, &path, line)?,
-                "instances" => {
-                    let n = integer(item, &path, line)?;
-                    seat.instances = u32::try_from(n)
-                        .ok()
-                        .filter(|n| *n > 0)
-                        .ok_or_else(|| error(&path, line, "must be a whole number from 1"))?;
-                }
-                "startup" => seat.startup = self.startup(item, &path, line)?,
-                "start" => match string(item, &path, line)?.as_str() {
-                    "on_demand" => {}
-                    "eager" => {
-                        return Err(error(
-                            &path,
-                            line,
-                            "eager seats are not supported: the root starts alone and fills \
-                             seats with by spawn --seat; use on_demand",
-                        ))
-                    }
-                    other => {
-                        return Err(error(
-                            &path,
-                            line,
-                            format!("must be on_demand, not {other}"),
-                        ))
-                    }
-                },
-                "restore_policy" => match string(item, &path, line)?.as_str() {
-                    "resume_if_possible" => {}
-                    other @ ("relaunch_fresh" | "checkpoint_only") => {
-                        return Err(error(
-                            &path,
-                            line,
-                            format!(
-                                "{other} is not supported: a send resumes the branch's session, \
-                                 and fails rather than start a fresh one"
-                            ),
-                        ))
-                    }
-                    other => {
-                        return Err(error(
-                            &path,
-                            line,
-                            format!("must be resume_if_possible, not {other}"),
-                        ))
-                    }
-                },
-                _ => unreachable!("checked against the known fields"),
+            };
+            seat.policy.deny = tools(policy.deny).map_err(|m| fail("policy.deny", m))?;
+            seat.policy.allow = tools(policy.allow).map_err(|m| fail("policy.allow", m))?;
+            seat.policy.delegation_commands = policy.delegation_commands.unwrap_or(false);
+        }
+        seat.delegates_to = self.delegates_to.unwrap_or_default();
+        let mut seen = BTreeSet::new();
+        for target in &seat.delegates_to {
+            if !seen.insert(target) {
+                return Err(fail("delegates_to", format!("{target} is listed twice")));
+            }
+        }
+        seat.escalates_to = self.escalates_to.unwrap_or_default();
+        if let Some(n) = self.instances {
+            seat.instances = from_one(n).ok_or_else(|| fail("instances", from_one_message()))?;
+        }
+        for text in self.bindings.unwrap_or_default() {
+            let binding = branchyard::Binding::parse(&text).map_err(|e| fail("bindings", e))?;
+            if seat.bindings.iter().any(|b| b.scratch == binding.scratch) {
+                return Err(fail(
+                    "bindings",
+                    format!("scratch area {} is bound twice", binding.scratch),
+                ));
+            }
+            seat.bindings.push(binding);
+        }
+        seat.startup = startup_at(self.startup, field, fields)?;
+        match self.start.as_deref() {
+            None | Some("on_demand") => {}
+            Some("eager") => {
+                return Err(fail(
+                    "start",
+                    "eager seats are not supported: the root starts alone and fills seats with \
+                     by spawn --seat; use on_demand"
+                        .into(),
+                ))
+            }
+            Some(other) => return Err(fail("start", format!("must be on_demand, not {other}"))),
+        }
+        match self.restore_policy.as_deref() {
+            None | Some("resume_if_possible") => {}
+            Some(other @ ("relaunch_fresh" | "checkpoint_only")) => {
+                return Err(fail(
+                    "restore_policy",
+                    format!(
+                        "{other} is not supported: a send resumes the branch's session, and \
+                         fails rather than start a fresh one"
+                    ),
+                ))
+            }
+            Some(other) => {
+                return Err(fail(
+                    "restore_policy",
+                    format!("must be resume_if_possible, not {other}"),
+                ))
             }
         }
         Ok(seat)
-    }
-
-    fn budget(
-        &self,
-        item: &Item,
-        field: &str,
-        line: Option<usize>,
-        lines: &mut BTreeMap<String, usize>,
-    ) -> Result<ChildBudget, RigError> {
-        let table = self.table(item, field, line)?;
-        let mut budget = ChildBudget::default();
-        for (key, item, line) in
-            self.entries(table, field, &["max_usd", "max_turns", "max_minutes"], &[])?
-        {
-            let path = join(field, &key);
-            if let Some(line) = line {
-                lines.insert(format!("budget.{key}"), line);
-            }
-            match key.as_str() {
-                "max_usd" => budget.max_usd = Some(positive(item, &path, line)?),
-                "max_minutes" => budget.max_minutes = Some(positive(item, &path, line)?),
-                _ => {
-                    let n = integer(item, &path, line)?;
-                    budget.max_turns = Some(
-                        u32::try_from(n)
-                            .ok()
-                            .filter(|n| *n > 0)
-                            .ok_or_else(|| error(&path, line, "must be a whole number from 1"))?,
-                    );
-                }
-            }
-        }
-        Ok(budget)
-    }
-
-    fn policy(
-        &self,
-        item: &Item,
-        field: &str,
-        line: Option<usize>,
-        lines: &mut BTreeMap<String, usize>,
-    ) -> Result<PolicySpec, RigError> {
-        let table = self.table(item, field, line)?;
-        let mut policy = PolicySpec::default();
-        for (key, item, line) in self.entries(
-            table,
-            field,
-            &["default", "deny", "allow", "delegation_commands"],
-            &[],
-        )? {
-            let path = join(field, &key);
-            if let Some(line) = line {
-                lines.insert(format!("policy.{key}"), line);
-            }
-            match key.as_str() {
-                "default" => {
-                    policy.default = Some(match string(item, &path, line)?.as_str() {
-                        "allow" => Fallback::Allow,
-                        "deny" => Fallback::Deny,
-                        "ask" => Fallback::Ask,
-                        other => {
-                            return Err(error(
-                                &path,
-                                line,
-                                format!(
-                                    "must be allow, deny or ask, not {other}; Branchyard answers \
-                                     every request and never bypasses permissions"
-                                ),
-                            ))
-                        }
-                    })
-                }
-                "deny" => policy.deny = tools(item, &path, line)?,
-                "allow" => policy.allow = tools(item, &path, line)?,
-                _ => policy.delegation_commands = boolean(item, &path, line)?,
-            }
-        }
-        Ok(policy)
     }
 }
 
@@ -824,91 +1138,29 @@ fn join(path: &str, key: &str) -> String {
     }
 }
 
-fn kind(item: &Item) -> &'static str {
-    item.type_name()
-}
-
-fn string(item: &Item, field: &str, line: Option<usize>) -> Result<String, RigError> {
-    item.as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| error(field, line, format!("must be a string, not {}", kind(item))))
-}
-
-fn nonempty(item: &Item, field: &str, line: Option<usize>) -> Result<String, RigError> {
-    let text = string(item, field, line)?;
-    match text.trim().is_empty() {
-        true => Err(error(field, line, "must not be empty")),
-        false => Ok(text),
+fn nonempty(text: Option<String>) -> Result<Option<String>, String> {
+    match text {
+        Some(text) if text.trim().is_empty() => Err("must not be empty".into()),
+        other => Ok(other),
     }
 }
 
-fn boolean(item: &Item, field: &str, line: Option<usize>) -> Result<bool, RigError> {
-    item.as_bool().ok_or_else(|| {
-        error(
-            field,
-            line,
-            format!("must be true or false, not {}", kind(item)),
-        )
-    })
+/// A whole number from 1, as a `u32`.
+fn from_one(n: i64) -> Option<u32> {
+    u32::try_from(n).ok().filter(|n| *n > 0)
 }
 
-fn integer(item: &Item, field: &str, line: Option<usize>) -> Result<i64, RigError> {
-    item.as_integer().ok_or_else(|| {
-        error(
-            field,
-            line,
-            format!("must be a whole number, not {}", kind(item)),
-        )
-    })
-}
-
-fn positive(item: &Item, field: &str, line: Option<usize>) -> Result<f64, RigError> {
-    let value = item
-        .as_float()
-        .or_else(|| item.as_integer().map(|i| i as f64))
-        .ok_or_else(|| error(field, line, format!("must be a number, not {}", kind(item))))?;
-    match value.is_finite() && value > 0.0 {
-        true => Ok(value),
-        false => Err(error(
-            field,
-            line,
-            format!("must be a positive number, not {value}"),
-        )),
-    }
-}
-
-fn strings(item: &Item, field: &str, line: Option<usize>) -> Result<Vec<String>, RigError> {
-    let array = item.as_array().ok_or_else(|| {
-        error(
-            field,
-            line,
-            format!("must be an array of strings, not {}", kind(item)),
-        )
-    })?;
-    array
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            value.as_str().map(str::to_owned).ok_or_else(|| {
-                error(
-                    format!("{field}[{index}]"),
-                    line,
-                    format!("must be a string, not {}", value.type_name()),
-                )
-            })
-        })
-        .collect()
+fn from_one_message() -> String {
+    "must be a whole number from 1".into()
 }
 
 /// Tool patterns: exact names, or a prefix with a trailing `*`.
-fn tools(item: &Item, field: &str, line: Option<usize>) -> Result<Vec<String>, RigError> {
-    let tools = strings(item, field, line)?;
+fn tools(tools: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let tools = tools.unwrap_or_default();
     for tool in &tools {
         if tool.trim().is_empty() || tool[..tool.len().saturating_sub(1)].contains('*') {
-            return Err(error(
-                field,
-                line,
-                format!("{tool:?} is not a tool name or a prefix ending in *"),
+            return Err(format!(
+                "{tool:?} is not a tool name or a prefix ending in *"
             ));
         }
     }
@@ -917,7 +1169,7 @@ fn tools(item: &Item, field: &str, line: Option<usize>) -> Result<Vec<String>, R
 
 /// A name usable as a branch name and a seat: lowercase letters, digits
 /// and hyphens.
-fn named(name: String, field: &str, line: Option<usize>) -> Result<String, RigError> {
+fn named(name: String, field: &str, at: Option<Pos>) -> Result<String, RigError> {
     let valid = !name.is_empty()
         && name.len() <= NAME_MAX
         && name
@@ -929,7 +1181,7 @@ fn named(name: String, field: &str, line: Option<usize>) -> Result<String, RigEr
         true => Ok(name),
         false => Err(error(
             field,
-            line,
+            at,
             format!(
                 "{name:?} is not a usable name: lowercase letters, digits and inner hyphens, at \
                  most {NAME_MAX} characters"
@@ -939,7 +1191,7 @@ fn named(name: String, field: &str, line: Option<usize>) -> Result<String, RigEr
 }
 
 /// A startup file's path: relative, inside the spec's directory.
-fn safe_path(path: &str, field: &str, line: Option<usize>) -> Result<(), RigError> {
+fn safe_path(path: &str, field: &str, at: Option<Pos>) -> Result<(), RigError> {
     let parsed = Path::new(path);
     let escapes = parsed
         .components()
@@ -947,10 +1199,157 @@ fn safe_path(path: &str, field: &str, line: Option<usize>) -> Result<(), RigErro
     match path.is_empty() || escapes {
         true => Err(error(
             field,
-            line,
+            at,
             format!("{path:?} must be a relative path inside the spec's directory, without .."),
         )),
         false => Ok(()),
+    }
+}
+
+/// `schema/rig.json`, generated from the `Raw*` types above.
+#[cfg(feature = "schema")]
+pub mod schema {
+    use std::borrow::Cow;
+
+    use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
+
+    use super::{RawFile, RawFileTable, NAME_MAX, VERSION};
+
+    /// A name: lowercase letters, digits and inner hyphens.
+    const NAME_PATTERN: &str = "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$";
+
+    /// The JSON Schema document, pretty-printed with a trailing newline,
+    /// matching `schema/rig.json` byte for byte. Only the freshness test
+    /// calls it; `by` is a binary with no command that prints it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn rig_json() -> String {
+        let schema = schemars::schema_for!(super::RawRig);
+        let mut value = serde_json::to_value(&schema).expect("a JSON Schema document serializes");
+        without_null(&mut value);
+        let mut text =
+            serde_json::to_string_pretty(&value).expect("a JSON Schema document serializes");
+        text.push('\n');
+        text
+    }
+
+    /// TOML has no null: an optional field is one that may be left out,
+    /// so drop the `null` alternatives and defaults schemars adds for
+    /// `Option<T>`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn without_null(value: &mut serde_json::Value) {
+        use serde_json::Value;
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::Array(types)) = map.get_mut("type") {
+                    types.retain(|t| t != "null");
+                    if types.len() == 1 {
+                        let only = types.remove(0);
+                        map.insert("type".into(), only);
+                    }
+                }
+                if let Some(Value::Array(branches)) = map.get_mut("anyOf") {
+                    branches.retain(|b| b.get("type").is_none_or(|t| t != "null"));
+                    if branches.len() == 1 {
+                        let only = branches.remove(0);
+                        map.remove("anyOf");
+                        if let Value::Object(only) = only {
+                            for (key, value) in only {
+                                map.entry(key).or_insert(value);
+                            }
+                        }
+                    }
+                }
+                if let Some(Value::Array(values)) = map.get_mut("enum") {
+                    values.retain(|v| !v.is_null());
+                }
+                if map.get("default").is_some_and(Value::is_null) {
+                    map.remove("default");
+                }
+                map.values_mut().for_each(without_null);
+            }
+            Value::Array(values) => values.iter_mut().for_each(without_null),
+            _ => {}
+        }
+    }
+
+    pub(super) fn version(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "The spec format's version; this build reads 1.",
+            "type": "integer",
+            "const": VERSION,
+        })
+    }
+
+    pub(super) fn name(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": NAME_PATTERN,
+            "maxLength": NAME_MAX,
+        })
+    }
+
+    pub(super) fn named<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "propertyNames": { "pattern": NAME_PATTERN, "maxLength": NAME_MAX },
+            "additionalProperties": generator.subschema_for::<T>(),
+        })
+    }
+
+    pub(super) fn ordered<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "additionalProperties": generator.subschema_for::<T>(),
+        })
+    }
+
+    pub(super) fn effort(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "anyOf": [
+                { "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
+                { "type": "integer", "minimum": 0, "maximum": 100 },
+            ],
+        })
+    }
+
+    pub(super) fn check(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "anyOf": [
+                { "type": "string", "minLength": 1 },
+                { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+            ],
+        })
+    }
+
+    /// `start`'s one accepted value.
+    #[allow(dead_code)]
+    #[derive(JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub(super) enum Start {
+        OnDemand,
+    }
+
+    /// `restore_policy`'s one accepted value.
+    #[allow(dead_code)]
+    #[derive(JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub(super) enum Restore {
+        ResumeIfPossible,
+    }
+
+    impl JsonSchema for RawFile {
+        fn schema_name() -> Cow<'static, str> {
+            "StartupFile".into()
+        }
+
+        fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+            json_schema!({
+                "anyOf": [
+                    { "type": "string" },
+                    generator.subschema_for::<RawFileTable>(),
+                ],
+            })
+        }
     }
 }
 
@@ -959,13 +1358,9 @@ fn safe_path(path: &str, field: &str, line: Option<usize>) -> Result<(), RigErro
 pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
     let by_name: BTreeMap<&str, &SeatSpec> =
         spec.seats.iter().map(|s| (s.name.as_str(), s)).collect();
-    let root = *by_name.get(spec.root.as_str()).ok_or_else(|| {
-        error(
-            "root",
-            spec.root_line,
-            format!("{} is not a seat", spec.root),
-        )
-    })?;
+    let root = *by_name
+        .get(spec.root.as_str())
+        .ok_or_else(|| error("root", spec.root_at, format!("{} is not a seat", spec.root)))?;
 
     // The edges must form a tree below the root.
     let mut parent: BTreeMap<&str, &str> = BTreeMap::new();
@@ -1190,6 +1585,7 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
                 delegates_to: seat.delegates_to.clone(),
                 escalates_to: seat.escalates_to.clone(),
                 instances: seat.instances,
+                bindings: seat.bindings.clone(),
             },
         );
     }
@@ -1698,6 +2094,83 @@ escalates_to = ["lead"]
     }
 
     #[test]
+    fn errors_cite_the_innermost_field_its_line_and_column() {
+        let base = "version = 1\nname = \"t\"\nroot = \"a\"\n[seats.a]\n";
+        let at = |extra: &str, field: &str, needle: &str| {
+            let error = refused(&format!("{base}{extra}"), field, needle);
+            (error.line.unwrap(), error.column.unwrap())
+        };
+        assert_eq!(
+            at(
+                "budget = { usd = 1 }",
+                "seats.a.budget.usd",
+                "expected one of: max_usd"
+            ),
+            (5, 12)
+        );
+        assert_eq!(
+            at(
+                "delegates_to = [\"b\", 3]",
+                "seats.a.delegates_to[1]",
+                "must be a string, not integer `3`"
+            ),
+            (5, 22)
+        );
+        assert_eq!(
+            at(
+                "startup = { files = [{ path = \"x\", delivery_hint = \"skill\" }] }",
+                "seats.a.startup.files[0].delivery_hint",
+                "not supported: every startup file"
+            ),
+            (5, 36)
+        );
+        assert_eq!(
+            at(
+                "[seats.a.budget]\nmax_turns = 1.5",
+                "seats.a.budget.max_turns",
+                "must be a whole number, not float `1.5`"
+            ),
+            (6, 1)
+        );
+        at(
+            "isolated = \"yes\"",
+            "seats.a.isolated",
+            "must be true or false",
+        );
+        at("secrets = \"X\"", "seats.a.secrets", "must be an array");
+        at("effort = true", "seats.a.effort", "must be low, medium");
+        at("effort = 300", "seats.a.effort", "0-100");
+        at("check = [\"x\", 3]", "seats.a.check[1]", "must be a string");
+        at("mcp = { docs = 3 }", "seats.a.mcp.docs", "must be a string");
+        at(
+            "startup = { files = [{ required = false }] }",
+            "seats.a.startup.files[0]",
+            "needs a path",
+        );
+        at("[[seats.a.x]]", "seats.a.x", "unknown field");
+        // A refused field is left out of the fields an unknown one lists.
+        let error = refused(
+            &format!("{base}bogus = 1"),
+            "seats.a.bogus",
+            "unknown field",
+        );
+        assert!(!error.message.contains("collaborates_with"), "{error}");
+        assert!(error.message.contains("delegates_to"), "{error}");
+    }
+
+    #[test]
+    fn validate_plans_a_spec_without_reading_files() {
+        let plan = validate(&with(
+            "seats.worker",
+            "startup = { files = [\"missing.md\"] }",
+        ))
+        .unwrap();
+        assert_eq!(plan.skipped_files, ["missing.md"]);
+        let error = validate("version = 1\nname = \"t\"\nroot = \"b\"\n[seats.a]\n").unwrap_err();
+        assert_eq!((error.field.as_str(), error.line), ("root", Some(3)));
+    }
+
+    #[test]
     fn what_branchyard_cannot_honor_is_refused_by_name() {
         for (field, needle) in [
             (
@@ -1874,7 +2347,11 @@ escalates_to = ["lead"]
 
     #[test]
     fn startup_files_become_instructions_in_order() {
-        let dir = std::env::temp_dir().join(format!("by-rig-unit-{}", std::process::id()));
+        let temp = tempfile::Builder::new()
+            .prefix("by-rig-unit-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
         std::fs::create_dir_all(dir.join("g")).unwrap();
         std::fs::write(dir.join("g/all.md"), "ALL\n").unwrap();
         std::fs::write(dir.join("g/pod.md"), "POD\n").unwrap();
@@ -1905,7 +2382,25 @@ escalates_to = ["lead"]
         std::fs::remove_file(dir.join("g/own.md")).unwrap();
         let error = load(&dir.join("rig.toml")).unwrap_err();
         assert_eq!(error.field, "seats.w.startup.files[0]");
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `schema/rig.json` is what the `Raw*` types generate. Rewrite it with
+    /// `BY_UPDATE_SCHEMA=1 cargo test -p branchyard-cli --features schema
+    /// rig_json`, then review the diff.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn rig_json_is_generated_and_fresh() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/rig.json");
+        let generated = schema::rig_json();
+        if std::env::var_os("BY_UPDATE_SCHEMA").is_some() {
+            std::fs::write(&path, &generated).unwrap();
+        }
+        let checked_in = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            checked_in == generated,
+            "schema/rig.json is stale; regenerate with:\n\
+             BY_UPDATE_SCHEMA=1 cargo test -p branchyard-cli --features schema rig_json"
+        );
     }
 
     /// The example rigs lower to the plans in `tests/golden/`. Rewrite them

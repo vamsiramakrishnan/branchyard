@@ -105,6 +105,11 @@ fn command(program: &str, dir: &Path) -> Command {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("NO_COLOR", "1")
+        // Never a person's own ~/.config/branchyard/config.toml.
+        .env(
+            "BRANCHYARD_USER_CONFIG",
+            "/nonexistent/branchyard-config.toml",
+        )
         .env("PAGER", "cat")
         .env_remove("BRANCHYARD_REMOTE")
         .env_remove("BRANCHYARD_TOKEN_FILE")
@@ -1297,4 +1302,197 @@ fn artifact_and_scratch_commands_print_what_local_ones_do() {
     let r = server.by(&dir.0, &["artifact", "list"]);
     assert_eq!(l.status.code(), Some(1));
     assert_eq!(r.status.code(), Some(1));
+}
+
+#[test]
+fn graph_commands_print_what_local_ones_do() {
+    let dir = Dir::new();
+    let here = dir.repo("here");
+    let there = dir.repo("there");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &["--allow-client-commands", "--allow-delegation"],
+    );
+    let both = |args: &[&str]| -> (Output, Output) {
+        let l = local(&here, args);
+        let r = server.by(
+            &dir.0,
+            &with_agent(args)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        (l, r)
+    };
+    let same_json = |args: &[&str]| -> Value {
+        let (l, r) = both(args);
+        assert_eq!(
+            l.status.code(),
+            r.status.code(),
+            "{args:?}\nlocal: {}\nremote: {}",
+            text(&l.stderr),
+            text(&r.stderr)
+        );
+        let (l, r) = (json(&l.stdout, &here), json(&r.stdout, &there));
+        assert_eq!(l, r, "{args:?}");
+        r
+    };
+    // The server runs children on its own threads; wait there for them as
+    // the local command already did.
+    let settled = |names: &[&str]| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let graph = json(
+                &server
+                    .by(&dir.0, &["graph", "show", "root", "--json"])
+                    .stdout,
+                &there,
+            );
+            let done = graph["children"].as_array().unwrap().iter().all(|c| {
+                !names.contains(&c["name"].as_str().unwrap())
+                    || !matches!(c["status"]["state"].as_str(), Some("running"))
+            });
+            if done {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{graph}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let (l, r) = both(&["run", "say hi", "--name", "root", "--delegate", "--yes"]);
+    assert!(
+        l.status.success() && r.status.success(),
+        "{}",
+        text(&r.stderr)
+    );
+    assert_eq!(
+        same_json(&["graph", "show", "root", "--json"])["revision"],
+        0
+    );
+    let edits = r#"[{"kind":"spawn","prompt":"WRITE lib.txt=1","name":"lib"},
+        {"kind":"spawn","prompt":"WRITE app.txt=1","name":"app","depends_on":["lib"],"after":"integrated"},
+        {"kind":"spawn","prompt":"EXIT","name":"bad"},
+        {"kind":"spawn","prompt":"WRITE x.txt=1","name":"blocked","depends_on":["bad"]}]"#;
+    let applied = same_json(&[
+        "graph",
+        "apply",
+        "--parent",
+        "root",
+        "--edits",
+        edits,
+        "--expected-revision",
+        "0",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(applied["revision"], 1);
+    assert_eq!(applied["spawned"][1]["status"]["state"], "waiting");
+    settled(&["lib", "bad", "blocked"]);
+    let shown = same_json(&["graph", "show", "root", "--json"]);
+    assert_eq!(shown["children"][1]["status"]["state"], "waiting");
+    assert_eq!(shown["children"][3]["status"]["state"], "blocked");
+    same_json(&["inspect", "app", "--json"]);
+    same_json(&["inspect", "root", "--json"]);
+    // Integrating the prerequisite starts its dependent, from the merge.
+    let merged = same_json(&["integrate", "lib", "--json"]);
+    assert_eq!(merged["target"], "by/root");
+    settled(&["app"]);
+    let shown = same_json(&["graph", "show", "root", "--json"]);
+    assert_eq!(shown["children"][1]["status"]["state"], "ready");
+    same_json(&["inspect", "app", "--json"]);
+    // Refusals are the same JSON errors, and change nothing.
+    for (args, kind) in [
+        (
+            &[
+                "graph",
+                "apply",
+                "--parent",
+                "root",
+                "--edits",
+                edits,
+                "--expected-revision",
+                "0",
+                "--json",
+            ][..],
+            "stale_revision",
+        ),
+        (
+            &[
+                "graph",
+                "apply",
+                "--parent",
+                "root",
+                "--edits",
+                r#"[{"kind":"add_dependency","dependent":"app","prerequisite":"lib"}]"#,
+                "--expected-revision",
+                "1",
+                "--json",
+            ],
+            "denied",
+        ),
+        (
+            &[
+                "graph",
+                "apply",
+                "--parent",
+                "root",
+                "--edits",
+                r#"[{"kind":"spawn","prompt":"x","name":"p","depends_on":["q"]},{"kind":"spawn","prompt":"y","name":"q","depends_on":["p"]}]"#,
+                "--expected-revision",
+                "1",
+                "--json",
+            ],
+            "denied",
+        ),
+        (&["graph", "show", "nope", "--json"], "unknown_branch"),
+    ] {
+        let error = same_json(args);
+        assert_eq!(error["error"]["kind"], kind, "{args:?}: {error}");
+    }
+    assert_eq!(
+        same_json(&["graph", "show", "root", "--json"])["revision"],
+        1
+    );
+}
+
+#[test]
+fn the_server_comes_from_flags_after_the_command_or_the_environment() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &[]);
+    let expected = text(&server.by(&dir.0, &["ls", "--json"]).stdout);
+    assert_eq!(expected.trim(), "[]");
+    // Global options after the command, and after its own flags.
+    let after = command(BY, &dir.0)
+        .args(["ls", "--json", "--remote", &server.url, "--token-file"])
+        .arg(&server.token_file)
+        .output()
+        .unwrap();
+    assert!(after.status.success(), "{}", text(&after.stderr));
+    assert_eq!(text(&after.stdout), expected);
+    // Only the environment, as clap's `env` reads it.
+    let env = command(BY, &dir.0)
+        .args(["ls", "--json"])
+        .env("BRANCHYARD_REMOTE", &server.url)
+        .env("BRANCHYARD_TOKEN_FILE", &server.token_file)
+        .env("BRANCHYARD_REPO", "app")
+        .output()
+        .unwrap();
+    assert!(env.status.success(), "{}", text(&env.stderr));
+    assert_eq!(text(&env.stdout), expected);
+    // A flag wins over its variable.
+    let flag_wins = command(BY, &dir.0)
+        .args(["ls", "--json", "--repo", "nope"])
+        .env("BRANCHYARD_REMOTE", &server.url)
+        .env("BRANCHYARD_TOKEN_FILE", &server.token_file)
+        .env("BRANCHYARD_REPO", "app")
+        .output()
+        .unwrap();
+    assert_eq!(flag_wins.status.code(), Some(1));
+    assert!(
+        text(&flag_wins.stderr).contains("nope"),
+        "{}",
+        text(&flag_wins.stderr)
+    );
 }

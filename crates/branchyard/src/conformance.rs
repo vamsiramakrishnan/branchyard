@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+use crate::graph::GraphBackend;
 use crate::state::{now_ms, Acquired, Backend, Begun, Fence, Owner, ProcessRow, Record};
 use crate::storage::StorageBackend;
 use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
@@ -18,6 +19,8 @@ pub(crate) struct Opened {
     pub backend: Arc<dyn Backend>,
     /// The same backend, as [`StorageBackend`]: see [`crate::storage`].
     pub storage: Arc<dyn StorageBackend>,
+    /// The same backend, as [`GraphBackend`]: see [`crate::graph`].
+    pub graph: Arc<dyn GraphBackend>,
     /// Opens another handle on the same store, as a second engine would.
     pub again: Box<dyn Fn() -> Arc<dyn Backend>>,
     _cleanup: Box<dyn std::any::Any>,
@@ -50,7 +53,8 @@ pub(crate) fn sqlite(name: &str) -> Opened {
     };
     Opened {
         backend: shared.clone(),
-        storage: shared,
+        storage: shared.clone(),
+        graph: shared,
         again: Box::new(open),
         _cleanup: Box::new(Temp(dir)),
     }
@@ -76,7 +80,8 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
     };
     Some(Opened {
         backend: shared.clone(),
-        storage: shared,
+        storage: shared.clone(),
+        graph: shared,
         again: Box::new(open),
         _cleanup: Box::new(()),
     })
@@ -1149,11 +1154,210 @@ pub(crate) fn upgrade(
     );
 }
 
+/// Graph proposals commit whole or not at all; a `waiting` branch leaves
+/// that state by one compare-and-swap; removal takes a branch's own edges.
+pub(crate) fn graph(s: Opened) {
+    use crate::graph::{After, Dependency, DependencyRef, GraphCommit};
+    let branches = &s.backend;
+    let graph = &s.graph;
+    branches
+        .write(&record_with_parent("root", None), None)
+        .unwrap();
+    let waiting = |name: &str| {
+        let mut record = record_with_parent(name, Some("root"));
+        record.info.status = BranchStatus::Waiting;
+        record
+    };
+    let edge = |dependent: &str, prerequisite: &str, after: After| Dependency {
+        dependent: dependent.into(),
+        prerequisite: prerequisite.into(),
+        after,
+    };
+    let commit = |expected: Option<u64>, create: Vec<Record>, add: Vec<Dependency>| GraphCommit {
+        parent: "root".into(),
+        expected,
+        create,
+        add,
+        remove: Vec::new(),
+    };
+    let children = || branches.read("root").unwrap().unwrap().info.children;
+    let unchanged = |revision: u64, kids: &[&str], edges: usize| {
+        assert_eq!(graph.graph_revision("root").unwrap(), revision);
+        assert_eq!(children(), kids);
+        assert_eq!(graph.dependencies("root").unwrap().len(), edges);
+    };
+    assert_eq!(graph.graph_revision("root").unwrap(), 0);
+
+    // A stale revision: nothing is created.
+    let stale = graph.commit_graph(&commit(
+        Some(3),
+        vec![waiting("a"), waiting("b")],
+        vec![edge("b", "a", After::Settled)],
+    ));
+    assert!(
+        matches!(
+            stale,
+            Err(Error::StaleRevision {
+                expected: 3,
+                actual: 0,
+                ..
+            })
+        ),
+        "{stale:?}"
+    );
+    assert!(branches.read("a").unwrap().is_none());
+    unchanged(0, &[], 0);
+
+    // The whole proposal commits together.
+    let revision = graph
+        .commit_graph(&commit(
+            Some(0),
+            vec![waiting("a"), waiting("b")],
+            vec![edge("b", "a", After::Integrated)],
+        ))
+        .unwrap();
+    assert_eq!(revision, 1);
+    unchanged(1, &["a", "b"], 1);
+    assert_eq!(
+        graph.prerequisites("b").unwrap(),
+        [edge("b", "a", After::Integrated)]
+    );
+    assert_eq!(graph.dependents("a").unwrap().len(), 1);
+    assert!(graph.dependents("b").unwrap().is_empty());
+    assert_eq!(
+        branches.read("b").unwrap().unwrap().info.status,
+        BranchStatus::Waiting
+    );
+
+    // A taken name, a duplicate edge, a missing edge, an edge on a branch
+    // that has started: each refused, and nothing of the proposal lands.
+    let taken = graph.commit_graph(&commit(
+        Some(1),
+        vec![waiting("c"), waiting("a")],
+        vec![edge("c", "a", After::Settled)],
+    ));
+    assert!(
+        matches!(taken, Err(Error::BranchExists(ref n)) if n == "a"),
+        "{taken:?}"
+    );
+    assert!(branches.read("c").unwrap().is_none());
+    unchanged(1, &["a", "b"], 1);
+    let duplicate = graph.commit_graph(&commit(
+        Some(1),
+        vec![waiting("c")],
+        vec![edge("b", "a", After::Settled)],
+    ));
+    assert!(matches!(duplicate, Err(Error::Denied(_))), "{duplicate:?}");
+    assert!(branches.read("c").unwrap().is_none());
+    unchanged(1, &["a", "b"], 1);
+    let missing = graph.commit_graph(&GraphCommit {
+        remove: vec![DependencyRef {
+            dependent: "a".into(),
+            prerequisite: "b".into(),
+        }],
+        ..commit(Some(1), Vec::new(), Vec::new())
+    });
+    assert!(matches!(missing, Err(Error::Denied(_))), "{missing:?}");
+    let mut running = branches.read("a").unwrap().unwrap();
+    running.info.status = BranchStatus::Running;
+    branches.write(&running, None).unwrap();
+    let started = graph.commit_graph(&commit(
+        Some(1),
+        Vec::new(),
+        vec![edge("a", "b", After::Settled)],
+    ));
+    assert!(matches!(started, Err(Error::Denied(_))), "{started:?}");
+    unchanged(1, &["a", "b"], 1);
+    // Without an expected revision (a plain spawn), the revision still
+    // moves on.
+    assert_eq!(
+        graph
+            .commit_graph(&commit(None, vec![waiting("c")], Vec::new()))
+            .unwrap(),
+        2
+    );
+
+    // Two engines claim a waiting branch: one wins, and only once.
+    let mut claimed = branches.read("b").unwrap().unwrap();
+    claimed.info.status = BranchStatus::Running;
+    let first = graph.claim(&claimed, &owner("one"), TTL).unwrap();
+    assert!(first.is_some());
+    assert!(graph.claim(&claimed, &owner("two"), TTL).unwrap().is_none());
+    assert_eq!(
+        branches.read("b").unwrap().unwrap().info.status,
+        BranchStatus::Running
+    );
+    let event = |status: BranchStatus| RecordedEvent {
+        at_ms: 1,
+        activity: Activity::Status(status),
+    };
+    let mut blocked = branches.read("b").unwrap().unwrap();
+    blocked.info.status = BranchStatus::Blocked { reason: "x".into() };
+    assert!(!graph
+        .settle_waiting(&blocked, &event(blocked.info.status.clone()))
+        .unwrap());
+
+    // A waiting branch settles once; a dependency edit reopens it.
+    let revision = graph
+        .commit_graph(&commit(
+            Some(2),
+            vec![waiting("d")],
+            vec![edge("d", "c", After::Settled)],
+        ))
+        .unwrap();
+    assert_eq!(revision, 3);
+    let mut d = branches.read("d").unwrap().unwrap();
+    d.info.status = BranchStatus::Blocked {
+        reason: "c failed".into(),
+    };
+    assert!(graph
+        .settle_waiting(&d, &event(d.info.status.clone()))
+        .unwrap());
+    assert!(!graph
+        .settle_waiting(&d, &event(d.info.status.clone()))
+        .unwrap());
+    assert_eq!(branches.event_count("d").unwrap(), 1);
+    let reopened = graph
+        .commit_graph(&GraphCommit {
+            remove: vec![DependencyRef {
+                dependent: "d".into(),
+                prerequisite: "c".into(),
+            }],
+            ..commit(Some(3), Vec::new(), Vec::new())
+        })
+        .unwrap();
+    assert_eq!(reopened, 4);
+    assert_eq!(
+        branches.read("d").unwrap().unwrap().info.status,
+        BranchStatus::Waiting
+    );
+    assert!(graph.prerequisites("d").unwrap().is_empty());
+
+    // Removal takes a branch's own edges and graph; what depended on it
+    // keeps its edge, to be blocked.
+    graph
+        .commit_graph(&commit(
+            Some(4),
+            Vec::new(),
+            vec![edge("d", "c", After::Settled)],
+        ))
+        .unwrap();
+    branches.delete("c").unwrap();
+    assert_eq!(graph.prerequisites("d").unwrap().len(), 1);
+    branches.delete("b").unwrap();
+    assert!(graph.prerequisites("b").unwrap().is_empty());
+    assert_eq!(graph.dependents("a").unwrap().len(), 0);
+    branches.delete("root").unwrap();
+    assert_eq!(graph.graph_revision("root").unwrap(), 0);
+    // d's own edge stays until d goes.
+    assert_eq!(graph.dependencies("root").unwrap().len(), 1);
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
-            concurrent_appends, races, storage, messages, delivery);
+            concurrent_appends, races, storage, messages, delivery, graph);
     };
     ($open:expr; $($check:ident),*) => {
         $(

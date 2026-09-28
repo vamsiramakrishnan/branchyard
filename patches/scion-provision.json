@@ -20,15 +20,6 @@
       }
     },
     {
-      "path": "crates/branchyard-provision/src/toml.rs",
-      "from": {
-        "harnesses/scion_harness.py": "fa39f10306f5776c8f868a4b8193d91fec981cbc",
-        "harnesses/codex/provision.py": "8d7da87e3412365cd08b3805d0aab5ef9dea9305",
-        "harnesses/scion_harness_test.py": "79d22aaf4e894af674781273b80c46ba0b35b5b6",
-        "harnesses/codex/provision_test.py": "b58d0ec4b27ccdeed2ebee330499e8fccdec91b4"
-      }
-    },
-    {
       "path": "crates/branchyard-provision/src/instructions.rs",
       "from": {
         "harnesses/scion_harness.py": "fa39f10306f5776c8f868a4b8193d91fec981cbc",
@@ -100,6 +91,18 @@
         "harnesses/codex/provision_test.py": "b58d0ec4b27ccdeed2ebee330499e8fccdec91b4",
         "harnesses/telemetry_provision_test.py": "74f9f5d243ab5faf086e9d49fef231c8d058d7ca"
       }
+    }
+  ],
+  "rewritten": [
+    {
+      "path": "crates/branchyard-provision/src/toml.rs",
+      "note": "No longer a line-for-line port: its document surgery (strip_sections, strip_top_level_key, set_top_level, merge_document) is rebuilt on toml_edit, a real TOML parser and editor, replacing the hand-rolled, line-based scan these sources originally were translated into. Its small literal-fragment builders (escape, string, inline_table, string_array) are unchanged. Kept here, without blob tracking, only so its header's attribution to Scion is still checked.",
+      "originally_from": [
+        "harnesses/scion_harness.py",
+        "harnesses/codex/provision.py",
+        "harnesses/scion_harness_test.py",
+        "harnesses/codex/provision_test.py"
+      ]
     }
   ]
 }

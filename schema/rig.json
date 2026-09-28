@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Branchyard rig spec",
+  "description": "A Branchyard rig spec: a root seat and the seats below it, joined by\n`delegates_to` edges that form a tree. See docs/rigs.md.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "description": "The spec format's version; this build reads 1.",
+      "type": "integer",
+      "const": 1
+    },
+    "name": {
+      "description": "The rig's name, and the root branch's unless `by rig run --name`\ngives one.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+      "maxLength": 40
+    },
+    "description": {
+      "type": "string"
+    },
+    "root": {
+      "description": "The name of the root seat, one of `seats`.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+      "maxLength": 40
+    },
+    "startup": {
+      "description": "Startup files for every seat.",
+      "$ref": "#/$defs/Startup"
+    },
+    "pods": {
+      "description": "Groups of seats sharing startup files, by name.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+        "maxLength": 40
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/Pod"
+      }
+    },
+    "seats": {
+      "description": "The seats, by name: the root and those below it.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+        "maxLength": 40
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/Seat"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "name",
+    "root",
+    "seats"
+  ],
+  "$defs": {
+    "Startup": {
+      "description": "Files delivered to a harness as standing instructions, never written\ninto a worktree.",
+      "type": "object",
+      "properties": {
+        "files": {
+          "description": "Paths relative to the spec's directory, without `..`; a bare path\nis required.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StartupFile"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "StartupFile": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/StartupFileTable"
+        }
+      ]
+    },
+    "StartupFileTable": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "required": {
+          "description": "A missing optional file is skipped; a missing required one (the\ndefault) is an error.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "Pod": {
+      "description": "A group of seats sharing startup files.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "startup": {
+          "description": "Startup files for the pod's seats.",
+          "$ref": "#/$defs/Startup"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Seat": {
+      "description": "One seat.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "The seat's role, given to its harness and to the parent's.",
+          "type": "string"
+        },
+        "pod": {
+          "description": "The pod whose startup files this seat also gets.",
+          "type": "string"
+        },
+        "harness": {
+          "description": "A harness or profile ID; a child defaults to its parent's, the\nroot to claude-code.",
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "description": "low, medium, high, xhigh, or a level from 0 to 100.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ]
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            }
+          ]
+        },
+        "auth": {
+          "description": "A credential name the server resolves.",
+          "type": "string"
+        },
+        "secrets": {
+          "description": "Names of secrets to write into the branch's private home; needs\nisolated = true here or above.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mcp": {
+          "description": "Stdio MCP servers, as name = \"command line\".",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "telemetry": {
+          "description": "`off`, or an http:// or https:// OTLP collector endpoint.",
+          "type": "string"
+        },
+        "isolated": {
+          "description": "Run in a home private to the branch; inherited by the seats below.",
+          "type": "boolean"
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "check": {
+          "description": "The check a branch must pass to integrate: a command line, or its\nwords.",
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/Policy"
+        },
+        "delegates_to": {
+          "description": "The seats this seat may spawn.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "escalates_to": {
+          "description": "Ancestor seats, besides its parent, this seat may escalate to.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instances": {
+          "description": "How many of this seat may run at once; 1 by default.",
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "bindings": {
+          "description": "Scratch areas, as NAME:read_only or NAME:exclusive_write.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "startup": {
+          "description": "Startup files for this seat.",
+          "$ref": "#/$defs/Startup"
+        },
+        "start": {
+          "description": "Only on_demand: the root starts alone and fills seats as it spawns.",
+          "$ref": "#/$defs/Start"
+        },
+        "restore_policy": {
+          "description": "Only resume_if_possible: a send resumes the branch's session.",
+          "$ref": "#/$defs/Restore"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Budget": {
+      "description": "Limits for one branch in this seat.",
+      "type": "object",
+      "properties": {
+        "max_usd": {
+          "type": "number",
+          "format": "double",
+          "minimum": 0
+        },
+        "max_turns": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "max_minutes": {
+          "type": "number",
+          "format": "double",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Policy": {
+      "description": "How permission requests are answered. A child seat may set only deny.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "Requests no rule decides: allow, deny (the default) or ask.",
+          "$ref": "#/$defs/Fallback"
+        },
+        "deny": {
+          "description": "Tool names, or prefixes ending in *, denied outright.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow": {
+          "description": "Tool names, or prefixes ending in *, allowed after deny.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "delegation_commands": {
+          "description": "Allow the harness's own `by` delegation commands.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Fallback": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny",
+        "ask"
+      ]
+    },
+    "Start": {
+      "description": "`start`'s one accepted value.",
+      "type": "string",
+      "enum": [
+        "on_demand"
+      ]
+    },
+    "Restore": {
+      "description": "`restore_policy`'s one accepted value.",
+      "type": "string",
+      "enum": [
+        "resume_if_possible"
+      ]
+    }
+  }
+}

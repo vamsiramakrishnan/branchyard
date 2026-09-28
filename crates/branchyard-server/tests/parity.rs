@@ -360,3 +360,164 @@ fn a_database_needs_a_build_with_postgres() {
     let error = Server::try_start(config).err().unwrap();
     assert!(error.contains("no PostgreSQL support"), "{error}");
 }
+
+/// `POST …/graph` commits a proposal before it answers; a stale revision
+/// is `409 stale_revision`, and a server without delegation refuses to
+/// spawn with `403`. The graph read back is the SDK's.
+#[test]
+fn a_person_applies_a_graph_through_the_server() {
+    use branchyard::{GraphEdit, SpawnSpec};
+    use branchyard_client::api::GraphRequest;
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.by_path = Some("/bin/true".into());
+    config.allow_delegation = true;
+    let server = Server::start(config.clone());
+    let client = server.client();
+    let repo = client.repo("app");
+    let root = run(
+        &client,
+        &TaskRequest {
+            delegation: Some(Envelope::default()),
+            ..task("say hi", "root")
+        },
+    );
+    assert_eq!(root.state, OperationState::Succeeded, "{root:?}");
+    let spawn = |name: &str, prompt: &str, depends_on: &[&str]| {
+        GraphEdit::Spawn(SpawnSpec {
+            prompt: prompt.into(),
+            name: Some(name.into()),
+            depends_on: depends_on.iter().map(|s| (*s).to_owned()).collect(),
+            ..SpawnSpec::default()
+        })
+    };
+    let request = GraphRequest {
+        expected_revision: 0,
+        edits: vec![
+            spawn("first", "WRITE f.txt=1", &[]),
+            spawn("second", "WRITE s.txt=1", &["first"]),
+        ],
+        policy: PolicySpec::allow_all(),
+        unapproved_tools: false,
+    };
+    let applied = repo.apply_graph("root", &request).unwrap();
+    assert_eq!(applied.revision, 1);
+    assert_eq!(applied.spawned[1].status, BranchStatus::Waiting);
+    match repo.apply_graph("root", &request) {
+        Err(branchyard_client::Error::Api { status, error }) => {
+            assert_eq!((status, error.code.as_str()), (409, "stale_revision"));
+            assert_eq!(
+                error.detail,
+                Some(serde_json::json!({"expected": 0, "actual": 1}))
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while repo.inspect("second").unwrap().status != BranchStatus::Ready {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "second never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let yard = Yard::open(&f.root).unwrap();
+    assert_eq!(repo.graph("root").unwrap(), yard.graph("root").unwrap());
+    let (status, _, body) = raw(
+        server.addr,
+        &get("/v1/repos/app/branches/root/graph", Some(TOKEN)),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["dependencies"][0]["prerequisite"], "first");
+    let (status, _, body) = raw(
+        server.addr,
+        &post(
+            "/v1/repos/app/branches/root/graph",
+            Some(TOKEN),
+            "",
+            r#"{"expected_revision": 1, "edits": [], "colour": 1}"#,
+        ),
+    );
+    assert_eq!(status, 400, "{body}");
+    drop(client);
+    drop(server);
+    // Without delegation, a proposal that spawns is refused.
+    config.allow_delegation = false;
+    let closed = Server::start(config);
+    let request = GraphRequest {
+        expected_revision: 1,
+        ..request
+    };
+    match closed.client().repo("app").apply_graph("root", &request) {
+        Err(branchyard_client::Error::Api { status, error }) => {
+            assert_eq!(
+                (status, error.code.as_str()),
+                (403, "delegation_not_allowed")
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// `POST …/spawn` with `depends_on` is queued work like any spawn: the
+/// worker that runs it creates the child waiting, the operation finishes
+/// without starting it, and integrating its prerequisite (queued too)
+/// starts it from the parent's branch.
+#[test]
+fn a_spawn_that_waits_goes_through_the_queue_and_starts_after_its_prerequisite() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.by_path = Some("/bin/true".into());
+    config.allow_delegation = true;
+    let server = Server::start(config);
+    let client = server.client();
+    let repo = client.repo("app");
+    let root = run(
+        &client,
+        &TaskRequest {
+            delegation: Some(Envelope::default()),
+            ..task("say hi", "root")
+        },
+    );
+    assert_eq!(root.state, OperationState::Succeeded, "{root:?}");
+    let spawn = |name: &str, prompt: &str, depends_on: &[&str]| SpawnRequest {
+        prompt: prompt.into(),
+        name: Some(name.into()),
+        policy: PolicySpec::allow_all(),
+        depends_on: depends_on.iter().map(|s| (*s).to_owned()).collect(),
+        after: branchyard::After::Integrated,
+        ..SpawnRequest::default()
+    };
+    let lib = repo
+        .spawn("root", &spawn("lib", "WRITE lib.txt=1", &[]), &new_key())
+        .unwrap();
+    assert_eq!(wait(&client, &lib.id).state, OperationState::Succeeded);
+    let app = repo
+        .spawn(
+            "root",
+            &spawn("app", "WRITE app.txt=1", &["lib"]),
+            &new_key(),
+        )
+        .unwrap();
+    assert_eq!(app.kind, OperationKind::Spawn);
+    let app = wait(&client, &app.id);
+    assert_eq!(app.state, OperationState::Succeeded, "{app:?}");
+    let inspection = app.result.unwrap().inspection.unwrap();
+    assert_eq!(inspection.status, BranchStatus::Waiting);
+    assert_eq!(inspection.depends_on[0].prerequisite, "lib");
+    assert_eq!(repo.graph("root").unwrap().dependencies.len(), 1);
+    assert_eq!(repo.branch("app").unwrap().turns, 0);
+
+    let integrated = wait(&client, &repo.integrate("lib", &new_key()).unwrap().id);
+    assert_eq!(
+        integrated.state,
+        OperationState::Succeeded,
+        "{integrated:?}"
+    );
+    common::eventually("app to start and finish", || {
+        repo.branch("app").unwrap().status == BranchStatus::Ready
+    });
+    let app = repo.branch("app").unwrap();
+    assert_eq!(app.turns, 1);
+    assert!(app.worktree.join("lib.txt").is_file(), "built on lib");
+}

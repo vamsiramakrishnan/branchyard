@@ -1,3 +1,4 @@
+#:schema ../../schema/rig.json
 # A lead that splits a change, delegates the implementation and a review,
 # and integrates the result.
 #

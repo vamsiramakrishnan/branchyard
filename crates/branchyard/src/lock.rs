@@ -103,13 +103,16 @@ mod tests {
 
     #[test]
     fn a_second_holder_is_refused_until_the_first_lets_go() {
-        let dir = std::env::temp_dir().join(format!("by-lock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let first = DirLock::acquire(&dir, "the first test holder").unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("by-lock-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
+        let first = DirLock::acquire(dir, "the first test holder").unwrap();
         assert_eq!(first.path(), dir.join("lock"));
         // A separate open of the file is a separate holder, in this
         // process as in another.
-        let refused = DirLock::acquire_within(&dir, "the second", Duration::from_millis(100))
+        let refused = DirLock::acquire_within(dir, "the second", Duration::from_millis(100))
             .unwrap_err()
             .to_string();
         assert!(refused.contains("already in use"), "{refused}");
@@ -121,25 +124,26 @@ mod tests {
             "{refused}"
         );
         drop(first);
-        let again = DirLock::acquire(&dir, "the second").unwrap();
+        let again = DirLock::acquire(dir, "the second").unwrap();
         drop(again);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_lock_released_while_waiting_is_taken() {
-        let dir = std::env::temp_dir().join(format!("by-lock-wait-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let first = DirLock::acquire(&dir, "the first").unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("by-lock-wait-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
+        let first = DirLock::acquire(dir, "the first").unwrap();
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
             drop(first);
         });
         let started = Instant::now();
-        let second = DirLock::acquire(&dir, "the second").unwrap();
+        let second = DirLock::acquire(dir, "the second").unwrap();
         assert!(started.elapsed() >= Duration::from_millis(150));
         releaser.join().unwrap();
         drop(second);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

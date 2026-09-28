@@ -45,19 +45,20 @@
 
 pub mod api;
 pub mod http;
+#[cfg(feature = "schema")]
+pub mod schema;
 pub mod sse;
 pub mod storage_api;
 
 use std::fmt;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use branchyard::{
-    ArtifactRef, Asked, BranchInfo, Children, EventPage, HarnessInfo, Inbox, Inspection, Message,
-    ScratchArea, ScratchLock, Steer,
+    ArtifactRef, Asked, BranchInfo, Children, EventPage, Graph, GraphApplied, HarnessInfo, Inbox,
+    Inspection, Message, ScratchArea, ScratchLock, Steer,
 };
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
@@ -65,9 +66,9 @@ use serde::Serialize;
 
 use api::{
     AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, Diff,
-    ErrorBody, ErrorResponse, FeedEntry, ForkRequest, HarnessList, IntegrateRequest, MergeRequest,
-    Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
-    SteerRequest, TaskRequest, TextRequest,
+    ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest,
+    MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest,
+    SpawnRequest, SteerRequest, TaskRequest, TextRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -120,24 +121,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// A fresh random idempotency key.
+/// A fresh random idempotency key: a version 4 UUID as 32 lowercase hex
+/// digits, without hyphens.
 pub fn new_key() -> String {
-    let mut bytes = [0u8; 16];
-    let random = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
-    if random.is_err() {
-        // No /dev/urandom: time, process and a counter are unique enough
-        // for idempotency, which needs uniqueness, not secrecy.
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mix = nanos
-            ^ (u128::from(std::process::id()) << 64)
-            ^ (u128::from(COUNTER.fetch_add(1, Ordering::Relaxed)) << 96);
-        bytes = mix.to_le_bytes();
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 /// A connection to one server. Cheap to clone.
@@ -229,6 +216,14 @@ impl Client {
 
     pub fn operation(&self, id: &str) -> Result<Operation, Error> {
         self.get(&format!("/v1/operations/{}", encode(id)))
+    }
+
+    /// The operation this caller's request with idempotency `key` created,
+    /// on any server sharing the operation store: how a caller that lost
+    /// the response to a `POST` finds what it started, besides retrying the
+    /// `POST` with the same key.
+    pub fn operation_by_key(&self, key: &str) -> Result<Operation, Error> {
+        self.get(&format!("/v1/operations?idempotency_key={}", encode(key)))
     }
 
     /// Poll an operation until it finishes.
@@ -527,6 +522,22 @@ impl Repo {
     /// `by children`.
     pub fn children(&self, branch: &str) -> Result<Children, Error> {
         self.client.get(&self.branch_path(branch, "/children"))
+    }
+
+    /// `branch`'s graph: its children, the dependencies among them, and
+    /// its graph revision; like `by graph show`.
+    pub fn graph(&self, branch: &str) -> Result<Graph, Error> {
+        self.client.get(&self.branch_path(branch, "/graph"))
+    }
+
+    /// Apply a graph proposal to `branch`'s children with the server's
+    /// authority as a person, like `by graph apply --parent`. All or
+    /// nothing; a stale `expected_revision` is `409 stale_revision`. A
+    /// retry after a lost connection is refused the same way once the
+    /// first attempt committed, so a proposal never applies twice.
+    pub fn apply_graph(&self, branch: &str, request: &GraphRequest) -> Result<GraphApplied, Error> {
+        self.client
+            .post(&self.branch_path(branch, "/graph"), request, &new_key())
     }
 
     /// Every message addressed to `branch`, oldest first; like `by inbox`.
@@ -1009,8 +1020,13 @@ mod tests {
         let a = new_key();
         let b = new_key();
         assert_eq!(a.len(), 32);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
         assert_ne!(a, b);
+        // A version 4 UUID: version nibble 4, variant 10xx.
+        assert_eq!(&a[12..13], "4");
+        assert!("89ab".contains(&a[16..17]), "{a}");
     }
 
     #[test]

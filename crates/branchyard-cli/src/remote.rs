@@ -18,8 +18,9 @@ use branchyard::{
     Sent,
 };
 use branchyard_client::api::{
-    BudgetSpec, ErrorBody, ForkRequest, MergeRequest, Operation, OperationResult, OperationState,
-    PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec, SendRequest, SpawnRequest, TaskRequest,
+    BudgetSpec, ErrorBody, ForkRequest, GraphRequest, MergeRequest, Operation, OperationResult,
+    OperationState, PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec, SendRequest,
+    SpawnRequest, TaskRequest,
 };
 use branchyard_client::{new_key, Client, Repo};
 
@@ -549,6 +550,9 @@ pub fn spawn(
         deny: args.deny.clone(),
         unapproved_tools: task.unapproved_tools,
         seat: args.seat.clone(),
+        depends_on: args.depends_on.clone(),
+        after: args.after,
+        bindings: args.bindings.clone(),
     };
     let op = remote
         .repo
@@ -561,6 +565,29 @@ pub fn spawn(
     result(done?)?
         .inspection
         .ok_or_else(|| branchyard::Error::State("the server returned no inspection".into()))
+}
+
+/// `graph apply --parent` on the server: the proposal commits there, and
+/// its children run there.
+pub fn apply_graph(
+    remote: &Remote,
+    parent: &str,
+    proposal: branchyard::GraphProposal,
+    task: &TaskArgs,
+) -> Result<branchyard::GraphApplied, branchyard::Error> {
+    let (policy, notice) = permissions(task)?;
+    let request = GraphRequest {
+        expected_revision: proposal.expected_revision,
+        edits: proposal.edits,
+        policy,
+        unapproved_tools: task.unapproved_tools,
+    };
+    let applied = remote
+        .repo
+        .apply_graph(parent, &request)
+        .map_err(sdk_error)?;
+    announce(remote, notice, None);
+    Ok(applied)
 }
 
 /// `integrate` on the server: merge a delegated child into its parent.
