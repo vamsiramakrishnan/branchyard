@@ -228,6 +228,36 @@ fn the_git_runner_reports_output_and_failures() {
     ));
 }
 
+/// Input on stdin and raw stdout bytes, as `by try` hashes, reads and
+/// applies through the choke point.
+#[test]
+fn the_git_runner_feeds_stdin_and_returns_bytes() {
+    use branchyard_workspace::Git;
+    let fixture = Fixture::new();
+    let root = &fixture.root();
+    let bytes: Vec<u8> = (0..=255u8).cycle().take(300_000).collect();
+    let blob = Git::new(root)
+        .args(["hash-object", "-w", "--no-filters", "--stdin"])
+        .stdin(bytes.clone())
+        .run()
+        .unwrap();
+    let back = Git::new(root)
+        .args(["cat-file", "blob", blob.trim()])
+        .run_bytes()
+        .unwrap();
+    assert_eq!(back, bytes);
+    // A failing command that stops reading its input early is a failure,
+    // not a broken pipe.
+    match Git::new(root)
+        .args(["apply", "--check"])
+        .stdin("not a patch\n".repeat(50_000))
+        .run()
+    {
+        Err(GitError::Failed { args, .. }) => assert_eq!(args, ["apply", "--check"]),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn create_branch_snapshot_and_diff() {
     let fixture = Fixture::new();

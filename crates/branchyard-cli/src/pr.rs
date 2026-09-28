@@ -15,13 +15,13 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use branchyard::{
     Activity, Branch, BranchInfo, BranchStatus, CheckRun, CiSummary, IssueLink,
     PullRequestActivity, PullRequestObservation, PullRequestRef, Pushed, RecordedEvent, Yard,
 };
+use branchyard_workspace::Git;
 use serde_json::{json, Value};
 
 use crate::args::{PrArgs, TaskArgs};
@@ -204,12 +204,11 @@ fn free_name(yard: &Yard, name: &str) -> Result<String, Failure> {
     let taken: BTreeSet<String> = yard.branches()?.into_iter().map(|b| b.name).collect();
     let exists = |candidate: &str| {
         taken.contains(candidate)
-            || Command::new("git")
+            || Git::new(yard.root())
                 .args(["rev-parse", "--verify", "--quiet"])
                 .arg(format!("refs/heads/by/{candidate}"))
-                .current_dir(yard.root())
-                .output()
-                .is_ok_and(|out| out.status.success())
+                .succeeds()
+                .unwrap_or(false)
     };
     if !exists(name) {
         return Ok(name.to_owned());
@@ -856,15 +855,12 @@ fn repo_of(url: &str) -> Option<(String, String, String)> {
 
 /// `git diff --stat` of the candidate against the base, at most 60 lines.
 fn diffstat(root: &Path, base: &str, commit: &str) -> String {
-    let out = Command::new("git")
+    match Git::new(root)
         .args(["diff", "--stat=100", "--no-color", base, commit, "--"])
-        .current_dir(root)
-        .output();
-    match out {
-        Ok(out) if out.status.success() => {
-            tail_lines(&String::from_utf8_lossy(&out.stdout), 60).to_owned()
-        }
-        _ => String::new(),
+        .run()
+    {
+        Ok(out) => tail_lines(&out, 60).to_owned(),
+        Err(_) => String::new(),
     }
 }
 

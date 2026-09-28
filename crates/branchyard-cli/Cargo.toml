@@ -24,6 +24,7 @@ schema = ["dep:schemars"]
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
 branchyard-server = { path = "../branchyard-server" }
+branchyard-workspace = { path = "../branchyard-workspace" }
 branchyard-mcp = { path = "../branchyard-mcp" }
 serde = "1"
 serde_json = "1"

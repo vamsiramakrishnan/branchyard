@@ -219,7 +219,9 @@ pub(crate) fn compare(
                 {
                     Ok(CheckResult::Passed { .. }) => AttemptCheck::Passed,
                     Ok(CheckResult::Failed { output_tail }) => AttemptCheck::Failed { output_tail },
-                    Ok(CheckResult::TimedOut { output_tail }) => AttemptCheck::TimedOut { output_tail },
+                    Ok(CheckResult::TimedOut { output_tail }) => {
+                        AttemptCheck::TimedOut { output_tail }
+                    }
                     Err(error) => AttemptCheck::Error {
                         message: error.to_string(),
                     },

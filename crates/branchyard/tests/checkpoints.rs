@@ -13,7 +13,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    Activity, Branch, BranchStatus, AttemptCheck, Error, Policy, RecordedEvent, SessionContinuity, Yard,
+    Activity, AttemptCheck, Branch, BranchStatus, Error, Policy, RecordedEvent, SessionContinuity,
+    Yard,
 };
 use common::{git, text, Fixture};
 

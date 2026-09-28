@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use crate::checkpoint::fault;
 use crate::state::now_ms;
 use crate::{git, DirLock, Error, Yard};
+use branchyard_workspace::Git;
 
 const HEAD_REF: &str = "refs/branchyard-try/head";
 const CANDIDATE_REF: &str = "refs/branchyard-try/candidate";
@@ -340,28 +341,11 @@ fn restore(yard: &Yard, mut state: TryState) -> Result<(), Error> {
 }
 
 fn apply(root: &Path, patch: &str, check: bool) -> Result<(), Error> {
-    use std::process::{Command, Stdio};
-    let mut command = Command::new("git");
-    command
-        .current_dir(root)
-        .args(["apply", "--whitespace=nowarn"])
-        .env("LC_ALL", "C")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE");
+    let mut command = Git::new(root).args(["apply", "--whitespace=nowarn"]);
     if check {
-        command.arg("--check");
+        command = command.arg("--check");
     }
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::Git(format!("could not run git: {e}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(patch.as_bytes())?;
-    }
-    let out = child.wait_with_output()?;
+    let (out, _) = command.stdin(patch).output().map_err(git::error)?;
     if out.status.success() {
         Ok(())
     } else {
@@ -453,44 +437,19 @@ fn current(root: &Path, path: &str) -> Result<Option<TryEntry>, Error> {
 
 /// The blob ID of `bytes`, exactly as stored (no filters).
 fn hash(root: &Path, bytes: &[u8]) -> Result<String, Error> {
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("git")
-        .current_dir(root)
+    let out = Git::new(root)
         .args(["hash-object", "--no-filters", "--stdin"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::Git(format!("could not run git: {e}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(bytes)?;
-    }
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        return Err(Error::Git(
-            String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .stdin(bytes)
+        .run()
+        .map_err(git::error)?;
+    Ok(out.trim().to_owned())
 }
 
 fn blob_bytes(root: &Path, blob: &str) -> Result<Vec<u8>, Error> {
-    let out = std::process::Command::new("git")
-        .current_dir(root)
+    Git::new(root)
         .args(["cat-file", "blob", blob])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .output()
-        .map_err(|e| Error::Git(format!("could not run git: {e}")))?;
-    if !out.status.success() {
-        return Err(Error::Git(format!(
-            "could not read blob {blob}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(out.stdout)
+        .run_bytes()
+        .map_err(|e| Error::Git(format!("could not read blob {blob}: {e}")))
 }
 
 /// Make `path` hold `entry`, or not exist.
