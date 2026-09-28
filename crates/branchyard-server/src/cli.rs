@@ -249,6 +249,10 @@ struct Flags {
     /// Do not log requests
     #[arg(short, long)]
     quiet: bool,
+    /// Log lines on stderr as pretty text or one JSON object each (default:
+    /// BRANCHYARD_LOG_FORMAT, else pretty)
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    log_format: Option<crate::logging::LogFormat>,
     /// Load and check the configuration as serving would, print any warnings, and exit
     /// without serving or writing a file
     #[arg(long)]
@@ -714,7 +718,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     }
     // `--quiet` keeps meaning "warn and above" for anyone who does not set
     // `BRANCHYARD_LOG`/`RUST_LOG` themselves; see `logging::init`.
-    crate::logging::init(flags.quiet);
+    crate::logging::init(flags.quiet, flags.log_format);
     let (config, warnings) = match build(flags) {
         Ok(built) => built,
         Err(error) => {
@@ -862,6 +866,13 @@ mod tests {
         let flags = parse(&args("-c conf.json -q")).unwrap();
         assert_eq!(flags.config, Some(PathBuf::from("conf.json")));
         assert!(flags.quiet);
+        assert_eq!(flags.log_format, None);
+        let json = parse(&args("--log-format json")).unwrap();
+        assert_eq!(json.log_format, Some(crate::logging::LogFormat::Json));
+        assert!(parse(&args("--log-format yaml"))
+            .unwrap_err()
+            .contains("invalid value 'yaml' for '--log-format <FORMAT>'"));
+        assert!(help("by serve").contains("--log-format <FORMAT>"));
         assert!(help("by worker").contains("Usage: by worker [OPTIONS]"));
         assert!(help("branchyard-server").contains("--webhook-events <KINDS>"));
         command("branchyard-server").debug_assert();

@@ -44,8 +44,32 @@ struct Cli {
     /// Also trust this CA certificate for https
     #[arg(long, global = true, value_name = "FILE")]
     ca_file: Option<String>,
+    /// Log lines on stderr as pretty text or one JSON object each (default:
+    /// BRANCHYARD_LOG_FORMAT, else pretty)
+    #[arg(long, global = true, value_name = "FORMAT", value_enum)]
+    log_format: Option<LogFormat>,
     #[command(subcommand)]
     command: Plugin,
+}
+
+/// How log lines are written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum LogFormat {
+    /// Human-readable lines.
+    Pretty,
+    /// One JSON object per line.
+    Json,
+}
+
+impl LogFormat {
+    /// The flag's format if given, else `BRANCHYARD_LOG_FORMAT`'s (`json`
+    /// or `pretty`, any case; anything else is `pretty`), else `pretty`.
+    fn resolve(flag: Option<LogFormat>, env: Option<&str>) -> LogFormat {
+        flag.unwrap_or(match env {
+            Some(value) if value.trim().eq_ignore_ascii_case("json") => LogFormat::Json,
+            _ => LogFormat::Pretty,
+        })
+    }
 }
 
 #[derive(clap::Subcommand, Debug, PartialEq, Eq)]
@@ -66,22 +90,19 @@ enum Plugin {
 }
 
 /// Sets up the process's tracing subscriber: level from `BRANCHYARD_LOG` or
-/// `RUST_LOG` (default `info`), format `pretty` unless
-/// `BRANCHYARD_LOG_FORMAT=json`. Writes to stderr, same as the rest of
-/// this plugin's diagnostics, so a Herdr pane still shows them.
-///
-/// TODO(BRANCHYARD_LOG_FORMAT): once this CLI grows a `--log-format
-/// json|pretty` flag, prefer it over the env var.
-fn init_logging() {
+/// `RUST_LOG` (default `info`), format from `--log-format`, else
+/// `BRANCHYARD_LOG_FORMAT`, else `pretty` ([`LogFormat::resolve`]). Writes
+/// to stderr, same as the rest of this plugin's diagnostics, so a Herdr
+/// pane still shows them.
+fn init_logging(format: Option<LogFormat>) {
     use tracing_subscriber::EnvFilter;
     let filter = std::env::var("BRANCHYARD_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
         .ok()
         .and_then(|directives| EnvFilter::try_new(directives).ok())
         .unwrap_or_else(|| EnvFilter::new("info"));
-    let json = std::env::var("BRANCHYARD_LOG_FORMAT")
-        .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
+    let env = std::env::var("BRANCHYARD_LOG_FORMAT").ok();
+    let json = LogFormat::resolve(format, env.as_deref()) == LogFormat::Json;
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -94,8 +115,8 @@ fn init_logging() {
 }
 
 fn main() -> ExitCode {
-    init_logging();
     let cli = <Cli as clap::Parser>::parse();
+    init_logging(cli.log_format);
     let flags: Vec<(String, String)> = [
         ("BRANCHYARD_REMOTE", cli.remote),
         ("BRANCHYARD_TOKEN_FILE", cli.token_file),
@@ -125,5 +146,29 @@ fn main() -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn log_format_is_a_flag_that_wins_over_the_variable() {
+        let cli =
+            Cli::try_parse_from(["branchyard-herdr", "bridge", "--log-format", "json"]).unwrap();
+        assert_eq!(cli.log_format, Some(LogFormat::Json));
+        let cli = Cli::try_parse_from(["branchyard-herdr", "bridge"]).unwrap();
+        assert_eq!(cli.log_format, None);
+        assert!(
+            Cli::try_parse_from(["branchyard-herdr", "--log-format", "xml", "bridge"]).is_err()
+        );
+        assert_eq!(LogFormat::resolve(None, Some("json")), LogFormat::Json);
+        assert_eq!(
+            LogFormat::resolve(Some(LogFormat::Pretty), Some("json")),
+            LogFormat::Pretty
+        );
+        assert_eq!(LogFormat::resolve(None, None), LogFormat::Pretty);
     }
 }
