@@ -564,6 +564,7 @@ mod tests {
                     files_changed: 1,
                     insertions: 2,
                     deletions: 0,
+                    sandbox: None,
                 },
                 prompt: Some("write it".into()),
                 available: true,

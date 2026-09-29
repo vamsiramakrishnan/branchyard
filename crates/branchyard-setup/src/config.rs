@@ -486,6 +486,24 @@ pub struct Microsandbox {
     /// Variables to copy into the sandbox, by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pass_env: Vec<String>,
+    /// Between turns: `"destroy"` the microVM (the default) or `"pause"`
+    /// it for the next turn. Pausing needs `live_branch`. See
+    /// docs/sandbox-snapshots.md.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^(pause|destroy)$"))]
+    pub keep: Option<String>,
+    /// With a kept sandbox, checkpoints that also keep a snapshot (default 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<u32>,
+    /// Kept sandboxes per repository before the least recently used is
+    /// destroyed (default 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_paused: Option<u32>,
+    /// Use the SDK's pause, live branching and full snapshots: unqualified
+    /// until they pass on a KVM host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_branch: Option<bool>,
 }
 
 /// `[notify]`: when a branch asks for permission or asks a question,
@@ -685,6 +703,19 @@ impl ProjectConfig {
             for name in &sandbox.pass_env {
                 branchyard_provision::check_variable_name(name)
                     .map_err(|why| ConfigError(format!("microsandbox.pass_env: {name:?} {why}")))?;
+            }
+            if let Some(keep) = sandbox
+                .keep
+                .as_deref()
+                .filter(|k| !matches!(*k, "pause" | "destroy"))
+            {
+                return fail(
+                    "microsandbox.keep",
+                    format!("{keep:?} is not \"pause\" or \"destroy\""),
+                );
+            }
+            if sandbox.max_paused == Some(0) {
+                return fail("microsandbox.max_paused", "must be at least 1".into());
             }
         }
         Ok(())
@@ -1089,6 +1120,18 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
         if !sandbox.pass_env.is_empty() {
             let names: Vec<String> = sandbox.pass_env.iter().map(|n| toml_string(n)).collect();
             out.push_str(&format!("pass_env = [{}]\n", names.join(", ")));
+        }
+        if let Some(keep) = &sandbox.keep {
+            out.push_str(&format!("keep = {}\n", toml_string(keep)));
+        }
+        if let Some(n) = sandbox.snapshots {
+            out.push_str(&format!("snapshots = {n}\n"));
+        }
+        if let Some(n) = sandbox.max_paused {
+            out.push_str(&format!("max_paused = {n}\n"));
+        }
+        if let Some(on) = sandbox.live_branch {
+            out.push_str(&format!("live_branch = {on}\n"));
         }
     }
     if !config.remote.is_empty() {

@@ -286,6 +286,38 @@ impl Actors {
         self.confirm(actor, "SuspendActor", acted).await
     }
 
+    /// Pause the actor on its node, keeping its node-local snapshot
+    /// (`PauseActor`). Resume it with [`Actors::start`], or suspend it with
+    /// [`Actors::stop`], which uploads that snapshot.
+    pub async fn pause(&mut self, actor: &ActorHandle) -> Result<(), Error> {
+        self.inspect(actor).await?;
+        let acted = self
+            .client
+            .pause_actor(pb::PauseActorRequest {
+                actor: self.reference(&actor.name),
+            })
+            .await?
+            .into_inner()
+            .actor;
+        self.confirm(actor, "PauseActor", acted).await
+    }
+
+    /// Delete a checkpoint's tag. Deleting an absent tag succeeds.
+    pub async fn delete_tag(&mut self, name: &str) -> Result<(), Error> {
+        let deleted = self
+            .client
+            .delete_tag(pb::DeleteTagRequest {
+                tag: self.reference(name),
+                options: None,
+            })
+            .await;
+        match deleted {
+            Ok(_) => Ok(()),
+            Err(status) if status.code() == Code::NotFound => Ok(()),
+            Err(status) => Err(status.into()),
+        }
+    }
+
     /// Record the stopped actor's latest snapshot as a durable checkpoint.
     ///
     /// The actor must already be stopped. Checkpointing does not suspend

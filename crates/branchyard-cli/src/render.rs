@@ -403,6 +403,18 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
         ),
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
         Activity::Workspace(report) => workspace_line(report, style),
+        Activity::Sandbox(event) => style.paint(
+            match event {
+                branchyard::SandboxEvent::Started {
+                    origin: branchyard::SandboxOrigin::Fresh { reason: Some(_) },
+                    ..
+                }
+                | branchyard::SandboxEvent::NotKept { .. }
+                | branchyard::SandboxEvent::NoSnapshot { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &event.describe(),
+        ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
                 Some(id) => format!(" (re #{id})"),

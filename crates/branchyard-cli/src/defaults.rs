@@ -196,6 +196,15 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
                 cpus: sandbox.cpus,
                 memory_mib: sandbox.memory_mib,
                 pass_env: sandbox.pass_env.clone(),
+                lifecycle: crate::args::LifecycleArgs {
+                    keep: sandbox.keep.as_deref().map(|keep| match keep {
+                        "pause" => branchyard::SandboxKeep::Pause,
+                        _ => branchyard::SandboxKeep::Destroy,
+                    }),
+                    snapshots: sandbox.snapshots,
+                    max_paused: sandbox.max_paused,
+                },
+                live_branch: sandbox.live_branch.unwrap_or(false),
             });
         }
     }

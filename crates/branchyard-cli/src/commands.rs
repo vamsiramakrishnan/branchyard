@@ -1821,6 +1821,9 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
             client_key: substrate.client_key.as_deref().map(absolute),
             router_ca: substrate.router_ca.as_deref().map(absolute),
             insecure: substrate.insecure,
+            keep: substrate.lifecycle.keep.unwrap_or_default(),
+            snapshots: substrate.lifecycle.snapshots,
+            max_paused: substrate.lifecycle.max_paused,
         }));
     }
     match (&task.sandbox, task.local) {
@@ -1829,6 +1832,10 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
             cpus: sandbox.cpus,
             memory_mib: sandbox.memory_mib,
             pass_env: sandbox.pass_env.clone(),
+            keep: sandbox.lifecycle.keep.unwrap_or_default(),
+            snapshots: sandbox.lifecycle.snapshots,
+            max_paused: sandbox.lifecycle.max_paused,
+            live_branch: sandbox.live_branch,
         })),
         (None, true) => Some(Provider::Local),
         (None, false) => None,

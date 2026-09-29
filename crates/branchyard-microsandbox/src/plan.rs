@@ -21,19 +21,69 @@ pub const DISK_SNAPSHOT: SnapshotGuarantee = SnapshotGuarantee {
     locality: Locality::SameHost,
 };
 
-/// What this provider claims: exec, and disk checkpoints that branch into
-/// new sandboxes. Not restore in place (the SDK restores into a new
-/// sandbox), not full-memory snapshots or live branching (the SDK has
-/// them; they are not qualified), not ingress or sharing.
+/// The full-scope guarantee declared with live branching on: memory,
+/// processes and the root disk, captured without the workload's
+/// cooperation, restorable only on this host (`Sandbox::branch` is local
+/// only, and a full snapshot needs the same CPU and memory geometry).
+pub const FULL_SNAPSHOT: SnapshotGuarantee = SnapshotGuarantee {
+    scope: SnapshotScope::Full,
+    consistency: Consistency::Crash,
+    locality: Locality::SameHost,
+};
+
+/// What this provider claims by default: exec, and disk checkpoints that
+/// branch into new sandboxes. Not restore in place (the SDK restores into a
+/// new sandbox), not full-memory snapshots, pause or live branching (see
+/// [`capabilities_with`]), not ingress or sharing.
 pub fn capabilities() -> Capabilities {
+    capabilities_with(false)
+}
+
+/// [`capabilities`], plus, with `live_branch` (the opt-in
+/// `live_branch = true` in the provider options, until qualified): pause
+/// and resume (`Sandbox::pause`/`resume`), live branching of a running or
+/// paused sandbox (`Sandbox::branch`/`branch_many`), and full-scope
+/// checkpoints (`Snapshot::builder(..).full()`) that branch with a forked
+/// restore (`Sandbox::restore(..).forked()`).
+pub fn capabilities_with(live_branch: bool) -> Capabilities {
+    let mut snapshots = vec![DISK_SNAPSHOT];
+    if live_branch {
+        snapshots.push(FULL_SNAPSHOT);
+    }
     Capabilities {
         exec: true,
         ingress: false,
-        checkpoint: vec![DISK_SNAPSHOT],
+        checkpoint: snapshots.clone(),
         restore: Vec::new(),
-        branch: vec![DISK_SNAPSHOT],
+        branch: snapshots,
         share: false,
+        pause: live_branch,
+        live_branch,
     }
+}
+
+/// Plan a live-branched child: its name and the mounts rebound for it.
+/// The child keeps its source's CPU and memory (a live branch cannot change
+/// them) and its root disk, so an image or limits are refused.
+pub fn live_child(spec: &SandboxSpec) -> Result<CreatePlan, ProviderError> {
+    if spec.image.is_some() {
+        return Err(ProviderError::Invalid(
+            "a live-branched sandbox keeps its source's root disk; it takes no image".into(),
+        ));
+    }
+    if !spec.resources.is_unlimited() {
+        return Err(ProviderError::Invalid(
+            "a live-branched sandbox keeps its source's CPUs and memory".into(),
+        ));
+    }
+    branch(spec)
+}
+
+/// Whether one `branch_many` call can create every child: the SDK applies
+/// one set of mounts to every child of a batch, so only children with the
+/// same mounts can share one.
+pub fn one_batch(children: &[CreatePlan]) -> bool {
+    children.len() > 1 && children.windows(2).all(|w| w[0].mounts == w[1].mounts)
 }
 
 /// A host directory bound into the guest.
@@ -324,6 +374,49 @@ mod tests {
         .is_err());
         let env = BTreeMap::from([("A=B".into(), "1".into())]);
         assert!(exec(&ExecSpec { env, ..base }).is_err());
+    }
+
+    #[test]
+    fn live_branching_is_declared_only_when_opted_in() {
+        use branchyard_sandbox::{FULL_SNAPSHOT as FULL, LIVE_BRANCH, PAUSE};
+        let off = capabilities();
+        for feature in [LIVE_BRANCH, PAUSE, FULL] {
+            assert!(!off.has(feature), "{feature}");
+        }
+        let on = capabilities_with(true);
+        for feature in [LIVE_BRANCH, PAUSE, FULL] {
+            assert!(on.has(feature), "{feature}");
+        }
+        assert_eq!(on.full_snapshot(), Some(FULL_SNAPSHOT));
+        let required = Requirements {
+            pause: true,
+            live_branch: true,
+            branch: Some(FULL_SNAPSHOT),
+            ..Requirements::default()
+        };
+        assert_eq!(admit(&required, &on), Ok(()));
+        assert!(admit(&required, &off).is_err());
+    }
+
+    #[test]
+    fn live_children_rebind_their_own_mounts_and_batch_only_when_equal() {
+        let child = |name: &str, worktree: &str| {
+            SandboxSpec::new(name).mount(Mount::writable(worktree, "/workspace"))
+        };
+        let a = live_child(&child("a", "/wt/a")).unwrap();
+        let b = live_child(&child("b", "/wt/b")).unwrap();
+        let c = live_child(&child("c", "/wt/a")).unwrap();
+        assert_eq!(a.image, None);
+        assert_eq!(a.mounts[0].host, PathBuf::from("/wt/a"));
+        assert!(!one_batch(&[a.clone(), b]));
+        assert!(one_batch(&[a.clone(), c]));
+        assert!(!one_batch(&[a]));
+        assert!(live_child(&spec()).is_err(), "an image is refused");
+        let limited = SandboxSpec {
+            image: None,
+            ..spec()
+        };
+        assert!(live_child(&limited).is_err(), "limits are refused");
     }
 
     #[test]

@@ -106,6 +106,12 @@ pub(crate) struct Record {
     /// `crate::workspace`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<crate::workspace::WorkspaceState>,
+    /// Where the branch's next sandbox should come from when it has none
+    /// kept: a provider snapshot of this branch's source (its parent, or
+    /// itself after a rewind). Cleared once a turn has used it. See
+    /// `crate::snapshots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_seed: Option<crate::snapshots::SandboxSeed>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current
@@ -528,6 +534,78 @@ pub(crate) trait PortBackend: Send + Sync + fmt::Debug {
     fn port(&self, branch: &str) -> Result<Option<u16>, Error>;
 }
 
+/// What a sandbox row records: a branch's kept sandbox, or one of its
+/// sandbox snapshots. See `crate::snapshots`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SandboxKind {
+    /// The branch's sandbox, paused between turns (`keep = "pause"`).
+    Kept,
+    /// A provider snapshot taken at one of the branch's checkpoints.
+    Snapshot,
+}
+
+impl SandboxKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SandboxKind::Kept => "kept",
+            SandboxKind::Snapshot => "snapshot",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<SandboxKind, Error> {
+        match text {
+            "kept" => Ok(SandboxKind::Kept),
+            "snapshot" => Ok(SandboxKind::Snapshot),
+            other => Err(Error::State(format!("unknown sandbox kind {other:?}"))),
+        }
+    }
+}
+
+/// A provider-side sandbox or snapshot a branch owns, so that a later turn,
+/// a fork or a removal in any process can find it, and eviction can pick
+/// the least recently used across the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SandboxRow {
+    pub branch: String,
+    pub incarnation: i64,
+    pub kind: SandboxKind,
+    /// Which provider holds it, and where: `crate::snapshots::provider_key`.
+    pub provider: String,
+    /// The sandbox's name, or the snapshot's handle.
+    pub name: String,
+    /// For a snapshot, its checkpoint; for a kept sandbox, the checkpoint
+    /// its state corresponds to, once recorded.
+    pub turn: Option<u32>,
+    /// Provider details as JSON: `crate::snapshots::Detail`.
+    pub detail: String,
+    /// Last parked or taken, for least-recently-used eviction.
+    pub used_ms: u64,
+}
+
+/// Sandboxes and sandbox snapshots owned by branches. A row is claimed by
+/// deleting it ([`SandboxBackend::take_sandbox`]): whoever deletes it owns
+/// the sandbox, so an engine resuming a kept sandbox and another evicting
+/// it never both act on it. Rows of a branch are deleted with it by
+/// [`Backend::delete`]; the provider-side sandboxes are the engine's to
+/// destroy first.
+pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
+    /// Insert or replace the row for (`branch`, `kind`, `name`).
+    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error>;
+    /// Every row of `branch`, oldest first.
+    fn sandboxes(&self, branch: &str) -> Result<Vec<SandboxRow>, Error>;
+    /// Every row of `kind` in the store whose provider is `provider`, least
+    /// recently used first.
+    fn sandboxes_of(&self, kind: SandboxKind, provider: &str) -> Result<Vec<SandboxRow>, Error>;
+    /// Delete the row and return it, or `None` if another took it first.
+    fn take_sandbox(
+        &self,
+        branch: &str,
+        kind: SandboxKind,
+        name: &str,
+    ) -> Result<Option<SandboxRow>, Error>;
+}
+
 /// The port a reservation takes: from `start`, the first not in `taken`
 /// for which `usable` holds.
 pub(crate) fn pick_port(
@@ -582,6 +660,9 @@ pub(crate) struct Store {
     graph: Arc<dyn GraphBackend>,
     /// Branch ports: the same backend again. See [`PortBackend`].
     ports: Arc<dyn PortBackend>,
+    /// Kept sandboxes and sandbox snapshots: the same backend again. See
+    /// [`SandboxBackend`].
+    sandboxes: Arc<dyn SandboxBackend>,
     owner: Arc<Owner>,
     signal: Arc<Signal>,
 }
@@ -608,7 +689,8 @@ impl Store {
             backend: backend.clone(),
             storage: backend.clone(),
             graph: backend.clone(),
-            ports: backend,
+            ports: backend.clone(),
+            sandboxes: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -630,7 +712,8 @@ impl Store {
             backend: backend.clone(),
             storage: backend.clone(),
             graph: backend.clone(),
-            ports: backend,
+            ports: backend.clone(),
+            sandboxes: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -662,6 +745,11 @@ impl Store {
     /// Branch ports; see [`PortBackend`].
     pub fn ports(&self) -> &dyn PortBackend {
         self.ports.as_ref()
+    }
+
+    /// Kept sandboxes and sandbox snapshots; see [`SandboxBackend`].
+    pub fn sandboxes(&self) -> &dyn SandboxBackend {
+        self.sandboxes.as_ref()
     }
 
     pub fn worktree(&self, name: &str) -> PathBuf {

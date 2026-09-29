@@ -9,14 +9,25 @@
 //! | `Process::teardown` | `Sandbox::exec_with("sh", ..)` running [`GROUP_TEARDOWN`] |
 //! | `stop` | `Sandbox::stop_with_timeout`, then `Sandbox::kill` if that fails |
 //! | `destroy` | `Sandbox::destroy()` (stop and remove) |
-//! | `checkpoint` | `Snapshot::builder(label).from_sandbox(name).create()` (disk) |
-//! | `branch` | `Sandbox::restore(label).name(..).cpus(..).memory(..).volume(..).restore()` |
+//! | `checkpoint` | `Snapshot::builder(label).from_sandbox(name).create()` (disk), `.full()` for a full-scope one |
+//! | `branch` | `Sandbox::restore(label).name(..).cpus(..).memory(..).volume(..).restore()`, `.forked()` from a full checkpoint |
+//! | `pause`, `resume` | `Sandbox::pause()`/`resume()`, or through `Sandbox::get(name)` from another process |
+//! | `branch_live` | `SandboxHandle::branch(name).volume(..).branch()`, or `branch_many(names)` when every child has the same mounts |
+//! | `release_checkpoint` | `Snapshot::remove(label, true)` |
+//!
+//! Pause, resume, live branching and full-scope checkpoints are declared only
+//! with [`MicrosandboxProvider::with_live_branch`] (the `live_branch = true`
+//! opt-in), until they are qualified on a KVM host. A spec with
+//! [`SandboxSpec::persist`] is created detached (`create_detached`), so it
+//! outlives this process and a later one adopts it by name
+//! (`Sandbox::get(name)` then `connect()`); every other sandbox this provider
+//! holds is destroyed when it is dropped.
 //!
 //! The SDK is asynchronous; a private Tokio runtime drives it, and every
 //! trait method blocks on it. Call them from ordinary threads, never from
 //! inside a Tokio runtime. Drop every [`Process`] before its provider.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,7 +43,7 @@ use microsandbox::{ExecControl, ExecEvent, ExecHandle, MicrosandboxError, Sandbo
 use tokio::runtime::{Handle, Runtime};
 
 use crate::bridge::{self, BridgedProcess, GuestControl, GuestEvent, GuestEvents, GROUP_TEARDOWN};
-use crate::plan::{self, CreatePlan, DISK_SNAPSHOT};
+use crate::plan::{self, CreatePlan, PlannedMount};
 
 /// How long a graceful stop may take before the microVM is killed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -44,6 +55,10 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct MicrosandboxProvider {
     runtime: Option<Runtime>,
     sandboxes: Mutex<HashMap<String, Arc<Sandbox>>>,
+    /// Sandboxes that outlive this provider: created with
+    /// [`SandboxSpec::persist`], or adopted from another process.
+    kept: Mutex<HashSet<String>>,
+    live_branch: bool,
 }
 
 impl std::fmt::Debug for MicrosandboxProvider {
@@ -67,7 +82,47 @@ impl MicrosandboxProvider {
         Ok(MicrosandboxProvider {
             runtime: Some(runtime),
             sandboxes: Mutex::new(HashMap::new()),
+            kept: Mutex::new(HashSet::new()),
+            live_branch: false,
         })
+    }
+
+    /// Declare and allow pause, resume, live branching and full-scope
+    /// checkpoints ([`plan::capabilities_with`]). Unqualified: see
+    /// `docs/sandbox-snapshots.md`.
+    pub fn with_live_branch(mut self, on: bool) -> MicrosandboxProvider {
+        self.live_branch = on;
+        self
+    }
+
+    fn keep(&self, name: &str) {
+        self.kept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_owned());
+    }
+
+    fn live(&self, operation: Operation) -> Result<(), ProviderError> {
+        match self.live_branch {
+            true => Ok(()),
+            false => Err(ProviderError::unsupported(operation)),
+        }
+    }
+
+    /// The sandbox named `name`: held, or adopted from the runtime (a
+    /// detached sandbox another process created) and connected.
+    fn adopt(&self, name: &str) -> Result<Arc<Sandbox>, ProviderError> {
+        if let Ok(held) = self.held(name) {
+            return Ok(held);
+        }
+        let connect = async {
+            let handle = Sandbox::get(name).await?;
+            handle.connect().await
+        };
+        let sandbox = Arc::new(self.handle().block_on(connect).map_err(error)?);
+        self.lock().insert(name.to_owned(), sandbox.clone());
+        self.keep(name);
+        Ok(sandbox)
     }
 
     fn handle(&self) -> &Handle {
@@ -91,7 +146,13 @@ impl MicrosandboxProvider {
 
 impl Drop for MicrosandboxProvider {
     fn drop(&mut self) {
-        let held: Vec<Arc<Sandbox>> = self.lock().drain().map(|(_, s)| s).collect();
+        let kept = std::mem::take(&mut *self.kept.lock().unwrap_or_else(|e| e.into_inner()));
+        let held: Vec<Arc<Sandbox>> = self
+            .lock()
+            .drain()
+            .filter(|(name, _)| !kept.contains(name))
+            .map(|(_, s)| s)
+            .collect();
         if let Some(runtime) = self.runtime.take() {
             for sandbox in held {
                 let _ = runtime.block_on(async {
@@ -112,8 +173,8 @@ pub fn state(status: SandboxStatus) -> SandboxState {
         SandboxStatus::Running => SandboxState::Running,
         SandboxStatus::Draining => SandboxState::Stopping,
         SandboxStatus::Crashed => SandboxState::Crashed,
-        // Frozen but resident: neither running nor stopped in the contract.
-        SandboxStatus::Paused => SandboxState::Unknown("paused".into()),
+        // Frozen but resident.
+        SandboxStatus::Paused => SandboxState::Paused,
     }
 }
 
@@ -157,12 +218,37 @@ pub fn event(event: ExecEvent) -> GuestEvent {
     }
 }
 
-fn unsupported(operation: Operation, required: &SnapshotGuarantee) -> ProviderError {
+fn unsupported(
+    operation: Operation,
+    required: &SnapshotGuarantee,
+    offered: Vec<SnapshotGuarantee>,
+) -> ProviderError {
     ProviderError::Unsupported(Unsupported {
         operation,
         required: Some(*required),
-        offered: vec![DISK_SNAPSHOT],
+        offered,
     })
+}
+
+/// Apply planned mounts to a builder that takes `volume(guest, |m| ..)`.
+fn bind<B>(mut builder: B, mounts: Vec<PlannedMount>, volume: impl Fn(B, PlannedMount) -> B) -> B {
+    for mount in mounts {
+        builder = volume(builder, mount);
+    }
+    builder
+}
+
+fn mount_with(
+    mount: PlannedMount,
+) -> impl FnOnce(microsandbox::sandbox::MountBuilder) -> microsandbox::sandbox::MountBuilder {
+    move |m| {
+        let m = m.bind(mount.host);
+        if mount.readonly {
+            m.readonly()
+        } else {
+            m
+        }
+    }
 }
 
 struct Events {
@@ -236,7 +322,7 @@ fn now_ms() -> u128 {
 
 impl SandboxProvider for MicrosandboxProvider {
     fn capabilities(&self) -> Capabilities {
-        plan::capabilities()
+        plan::capabilities_with(self.live_branch)
     }
 
     fn ensure(&self, spec: &SandboxSpec) -> Result<SandboxInfo, ProviderError> {
@@ -260,18 +346,18 @@ impl SandboxProvider for MicrosandboxProvider {
         if let Some(memory) = memory_mib {
             builder = builder.memory(memory);
         }
-        for mount in mounts {
-            builder = builder.volume(mount.guest, move |m| {
-                let m = m.bind(mount.host);
-                if mount.readonly {
-                    m.readonly()
-                } else {
-                    m
-                }
-            });
+        builder = bind(builder, mounts, |b, mount| {
+            b.volume(mount.guest.clone(), mount_with(mount))
+        });
+        let sandbox = match spec.persist {
+            true => self.handle().block_on(builder.create_detached()),
+            false => self.handle().block_on(builder.create()),
         }
-        let sandbox = self.handle().block_on(builder.create()).map_err(error)?;
+        .map_err(error)?;
         self.lock().insert(name.clone(), Arc::new(sandbox));
+        if spec.persist {
+            self.keep(&name);
+        }
         Ok(SandboxInfo {
             name,
             state: SandboxState::Running,
@@ -298,7 +384,7 @@ impl SandboxProvider for MicrosandboxProvider {
     }
 
     fn exec(&self, name: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
-        let sandbox = self.held(name)?;
+        let sandbox = self.adopt(name)?;
         let plan = plan::exec(spec)?;
         let start = sandbox.exec_stream_with(plan.program, |e| {
             e.args(plan.args).cwd(plan.cwd).envs(plan.env).stdin_pipe()
@@ -319,7 +405,7 @@ impl SandboxProvider for MicrosandboxProvider {
     }
 
     fn stop(&self, name: &str) -> Result<(), ProviderError> {
-        let sandbox = self.held(name)?;
+        let sandbox = self.adopt(name)?;
         let graceful = self
             .handle()
             .block_on(sandbox.stop_with_timeout(STOP_TIMEOUT));
@@ -331,6 +417,10 @@ impl SandboxProvider for MicrosandboxProvider {
 
     fn destroy(&self, name: &str) -> Result<(), ProviderError> {
         let held = self.lock().remove(name);
+        self.kept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
         let destroyed = match held {
             Some(sandbox) => self.handle().block_on(sandbox.destroy()),
             None => match self.handle().block_on(Sandbox::get(name)) {
@@ -351,33 +441,41 @@ impl SandboxProvider for MicrosandboxProvider {
         name: &str,
         required: &SnapshotGuarantee,
     ) -> Result<Checkpoint, ProviderError> {
-        if !DISK_SNAPSHOT.satisfies(required) {
-            return Err(unsupported(Operation::Checkpoint, required));
-        }
-        self.held(name)?;
+        let offered = self.capabilities().checkpoint;
+        let Some(guarantee) = offered.iter().find(|g| g.satisfies(required)).copied() else {
+            return Err(unsupported(Operation::Checkpoint, required, offered));
+        };
         let label = format!("{name}-checkpoint-{}", now_ms());
         plan::name(&label)?;
-        let create = Snapshot::builder(label.as_str())
-            .from_sandbox(name)
-            .create();
-        self.handle().block_on(create).map_err(error)?;
+        let builder = Snapshot::builder(label.as_str()).from_sandbox(name);
+        let builder = match guarantee.scope {
+            SnapshotScope::Full => builder.full(),
+            SnapshotScope::Disk => builder,
+        };
+        self.handle().block_on(builder.create()).map_err(error)?;
         Ok(Checkpoint {
             sandbox: name.to_owned(),
             reference: label,
-            guarantee: DISK_SNAPSHOT,
+            guarantee,
         })
     }
 
-    /// Boot a new sandbox from a disk checkpoint. The checkpoint fixes the
-    /// root filesystem, so `spec.image` is not used; its limits and mounts
-    /// are.
+    /// Boot a new sandbox from a disk checkpoint, or restore a full one
+    /// with private copy-on-write memory (`forked`). The checkpoint fixes
+    /// the root filesystem, so `spec.image` is not used; its limits (which
+    /// must match a full checkpoint's) and mounts are.
     fn branch(
         &self,
         checkpoint: &Checkpoint,
         spec: &SandboxSpec,
     ) -> Result<SandboxInfo, ProviderError> {
-        if checkpoint.guarantee.scope != SnapshotScope::Disk {
-            return Err(unsupported(Operation::Branch, &checkpoint.guarantee));
+        let offered = self.capabilities().branch;
+        if !offered.contains(&checkpoint.guarantee) {
+            return Err(unsupported(
+                Operation::Branch,
+                &checkpoint.guarantee,
+                offered,
+            ));
         }
         let plan = plan::branch(spec)?;
         if self.lock().contains_key(&plan.name) {
@@ -393,28 +491,167 @@ impl SandboxProvider for MicrosandboxProvider {
         if let Some(memory) = plan.memory_mib {
             restore = restore.memory(memory);
         }
-        for mount in plan.mounts {
-            restore = restore.volume(mount.guest, move |m| {
-                let m = m.bind(mount.host);
-                if mount.readonly {
-                    m.readonly()
-                } else {
-                    m
-                }
-            });
+        restore = bind(restore, plan.mounts, |r, mount| {
+            r.volume(mount.guest.clone(), mount_with(mount))
+        });
+        if checkpoint.guarantee.scope == SnapshotScope::Full {
+            restore = restore.forked();
+        } else {
+            restore = restore.disk_only();
         }
+        // A restore is always detached.
         let sandbox = self.handle().block_on(restore.restore()).map_err(error)?;
         self.lock().insert(plan.name.clone(), Arc::new(sandbox));
+        if spec.persist {
+            self.keep(&plan.name);
+        }
         Ok(SandboxInfo {
             name: plan.name,
             state: SandboxState::Running,
         })
+    }
+
+    fn pause(&self, name: &str) -> Result<(), ProviderError> {
+        self.live(Operation::Pause)?;
+        let held = self.lock().get(name).cloned();
+        let paused = match held {
+            Some(sandbox) => self.handle().block_on(sandbox.pause()),
+            None => self.handle().block_on(async {
+                let handle = Sandbox::get(name).await?;
+                handle.pause().await
+            }),
+        };
+        paused.map_err(error)
+    }
+
+    /// Resume a paused sandbox, or start a stopped one detached, and
+    /// connect to it for exec.
+    fn resume(&self, name: &str) -> Result<SandboxInfo, ProviderError> {
+        self.live(Operation::Resume)?;
+        let resumed = self.handle().block_on(async {
+            let handle = Sandbox::get(name).await?;
+            match handle.status_snapshot() {
+                SandboxStatus::Paused => {
+                    handle.resume().await?;
+                    handle.connect().await
+                }
+                SandboxStatus::Running => handle.connect().await,
+                _ => handle.start_detached().await,
+            }
+        });
+        let sandbox = resumed.map_err(error)?;
+        self.lock().insert(name.to_owned(), Arc::new(sandbox));
+        self.keep(name);
+        Ok(SandboxInfo {
+            name: name.to_owned(),
+            state: SandboxState::Running,
+        })
+    }
+
+    /// `Sandbox::branch` per child, each with its own mounts, or one
+    /// `branch_many` when every child has the same mounts. Children are
+    /// detached; the source keeps its running or paused state. Local only.
+    fn branch_live(
+        &self,
+        source: &str,
+        children: &[SandboxSpec],
+    ) -> Vec<Result<SandboxInfo, ProviderError>> {
+        if let Err(error) = self.live(Operation::LiveBranch) {
+            let why = error.to_string();
+            return children
+                .iter()
+                .map(|_| Err(ProviderError::Runtime(why.clone())))
+                .collect();
+        }
+        let plans: Vec<Result<CreatePlan, ProviderError>> =
+            children.iter().map(plan::live_child).collect();
+        let valid: Vec<CreatePlan> = plans
+            .iter()
+            .filter_map(|p| p.as_ref().ok().cloned())
+            .collect();
+        let source_handle = self.handle().block_on(Sandbox::get(source));
+        let handle = match source_handle {
+            Ok(handle) => handle,
+            Err(e) => {
+                let why = error(e).to_string();
+                return children
+                    .iter()
+                    .map(|_| Err(ProviderError::Runtime(why.clone())))
+                    .collect();
+            }
+        };
+        let mut made: HashMap<String, Result<Sandbox, ProviderError>> = HashMap::new();
+        if valid.len() == plans.len() && plan::one_batch(&valid) {
+            let names: Vec<String> = valid.iter().map(|p| p.name.clone()).collect();
+            let builder = bind(
+                handle.branch_many(names),
+                valid[0].mounts.clone(),
+                |b, mount| b.volume(mount.guest.clone(), mount_with(mount)),
+            );
+            match self.handle().block_on(builder.branch()) {
+                Ok(outcomes) => {
+                    for outcome in outcomes {
+                        made.insert(outcome.name, outcome.result.map_err(error));
+                    }
+                }
+                Err(e) => {
+                    let why = error(e).to_string();
+                    for name in valid.iter().map(|p| p.name.clone()) {
+                        made.insert(name, Err(ProviderError::Runtime(why.clone())));
+                    }
+                }
+            }
+        } else {
+            for child in &valid {
+                let builder = bind(
+                    handle.branch(child.name.as_str()),
+                    child.mounts.clone(),
+                    |b, mount| b.volume(mount.guest.clone(), mount_with(mount)),
+                );
+                made.insert(
+                    child.name.clone(),
+                    self.handle().block_on(builder.branch()).map_err(error),
+                );
+            }
+        }
+        plans
+            .into_iter()
+            .zip(children)
+            .map(|(plan, spec)| {
+                let plan = plan?;
+                let sandbox = made
+                    .remove(&plan.name)
+                    .unwrap_or_else(|| Err(ProviderError::Runtime("no outcome".into())))?;
+                self.lock().insert(plan.name.clone(), Arc::new(sandbox));
+                if spec.persist {
+                    self.keep(&plan.name);
+                }
+                Ok(SandboxInfo {
+                    name: plan.name,
+                    state: SandboxState::Running,
+                })
+            })
+            .collect()
+    }
+
+    fn release_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ProviderError> {
+        match self
+            .handle()
+            .block_on(Snapshot::remove(checkpoint.reference.as_str(), true))
+        {
+            Ok(()) => Ok(()),
+            Err(e) => match error(e) {
+                ProviderError::NotFound(_) => Ok(()),
+                other => Err(other),
+            },
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::DISK_SNAPSHOT;
 
     #[test]
     fn every_runtime_status_maps() {
@@ -424,10 +661,7 @@ mod tests {
         assert_eq!(state(SandboxStatus::Stopped), SandboxState::Stopped);
         assert_eq!(state(SandboxStatus::Created), SandboxState::Stopped);
         assert_eq!(state(SandboxStatus::Crashed), SandboxState::Crashed);
-        assert_eq!(
-            state(SandboxStatus::Paused),
-            SandboxState::Unknown("paused".into())
-        );
+        assert_eq!(state(SandboxStatus::Paused), SandboxState::Paused);
     }
 
     #[test]
@@ -474,6 +708,13 @@ mod tests {
     fn the_provider_starts_without_a_runtime_and_declares_its_plan() {
         let provider = MicrosandboxProvider::new().unwrap();
         assert_eq!(provider.capabilities(), plan::capabilities());
+        assert!(matches!(
+            provider.pause("absent"),
+            Err(ProviderError::Unsupported(_))
+        ));
+        assert!(provider.branch_live("absent", &[SandboxSpec::new("c")])[0].is_err());
+        let live = MicrosandboxProvider::new().unwrap().with_live_branch(true);
+        assert_eq!(live.capabilities(), plan::capabilities_with(true));
         assert!(matches!(
             provider.exec("absent", &ExecSpec::default()),
             Err(ProviderError::NotFound(_))

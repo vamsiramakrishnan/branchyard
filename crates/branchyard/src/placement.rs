@@ -17,16 +17,25 @@
 //! Either sandbox is journaled as the turn's `sandbox` step before it is
 //! created. If this engine stops, recovery destroys a Microsandbox sandbox,
 //! and brings a Substrate actor's work back as the turn's end would have
-//! before deleting it.
+//! before deleting it, unless the turn had already parked it (below).
 //!
 //! Either way the harness gets `HOME` and the variables named in the
-//! provider's `pass_env`, and nothing else from this process. Each turn gets
-//! a fresh sandbox, destroyed when the turn ends.
+//! provider's `pass_env`, and nothing else from this process. By default
+//! each turn gets a fresh sandbox, destroyed when the turn ends. With
+//! `keep = "pause"` and a provider that can pause, the sandbox is paused
+//! and recorded when the turn ends, and the next turn resumes it; a branch
+//! seeded from another's checkpoint gets a sandbox branched from that
+//! checkpoint's provider snapshot. See [`crate::snapshots`] and
+//! `docs/sandbox-snapshots.md`. The turn's sandbox runs the branch's
+//! `[workspace]` setup too ([`Placement::sandbox`]), so what it installs
+//! outside the worktree lives in the sandbox and its snapshots.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use std::sync::Arc;
 
 use branchyard_harness::{Driver, Open};
 use branchyard_runtime::{RuntimeError, Session};
@@ -35,10 +44,9 @@ use branchyard_substrate::transfer::{self, Pushed};
 use branchyard_substrate::SubstrateProvider;
 use serde_json::{json, Value};
 
-use crate::state::{now_ms, Fence, Record};
-#[cfg(test)]
-use crate::SandboxOptions;
-use crate::{git, harness, Error, Provider, SubstrateOptions, Yard};
+use crate::snapshots::{self, SandboxEvent, SandboxOrigin};
+use crate::state::{now_ms, Begun, Fence, Record, SandboxKind};
+use crate::{git, harness, Activity, Error, Provider, SandboxOptions, SubstrateOptions, Yard};
 
 /// Where the worktree appears in a sandbox.
 pub const WORKSPACE: &str = "/workspace";
@@ -59,12 +67,15 @@ pub(crate) fn sandboxed(provider: Option<&Provider>) -> bool {
 }
 
 /// Refuse a provider this build or its options cannot run, before anything
-/// is created.
-pub(crate) fn check(provider: Option<&Provider>) -> Result<(), Error> {
+/// is created. A yard given its own sandbox provider
+/// ([`Yard::use_sandbox_provider`]) runs Microsandbox branches without the
+/// SDK.
+pub(crate) fn check(yard: &Yard, provider: Option<&Provider>) -> Result<(), Error> {
     match provider {
         None | Some(Provider::Local) => Ok(()),
         Some(Provider::Microsandbox(options)) => {
-            if !branchyard_microsandbox::ENABLED {
+            let own = crate::projection::lock(&yard.hub.sandbox_provider).is_some();
+            if !own && !branchyard_microsandbox::ENABLED {
                 return Err(Error::Unsupported(
                     "this build has no Microsandbox support; rebuild with \
                      --features microsandbox (Rust 1.94 or newer), see docs/providers.md"
@@ -120,17 +131,114 @@ pub(crate) fn guest_paths(record: &Record) -> (String, String) {
     }
 }
 
-/// A turn's harness location. A sandbox is destroyed by
-/// [`Placement::release`], or on drop.
+/// The spec of a Microsandbox branch's sandbox, and its harness's
+/// variables: the worktree at [`WORKSPACE`], the private home at [`HOME`],
+/// the git directory read-only, and every scratch area it may reach.
+fn microsandbox_spec(
+    yard: &Yard,
+    record: &Record,
+    options: &SandboxOptions,
+) -> Result<(SandboxSpec, BTreeMap<OsString, OsString>), String> {
+    let home = record
+        .home
+        .clone()
+        .ok_or("a sandboxed branch has no private home")?;
+    let mut env = sandbox_env(HOME, &options.pass_env)?;
+    let git_dir = git::common_dir(&yard.root).map_err(|e| e.to_string())?;
+    let mut mounts = vec![
+        Mount::writable(&record.info.worktree, WORKSPACE),
+        Mount::writable(home, HOME),
+        Mount::read_only(&git_dir, &git_dir),
+    ];
+    // Every scratch area this branch may reach is mounted read-write at a
+    // fixed guest path, named for the harness the same way the local
+    // provider's environment variable does; see `docs/storage.md`. One
+    // writer at a time is still enforced by `by scratch lock`, not by this
+    // mount.
+    if let Ok(areas) = crate::storage::authorized_scratch(yard, &record.info.name) {
+        for area in &areas {
+            let host = crate::storage::scratch_dir(&yard.store(), &area.name);
+            let _ = std::fs::create_dir_all(&host);
+            let guest = format!("{SCRATCH_MOUNT_BASE}/{}", area.name);
+            mounts.push(Mount::writable(&host, &guest));
+            env.insert(
+                crate::storage::scratch_env_var(&area.name).into(),
+                guest.into(),
+            );
+        }
+    }
+    let keep = snapshots::lifecycle(record.provider.as_ref()).is_some_and(|l| l.keep);
+    let spec = SandboxSpec {
+        name: sandbox_name(&record.info.name, now_ms()),
+        image: Some(options.image.clone()),
+        resources: Resources {
+            cpus: options.cpus,
+            memory_mib: options.memory_mib,
+        },
+        mounts,
+        // A kept sandbox outlives this process.
+        persist: keep,
+    };
+    Ok((spec, env))
+}
+
+/// For a fan whose setup runs once: the spec of `record`'s sandbox, when
+/// its placement mounts the worktree (so a sandbox branched from another
+/// can be rebound to it), and its provider. `None` otherwise.
+pub(crate) fn fan_spec(
+    yard: &Yard,
+    record: &Record,
+) -> Result<Option<(SandboxSpec, Arc<dyn SandboxProvider>)>, String> {
+    let Some(Provider::Microsandbox(options)) = &record.provider else {
+        return Ok(None);
+    };
+    let (spec, _) = microsandbox_spec(yard, record, options)?;
+    Ok(Some((spec, microsandbox(yard, options)?)))
+}
+
+/// Journal `record`'s turn's `sandbox` step for a sandbox made for it
+/// before its turn (a fan's), so recovery destroys it if this engine stops
+/// first.
+pub(crate) fn journal_handed(
+    yard: &Yard,
+    record: &Record,
+    fence: &Fence,
+    name: &str,
+) -> Result<(), String> {
+    let provider = record
+        .provider
+        .as_ref()
+        .map(snapshots::provider_name)
+        .unwrap_or("");
+    journal_sandbox(yard, fence, name, json!({ "provider": provider }))
+}
+
+/// Where a turn's sandbox comes from, when the caller already knows.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum SandboxPlan {
+    /// Kept, branched from the branch's seed, or fresh: see
+    /// [`snapshots::acquire`].
+    #[default]
+    Default,
+    /// A sandbox made for this turn already (a fan's branch of its prepared
+    /// sandbox), whose `sandbox` step is journaled.
+    Handed { name: String, origin: SandboxOrigin },
+    /// A fresh one, for this reason.
+    Fresh(String),
+}
+
+/// A turn's harness location. A sandbox is destroyed, or parked, by
+/// [`Placement::release`]; destroyed on drop otherwise.
 pub(crate) struct Placement {
     cwd: String,
     kind: Kind,
+    started: Option<SandboxEvent>,
 }
 
 enum Kind {
     Local(branchyard_runtime::Environment),
     Sandbox {
-        provider: Box<dyn SandboxProvider>,
+        provider: Arc<dyn SandboxProvider>,
         name: String,
         env: BTreeMap<OsString, OsString>,
         released: bool,
@@ -151,12 +259,9 @@ struct Actor {
 }
 
 impl Actor {
-    /// Bring the worktree and home back, then delete the actor. Returns
-    /// what went wrong, if anything; the actor is deleted regardless.
-    fn release(&mut self) -> Vec<String> {
-        if std::mem::replace(&mut self.released, true) {
-            return Vec::new();
-        }
+    /// Bring the worktree and home back. Returns what went wrong, if
+    /// anything.
+    fn bring_back(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
         match self.provider.endpoint(&self.name) {
             Ok(endpoint) => {
@@ -184,6 +289,16 @@ impl Actor {
             Err(_) => {}
         }
         self.pushed = None;
+        warnings
+    }
+
+    /// Bring the worktree and home back, then delete the actor. Returns
+    /// what went wrong, if anything; the actor is deleted regardless.
+    fn release(&mut self) -> Vec<String> {
+        if std::mem::replace(&mut self.released, true) {
+            return Vec::new();
+        }
+        let mut warnings = self.bring_back();
         if let Err(error) = self.provider.destroy(&self.name) {
             warnings.push(format!("could not delete actor {}: {error}", self.name));
         }
@@ -191,83 +306,110 @@ impl Actor {
     }
 }
 
+/// Journal the turn's `sandbox` step naming `name` (and `extra`) before it
+/// is created or resumed. A step an earlier choice of this turn began, for a
+/// sandbox that was not used, is replaced.
+fn journal_sandbox(yard: &Yard, fence: &Fence, name: &str, extra: Value) -> Result<(), String> {
+    let store = yard.store();
+    let mut intent = extra;
+    intent["sandbox"] = json!(name);
+    let backend = store.backend();
+    let begun = backend
+        .begin_step(fence, fence.turn, STEP_SANDBOX, &intent)
+        .map_err(|e| format!("could not record sandbox {name}: {e}"))?;
+    if let Begun::Pending(earlier) = begun {
+        if earlier != intent {
+            backend
+                .abandon_step(fence, fence.turn, STEP_SANDBOX)
+                .and_then(|()| backend.begin_step(fence, fence.turn, STEP_SANDBOX, &intent))
+                .map_err(|e| format!("could not record sandbox {name}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 impl Placement {
-    /// Prepare the record's provider: for a sandbox, create it now. A
+    /// Prepare the record's provider: for a sandbox, get it now (kept,
+    /// branched, handed over or fresh, as `plan` and the store say). A
     /// failure is the turn's failure reason.
-    pub fn prepare(yard: &Yard, record: &Record, fence: &Fence) -> Result<Placement, String> {
+    pub fn prepare(
+        yard: &Yard,
+        record: &Record,
+        fence: &Fence,
+        plan: &SandboxPlan,
+    ) -> Result<Placement, String> {
         let options = match &record.provider {
             None | Some(Provider::Local) => {
                 return Ok(Placement {
                     cwd: record.info.worktree.display().to_string(),
                     kind: Kind::Local(harness::environment(record.home.as_deref())),
+                    started: None,
                 })
             }
             Some(Provider::Substrate(options)) => {
-                return Placement::substrate(yard, record, fence, options)
+                return Placement::substrate(yard, record, fence, options, plan)
             }
             Some(Provider::Microsandbox(options)) => options,
         };
-        let home = record
-            .home
-            .clone()
-            .ok_or("a sandboxed branch has no private home")?;
-        let mut env = sandbox_env(HOME, &options.pass_env)?;
-        let git_dir = git::common_dir(&yard.root).map_err(|e| e.to_string())?;
-        let mut mounts = vec![
-            Mount::writable(&record.info.worktree, WORKSPACE),
-            Mount::writable(home, HOME),
-            Mount::read_only(&git_dir, &git_dir),
-        ];
-        // Every scratch area this branch may reach is mounted read-write
-        // at a fixed guest path, named for the harness the same way the
-        // local provider's environment variable does; see
-        // `docs/storage.md`. One writer at a time is still enforced by
-        // `by scratch lock`, not by this mount.
-        if let Ok(areas) = crate::storage::authorized_scratch(yard, &record.info.name) {
-            for area in &areas {
-                let host = crate::storage::scratch_dir(&yard.store(), &area.name);
-                let _ = std::fs::create_dir_all(&host);
-                let guest = format!("{SCRATCH_MOUNT_BASE}/{}", area.name);
-                mounts.push(Mount::writable(&host, &guest));
-                env.insert(
-                    crate::storage::scratch_env_var(&area.name).into(),
-                    guest.into(),
-                );
+        let (spec, env) = microsandbox_spec(yard, record, options)?;
+        let provider = microsandbox(yard, options)?;
+        let key = snapshots::provider_key(record.provider.as_ref().expect("matched above"));
+        let journal =
+            |name: &str| journal_sandbox(yard, fence, name, json!({ "provider": "microsandbox" }));
+        let acquired = match plan {
+            SandboxPlan::Handed { name, origin } => {
+                journal(name)?;
+                snapshots::Acquired {
+                    name: name.clone(),
+                    origin: origin.clone(),
+                }
             }
-        }
-        let spec = SandboxSpec {
-            name: sandbox_name(&record.info.name, now_ms()),
-            image: Some(options.image.clone()),
-            resources: Resources {
-                cpus: options.cpus,
-                memory_mib: options.memory_mib,
-            },
-            mounts,
+            SandboxPlan::Fresh(reason) => {
+                journal(&spec.name)?;
+                provider.ensure(&spec).map_err(|e| {
+                    let _ = provider.destroy(&spec.name);
+                    format!("could not create sandbox {}: {e}", spec.name)
+                })?;
+                snapshots::Acquired {
+                    name: spec.name.clone(),
+                    origin: SandboxOrigin::Fresh {
+                        reason: Some(reason.clone()),
+                    },
+                }
+            }
+            SandboxPlan::Default => {
+                let store = yard.store();
+                snapshots::acquire(
+                    &store,
+                    record,
+                    fence,
+                    provider.as_ref(),
+                    &key,
+                    &spec,
+                    &journal,
+                )
+                .inspect_err(|_| {
+                    let _ = provider.destroy(&spec.name);
+                })?
+            }
         };
-        let provider = microsandbox()?;
-        // Journaled before the sandbox exists, so recovery can destroy it.
         let store = yard.store();
-        let intent = json!({ "provider": "microsandbox", "sandbox": spec.name });
-        store
-            .backend()
-            .begin_step(fence, fence.turn, STEP_SANDBOX, &intent)
-            .map_err(|e| format!("could not record sandbox {}: {e}", spec.name))?;
-        let created = provider.ensure(&spec);
         let _ = store.backend().finish_step(
             fence,
             fence.turn,
             STEP_SANDBOX,
-            &json!({ "created": created.is_ok() }),
+            &json!({ "created": true, "sandbox": acquired.name }),
         );
-        if let Err(error) = created {
-            let _ = provider.destroy(&spec.name);
-            return Err(format!("could not create sandbox {}: {error}", spec.name));
-        }
         Ok(Placement {
             cwd: WORKSPACE.into(),
+            started: Some(SandboxEvent::Started {
+                provider: "microsandbox".into(),
+                sandbox: acquired.name.clone(),
+                origin: acquired.origin,
+            }),
             kind: Kind::Sandbox {
                 provider,
-                name: spec.name,
+                name: acquired.name,
                 env,
                 released: false,
             },
@@ -279,6 +421,7 @@ impl Placement {
         record: &Record,
         fence: &Fence,
         options: &SubstrateOptions,
+        plan: &SandboxPlan,
     ) -> Result<Placement, String> {
         let home = record
             .home
@@ -286,30 +429,43 @@ impl Placement {
             .ok_or("a sandboxed branch has no private home")?;
         let env = sandbox_env(options.home(), &options.pass_env)?;
         let provider = substrate(options)?;
-        let name = actor_name(&record.info.name, now_ms());
+        let spec = SandboxSpec::new(actor_name(&record.info.name, now_ms()));
+        let key = snapshots::provider_key(record.provider.as_ref().expect("matched above"));
         // Journaled before the actor exists, so recovery can delete it.
+        let journal = |name: &str| {
+            journal_sandbox(
+                yard,
+                fence,
+                name,
+                json!({ "provider": "substrate", "actor": name, "atespace": options.atespace() }),
+            )
+        };
         let store = yard.store();
-        let intent = json!({
-            "provider": "substrate",
-            "actor": name,
-            "atespace": options.atespace(),
-        });
-        store
-            .backend()
-            .begin_step(fence, fence.turn, STEP_SANDBOX, &intent)
-            .map_err(|e| format!("could not record actor {name}: {e}"))?;
-        let mut actor = Box::new(Actor {
-            provider,
-            name: name.clone(),
-            env,
-            worktree: record.info.worktree.clone(),
-            pushed: None,
-            home: None,
-            released: false,
-        });
-        let created = actor.provider.ensure(&SandboxSpec::new(&name));
-        let uid = actor
-            .provider
+        let acquired = match plan {
+            SandboxPlan::Handed { name, origin } => journal(name).map(|()| snapshots::Acquired {
+                name: name.clone(),
+                origin: origin.clone(),
+            }),
+            SandboxPlan::Fresh(reason) => journal(&spec.name).and_then(|()| {
+                provider
+                    .ensure(&spec)
+                    .map(|_| snapshots::Acquired {
+                        name: spec.name.clone(),
+                        origin: SandboxOrigin::Fresh {
+                            reason: Some(reason.clone()),
+                        },
+                    })
+                    .map_err(|e| format!("could not create actor {}: {e}", spec.name))
+            }),
+            SandboxPlan::Default => {
+                snapshots::acquire(&store, record, fence, &provider, &key, &spec, &journal)
+            }
+        };
+        let name = acquired
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|_| spec.name.clone());
+        let uid = provider
             .handle(&name)
             .ok()
             .flatten()
@@ -319,6 +475,15 @@ impl Placement {
             store
                 .backend()
                 .finish_step(fence, fence.turn, STEP_SANDBOX, &json!({ "uid": uid }));
+        let mut actor = Box::new(Actor {
+            provider,
+            name: name.clone(),
+            env,
+            worktree: record.info.worktree.clone(),
+            pushed: None,
+            home: None,
+            released: false,
+        });
         let fail = |actor: &mut Actor, why: String| -> Result<Placement, String> {
             let warnings = actor.release();
             match warnings.is_empty() {
@@ -326,17 +491,28 @@ impl Placement {
                 false => Err(format!("{why}; {}", warnings.join("; "))),
             }
         };
-        if let Err(error) = created {
-            return fail(
-                &mut actor,
-                format!("could not create actor {name}: {error}"),
-            );
-        }
+        let acquired = match acquired {
+            Ok(acquired) => acquired,
+            Err(error) => return fail(&mut actor, error),
+        };
         let endpoint = match actor.provider.endpoint(&name) {
             Ok(endpoint) => endpoint,
             Err(error) => return fail(&mut actor, error.to_string()),
         };
         let workdir = PathBuf::from(options.workdir());
+        let guest_home = PathBuf::from(options.home());
+        // A resumed or branched actor still holds a worktree and a home
+        // from before: the worktree's files go (what git ignores, such as
+        // what setup installed, stays), and so does the home, before this
+        // host's are sent.
+        if !matches!(acquired.origin, SandboxOrigin::Fresh { .. }) {
+            if let Err(error) = transfer::clear_for_push(&endpoint, &workdir, &guest_home) {
+                return fail(
+                    &mut actor,
+                    format!("could not clear actor {name} for this turn: {error}"),
+                );
+            }
+        }
         let stage = staging(yard, &name);
         match transfer::push_staged(&endpoint, &record.info.worktree, &workdir, Some(&stage)) {
             Ok(pushed) => actor.pushed = Some(pushed),
@@ -347,7 +523,6 @@ impl Placement {
                 )
             }
         }
-        let guest_home = PathBuf::from(options.home());
         if let Err(error) = transfer::push_tree(&endpoint, &home, &guest_home) {
             return fail(
                 &mut actor,
@@ -357,8 +532,35 @@ impl Placement {
         actor.home = Some((home, guest_home));
         Ok(Placement {
             cwd: options.workdir().to_owned(),
+            started: Some(SandboxEvent::Started {
+                provider: "substrate".into(),
+                sandbox: name,
+                origin: acquired.origin,
+            }),
             kind: Kind::Substrate(actor),
         })
+    }
+
+    /// Where the turn's sandbox came from, to record; `None` for a local
+    /// harness.
+    pub fn started(&self) -> Option<SandboxEvent> {
+        self.started.clone()
+    }
+
+    /// The turn's sandbox and its provider, for running the workspace's
+    /// scripts in it; `None` for a local harness.
+    pub fn sandbox(&self) -> Option<(&dyn SandboxProvider, &str)> {
+        match &self.kind {
+            Kind::Local(_) => None,
+            Kind::Sandbox { provider, name, .. } => Some((provider.as_ref(), name.as_str())),
+            Kind::Substrate(actor) => Some((&actor.provider, actor.name.as_str())),
+        }
+    }
+
+    /// Whether the worktree is mounted into the sandbox (so what setup
+    /// leaves in it is on this host), rather than copied in and out.
+    pub fn mounts_worktree(&self) -> bool {
+        matches!(self.kind, Kind::Sandbox { .. })
     }
 
     /// Whether the harness runs in a sandbox rather than on this host.
@@ -418,9 +620,45 @@ impl Placement {
         }
     }
 
-    /// Destroy the sandbox, if any; for a Substrate actor, bring the
-    /// worktree and home back first. A failure is returned as a warning.
-    pub fn release(&mut self) -> Option<String> {
+    /// End the turn's sandbox, if any: park it for the next turn when the
+    /// branch keeps its sandbox and the provider can pause, else destroy
+    /// it. A Substrate actor's worktree and home come back first. Returns
+    /// what to record.
+    pub fn release(&mut self, yard: &Yard, record: &Record, fence: &Fence) -> Vec<Activity> {
+        match &mut self.kind {
+            Kind::Local(_) => Vec::new(),
+            Kind::Sandbox {
+                provider,
+                name,
+                released,
+                ..
+            } => {
+                if std::mem::replace(released, true) {
+                    return Vec::new();
+                }
+                snapshots::park(yard, record, fence, provider.as_ref(), name)
+            }
+            Kind::Substrate(actor) => {
+                if std::mem::replace(&mut actor.released, true) {
+                    return Vec::new();
+                }
+                let warnings = actor.bring_back();
+                let mut said: Vec<Activity> = warnings.into_iter().map(Activity::Warning).collect();
+                said.extend(snapshots::park(
+                    yard,
+                    record,
+                    fence,
+                    &actor.provider,
+                    &actor.name,
+                ));
+                said
+            }
+        }
+    }
+
+    /// Destroy the sandbox without keeping it; for a Substrate actor, bring
+    /// the worktree and home back first. A failure is returned as a warning.
+    pub fn discard(&mut self) -> Option<String> {
         match &mut self.kind {
             Kind::Local(_) => None,
             Kind::Sandbox {
@@ -447,7 +685,7 @@ impl Placement {
 
 impl Drop for Placement {
     fn drop(&mut self) {
-        self.release();
+        self.discard();
     }
 }
 
@@ -487,15 +725,28 @@ fn actor_name(branch: &str, ms: u64) -> String {
     format!("by-{}{suffix}", branch.trim_end_matches('-'))
 }
 
+/// The provider a Microsandbox branch runs through: the yard's own
+/// ([`Yard::use_sandbox_provider`]), or the SDK's, with live branching
+/// declared only when `options` opt in.
+pub(crate) fn microsandbox(
+    yard: &Yard,
+    options: &SandboxOptions,
+) -> Result<Arc<dyn SandboxProvider>, String> {
+    if let Some(own) = crate::projection::lock(&yard.hub.sandbox_provider).clone() {
+        return Ok(own);
+    }
+    sdk(options.live_branch)
+}
+
 #[cfg(feature = "microsandbox")]
-fn microsandbox() -> Result<Box<dyn SandboxProvider>, String> {
+fn sdk(live_branch: bool) -> Result<Arc<dyn SandboxProvider>, String> {
     branchyard_microsandbox::MicrosandboxProvider::new()
-        .map(|p| Box::new(p) as Box<dyn SandboxProvider>)
+        .map(|p| Arc::new(p.with_live_branch(live_branch)) as Arc<dyn SandboxProvider>)
         .map_err(|e| format!("could not start the Microsandbox SDK: {e}"))
 }
 
 #[cfg(not(feature = "microsandbox"))]
-fn microsandbox() -> Result<Box<dyn SandboxProvider>, String> {
+fn sdk(_: bool) -> Result<Arc<dyn SandboxProvider>, String> {
     Err("this build has no Microsandbox support".into())
 }
 
@@ -533,6 +784,11 @@ fn substrate(options: &SubstrateOptions) -> Result<SubstrateProvider, String> {
     substrate_provider(options, true)
 }
 
+/// A provider for `options` that signs bridge credentials.
+pub(crate) fn substrate_signed(options: &SubstrateOptions) -> Result<SubstrateProvider, String> {
+    substrate(options)
+}
+
 /// Where a turn's transfer to `actor` is staged, so recovery can delete it.
 fn staging(yard: &Yard, actor: &str) -> PathBuf {
     yard.store().dir().join("transfer").join(actor)
@@ -541,24 +797,41 @@ fn staging(yard: &Yard, actor: &str) -> PathBuf {
 /// Clean up the sandbox a stopped engine's turn journaled in its
 /// `sandbox` step: a Substrate actor's work is brought back, then the actor
 /// and its transfer's staging directory are deleted; a Microsandbox sandbox
-/// is destroyed. Returns what recovery should report, if anything.
-pub(crate) fn recover(yard: &Yard, record: &Record, intent: &Value) -> Option<String> {
-    match &record.provider {
-        Some(Provider::Substrate(options)) => {
-            let actor = intent.get("actor")?.as_str()?;
-            Some(recover_actor(yard, record, options, actor))
-        }
-        Some(Provider::Microsandbox(_)) => {
-            let name = intent.get("sandbox")?.as_str()?;
-            Some(destroy_orphan(microsandbox(), name))
-        }
-        None | Some(Provider::Local) => None,
+/// is destroyed. A sandbox the turn had already parked (its `sandbox_park`
+/// step finished with it kept) stays, recorded for the next turn; a kept
+/// record for one destroyed here is removed. Returns what recovery should
+/// report, if anything.
+pub(crate) fn recover(
+    yard: &Yard,
+    record: &Record,
+    intent: &Value,
+    parked: Option<&Value>,
+) -> Option<String> {
+    let name = intent
+        .get("actor")
+        .or_else(|| intent.get("sandbox"))?
+        .as_str()?
+        .to_owned();
+    if parked.and_then(|o| o.get("kept")).and_then(Value::as_bool) == Some(true) {
+        return Some(format!(
+            "its sandbox {name} was already kept paused for the next turn"
+        ));
     }
+    let said = match &record.provider {
+        Some(Provider::Substrate(options)) => recover_actor(yard, record, options, &name),
+        Some(Provider::Microsandbox(options)) => destroy_orphan(microsandbox(yard, options), &name),
+        None | Some(Provider::Local) => return None,
+    };
+    let _ = yard
+        .store()
+        .sandboxes()
+        .take_sandbox(&record.info.name, SandboxKind::Kept, &name);
+    Some(said)
 }
 
 /// Destroy the Microsandbox sandbox `name` a stopped engine left, through
 /// `provider`, and say what happened.
-fn destroy_orphan(provider: Result<Box<dyn SandboxProvider>, String>, name: &str) -> String {
+fn destroy_orphan(provider: Result<Arc<dyn SandboxProvider>, String>, name: &str) -> String {
     let destroyed = provider.and_then(|provider| {
         let existed = provider.inspect(name).map_err(|e| e.to_string())?.is_some();
         provider.destroy(name).map_err(|e| e.to_string())?;
@@ -678,16 +951,29 @@ mod tests {
 
     #[test]
     fn providers_are_checked_before_anything_is_created() {
-        assert!(check(None).is_ok());
-        assert!(check(Some(&Provider::Local)).is_ok());
+        let dir = tempfile::Builder::new()
+            .prefix("by-placement-")
+            .tempdir()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        let yard = Yard::open(dir.path()).unwrap();
+        assert!(check(&yard, None).is_ok());
+        assert!(check(&yard, Some(&Provider::Local)).is_ok());
         let empty = Provider::Microsandbox(SandboxOptions::default());
-        assert!(matches!(check(Some(&empty)), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            check(&yard, Some(&empty)),
+            Err(Error::Unsupported(_))
+        ));
         let image = Provider::Microsandbox(SandboxOptions {
             image: "alpine:3.20".into(),
             ..SandboxOptions::default()
         });
         assert_eq!(
-            check(Some(&image)).is_ok(),
+            check(&yard, Some(&image)).is_ok(),
             branchyard_microsandbox::ENABLED
         );
         assert!(sandboxed(Some(&image)));
@@ -709,7 +995,7 @@ mod tests {
             key: key.clone(),
             ..SubstrateOptions::default()
         };
-        assert!(check(Some(&Provider::Substrate(good.clone()))).is_ok());
+        assert!(check_substrate(&good.clone()).is_ok());
         assert!(sandboxed(Some(&Provider::Substrate(good.clone()))));
         // TLS anywhere, or plain HTTP to another host when asked for.
         for fine in [
@@ -724,10 +1010,7 @@ mod tests {
                 ..good.clone()
             },
         ] {
-            assert!(
-                check(Some(&Provider::Substrate(fine.clone()))).is_ok(),
-                "{fine:?}"
-            );
+            assert!(check_substrate(&fine.clone()).is_ok(), "{fine:?}");
         }
         let bad = [
             SubstrateOptions {
@@ -772,7 +1055,7 @@ mod tests {
         for options in bad {
             assert!(
                 matches!(
-                    check(Some(&Provider::Substrate(options.clone()))),
+                    check_substrate(&options.clone()),
                     Err(Error::Unsupported(_))
                 ),
                 "{options:?}"
@@ -842,7 +1125,7 @@ mod tests {
             fail,
         };
         let boxed =
-            |p: &Standin| -> Result<Box<dyn SandboxProvider>, String> { Ok(Box::new(p.clone())) };
+            |p: &Standin| -> Result<Arc<dyn SandboxProvider>, String> { Ok(Arc::new(p.clone())) };
         let provider = standin(false);
         assert_eq!(
             destroy_orphan(boxed(&provider), "by-x-1"),
@@ -860,7 +1143,7 @@ mod tests {
         );
         if !branchyard_microsandbox::ENABLED {
             assert_eq!(
-                destroy_orphan(microsandbox(), "by-x-1"),
+                destroy_orphan(sdk(false), "by-x-1"),
                 "could not destroy its Microsandbox sandbox by-x-1: this build has no \
                  Microsandbox support"
             );

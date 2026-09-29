@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
     now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PortBackend,
-    ProcessRow, Record, ReservationRow, SteerRow, StepRow,
+    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
@@ -238,6 +238,19 @@ CREATE TABLE IF NOT EXISTS by_ports (
     reserved_ms BIGINT NOT NULL,
     UNIQUE (repo, branch)
 );
+CREATE TABLE IF NOT EXISTS by_sandboxes (
+    repo TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    incarnation BIGINT NOT NULL,
+    provider TEXT NOT NULL,
+    turn BIGINT,
+    detail TEXT NOT NULL,
+    used_ms BIGINT NOT NULL,
+    PRIMARY KEY (repo, branch, kind, name)
+);
+CREATE INDEX IF NOT EXISTS by_sandboxes_provider ON by_sandboxes (repo, kind, provider, used_ms);
 ";
 
 fn steer_row(r: &Row) -> SteerRow {
@@ -944,6 +957,7 @@ impl Backend for Postgres {
                 "DELETE FROM by_graph_edges WHERE repo = $1 AND dependent = $2",
                 "DELETE FROM by_graph_revisions WHERE repo = $1 AND parent = $2",
                 "DELETE FROM by_ports WHERE repo = $1 AND branch = $2",
+                "DELETE FROM by_sandboxes WHERE repo = $1 AND branch = $2",
             ] {
                 tx.execute(sql, &[&self.repo, &name])
                     .map_err(db("delete"))?;
@@ -1930,6 +1944,96 @@ impl PortBackend for Postgres {
             )
         })?;
         Ok(row.map(|r| r.get::<_, i32>(0) as u16))
+    }
+}
+
+const SANDBOX_COLUMNS: &str = "branch, incarnation, kind, provider, name, turn, detail, used_ms";
+
+fn sandbox_row(r: &Row) -> Result<SandboxRow, Error> {
+    Ok(SandboxRow {
+        branch: r.get(0),
+        incarnation: r.get(1),
+        kind: SandboxKind::parse(r.get(2))?,
+        provider: r.get(3),
+        name: r.get(4),
+        turn: r.get::<_, Option<i64>>(5).map(|t| t as u32),
+        detail: r.get(6),
+        used_ms: uint(r.get(7)),
+    })
+}
+
+impl SandboxBackend for Postgres {
+    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                "INSERT INTO by_sandboxes \
+                 (repo, branch, incarnation, kind, provider, name, turn, detail, used_ms) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 ON CONFLICT (repo, branch, kind, name) DO UPDATE SET \
+                 incarnation = EXCLUDED.incarnation, provider = EXCLUDED.provider, \
+                 turn = EXCLUDED.turn, detail = EXCLUDED.detail, used_ms = EXCLUDED.used_ms",
+                &[
+                    &self.repo,
+                    &row.branch,
+                    &row.incarnation,
+                    &row.kind.as_str(),
+                    &row.provider,
+                    &row.name,
+                    &row.turn.map(i64::from),
+                    &row.detail,
+                    &int(row.used_ms),
+                ],
+            )
+            .map_err(db("sandbox"))?;
+            Ok(())
+        })
+    }
+
+    fn sandboxes(&self, branch: &str) -> Result<Vec<SandboxRow>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {SANDBOX_COLUMNS} FROM by_sandboxes WHERE repo = $1 AND branch = $2 \
+                     ORDER BY used_ms, name"
+                ),
+                &[&self.repo, &branch],
+            )
+        })?;
+        rows.iter().map(sandbox_row).collect()
+    }
+
+    fn sandboxes_of(&self, kind: SandboxKind, provider: &str) -> Result<Vec<SandboxRow>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {SANDBOX_COLUMNS} FROM by_sandboxes \
+                     WHERE repo = $1 AND kind = $2 AND provider = $3 \
+                     ORDER BY used_ms, branch, name"
+                ),
+                &[&self.repo, &kind.as_str(), &provider],
+            )
+        })?;
+        rows.iter().map(sandbox_row).collect()
+    }
+
+    fn take_sandbox(
+        &self,
+        branch: &str,
+        kind: SandboxKind,
+        name: &str,
+    ) -> Result<Option<SandboxRow>, Error> {
+        let row = self.tx(true, |tx| {
+            tx.query_opt(
+                &format!(
+                    "DELETE FROM by_sandboxes \
+                     WHERE repo = $1 AND branch = $2 AND kind = $3 AND name = $4 \
+                     RETURNING {SANDBOX_COLUMNS}"
+                ),
+                &[&self.repo, &branch, &kind.as_str(), &name],
+            )
+            .map_err(db("sandbox"))
+        })?;
+        row.as_ref().map(sandbox_row).transpose()
     }
 }
 

@@ -156,3 +156,127 @@ fn a_disk_checkpoint_branches_into_a_new_sandbox() {
         provider.destroy(name).unwrap();
     }
 }
+
+// Live branching, the pattern mario-never-dies probes: a paused source is
+// branched into children that keep its processes (same PIDs), whose writes
+// stay private, while the source stays paused. Declared only with
+// `with_live_branch(true)`; unqualified until these pass on a KVM host.
+
+fn live_provider() -> MicrosandboxProvider {
+    MicrosandboxProvider::new().unwrap().with_live_branch(true)
+}
+
+/// A long-running process in `sandbox`, started detached from the exec,
+/// and its PID.
+fn start_sleeper(provider: &dyn SandboxProvider, sandbox: &str) -> String {
+    let (code, pid) = run(
+        provider,
+        sandbox,
+        "sleep 3600 >/dev/null 2>&1 & echo $! > /root/sleeper.pid; cat /root/sleeper.pid",
+    );
+    assert_eq!(code, Some(0));
+    pid.trim().to_owned()
+}
+
+#[test]
+#[ignore = "needs Linux with KVM and the msb 0.7.3 runtime"]
+fn a_live_branch_child_keeps_the_sources_processes() {
+    let setup = setup("live-pids");
+    let provider = live_provider();
+    let (source, child) = ("by-msb-live-source", "by-msb-live-child");
+    for name in [source, child] {
+        let _ = provider.destroy(name);
+    }
+    provider.ensure(&spec(&setup, source).persist()).unwrap();
+    let pid = start_sleeper(&provider, source);
+    provider.pause(source).unwrap();
+    let children = [SandboxSpec::new(child).mount(Mount::writable(&setup.workspace, GUEST))];
+    let made = provider.branch_live(source, &children);
+    assert!(made[0].is_ok(), "{:?}", made[0]);
+    let (code, alive) = run(&provider, child, &format!("kill -0 {pid} && echo alive"));
+    assert_eq!(
+        (code, alive.trim()),
+        (Some(0), "alive"),
+        "PID {pid} in the child"
+    );
+    for name in [child, source] {
+        provider.destroy(name).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "needs Linux with KVM and the msb 0.7.3 runtime"]
+fn a_live_branch_childs_writes_are_private_and_the_paused_source_stays_paused() {
+    let setup = setup("live-private");
+    let provider = live_provider();
+    let source = "by-msb-live-src2";
+    let children = ["by-msb-live-c1", "by-msb-live-c2"];
+    for name in std::iter::once(source).chain(children) {
+        let _ = provider.destroy(name);
+    }
+    provider.ensure(&spec(&setup, source).persist()).unwrap();
+    assert_eq!(
+        run(&provider, source, "echo source > /root/marker && sync").0,
+        Some(0)
+    );
+    provider.pause(source).unwrap();
+    // Each child gets its own workspace, rebound at the same guest path.
+    let specs: Vec<SandboxSpec> = children
+        .iter()
+        .map(|name| SandboxSpec::new(*name).mount(Mount::writable(workspace(name), GUEST)))
+        .collect();
+    for made in provider.branch_live(source, &specs) {
+        made.unwrap();
+    }
+    assert_eq!(
+        provider.inspect(source).unwrap().unwrap().state,
+        SandboxState::Paused,
+        "the source stayed paused"
+    );
+    run(
+        &provider,
+        children[0],
+        "echo c1 > /root/marker && touch /workspace/c1-was-here",
+    );
+    let (_, other) = run(&provider, children[1], "cat /root/marker");
+    assert_eq!(other, "source\n", "c2 saw c1's root-disk write");
+    assert!(workspace_file(children[0], "c1-was-here"));
+    assert!(!workspace_file(children[1], "c1-was-here"));
+    provider.resume(source).unwrap();
+    let (_, own) = run(&provider, source, "cat /root/marker");
+    assert_eq!(own, "source\n");
+    for name in children.into_iter().chain([source]) {
+        provider.destroy(name).unwrap();
+    }
+}
+
+fn workspace_file(name: &str, file: &str) -> bool {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("msb-{name}"))
+        .join(file)
+        .exists()
+}
+
+#[test]
+#[ignore = "needs Linux with KVM and the msb 0.7.3 runtime"]
+fn a_persisted_sandbox_is_resumed_by_another_provider() {
+    let setup = setup("persist");
+    let name = "by-msb-persist";
+    {
+        let provider = live_provider();
+        let _ = provider.destroy(name);
+        provider.ensure(&spec(&setup, name).persist()).unwrap();
+        run(&provider, name, "echo kept > /root/marker");
+        provider.pause(name).unwrap();
+    }
+    // A new provider, as a later `by send` would have.
+    let provider = live_provider();
+    assert_eq!(
+        provider.inspect(name).unwrap().unwrap().state,
+        SandboxState::Paused
+    );
+    provider.resume(name).unwrap();
+    let (code, out) = run(&provider, name, "cat /root/marker");
+    assert_eq!((code, out.as_str()), (Some(0), "kept\n"));
+    provider.destroy(name).unwrap();
+}
