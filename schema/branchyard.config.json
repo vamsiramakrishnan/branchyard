@@ -287,6 +287,39 @@
             "type": "string"
           },
           "description": "Variables to copy into the sandbox, by name."
+        },
+        "keep": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Between turns: `\"destroy\"` the microVM (the default) or `\"pause\"`\nit for the next turn. Pausing needs `live_branch`. See\ndocs/sandbox-snapshots.md.",
+          "pattern": "^(pause|destroy)$"
+        },
+        "snapshots": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "With a kept sandbox, checkpoints that also keep a snapshot (default 3)."
+        },
+        "max_paused": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Kept sandboxes per repository before the least recently used is\ndestroyed (default 4)."
+        },
+        "live_branch": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Use the SDK's pause, live branching and full snapshots: unqualified\nuntil they pass on a KVM host."
         }
       },
       "required": [

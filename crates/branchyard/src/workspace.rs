@@ -163,6 +163,17 @@ pub enum WorkspacePhase {
     Run,
 }
 
+/// Where a workspace phase's commands ran.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RanIn {
+    /// On this host, in the worktree.
+    Host,
+    /// In the branch's sandbox, through its provider.
+    Sandbox,
+}
+
 /// What one phase of a branch's workspace lifecycle did.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,10 +207,10 @@ pub struct WorkspaceReport {
     /// The branch's reserved port, as the commands saw it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Where setup ran: `host`, or the sandbox the branch's harness runs
-    /// in (`sandbox`).
+    /// Where the commands ran: on this host, or in the sandbox the
+    /// branch's harness runs in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ran_in: Option<String>,
+    pub ran_in: Option<RanIn>,
     /// Setup did not run for this branch: it inherited another branch's,
     /// with a sandbox branched from that branch's (a fork from a sandbox
     /// snapshot, or a fan whose setup ran once), named here.
@@ -412,7 +423,7 @@ pub(crate) fn prepare(
     } else if let Some(inherit) = inherit {
         let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(port));
         report.inherited_from = Some(inherit.from.clone());
-        report.ran_in = Some("sandbox".into());
+        report.ran_in = Some(RanIn::Sandbox);
         if let Some(from) = &inherit.worktree {
             if let Err(error) = replicate(from, &worktree, &inherit.produced) {
                 report.ok = false;
@@ -458,7 +469,7 @@ pub(crate) fn prepare(
             let before = seen.then(|| untracked(&worktree));
             match runner {
                 Runner::Host => {
-                    report.ran_in = Some("host".into());
+                    report.ran_in = Some(RanIn::Host);
                     let env = variables(yard, &name, &worktree, Some(port));
                     let on_spawn = |row: &ProcessRow| store.backend().record_process(fence, row);
                     run_commands(
@@ -478,7 +489,7 @@ pub(crate) fn prepare(
                     cwd,
                     ..
                 } => {
-                    report.ran_in = Some("sandbox".into());
+                    report.ran_in = Some(RanIn::Sandbox);
                     // The root and the port are this host's; the worktree
                     // is where the sandbox sees it.
                     let env = vec![
@@ -617,7 +628,7 @@ pub(crate) fn teardown(
     // A sandboxed branch's teardown runs in a sandbox of its own, as its
     // setup did: its kept one when it has one, else a fresh one.
     if let (Some(fence), true) = (fence, crate::placement::sandboxed(record.provider.as_ref())) {
-        report.ran_in = Some("sandbox".into());
+        report.ran_in = Some(RanIn::Sandbox);
         let plan = crate::placement::SandboxPlan::Default;
         match crate::placement::Placement::prepare(yard, record, fence, &plan) {
             Ok(mut placement) => {
@@ -649,7 +660,7 @@ pub(crate) fn teardown(
         }
         return Ok(Some(report));
     }
-    report.ran_in = Some("host".into());
+    report.ran_in = Some(RanIn::Host);
     let env = variables(yard, &record.info.name, worktree, port);
     let on_spawn = |row: &ProcessRow| match fence {
         Some(fence) => store.backend().record_process(fence, row),

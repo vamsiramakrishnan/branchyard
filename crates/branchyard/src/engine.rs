@@ -376,7 +376,7 @@ fn run(
         }
     };
     if let Some(started) = placement.started() {
-        recorder.record(Activity::Sandbox(started.clone()))?;
+        recorder.record(crate::snapshots::event(started.clone()))?;
         // A seed is used once: later turns resume the kept sandbox or
         // start fresh.
         if record.sandbox_seed.take().is_some() {

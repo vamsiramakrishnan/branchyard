@@ -877,7 +877,7 @@ pub(crate) fn fork(
     };
     // The fork's first sandbox, from the parent's provider snapshot at its
     // base when there is one (`crate::snapshots`), on the same provider.
-    let seed = match &provider == &parent.provider {
+    let seed = match provider == parent.provider {
         true => crate::snapshots::seed(&parent, at.or(parent.checkpoint.filter(|n| *n > 0)), &base),
         false => None,
     };

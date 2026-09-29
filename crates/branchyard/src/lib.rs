@@ -177,7 +177,7 @@ pub use spotlight::{TryEntry, TryFile, TryState};
 use std::collections::BTreeMap;
 pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
 pub use workspace::{
-    check_glob as check_workspace_glob, WorkspaceInfo, WorkspacePhase, WorkspaceReport,
+    check_glob as check_workspace_glob, RanIn, WorkspaceInfo, WorkspacePhase, WorkspaceReport,
     WorkspaceSpec, ENV_PORT, ENV_WORKTREE, OUTPUT_TAIL as WORKSPACE_OUTPUT_TAIL,
     PORT_RANGE as WORKSPACE_PORT_RANGE,
 };
@@ -1687,7 +1687,7 @@ pub enum Activity {
     /// Where a turn's sandbox came from (fresh, resumed, branched from a
     /// provider snapshot) and what became of it: kept, destroyed, evicted,
     /// a snapshot released. See `docs/sandbox-snapshots.md`.
-    Sandbox(SandboxEvent),
+    Sandbox(Box<SandboxEvent>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the
@@ -1712,7 +1712,7 @@ pub struct Checkpoint {
     /// kept its sandbox and the provider could; see
     /// `docs/sandbox-snapshots.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<SandboxSnapshot>,
+    pub sandbox: Option<Box<SandboxSnapshot>>,
 }
 
 /// How a rewound or forked-at branch's conversation continues. Serialized as

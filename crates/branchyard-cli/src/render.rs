@@ -404,7 +404,7 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
         Activity::Workspace(report) => workspace_line(report, style),
         Activity::Sandbox(event) => style.paint(
-            match event {
+            match event.as_ref() {
                 branchyard::SandboxEvent::Started {
                     origin: branchyard::SandboxOrigin::Fresh { reason: Some(_) },
                     ..

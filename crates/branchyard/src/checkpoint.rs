@@ -218,7 +218,7 @@ pub(crate) fn record_turn(
             // keeps its sandbox and its provider can take one.
             let (snapshot, said) =
                 crate::snapshots::snapshot_turn(yard, fence, record, turn, &checkpoint.commit);
-            checkpoint.sandbox = snapshot;
+            checkpoint.sandbox = snapshot.map(Box::new);
             recorder.record(Activity::Checkpoint(checkpoint.clone()))?;
             for activity in said {
                 recorder.record(activity)?;

@@ -182,13 +182,13 @@ fn microsandbox_spec(
     Ok((spec, env))
 }
 
+/// A sandbox's spec and the provider it is created through.
+pub(crate) type Planned = (SandboxSpec, Arc<dyn SandboxProvider>);
+
 /// For a fan whose setup runs once: the spec of `record`'s sandbox, when
 /// its placement mounts the worktree (so a sandbox branched from another
 /// can be rebound to it), and its provider. `None` otherwise.
-pub(crate) fn fan_spec(
-    yard: &Yard,
-    record: &Record,
-) -> Result<Option<(SandboxSpec, Arc<dyn SandboxProvider>)>, String> {
+pub(crate) fn fan_spec(yard: &Yard, record: &Record) -> Result<Option<Planned>, String> {
     let Some(Provider::Microsandbox(options)) = &record.provider else {
         return Ok(None);
     };
@@ -1148,5 +1148,68 @@ mod tests {
                  Microsandbox support"
             );
         }
+    }
+
+    /// Recovery leaves a sandbox its turn had parked (its record is how the
+    /// next turn finds it), and destroys one it had not, removing any kept
+    /// record of it.
+    #[test]
+    fn recovery_keeps_a_parked_sandbox_and_destroys_an_unparked_one() {
+        use crate::state::{SandboxKind, SandboxRow};
+        let dir = tempfile::Builder::new()
+            .prefix("by-placement-")
+            .tempdir()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        let yard = Yard::open(dir.path()).unwrap();
+        let standin = Standin {
+            known: std::sync::Arc::new(std::sync::Mutex::new(vec!["by-b-1".into()])),
+            destroyed: Default::default(),
+            fail: false,
+        };
+        yard.use_sandbox_provider(Arc::new(standin.clone()));
+        let record: Record = serde_json::from_value(json!({
+            "info": {
+                "name": "b", "git_branch": "by/b", "worktree": "/w",
+                "prompt": "p", "harness": "h", "profile": "p", "session": null,
+                "parent": null, "base": "b", "candidate": null,
+                "status": {"state": "running"}, "turns": 0, "cost_usd": null,
+                "created_at": 0
+            },
+            "created_ms": 0, "check": null, "command": null, "home": null,
+            "cost_baseline": null,
+            "provider": {"kind": "microsandbox", "image": "i", "keep": "pause"}
+        }))
+        .unwrap();
+        let intent = json!({ "provider": "microsandbox", "sandbox": "by-b-1" });
+        let kept = json!({ "kept": true });
+        assert_eq!(
+            recover(&yard, &record, &intent, Some(&kept)).as_deref(),
+            Some("its sandbox by-b-1 was already kept paused for the next turn")
+        );
+        assert!(standin.destroyed.lock().unwrap().is_empty());
+        yard.store()
+            .sandboxes()
+            .put_sandbox(&SandboxRow {
+                branch: "b".into(),
+                incarnation: 1,
+                kind: SandboxKind::Kept,
+                provider: "microsandbox".into(),
+                name: "by-b-1".into(),
+                turn: None,
+                detail: "{}".into(),
+                used_ms: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            recover(&yard, &record, &intent, None).as_deref(),
+            Some("destroyed its Microsandbox sandbox by-b-1")
+        );
+        assert_eq!(*standin.destroyed.lock().unwrap(), ["by-b-1"]);
+        assert!(yard.store().sandboxes().sandboxes("b").unwrap().is_empty());
     }
 }

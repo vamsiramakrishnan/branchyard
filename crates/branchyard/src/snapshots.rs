@@ -252,6 +252,11 @@ impl SandboxEvent {
     }
 }
 
+/// `event` as an activity to record.
+pub(crate) fn event(event: SandboxEvent) -> Activity {
+    Activity::Sandbox(Box::new(event))
+}
+
 /// Where a branch's next sandbox comes from when it has none kept: the
 /// provider snapshot of `branch` at checkpoint `turn`, or the newest at
 /// `commit`. Only a snapshot of that commit is used: rows go with their
@@ -643,7 +648,7 @@ pub(crate) fn park(
             )));
         }
         if let Some(reason) = reason {
-            said.push(Activity::Sandbox(SandboxEvent::NotKept {
+            said.push(event(SandboxEvent::NotKept {
                 provider: kind.into(),
                 sandbox: name.into(),
                 reason,
@@ -688,7 +693,7 @@ pub(crate) fn park(
                 store
                     .backend()
                     .finish_step(fence, fence.turn, STEP_PARK, &json!({ "kept": true }));
-            said.push(Activity::Sandbox(SandboxEvent::Kept {
+            said.push(event(SandboxEvent::Kept {
                 provider: kind.into(),
                 sandbox: name.into(),
             }));
@@ -744,7 +749,7 @@ pub(crate) fn evict(yard: &Yard, key: &str, max: u32, except: &str) -> Vec<Activ
             .and_then(|p| open(yard, &p))
             .and_then(|provider| provider.destroy(&row.name).map_err(|e| e.to_string()));
         match destroyed {
-            Ok(()) => said.push(Activity::Sandbox(SandboxEvent::Evicted {
+            Ok(()) => said.push(event(SandboxEvent::Evicted {
                 provider: key.split(':').next().unwrap_or(key).to_owned(),
                 sandbox: row.name.clone(),
                 branch: row.branch.clone(),
@@ -796,7 +801,7 @@ pub(crate) fn snapshot_turn(
     let provider = match open(yard, &provider_options) {
         Ok(provider) => provider,
         Err(reason) => {
-            said.push(Activity::Sandbox(SandboxEvent::NoSnapshot { turn, reason }));
+            said.push(event(SandboxEvent::NoSnapshot { turn, reason }));
             return (None, said);
         }
     };
@@ -804,7 +809,7 @@ pub(crate) fn snapshot_turn(
     let method = match method(&capabilities) {
         Ok(method) => method,
         Err(reason) => {
-            said.push(Activity::Sandbox(SandboxEvent::NoSnapshot { turn, reason }));
+            said.push(event(SandboxEvent::NoSnapshot { turn, reason }));
             return (None, said);
         }
     };
@@ -897,7 +902,7 @@ pub(crate) fn snapshot_turn(
                 STEP_SNAPSHOT,
                 &json!({ "error": reason }),
             );
-            said.push(Activity::Sandbox(SandboxEvent::NoSnapshot { turn, reason }));
+            said.push(event(SandboxEvent::NoSnapshot { turn, reason }));
             None
         }
     };
@@ -962,12 +967,12 @@ fn release(
             "could not release {} sandbox {}: {error}",
             kind, row.name
         )),
-        (Ok(()), SandboxKind::Snapshot) => Activity::Sandbox(SandboxEvent::Released {
+        (Ok(()), SandboxKind::Snapshot) => event(SandboxEvent::Released {
             provider: kind.to_owned(),
             handle: row.name,
             turn: row.turn.unwrap_or_default(),
         }),
-        (Ok(()), SandboxKind::Kept) => Activity::Sandbox(SandboxEvent::NotKept {
+        (Ok(()), SandboxKind::Kept) => event(SandboxEvent::NotKept {
             provider: kind.to_owned(),
             sandbox: row.name,
             reason: "destroyed with the branch's sandbox state".into(),
@@ -979,15 +984,13 @@ fn release(
 pub(crate) fn discard_kept(yard: &Yard, record: &Record, why: &str) -> Vec<Activity> {
     discard(yard, record, |row| row.kind == SandboxKind::Kept)
         .into_iter()
-        .map(|a| match a {
-            Activity::Sandbox(SandboxEvent::NotKept {
-                provider, sandbox, ..
-            }) => Activity::Sandbox(SandboxEvent::NotKept {
-                provider,
-                sandbox,
-                reason: why.to_owned(),
-            }),
-            other => other,
+        .map(|mut a| {
+            if let Activity::Sandbox(event) = &mut a {
+                if let SandboxEvent::NotKept { reason, .. } = event.as_mut() {
+                    *reason = why.to_owned();
+                }
+            }
+            a
         })
         .collect()
 }

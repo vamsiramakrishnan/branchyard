@@ -606,6 +606,12 @@ pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
     ) -> Result<Option<SandboxRow>, Error>;
 }
 
+/// [`PortBackend`] and [`SandboxBackend`] together, so a [`Store`] holds
+/// one trait object for both.
+pub(crate) trait Extras: PortBackend + SandboxBackend {}
+
+impl<T: PortBackend + SandboxBackend> Extras for T {}
+
 /// The port a reservation takes: from `start`, the first not in `taken`
 /// for which `usable` holds.
 pub(crate) fn pick_port(
@@ -658,11 +664,10 @@ pub(crate) struct Store {
     /// Dependencies and graph revisions: the same backend again, as for
     /// `storage`. See [`crate::graph`].
     graph: Arc<dyn GraphBackend>,
-    /// Branch ports: the same backend again. See [`PortBackend`].
-    ports: Arc<dyn PortBackend>,
-    /// Kept sandboxes and sandbox snapshots: the same backend again. See
+    /// Branch ports, kept sandboxes and sandbox snapshots: the same backend
+    /// again, as one trait object for both. See [`PortBackend`] and
     /// [`SandboxBackend`].
-    sandboxes: Arc<dyn SandboxBackend>,
+    extras: Arc<dyn Extras>,
     owner: Arc<Owner>,
     signal: Arc<Signal>,
 }
@@ -689,8 +694,7 @@ impl Store {
             backend: backend.clone(),
             storage: backend.clone(),
             graph: backend.clone(),
-            ports: backend.clone(),
-            sandboxes: backend,
+            extras: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -712,8 +716,7 @@ impl Store {
             backend: backend.clone(),
             storage: backend.clone(),
             graph: backend.clone(),
-            ports: backend.clone(),
-            sandboxes: backend,
+            extras: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -744,12 +747,12 @@ impl Store {
 
     /// Branch ports; see [`PortBackend`].
     pub fn ports(&self) -> &dyn PortBackend {
-        self.ports.as_ref()
+        self.extras.as_ref()
     }
 
     /// Kept sandboxes and sandbox snapshots; see [`SandboxBackend`].
     pub fn sandboxes(&self) -> &dyn SandboxBackend {
-        self.sandboxes.as_ref()
+        self.extras.as_ref()
     }
 
     pub fn worktree(&self, name: &str) -> PathBuf {
