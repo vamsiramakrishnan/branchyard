@@ -665,6 +665,91 @@ fn a_try_cut_short_is_rolled_back_exactly() {
     }
 }
 
+/// A checkout whose bytes on disk are not its blobs: a file checked out
+/// with CRLF line endings, and one through a smudge filter.
+fn filtered_try_fixture() -> Fixture {
+    let f = Fixture::new();
+    f.git(&["config", "filter.x.smudge", "sed s/A/B/"]);
+    f.git(&["config", "filter.x.clean", "sed s/B/A/"]);
+    fs::write(
+        f.root.join(".gitattributes"),
+        "crlf.txt text eol=crlf\nf.dat filter=x\n",
+    )
+    .unwrap();
+    fs::write(f.root.join("crlf.txt"), "one\r\ntwo\r\n").unwrap();
+    fs::write(f.root.join("f.dat"), "B1\nB2\n").unwrap();
+    f.git(&["add", "."]);
+    f.git(&["commit", "-q", "-m", "filtered files"]);
+    assert_eq!(f.git(&["show", "HEAD:f.dat"]), "A1\nA2\n");
+    assert_eq!(f.git(&["show", "HEAD:crlf.txt"]), "one\ntwo\n");
+    assert_eq!(f.git(&["status", "--porcelain"]), "");
+    let branch = f
+        .task("SH printf 'one\\ntwo\\nthree\\n' > crlf.txt && printf 'A1\\nA2\\nA3\\n' > f.dat")
+        .name("tried")
+        .base("HEAD")
+        .policy(Policy::allow_all())
+        .run()
+        .unwrap();
+    assert_eq!(
+        branch.info().status,
+        BranchStatus::Ready,
+        "{:?}",
+        branch.events()
+    );
+    f
+}
+
+#[test]
+fn try_off_restores_the_bytes_on_disk_through_line_endings_and_filters() {
+    for fault in [None, Some("try-after-apply"), Some("try-mid-restore")] {
+        let f = filtered_try_fixture();
+        let before = tree(&f.root);
+        match fault {
+            None => {
+                let state = f.yard.try_on("tried").unwrap();
+                let paths: Vec<&str> = state.files.iter().map(|f| f.path.as_str()).collect();
+                assert_eq!(paths, ["crlf.txt", "f.dat"]);
+                assert!(f.root.join(".branchyard/try/before").is_dir());
+                f.yard.try_off(false).unwrap().unwrap();
+            }
+            Some("try-mid-restore") => {
+                f.yard.try_on("tried").unwrap();
+                crash(
+                    &f,
+                    "try_child",
+                    &[
+                        ("BY_CHILD_BRANCH", "--off"),
+                        ("BRANCHYARD_FAULT", "try-mid-restore"),
+                    ],
+                );
+                f.yard.try_recover().unwrap().expect("a rollback");
+            }
+            Some(fault) => {
+                crash(
+                    &f,
+                    "try_child",
+                    &[("BY_CHILD_BRANCH", "tried"), ("BRANCHYARD_FAULT", fault)],
+                );
+                f.yard.try_recover().unwrap().expect("a rollback");
+            }
+        }
+        assert_eq!(tree(&f.root), before, "{fault:?}");
+        assert_eq!(
+            fs::read(f.root.join("crlf.txt")).unwrap(),
+            b"one\r\ntwo\r\n",
+            "{fault:?}"
+        );
+        assert_eq!(
+            fs::read(f.root.join("f.dat")).unwrap(),
+            b"B1\nB2\n",
+            "{fault:?}"
+        );
+        assert_eq!(f.git(&["status", "--porcelain"]), "", "{fault:?}");
+        assert!(f.yard.try_status().unwrap().is_none());
+        assert!(!f.root.join(".branchyard/try/before").exists(), "{fault:?}");
+    }
+}
+
 #[test]
 fn attempts_compare_side_by_side_with_checks_and_diffs() {
     let f = Fixture::new();

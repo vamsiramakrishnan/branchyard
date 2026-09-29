@@ -2,19 +2,23 @@
 //! where the user's dev server already runs, and taken back out exactly.
 //!
 //! Applying is refused unless the checkout is clean (nothing staged,
-//! modified or untracked, ignored files aside), so what it held before is
-//! exactly `HEAD`. Before anything is written, the plan is saved to
+//! modified or untracked, ignored files aside). Clean is not byte for byte
+//! `HEAD`, though: line-ending conversion and clean/smudge filters make the
+//! bytes on disk differ from the blobs. So before anything is written, the
+//! bytes each path the diff touches holds on disk (a file's contents or a
+//! link's target) are copied to `.branchyard/try/before/`, named by their
+//! unfiltered blob ID, and synced; then the plan is saved to
 //! `.branchyard/try/state.json` in the phase `applying`: the branch, its
 //! candidate, the diff's base, the checkout's `HEAD`, and for each path the
-//! diff touches its entry before (mode, blob and permission bits, or absent)
-//! and, once applied, after. The diff is then applied with `git apply`,
+//! diff touches its entry before (mode, that blob ID and permission bits,
+//! or absent) and, once applied, after. The diff is then applied with `git apply`,
 //! which changes nothing when any hunk does not apply, and the phase becomes
 //! `applied`. `HEAD` and the candidate are pinned by refs under
 //! `refs/branchyard-try/` so their objects outlive the branch.
 //!
 //! Turning it off (`--off`) refuses when a tried file was changed since or
 //! `HEAD` moved, unless forced, then records the phase `restoring` and
-//! writes every path back from its saved entry: the blob's bytes with their
+//! writes every path back from its saved entry: the saved bytes with their
 //! permission bits, a symbolic link, or nothing for a path that did not
 //! exist, removing the directories applying created. A state left in
 //! `applying` or `restoring` by a process that stopped is rolled back the
@@ -44,6 +48,11 @@ fn dir(yard: &Yard) -> PathBuf {
 
 fn state_path(yard: &Yard) -> PathBuf {
     dir(yard).join("state.json")
+}
+
+/// Where the bytes each tried path held on disk before are kept, by blob ID.
+fn before_dir(yard: &Yard) -> PathBuf {
+    dir(yard).join("before")
 }
 
 /// A try in effect, as `.branchyard/try/state.json` holds it.
@@ -83,6 +92,8 @@ pub struct TryFile {
 pub struct TryEntry {
     /// `100644`, `100755` or `120000` (a symbolic link).
     pub mode: String,
+    /// The blob ID of the bytes on disk (a link's target), hashed without
+    /// filters, so it can differ from the blob in `HEAD`.
     pub blob: String,
     /// `st_mode & 0o7777`, for a regular file.
     pub permissions: Option<u32>,
@@ -123,7 +134,41 @@ fn clear(yard: &Yard) -> Result<(), Error> {
     }
     git::delete_ref(&yard.root, HEAD_REF)?;
     git::delete_ref(&yard.root, CANDIDATE_REF)?;
+    remove_before(yard)
+}
+
+fn remove_before(yard: &Yard) -> Result<(), Error> {
+    match fs::remove_dir_all(before_dir(yard)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Keep the bytes `path` holds on disk, durably, under their blob ID.
+fn keep_before(yard: &Yard, path: &str, entry: &TryEntry) -> Result<(), Error> {
+    let full = yard.root.join(path);
+    let bytes = if entry.mode == "120000" {
+        fs::read_link(&full)?.into_os_string().into_encoded_bytes()
+    } else {
+        fs::read(&full)?
+    };
+    let dir = before_dir(yard);
+    fs::create_dir_all(&dir)?;
+    let mut file = fs::File::create(dir.join(&entry.blob))?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
     Ok(())
+}
+
+/// The bytes saved for `entry` before the try, or, for a state written
+/// before they were saved, its blob from git.
+fn before_bytes(yard: &Yard, entry: &TryEntry) -> Result<Vec<u8>, Error> {
+    match fs::read(before_dir(yard).join(&entry.blob)) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => blob_bytes(&yard.root, &entry.blob),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn lock(yard: &Yard) -> Result<DirLock, Error> {
@@ -192,10 +237,23 @@ pub(crate) fn on(yard: &Yard, name: &str) -> Result<TryState, Error> {
         .ok_or_else(|| Error::Git("the checkout has no commit checked out".into()))?;
     let base = record.info.base.clone();
     let paths = git::changed_paths(root, &base, &candidate.commit)?;
+    // Left by a try whose state was cleared before its bytes were.
+    remove_before(yard)?;
     let mut files = Vec::new();
     let mut created_dirs = Vec::new();
     for path in &paths {
-        let before = entry_at(root, &head, path)?;
+        // Refuses a path that is not a file in `HEAD`.
+        entry_at(root, &head, path)?;
+        // What is on disk, which filters can make differ from `HEAD`.
+        let before = current(root, path)?;
+        if before.as_ref().is_some_and(|entry| entry.mode == "040000") {
+            return Err(Error::Denied(format!(
+                "{path} is a directory in the checkout; by try handles files only"
+            )));
+        }
+        if let Some(entry) = &before {
+            keep_before(yard, path, entry)?;
+        }
         if before.is_none() {
             let mut parent = Path::new(path).parent();
             let mut new_dirs = Vec::new();
@@ -215,9 +273,14 @@ pub(crate) fn on(yard: &Yard, name: &str) -> Result<TryState, Error> {
         }
         files.push(TryFile {
             path: path.clone(),
-            before: before.map(|entry| with_permissions(root, path, entry)),
+            before,
             after: None,
         });
+    }
+    if !files.is_empty() {
+        fs::File::open(before_dir(yard))
+            .and_then(|d| d.sync_all())
+            .ok();
     }
     let patch = git::run(
         root,
@@ -329,7 +392,7 @@ fn restore(yard: &Yard, mut state: TryState) -> Result<(), Error> {
         if n == 1 {
             fault("try-mid-restore");
         }
-        write_entry(root, &file.path, file.before.as_ref())?;
+        write_entry(yard, &file.path, file.before.as_ref())?;
     }
     for dir in state.created_dirs.iter().rev() {
         // Only if empty: anything else in it is not the try's.
@@ -379,13 +442,6 @@ fn entry_at(root: &Path, commit: &str, path: &str) -> Result<Option<TryEntry>, E
         blob: blob.to_owned(),
         permissions: None,
     }))
-}
-
-fn with_permissions(root: &Path, path: &str, mut entry: TryEntry) -> TryEntry {
-    if entry.mode != "120000" {
-        entry.permissions = permissions(&root.join(path));
-    }
-    entry
 }
 
 #[cfg(unix)]
@@ -453,8 +509,8 @@ fn blob_bytes(root: &Path, blob: &str) -> Result<Vec<u8>, Error> {
 }
 
 /// Make `path` hold `entry`, or not exist.
-fn write_entry(root: &Path, path: &str, entry: Option<&TryEntry>) -> Result<(), Error> {
-    let full = root.join(path);
+fn write_entry(yard: &Yard, path: &str, entry: Option<&TryEntry>) -> Result<(), Error> {
+    let full = yard.root.join(path);
     let existing = fs::symlink_metadata(&full).ok();
     if let Some(meta) = &existing {
         if meta.is_dir() {
@@ -469,7 +525,7 @@ fn write_entry(root: &Path, path: &str, entry: Option<&TryEntry>) -> Result<(), 
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = blob_bytes(root, &entry.blob)?;
+    let bytes = before_bytes(yard, entry)?;
     if entry.mode == "120000" {
         #[cfg(unix)]
         {
