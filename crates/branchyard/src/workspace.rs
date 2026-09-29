@@ -121,6 +121,11 @@ pub(crate) struct WorkspaceState {
     /// worktree; left out of snapshots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copied: Vec<String>,
+    /// What setup left in the worktree that git does not track (a created
+    /// directory once), relative to it: what a branch that inherits this
+    /// setup from a sandbox snapshot gets copied into its own worktree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub produced: Vec<String>,
 }
 
 impl WorkspaceState {
@@ -129,6 +134,7 @@ impl WorkspaceState {
             spec,
             ready: false,
             copied: Vec::new(),
+            produced: Vec::new(),
         }
     }
 }
@@ -155,6 +161,17 @@ pub enum WorkspacePhase {
     Teardown,
     /// A named run script, from `by workspace run`.
     Run,
+}
+
+/// Where a workspace phase's commands ran.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RanIn {
+    /// On this host, in the worktree.
+    Host,
+    /// In the branch's sandbox, through its provider.
+    Sandbox,
 }
 
 /// What one phase of a branch's workspace lifecycle did.
@@ -190,6 +207,15 @@ pub struct WorkspaceReport {
     /// The branch's reserved port, as the commands saw it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Where the commands ran: on this host, or in the sandbox the
+    /// branch's harness runs in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_in: Option<RanIn>,
+    /// Setup did not run for this branch: it inherited another branch's,
+    /// with a sandbox branched from that branch's (a fork from a sandbox
+    /// snapshot, or a fan whose setup ran once), named here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_from: Option<String>,
 }
 
 impl WorkspaceReport {
@@ -206,6 +232,8 @@ impl WorkspaceReport {
             error: None,
             duration_ms: 0,
             port,
+            ran_in: None,
+            inherited_from: None,
         }
     }
 
@@ -298,17 +326,48 @@ pub(crate) fn variables(
     vars
 }
 
+/// Where a branch's setup commands run.
+pub(crate) enum Runner<'a> {
+    /// On this host, in the worktree.
+    Host,
+    /// In the turn's sandbox, through its provider, in `cwd` (where the
+    /// worktree is in the sandbox). `mounted`: the worktree is this host's,
+    /// mounted, so what setup leaves in it is seen here.
+    Sandbox {
+        provider: &'a dyn branchyard_sandbox::SandboxProvider,
+        name: &'a str,
+        cwd: String,
+        mounted: bool,
+    },
+}
+
+/// Setup this branch does not run, because its sandbox was branched from
+/// another branch's that had run it.
+pub(crate) struct Inherit {
+    /// The branch whose setup this is.
+    pub from: String,
+    /// Its worktree on this host, to copy what its setup produced from;
+    /// `None` when the worktree is not mounted (the outputs are already in
+    /// the branched sandbox).
+    pub worktree: Option<PathBuf>,
+    /// What its setup produced, relative to its worktree.
+    pub produced: Vec<String>,
+}
+
 /// Prepare the worktree of the turn's branch when its workspace is not
-/// ready: reserve its port, copy, and run setup, as the journaled `setup`
-/// step. `Ok(Err(reason))` fails the branch; the report is recorded
-/// either way. Stops early, and fails, when the turn is cancelled or its
-/// lease lost.
+/// ready: reserve its port, copy, and run setup (where `runner` says, or
+/// not at all when `inherit` says another branch's already reached this
+/// one's sandbox), as the journaled `setup` step. `Ok(Err(reason))` fails
+/// the branch; the report is recorded either way. Stops early, and fails,
+/// when the turn is cancelled or its lease lost.
 pub(crate) fn prepare(
     yard: &Yard,
     record: &mut Record,
     fence: &Fence,
     recorder: &mut Recorder,
     lost: &dyn Fn() -> bool,
+    runner: &Runner<'_>,
+    inherit: Option<&Inherit>,
 ) -> Result<Result<(), String>, Error> {
     let Some(state) = record.workspace.clone() else {
         return Ok(Ok(()));
@@ -330,12 +389,18 @@ pub(crate) fn prepare(
         fence.incarnation,
         fence.generation
     );
+    let sandbox = match runner {
+        Runner::Host => None,
+        Runner::Sandbox { name, .. } => Some(name.to_string()),
+    };
     let intent = json!({
         "copy": state.spec.copy,
         "setup": state.spec.setup,
         "port": port,
         "spawn": marker,
         "host": proc::host(),
+        "sandbox": sandbox,
+        "inherited_from": inherit.map(|i| i.from.clone()),
     });
     // A pending intent is an earlier attempt of this turn that stopped
     // midway; setup is idempotent, so it runs again.
@@ -352,8 +417,34 @@ pub(crate) fn prepare(
         recorder.record(Activity::Workspace(copied.clone()))?;
     }
     let mut outcome = json!({ "ok": copied_ok, "copied": copied_paths });
+    let mut produced = Vec::new();
     let result = if !copied_ok {
         Err(copied.failure())
+    } else if let Some(inherit) = inherit {
+        let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(port));
+        report.inherited_from = Some(inherit.from.clone());
+        report.ran_in = Some(RanIn::Sandbox);
+        if let Some(from) = &inherit.worktree {
+            if let Err(error) = replicate(from, &worktree, &inherit.produced) {
+                report.ok = false;
+                report.error = Some(format!(
+                    "could not copy what {}'s setup produced: {error}",
+                    inherit.from
+                ));
+            }
+        }
+        produced = inherit.produced.clone();
+        outcome = json!({
+            "ok": report.ok,
+            "copied": copied_paths,
+            "inherited_from": inherit.from,
+        });
+        let failed = (!report.ok).then(|| report.failure());
+        recorder.record(Activity::Workspace(report))?;
+        match failed {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
     } else if state.spec.setup.is_empty() {
         Ok(())
     } else {
@@ -362,7 +453,6 @@ pub(crate) fn prepare(
             report.ok = false;
             report.error = Some(DENIED.to_owned());
         } else {
-            let env = variables(yard, &name, &worktree, Some(port));
             let cancel = || {
                 if lost() {
                     return Some("its engine lost the branch's lease".to_owned());
@@ -374,17 +464,58 @@ pub(crate) fn prepare(
                     .flatten()
                     .map(|by| format!("cancelled by {by}"))
             };
-            let on_spawn = |row: &ProcessRow| store.backend().record_process(fence, row);
-            run_commands(
-                &mut report,
-                &state.spec.setup,
-                &worktree,
-                &env,
-                Some(&marker),
-                SETUP_TIMEOUT,
-                &on_spawn,
-                &cancel,
-            )?;
+            // What setup leaves in the worktree, when it can be seen here.
+            let seen = !matches!(runner, Runner::Sandbox { mounted: false, .. });
+            let before = seen.then(|| untracked(&worktree));
+            match runner {
+                Runner::Host => {
+                    report.ran_in = Some(RanIn::Host);
+                    let env = variables(yard, &name, &worktree, Some(port));
+                    let on_spawn = |row: &ProcessRow| store.backend().record_process(fence, row);
+                    run_commands(
+                        &mut report,
+                        &state.spec.setup,
+                        &worktree,
+                        &env,
+                        Some(&marker),
+                        SETUP_TIMEOUT,
+                        &on_spawn,
+                        &cancel,
+                    )?;
+                }
+                Runner::Sandbox {
+                    provider,
+                    name: sandbox,
+                    cwd,
+                    ..
+                } => {
+                    report.ran_in = Some(RanIn::Sandbox);
+                    // The root and the port are this host's; the worktree
+                    // is where the sandbox sees it.
+                    let env = vec![
+                        (crate::ENV_BRANCH.to_owned(), name.clone()),
+                        (ENV_WORKTREE.to_owned(), cwd.clone()),
+                        (ENV_PORT.to_owned(), port.to_string()),
+                    ];
+                    run_in_sandbox(
+                        &mut report,
+                        &state.spec.setup,
+                        *provider,
+                        sandbox,
+                        cwd,
+                        &env,
+                        SETUP_TIMEOUT,
+                        &cancel,
+                    );
+                }
+            }
+            if let Some(before) = before {
+                let copied: BTreeSet<&String> = copied_paths.iter().collect();
+                produced = untracked(&worktree)
+                    .into_iter()
+                    .filter(|p| !before.contains(p) && !copied.contains(p))
+                    .collect();
+            }
         }
         outcome = json!({
             "ok": report.ok,
@@ -402,12 +533,68 @@ pub(crate) fn prepare(
     if let Some(workspace) = record.workspace.as_mut() {
         workspace.copied = copied_paths;
         workspace.ready = result.is_ok();
+        workspace.produced = produced;
     }
     store.write_fenced(record, fence)?;
     store
         .backend()
         .finish_step(fence, fence.turn, STEP_SETUP, &outcome)?;
     Ok(result)
+}
+
+/// Every path in `worktree` git does not track, ignored or not, a wholly
+/// untracked directory once (with a trailing `/` removed).
+pub(crate) fn untracked(worktree: &Path) -> BTreeSet<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["ls-files", "-z", "--others", "--directory"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let Ok(output) = output else {
+        return BTreeSet::new();
+    };
+    output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).trim_end_matches('/').to_owned())
+        .collect()
+}
+
+/// Copy each of `paths` (relative) from `from` into `to`, keeping modes and
+/// symbolic links, where `to` does not have it yet.
+pub(crate) fn replicate(from: &Path, to: &Path, paths: &[String]) -> Result<(), String> {
+    for rel in paths {
+        if !check_relative(rel) {
+            return Err(format!("{rel:?} is not a path inside the worktree"));
+        }
+        let source = from.join(rel);
+        let target = to.join(rel);
+        if target.symlink_metadata().is_ok() || source.symlink_metadata().is_err() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let status = Command::new("cp")
+            .arg("-a")
+            .arg(&source)
+            .arg(&target)
+            .stdin(Stdio::null())
+            .status()
+            .map_err(|e| format!("cp: {e}"))?;
+        if !status.success() {
+            return Err(format!("cp -a {rel} failed with {status}"));
+        }
+    }
+    Ok(())
+}
+
+fn check_relative(rel: &str) -> bool {
+    let path = Path::new(rel);
+    !rel.is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// Why a yard that denies workspace scripts did not run them.
@@ -438,6 +625,42 @@ pub(crate) fn teardown(
         report.error = Some(DENIED.to_owned());
         return Ok(Some(report));
     }
+    // A sandboxed branch's teardown runs in a sandbox of its own, as its
+    // setup did: its kept one when it has one, else a fresh one.
+    if let (Some(fence), true) = (fence, crate::placement::sandboxed(record.provider.as_ref())) {
+        report.ran_in = Some(RanIn::Sandbox);
+        let plan = crate::placement::SandboxPlan::Default;
+        match crate::placement::Placement::prepare(yard, record, fence, &plan) {
+            Ok(mut placement) => {
+                if let Some((provider, name)) = placement.sandbox() {
+                    let cwd = placement.cwd();
+                    let env = vec![
+                        (crate::ENV_BRANCH.to_owned(), record.info.name.clone()),
+                        (ENV_WORKTREE.to_owned(), cwd.clone()),
+                    ];
+                    run_in_sandbox(
+                        &mut report,
+                        &state.spec.teardown,
+                        provider,
+                        name,
+                        &cwd,
+                        &env,
+                        TEARDOWN_TIMEOUT,
+                        &|| None,
+                    );
+                }
+                if let Some(warning) = placement.discard() {
+                    report.error.get_or_insert(warning);
+                }
+            }
+            Err(why) => {
+                report.ok = false;
+                report.error = Some(format!("could not get a sandbox to run it in: {why}"));
+            }
+        }
+        return Ok(Some(report));
+    }
+    report.ran_in = Some(RanIn::Host);
     let env = variables(yard, &record.info.name, worktree, port);
     let on_spawn = |row: &ProcessRow| match fence {
         Some(fence) => store.backend().record_process(fence, row),
@@ -813,6 +1036,104 @@ pub(crate) fn run_commands(
     report.output = output.text();
     report.duration_ms = started.elapsed().as_millis() as u64;
     Ok(())
+}
+
+/// [`run_commands`], each command exec'd with `sh -c` in `sandbox`
+/// through `provider`, in `cwd`. Each exec is its own process group in the
+/// sandbox; it is torn down when the command ends, at `timeout`, or when
+/// `cancel` returns a reason. Nothing is recorded as a host process: the
+/// sandbox is the turn's journaled `sandbox`, which recovery destroys.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_in_sandbox(
+    report: &mut WorkspaceReport,
+    commands: &[String],
+    provider: &dyn branchyard_sandbox::SandboxProvider,
+    sandbox: &str,
+    cwd: &str,
+    env: &[(String, String)],
+    timeout: Duration,
+    cancel: &dyn Fn() -> Option<String>,
+) {
+    use std::sync::{Arc, Mutex};
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let output = Arc::new(Mutex::new(Tail::default()));
+    for command in commands {
+        report.commands.push(command.clone());
+        let spec = branchyard_sandbox::ExecSpec {
+            argv: vec!["sh".into(), "-c".into(), command.clone()],
+            cwd: PathBuf::from(cwd),
+            env: env.iter().map(|(n, v)| (n.into(), v.into())).collect(),
+        };
+        let mut process = match provider.exec(sandbox, &spec) {
+            Ok(process) => process,
+            Err(error) => {
+                report.ok = false;
+                report.error = Some(format!("could not start sh in sandbox {sandbox}: {error}"));
+                break;
+            }
+        };
+        drop(process.take_stdin());
+        let readers: Vec<_> = [process.take_stdout(), process.take_stderr()]
+            .into_iter()
+            .flatten()
+            .map(|mut pipe| {
+                let output = output.clone();
+                std::thread::spawn(move || {
+                    let mut buffer = [0u8; 8192];
+                    loop {
+                        match pipe.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => output
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(&buffer[..n]),
+                        }
+                    }
+                })
+            })
+            .collect();
+        let status = loop {
+            match process.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(e) => break Err(format!("could not wait for it: {e}")),
+            }
+            if Instant::now() >= deadline {
+                let _ = process.kill();
+                break Err(format!("timed out after {}s", timeout.as_secs()));
+            }
+            if let Some(why) = cancel() {
+                let _ = process.kill();
+                break Err(format!("stopped: {why}"));
+            }
+            std::thread::sleep(TICK);
+        };
+        // What the command left running in its group would hold its
+        // output open; it goes with the command.
+        process.teardown();
+        for reader in readers {
+            let _ = reader.join();
+        }
+        match status {
+            Ok(status) if status.success() => report.exit_code = status.code,
+            Ok(status) => {
+                report.ok = false;
+                report.exit_code = status.code;
+                if status.code.is_none() {
+                    report.error = Some(format!("ended with {status}"));
+                }
+                break;
+            }
+            Err(why) => {
+                report.ok = false;
+                report.error = Some(why);
+                break;
+            }
+        }
+    }
+    report.output = output.lock().unwrap_or_else(|e| e.into_inner()).text();
+    report.duration_ms = started.elapsed().as_millis() as u64;
 }
 
 /// The last [`OUTPUT_TAIL`] bytes written.

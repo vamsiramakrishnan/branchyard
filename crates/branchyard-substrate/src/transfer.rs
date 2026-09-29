@@ -701,6 +701,57 @@ fn advance(worktree: &Path, base: &str, head: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Run in the actor by [`clear_for_push`]: `sh -c CLEAR sh WORKDIR HOME`.
+/// In the worktree's repository, every file git tracks or would track
+/// (untracked and not ignored) is removed, then the repository itself;
+/// ignored files, such as what a workspace setup installed, stay. The home
+/// is emptied.
+pub const CLEAR: &str = r#"w=$1 h=$2
+if [ -d "$w/.git" ]; then
+  cd "$w" || exit 1
+  git ls-files -c -o --exclude-standard | while IFS= read -r f; do rm -f -- "$f"; done
+  rm -rf .git
+fi
+if [ -n "$h" ] && [ "$h" != / ]; then rm -rf "$h"; fi
+exit 0"#;
+
+/// Make a resumed or branched actor ready for [`push`] again: its old
+/// worktree repository and the files git sees in it are removed (ignored
+/// files stay), and its home is removed. The actor needs `sh` and `git`.
+pub fn clear_for_push(endpoint: &Endpoint, workdir: &Path, home: &Path) -> Result<(), Error> {
+    let spec = ExecSpec {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            CLEAR.into(),
+            "sh".into(),
+            path_str(workdir)?.to_owned(),
+            path_str(home)?.to_owned(),
+        ],
+        cwd: PathBuf::from("/"),
+        env: BTreeMap::from([("LC_ALL".into(), "C".into())]),
+    };
+    let mut process = endpoint
+        .exec(&spec)
+        .map_err(|e| Error::Guest(format!("could not clear {}: {e}", workdir.display())))?;
+    drop(process.take_stdin());
+    let mut stderr = String::new();
+    let _ = process
+        .take_stderr()
+        .expect("stderr is piped")
+        .read_to_string(&mut stderr);
+    let status = process.wait()?;
+    process.teardown();
+    match status.success() {
+        true => Ok(()),
+        false => Err(Error::Guest(format!(
+            "clearing {} failed with {status}: {}",
+            workdir.display(),
+            stderr.trim()
+        ))),
+    }
+}
+
 /// Copy the host directory `from` to `to` in the actor, if it exists.
 pub fn push_tree(endpoint: &Endpoint, from: &Path, to: &Path) -> Result<(), Error> {
     if !from.is_dir() {

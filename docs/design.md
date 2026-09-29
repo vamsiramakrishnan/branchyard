@@ -242,6 +242,16 @@ Live cloning of an active harness may duplicate tool calls, external connections
 
 For a group of children, prefer one consistent checkpoint followed by independent restores over repeatedly capturing a changing parent.
 
+### As built: provider snapshots under git checkpoints
+
+Implemented as [sandbox snapshots](sandbox-snapshots.md), tested against fake providers only, and **unqualified** on every provider:
+
+- The provider contract has optional `pause`, `resume`, `branch_live` (children rebound to their own mounts) and `release_checkpoint`, and capabilities name `LIVE_BRANCH`, `PAUSE` and `FULL_SNAPSHOT`. The engine chooses by capability; a live fork is never a silent fallback, nor the reverse: each path is recorded with its reason.
+- Environment snapshot and source checkpoint stay separate, as above. A branch that keeps its sandbox (`keep = "pause"`) pauses it between turns, and each git checkpoint takes a provider snapshot of it (Microsandbox: a paused live-branched child; Substrate: suspend and a tag). The code in a snapshot's descendants always comes from git; the snapshot contributes the environment (root disk, running services, and with a live branch, memory).
+- Session handoff is unchanged: a branched sandbox never continues the harness's session, and the harness is not running when a snapshot is taken, so no live harness is cloned. Attempt identity is created per turn (Substrate mints a new attempt credential on every resume and branch).
+- A group of children takes one consistent capture, as recommended above: `by fan` runs setup once in a prepared sandbox, pauses it, and live-branches it once for every branch.
+- Microsandbox's pause, live branch and full snapshots are declared only behind the `live_branch` opt-in until the pinned SDK and runtime pass the ignored KVM tests; with it off, every path falls back to a fresh sandbox, git and setup. Warm pools stay out: a kept sandbox is per branch, bounded per repository by `max_paused` with least-recently-used eviction.
+
 ## 7. Storage and networking without new infrastructure projects
 
 Use the sandbox runtime's image cache, snapshot format and writable-layer machinery. OpenDAL transports opaque, versioned artifacts; it is not a POSIX filesystem or a VM memory manager. Store manifests with producer/runtime version, architecture, geometry, scope, digest and compatibility requirements.

@@ -100,6 +100,9 @@ pub(crate) struct Hub {
     /// Set by [`crate::Yard::deny_workspace_scripts`]: workspace setup and
     /// teardown commands never run on this yard.
     scripts_denied: std::sync::atomic::AtomicBool,
+    /// Set by [`crate::Yard::use_sandbox_provider`]: the provider every
+    /// Microsandbox-provider branch runs through instead of the SDK.
+    pub sandbox_provider: Mutex<Option<Arc<dyn branchyard_sandbox::SandboxProvider>>>,
 }
 
 impl Default for Hub {
@@ -115,6 +118,7 @@ impl Default for Hub {
             delivery_hook: Mutex::new(Some(Arc::new(crate::inbox::SteerDelivery::default()))),
             graph_options: Default::default(),
             scripts_denied: Default::default(),
+            sandbox_provider: Default::default(),
         }
     }
 }

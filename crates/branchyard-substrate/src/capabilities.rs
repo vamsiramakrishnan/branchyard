@@ -44,7 +44,9 @@ impl std::error::Error for TemplateError {}
 /// Restore to an arbitrary checkpoint is not declared: `RevertActor` only
 /// returns an actor to its latest suspend, which [`Actors::revert`]
 /// exposes under its own name. Pause snapshots are node-local and unnamed, so
-/// they are not offered as checkpoints.
+/// they are not offered as checkpoints; pausing itself (`PauseActor`, and
+/// `ResumeActor` to continue) is declared. Live branching is not: Substrate
+/// has no fork of a running actor, only suspend, tag and create from the tag.
 ///
 /// [`Actors::revert`]: crate::Actors::revert
 pub fn capabilities(template: &pb::ActorTemplate) -> Result<Capabilities, TemplateError> {
@@ -64,6 +66,8 @@ pub fn capabilities(template: &pb::ActorTemplate) -> Result<Capabilities, Templa
         restore: Vec::new(),
         branch: vec![committed],
         share: false,
+        pause: true,
+        live_branch: false,
     })
 }
 
@@ -101,7 +105,8 @@ pub fn state(actor: &pb::Actor) -> SandboxState {
         Ok(pb::ActorState::Suspending | pb::ActorState::Pausing | pb::ActorState::Reverting) => {
             SandboxState::Stopping
         }
-        Ok(pb::ActorState::Suspended | pb::ActorState::Paused) => SandboxState::Stopped,
+        Ok(pb::ActorState::Suspended) => SandboxState::Stopped,
+        Ok(pb::ActorState::Paused) => SandboxState::Paused,
         Ok(pb::ActorState::Crashed) => SandboxState::Crashed,
         Ok(pb::ActorState::Deleting) => SandboxState::Destroying,
         Ok(pb::ActorState::Unspecified) => SandboxState::Unknown("ACTOR_STATE_UNSPECIFIED".into()),
@@ -218,6 +223,10 @@ mod tests {
         };
         assert_eq!(
             state(&actor(pb::ActorState::Paused as i32)),
+            SandboxState::Paused
+        );
+        assert_eq!(
+            state(&actor(pb::ActorState::Suspended as i32)),
             SandboxState::Stopped
         );
         assert_eq!(

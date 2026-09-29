@@ -496,3 +496,103 @@ fn a_workspace_port_is_reserved_in_postgres_stable_and_released_on_removal() {
     assert!(pg.yard.workspace("ws-two").unwrap().ready);
     drop(two);
 }
+
+/// A kept sandbox and its snapshots recorded in PostgreSQL: a second
+/// engine (another `Yard::open_postgres`) resumes the sandbox the first
+/// parked, forks from a snapshot the first took, and removal releases
+/// everything; the fake provider stands in for Microsandbox.
+#[test]
+fn kept_sandboxes_and_snapshots_are_recorded_in_postgres_across_engines() {
+    use branchyard::{
+        Provider, SandboxEvent, SandboxKeep, SandboxOptions, SandboxOrigin, SnapshotMethod,
+        TaskOptions,
+    };
+    use branchyard_sandbox::fake::FakeProvider;
+    let Some(pg) = Pg::new() else { return };
+    let fake = std::sync::Arc::new(FakeProvider::live(
+        Box::new(branchyard_runtime::LocalProvider::new()),
+        pg.f.dir.join("fake-provider"),
+    ));
+    let options = TaskOptions {
+        provider: Some(Provider::Microsandbox(SandboxOptions {
+            image: "registry.example/harness:1".into(),
+            keep: SandboxKeep::Pause,
+            ..SandboxOptions::default()
+        })),
+        policy: Policy::allow_all(),
+        ..pg.f.options()
+    };
+    pg.yard.use_sandbox_provider(fake.clone());
+    let first = pg
+        .yard
+        .task("SH printf one > \"$BY_FAKE_ROOTFS/marker\"")
+        .options(options.clone())
+        .name("pg-kept")
+        .run()
+        .unwrap();
+    assert!(
+        first
+            .events()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(&e.activity, Activity::Sandbox(event) if matches!(**event, SandboxEvent::Kept { .. }))),
+        "{:?}",
+        first.events()
+    );
+    let other = pg.open();
+    other.use_sandbox_provider(fake.clone());
+    let sent = other
+        .branch("pg-kept")
+        .unwrap()
+        .send("SH cat \"$BY_FAKE_ROOTFS/marker\"", options.clone())
+        .unwrap();
+    let origins: Vec<SandboxOrigin> = sent
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Sandbox(event) => match *event {
+                SandboxEvent::Started { origin, .. } => Some(origin),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(origins.last(), Some(&SandboxOrigin::Resumed));
+    assert!(text(&sent.events().unwrap()).contains("one"));
+    let fork = other
+        .branch("pg-kept")
+        .unwrap()
+        .fork_at(
+            1,
+            "SH cat \"$BY_FAKE_ROOTFS/marker\"",
+            TaskOptions {
+                name: Some("pg-fork".into()),
+                ..options.clone()
+            },
+        )
+        .unwrap();
+    let origin = fork
+        .events()
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.activity {
+            Activity::Sandbox(event) => match *event {
+                SandboxEvent::Started { origin, .. } => Some(origin),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        origin,
+        SandboxOrigin::Branched {
+            branch: "pg-kept".into(),
+            turn: 1,
+            method: SnapshotMethod::LiveBranch,
+        }
+    );
+    pg.yard.remove("pg-fork").unwrap();
+    pg.yard.remove("pg-kept").unwrap();
+    assert!(fake.sandboxes().is_empty(), "{:?}", fake.sandboxes());
+}

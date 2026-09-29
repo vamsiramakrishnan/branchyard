@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 
 use crate::delegation;
 use crate::graph;
-use crate::placement::Placement;
+use crate::placement::{Placement, SandboxPlan};
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
 use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
@@ -65,6 +65,9 @@ pub(crate) struct Turn<'a> {
     /// Recorded as a warning when the turn starts, such as why it starts a
     /// fresh session.
     pub note: Option<String>,
+    /// Where the turn's sandbox comes from, when the caller already knows
+    /// (a fan's prepared branch); by default, as the store says.
+    pub sandbox: SandboxPlan,
 }
 
 /// How a turn ended, before the snapshot. Journaled as the `turn_end`
@@ -164,11 +167,19 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Interrupted;
         } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
             record.info.status = BranchStatus::BudgetExceeded { limit };
-        } else if let Err(reason) =
-            crate::workspace::prepare(turn.yard, &mut record, &fence, &mut recorder, &|| {
-                lease.lost()
-            })?
-        {
+        } else if let Err(reason) = match crate::placement::sandboxed(record.provider.as_ref()) {
+            // A sandboxed branch's setup runs in its sandbox, in the turn.
+            true => Ok(()),
+            false => crate::workspace::prepare(
+                turn.yard,
+                &mut record,
+                &fence,
+                &mut recorder,
+                &|| lease.lost(),
+                &crate::workspace::Runner::Host,
+                None,
+            )?,
+        } {
             // Setup that did not complete runs again on the next turn.
             record.info.status = match store.backend().cancel_requested(&fence)? {
                 Some(_) => BranchStatus::Interrupted,
@@ -177,7 +188,7 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         } else if let Err(reason) = graph::bind(turn.yard, &record) {
             record.info.status = BranchStatus::Failed { reason };
         } else {
-            let driven = drive(&mut recorder, &turn, &record, &bounds, &lease);
+            let driven = drive(&mut recorder, &turn, &mut record, &bounds, &lease);
             graph::unbind(turn.yard, &record);
             conclude(
                 turn.yard,
@@ -257,7 +268,7 @@ fn spent(reported: f64, baseline: Option<f64>) -> f64 {
 fn drive(
     recorder: &mut Recorder,
     turn: &Turn<'_>,
-    record: &Record,
+    record: &mut Record,
     bounds: &Bounds,
     lease: &Lease,
 ) -> Result<Driven, Error> {
@@ -289,7 +300,7 @@ fn drive(
 fn run(
     recorder: &mut Recorder,
     turn: &Turn<'_>,
-    record: &Record,
+    record: &mut Record,
     bounds: &Bounds,
     lease: &Lease,
     started: Instant,
@@ -357,13 +368,31 @@ fn run(
         recorder.record(activity)?;
     }
     // Declared before the session so a sandbox outlives it.
-    let mut placement = match Placement::prepare(turn.yard, record, fence) {
+    let mut placement = match Placement::prepare(turn.yard, record, fence, &turn.sandbox) {
         Ok(placement) => placement,
         Err(reason) => {
             driven.end = End::failed(reason);
             return Ok(driven);
         }
     };
+    if let Some(started) = placement.started() {
+        recorder.record(crate::snapshots::event(started.clone()))?;
+        // A seed is used once: later turns resume the kept sandbox or
+        // start fresh.
+        if record.sandbox_seed.take().is_some() {
+            store.write_fenced(record, fence)?;
+        }
+        // The branch's workspace, set up in its sandbox, or inherited from
+        // the branch whose sandbox this one was branched from.
+        if let Some(end) = sandbox_setup(recorder, turn, record, lease, &placement, &started)? {
+            if let Some(warning) = placement.discard() {
+                recorder.record(Activity::Warning(warning))?;
+            }
+            driven.end = end;
+            return Ok(driven);
+        }
+    }
+    let record: &Record = record;
     // Every local harness learns which branch it is on, so `by` inside it
     // never mistakes it for a person; only a delegating one gets a token.
     if !placement.is_sandbox() {
@@ -818,8 +847,8 @@ fn run(
             }
             Err(error) => recorder.record(Activity::Warning(format!("kill failed: {error}")))?,
         }
-        if let Some(warning) = placement.release() {
-            recorder.record(Activity::Warning(warning))?;
+        for activity in placement.release(turn.yard, record, fence) {
+            recorder.record(activity)?;
         }
         return Ok(driven);
     }
@@ -846,10 +875,59 @@ fn run(
         }
         Err(error) => recorder.record(Activity::Warning(format!("close failed: {error}")))?,
     }
-    if let Some(warning) = placement.release() {
-        recorder.record(Activity::Warning(warning))?;
+    for activity in placement.release(turn.yard, record, fence) {
+        recorder.record(activity)?;
     }
     Ok(driven)
+}
+
+/// Run a sandboxed branch's workspace setup in its sandbox, or take it
+/// from the branch its sandbox was branched from. `Some(end)` when the turn
+/// cannot go on.
+fn sandbox_setup(
+    recorder: &mut Recorder,
+    turn: &Turn<'_>,
+    record: &mut Record,
+    lease: &Lease,
+    placement: &Placement,
+    started: &crate::SandboxEvent,
+) -> Result<Option<End>, Error> {
+    let Some((provider, name)) = placement.sandbox() else {
+        return Ok(None);
+    };
+    if record.workspace.as_ref().is_none_or(|w| w.ready) {
+        return Ok(None);
+    }
+    let fence = lease.fence();
+    let store = turn.yard.store();
+    let mounted = placement.mounts_worktree();
+    let inherit = match started {
+        crate::SandboxEvent::Started { origin, .. } => {
+            crate::snapshots::inherited(turn.yard, record, origin, mounted)
+        }
+        _ => None,
+    };
+    let runner = crate::workspace::Runner::Sandbox {
+        provider,
+        name,
+        cwd: placement.cwd(),
+        mounted,
+    };
+    match crate::workspace::prepare(
+        turn.yard,
+        record,
+        fence,
+        recorder,
+        &|| lease.lost(),
+        &runner,
+        inherit.as_ref(),
+    )? {
+        Ok(()) => Ok(None),
+        Err(reason) => Ok(Some(match store.backend().cancel_requested(fence)? {
+            Some(by) => End::Cancelled { by },
+            None => End::Failed { reason },
+        })),
+    }
 }
 
 /// This turn's steered input: polled from the store at most every

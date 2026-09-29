@@ -403,6 +403,18 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
         ),
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
         Activity::Workspace(report) => workspace_line(report, style),
+        Activity::Sandbox(event) => style.paint(
+            match event.as_ref() {
+                branchyard::SandboxEvent::Started {
+                    origin: branchyard::SandboxOrigin::Fresh { reason: Some(_) },
+                    ..
+                }
+                | branchyard::SandboxEvent::NotKept { .. }
+                | branchyard::SandboxEvent::NoSnapshot { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &event.describe(),
+        ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
                 Some(id) => format!(" (re #{id})"),
@@ -1302,6 +1314,41 @@ mod tests {
     use std::path::PathBuf;
 
     const PLAIN: Style = Style::PLAIN;
+
+    #[test]
+    fn sandbox_events_say_which_path_a_turn_took() {
+        use branchyard::{SandboxEvent, SandboxOrigin, SnapshotMethod};
+        let line = |event| activity_line(&Activity::Sandbox(Box::new(event)), PLAIN).unwrap();
+        assert_eq!(
+            line(SandboxEvent::Started {
+                provider: "microsandbox".into(),
+                sandbox: "by-a-1".into(),
+                origin: SandboxOrigin::Branched {
+                    branch: "a".into(),
+                    turn: 3,
+                    method: SnapshotMethod::LiveBranch,
+                },
+            }),
+            "sandbox: branched from a's checkpoint 3 (microsandbox live branch)"
+        );
+        assert_eq!(
+            line(SandboxEvent::Started {
+                provider: "substrate".into(),
+                sandbox: "by-a-2".into(),
+                origin: SandboxOrigin::Fresh {
+                    reason: Some("provider can't branch: it declares neither".into()),
+                },
+            }),
+            "sandbox: fresh (provider can't branch: it declares neither)"
+        );
+        assert_eq!(
+            line(SandboxEvent::Kept {
+                provider: "substrate".into(),
+                sandbox: "by-a-2".into(),
+            }),
+            "sandbox: kept paused for the next turn (substrate by-a-2)"
+        );
+    }
 
     fn request(tool: &str, input: Value) -> PermissionRequest {
         PermissionRequest {

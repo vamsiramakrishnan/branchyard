@@ -451,6 +451,21 @@
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
         },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
         "SandboxOptions": {
           "type": "object",
           "properties": {
@@ -482,6 +497,32 @@
               },
               "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
               "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
             }
           },
           "required": [
@@ -566,6 +607,28 @@
               "type": "boolean",
               "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
               "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
             }
           },
           "required": [
@@ -1737,6 +1800,21 @@
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
         },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
         "SandboxOptions": {
           "type": "object",
           "properties": {
@@ -1768,6 +1846,32 @@
               },
               "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
               "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
             }
           },
           "required": [
@@ -1852,6 +1956,28 @@
               "type": "boolean",
               "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
               "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
             }
           },
           "required": [
@@ -2376,6 +2502,21 @@
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
         },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
         "SandboxOptions": {
           "type": "object",
           "properties": {
@@ -2407,6 +2548,32 @@
               },
               "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
               "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
             }
           },
           "required": [
@@ -2491,6 +2658,28 @@
               "type": "boolean",
               "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
               "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
             }
           },
           "required": [
@@ -5907,6 +6096,19 @@
               ],
               "additionalProperties": false,
               "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sandbox": {
+                  "$ref": "#/$defs/SandboxEvent"
+                }
+              },
+              "required": [
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -6970,6 +7172,24 @@
               "minimum": 0,
               "maximum": 65535,
               "description": "The branch's reserved port, as the commands saw it."
+            },
+            "ran_in": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RanIn"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the commands ran: on this host, or in the sandbox the\nbranch's harness runs in."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
             }
           },
           "required": [
@@ -7002,6 +7222,21 @@
             }
           ],
           "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
+        },
+        "RanIn": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "host",
+              "description": "On this host, in the worktree."
+            },
+            {
+              "type": "string",
+              "const": "sandbox",
+              "description": "In the branch's sandbox, through its provider."
+            }
+          ],
+          "description": "Where a workspace phase's commands ran."
         },
         "Checkpoint": {
           "type": "object",
@@ -7049,6 +7284,17 @@
               "type": "integer",
               "format": "uint32",
               "minimum": 0
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SandboxSnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The provider snapshot taken with this checkpoint, when the branch\nkept its sandbox and the provider could; see\n`docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -7060,6 +7306,81 @@
             "deletions"
           ],
           "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SandboxSnapshot": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "`microsandbox` or `substrate`."
+            },
+            "handle": {
+              "type": "string",
+              "description": "The provider's name for it: a paused sandbox, or a checkpoint\nreference such as a Substrate tag."
+            },
+            "scope": {
+              "$ref": "#/$defs/SandboxScope"
+            },
+            "consistency": {
+              "$ref": "#/$defs/SandboxConsistency"
+            },
+            "method": {
+              "$ref": "#/$defs/SnapshotMethod"
+            }
+          },
+          "required": [
+            "provider",
+            "handle",
+            "scope",
+            "consistency",
+            "method"
+          ],
+          "description": "The provider snapshot a checkpoint took, on\n[`crate::Checkpoint::sandbox`]."
+        },
+        "SandboxScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Memory, processes and disk."
+            },
+            {
+              "type": "string",
+              "const": "disk",
+              "description": "The disk only; a restore boots it fresh."
+            }
+          ],
+          "description": "What a snapshot captured: [`SnapshotScope`] as recorded."
+        },
+        "SandboxConsistency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "crash",
+              "description": "Taken without the workload's cooperation."
+            },
+            {
+              "type": "string",
+              "const": "application",
+              "description": "At a point the workload reached deliberately."
+            }
+          ],
+          "description": "[`Consistency`] as recorded."
+        },
+        "SnapshotMethod": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "live_branch",
+              "description": "A paused child of the branch's sandbox (live branch), branched\nagain for each new sandbox."
+            },
+            {
+              "type": "string",
+              "const": "checkpoint",
+              "description": "A provider checkpoint (Substrate: suspend and a tag), from which new\nsandboxes are created."
+            }
+          ],
+          "description": "How a provider snapshot was taken, and so how a sandbox is branched\nfrom it."
         },
         "SessionContinuity": {
           "oneOf": [
@@ -7513,6 +7834,242 @@
             "ci"
           ],
           "description": "What was observed of a pull request at one moment."
+        },
+        "SandboxEvent": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "origin": {
+                  "$ref": "#/$defs/SandboxOrigin"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "origin"
+              ],
+              "description": "The turn's sandbox, and where it came from."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox"
+              ],
+              "description": "Paused and recorded when the turn ended, for the next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "not_kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "reason"
+              ],
+              "description": "Destroyed when the turn ended although it was to be kept."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "branch": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "evicted"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch"
+              ],
+              "description": "Another branch's kept sandbox, destroyed to stay within\n`max_paused`: the least recently used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "event": {
+                  "type": "string",
+                  "const": "released"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "handle",
+                "turn"
+              ],
+              "description": "A checkpoint's provider snapshot, released to keep the newest\n`snapshots`, or with its branch's sandbox."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "no_snapshot"
+                }
+              },
+              "required": [
+                "event",
+                "turn",
+                "reason"
+              ],
+              "description": "No provider snapshot was taken with checkpoint `turn`."
+            }
+          ],
+          "description": "What happened to a branch's sandbox, as [`Activity::Sandbox`]."
+        },
+        "SandboxOrigin": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "Created fresh; `reason` says why a kept or branched one was not\nused, when one was wanted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "const": "resumed"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "The branch's own sandbox, kept since its last turn, resumed."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branched"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "turn",
+                "method"
+              ],
+              "description": "Branched from `branch`'s provider snapshot at checkpoint `turn`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "prepared"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "method"
+              ],
+              "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            }
+          ],
+          "description": "Where a turn's sandbox came from."
         }
       }
     },
@@ -8003,6 +8560,19 @@
               ],
               "additionalProperties": false,
               "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sandbox": {
+                  "$ref": "#/$defs/SandboxEvent"
+                }
+              },
+              "required": [
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -9066,6 +9636,24 @@
               "minimum": 0,
               "maximum": 65535,
               "description": "The branch's reserved port, as the commands saw it."
+            },
+            "ran_in": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RanIn"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the commands ran: on this host, or in the sandbox the\nbranch's harness runs in."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
             }
           },
           "required": [
@@ -9098,6 +9686,21 @@
             }
           ],
           "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
+        },
+        "RanIn": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "host",
+              "description": "On this host, in the worktree."
+            },
+            {
+              "type": "string",
+              "const": "sandbox",
+              "description": "In the branch's sandbox, through its provider."
+            }
+          ],
+          "description": "Where a workspace phase's commands ran."
         },
         "Checkpoint": {
           "type": "object",
@@ -9145,6 +9748,17 @@
               "type": "integer",
               "format": "uint32",
               "minimum": 0
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SandboxSnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The provider snapshot taken with this checkpoint, when the branch\nkept its sandbox and the provider could; see\n`docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -9156,6 +9770,81 @@
             "deletions"
           ],
           "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SandboxSnapshot": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "`microsandbox` or `substrate`."
+            },
+            "handle": {
+              "type": "string",
+              "description": "The provider's name for it: a paused sandbox, or a checkpoint\nreference such as a Substrate tag."
+            },
+            "scope": {
+              "$ref": "#/$defs/SandboxScope"
+            },
+            "consistency": {
+              "$ref": "#/$defs/SandboxConsistency"
+            },
+            "method": {
+              "$ref": "#/$defs/SnapshotMethod"
+            }
+          },
+          "required": [
+            "provider",
+            "handle",
+            "scope",
+            "consistency",
+            "method"
+          ],
+          "description": "The provider snapshot a checkpoint took, on\n[`crate::Checkpoint::sandbox`]."
+        },
+        "SandboxScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Memory, processes and disk."
+            },
+            {
+              "type": "string",
+              "const": "disk",
+              "description": "The disk only; a restore boots it fresh."
+            }
+          ],
+          "description": "What a snapshot captured: [`SnapshotScope`] as recorded."
+        },
+        "SandboxConsistency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "crash",
+              "description": "Taken without the workload's cooperation."
+            },
+            {
+              "type": "string",
+              "const": "application",
+              "description": "At a point the workload reached deliberately."
+            }
+          ],
+          "description": "[`Consistency`] as recorded."
+        },
+        "SnapshotMethod": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "live_branch",
+              "description": "A paused child of the branch's sandbox (live branch), branched\nagain for each new sandbox."
+            },
+            {
+              "type": "string",
+              "const": "checkpoint",
+              "description": "A provider checkpoint (Substrate: suspend and a tag), from which new\nsandboxes are created."
+            }
+          ],
+          "description": "How a provider snapshot was taken, and so how a sandbox is branched\nfrom it."
         },
         "SessionContinuity": {
           "oneOf": [
@@ -9609,6 +10298,242 @@
             "ci"
           ],
           "description": "What was observed of a pull request at one moment."
+        },
+        "SandboxEvent": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "origin": {
+                  "$ref": "#/$defs/SandboxOrigin"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "origin"
+              ],
+              "description": "The turn's sandbox, and where it came from."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox"
+              ],
+              "description": "Paused and recorded when the turn ended, for the next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "not_kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "reason"
+              ],
+              "description": "Destroyed when the turn ended although it was to be kept."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "branch": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "evicted"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch"
+              ],
+              "description": "Another branch's kept sandbox, destroyed to stay within\n`max_paused`: the least recently used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "event": {
+                  "type": "string",
+                  "const": "released"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "handle",
+                "turn"
+              ],
+              "description": "A checkpoint's provider snapshot, released to keep the newest\n`snapshots`, or with its branch's sandbox."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "no_snapshot"
+                }
+              },
+              "required": [
+                "event",
+                "turn",
+                "reason"
+              ],
+              "description": "No provider snapshot was taken with checkpoint `turn`."
+            }
+          ],
+          "description": "What happened to a branch's sandbox, as [`Activity::Sandbox`]."
+        },
+        "SandboxOrigin": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "Created fresh; `reason` says why a kept or branched one was not\nused, when one was wanted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "const": "resumed"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "The branch's own sandbox, kept since its last turn, resumed."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branched"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "turn",
+                "method"
+              ],
+              "description": "Branched from `branch`'s provider snapshot at checkpoint `turn`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "prepared"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "method"
+              ],
+              "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            }
+          ],
+          "description": "Where a turn's sandbox came from."
         }
       }
     },
@@ -11597,6 +12522,19 @@
               ],
               "additionalProperties": false,
               "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sandbox": {
+                  "$ref": "#/$defs/SandboxEvent"
+                }
+              },
+              "required": [
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -12660,6 +13598,24 @@
               "minimum": 0,
               "maximum": 65535,
               "description": "The branch's reserved port, as the commands saw it."
+            },
+            "ran_in": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RanIn"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the commands ran: on this host, or in the sandbox the\nbranch's harness runs in."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
             }
           },
           "required": [
@@ -12692,6 +13648,21 @@
             }
           ],
           "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
+        },
+        "RanIn": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "host",
+              "description": "On this host, in the worktree."
+            },
+            {
+              "type": "string",
+              "const": "sandbox",
+              "description": "In the branch's sandbox, through its provider."
+            }
+          ],
+          "description": "Where a workspace phase's commands ran."
         },
         "Checkpoint": {
           "type": "object",
@@ -12739,6 +13710,17 @@
               "type": "integer",
               "format": "uint32",
               "minimum": 0
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SandboxSnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The provider snapshot taken with this checkpoint, when the branch\nkept its sandbox and the provider could; see\n`docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -12750,6 +13732,81 @@
             "deletions"
           ],
           "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SandboxSnapshot": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "`microsandbox` or `substrate`."
+            },
+            "handle": {
+              "type": "string",
+              "description": "The provider's name for it: a paused sandbox, or a checkpoint\nreference such as a Substrate tag."
+            },
+            "scope": {
+              "$ref": "#/$defs/SandboxScope"
+            },
+            "consistency": {
+              "$ref": "#/$defs/SandboxConsistency"
+            },
+            "method": {
+              "$ref": "#/$defs/SnapshotMethod"
+            }
+          },
+          "required": [
+            "provider",
+            "handle",
+            "scope",
+            "consistency",
+            "method"
+          ],
+          "description": "The provider snapshot a checkpoint took, on\n[`crate::Checkpoint::sandbox`]."
+        },
+        "SandboxScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Memory, processes and disk."
+            },
+            {
+              "type": "string",
+              "const": "disk",
+              "description": "The disk only; a restore boots it fresh."
+            }
+          ],
+          "description": "What a snapshot captured: [`SnapshotScope`] as recorded."
+        },
+        "SandboxConsistency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "crash",
+              "description": "Taken without the workload's cooperation."
+            },
+            {
+              "type": "string",
+              "const": "application",
+              "description": "At a point the workload reached deliberately."
+            }
+          ],
+          "description": "[`Consistency`] as recorded."
+        },
+        "SnapshotMethod": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "live_branch",
+              "description": "A paused child of the branch's sandbox (live branch), branched\nagain for each new sandbox."
+            },
+            {
+              "type": "string",
+              "const": "checkpoint",
+              "description": "A provider checkpoint (Substrate: suspend and a tag), from which new\nsandboxes are created."
+            }
+          ],
+          "description": "How a provider snapshot was taken, and so how a sandbox is branched\nfrom it."
         },
         "SessionContinuity": {
           "oneOf": [
@@ -13203,6 +14260,242 @@
             "ci"
           ],
           "description": "What was observed of a pull request at one moment."
+        },
+        "SandboxEvent": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "origin": {
+                  "$ref": "#/$defs/SandboxOrigin"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "origin"
+              ],
+              "description": "The turn's sandbox, and where it came from."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox"
+              ],
+              "description": "Paused and recorded when the turn ended, for the next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "not_kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "reason"
+              ],
+              "description": "Destroyed when the turn ended although it was to be kept."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "branch": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "evicted"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch"
+              ],
+              "description": "Another branch's kept sandbox, destroyed to stay within\n`max_paused`: the least recently used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "event": {
+                  "type": "string",
+                  "const": "released"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "handle",
+                "turn"
+              ],
+              "description": "A checkpoint's provider snapshot, released to keep the newest\n`snapshots`, or with its branch's sandbox."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "no_snapshot"
+                }
+              },
+              "required": [
+                "event",
+                "turn",
+                "reason"
+              ],
+              "description": "No provider snapshot was taken with checkpoint `turn`."
+            }
+          ],
+          "description": "What happened to a branch's sandbox, as [`Activity::Sandbox`]."
+        },
+        "SandboxOrigin": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "Created fresh; `reason` says why a kept or branched one was not\nused, when one was wanted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "const": "resumed"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "The branch's own sandbox, kept since its last turn, resumed."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branched"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "turn",
+                "method"
+              ],
+              "description": "Branched from `branch`'s provider snapshot at checkpoint `turn`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "prepared"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "method"
+              ],
+              "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            }
+          ],
+          "description": "Where a turn's sandbox came from."
         }
       }
     },

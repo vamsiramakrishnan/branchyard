@@ -118,6 +118,20 @@ pub struct SandboxArgs {
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
     pub pass_env: Vec<String>,
+    /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`.
+    pub lifecycle: LifecycleArgs,
+    /// `--live-branch`: declare the SDK's pause, live branch and full
+    /// snapshots (unqualified).
+    pub live_branch: bool,
+}
+
+/// What happens to a sandboxed branch's sandbox between turns; see
+/// docs/sandbox-snapshots.md.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LifecycleArgs {
+    pub keep: Option<branchyard::SandboxKeep>,
+    pub snapshots: Option<u32>,
+    pub max_paused: Option<u32>,
 }
 
 /// Options for `--provider substrate`.
@@ -144,6 +158,8 @@ pub struct SubstrateArgs {
     /// `--substrate-insecure`: allow `http://` or `ws://` to hosts other
     /// than loopback.
     pub insecure: bool,
+    /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`.
+    pub lifecycle: LifecycleArgs,
 }
 
 /// Options of `by spawn`.
@@ -1615,6 +1631,51 @@ pub struct Launch {
     microsandbox: MicrosandboxFlags,
     #[command(flatten)]
     substrate: SubstrateFlags,
+    #[command(flatten)]
+    lifecycle: LifecycleFlags,
+}
+
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Sandbox lifecycle (--provider microsandbox or substrate)")]
+pub struct LifecycleFlags {
+    /// Between turns: destroy the sandbox (default) or pause it for the next turn
+    #[arg(long, value_name = "WHAT", value_parser = keep_sandbox)]
+    keep_sandbox: Option<branchyard::SandboxKeep>,
+    /// Checkpoints that also keep a provider snapshot, with a kept sandbox (default 3)
+    #[arg(long, value_name = "N")]
+    sandbox_snapshots: Option<u32>,
+    /// Kept sandboxes of this provider in the repository before the least recently used
+    /// is destroyed (default 4)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    max_paused: Option<u32>,
+}
+
+impl LifecycleFlags {
+    fn first_given(&self) -> Option<&'static str> {
+        [
+            ("keep-sandbox", self.keep_sandbox.is_some()),
+            ("sandbox-snapshots", self.sandbox_snapshots.is_some()),
+            ("max-paused", self.max_paused.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(flag, given)| given.then_some(flag))
+    }
+
+    fn args(&self) -> LifecycleArgs {
+        LifecycleArgs {
+            keep: self.keep_sandbox,
+            snapshots: self.sandbox_snapshots,
+            max_paused: self.max_paused,
+        }
+    }
+}
+
+fn keep_sandbox(value: &str) -> Result<branchyard::SandboxKeep, String> {
+    match value {
+        "pause" => Ok(branchyard::SandboxKeep::Pause),
+        "destroy" => Ok(branchyard::SandboxKeep::Destroy),
+        other => Err(format!("{other:?} is not pause or destroy")),
+    }
 }
 
 #[derive(Args, Clone, Debug, Default, PartialEq)]
@@ -1629,6 +1690,9 @@ pub struct MicrosandboxFlags {
     /// Sandbox memory in MiB
     #[arg(long, value_name = "MIB", value_parser = memory)]
     memory: Option<u32>,
+    /// Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM)
+    #[arg(long)]
+    live_branch: bool,
 }
 
 #[derive(Args, Clone, Debug, Default, PartialEq)]
@@ -1708,6 +1772,7 @@ impl Launch {
                 ("image", micro.image.is_some()),
                 ("cpus", micro.cpus.is_some()),
                 ("memory", micro.memory.is_some()),
+                ("live-branch", micro.live_branch),
             ]
             .into_iter()
             .find_map(|(flag, given)| given.then_some(flag));
@@ -1723,6 +1788,14 @@ impl Launch {
         if matches!(chosen, None | Some(ProviderArg::Local)) && self.pass_env.is_some() {
             return Err("--pass-env needs --provider microsandbox or substrate".into());
         }
+        if matches!(chosen, None | Some(ProviderArg::Local)) {
+            if let Some(flag) = self.lifecycle.first_given() {
+                return Err(format!(
+                    "--{flag} needs --provider microsandbox or substrate"
+                ));
+            }
+        }
+        let lifecycle = self.lifecycle.args();
         let pass_env = self.pass_env.map(|list| list.0).unwrap_or_default();
         match chosen {
             None => {}
@@ -1738,6 +1811,8 @@ impl Launch {
                     cpus: self.microsandbox.cpus,
                     memory_mib: self.microsandbox.memory,
                     pass_env,
+                    lifecycle,
+                    live_branch: self.microsandbox.live_branch,
                 });
             }
             Some(ProviderArg::Substrate) => {
@@ -1761,6 +1836,7 @@ impl Launch {
                     client_key: s.substrate_client_key,
                     router_ca: s.substrate_router_ca,
                     insecure: s.substrate_insecure,
+                    lifecycle,
                 });
             }
         }
@@ -2808,7 +2884,35 @@ mod tests {
                 cpus: Some(2),
                 memory_mib: Some(4096),
                 pass_env: vec!["ANTHROPIC_API_KEY".into(), "GH_TOKEN".into()],
+                ..SandboxArgs::default()
             })
+        );
+        let kept = self::task(
+            "run go --provider microsandbox --image a --live-branch --keep-sandbox pause \
+             --sandbox-snapshots 2 --max-paused 6",
+        );
+        assert_eq!(
+            kept.sandbox,
+            Some(SandboxArgs {
+                image: "a".into(),
+                lifecycle: LifecycleArgs {
+                    keep: Some(branchyard::SandboxKeep::Pause),
+                    snapshots: Some(2),
+                    max_paused: Some(6),
+                },
+                live_branch: true,
+                ..SandboxArgs::default()
+            })
+        );
+        assert!(err("run go --keep-sandbox pause")
+            .contains("--keep-sandbox needs --provider microsandbox or substrate"));
+        assert!(
+            err("run go --provider microsandbox --image a --keep-sandbox forever")
+                .contains("not pause or destroy")
+        );
+        assert!(err("run go --live-branch").contains("--live-branch needs --provider microsandbox"));
+        assert!(
+            err("run go --provider microsandbox --image a --max-paused 0").contains("--max-paused")
         );
         assert!(!task.local);
         let task = self::task("fork b go --provider local");

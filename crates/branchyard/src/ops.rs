@@ -150,6 +150,15 @@ pub(crate) fn merge(yard: &Yard, name: &str, target: &str) -> Result<Merged, Err
         target: target.to_owned(),
         commit: merged.commit.clone(),
     };
+    // A merged branch runs no more turns: its kept sandbox goes. Its
+    // snapshots stay, for forks, until it is removed.
+    let discarded = crate::snapshots::discard_kept(yard, &record, "the branch was merged");
+    if !discarded.is_empty() {
+        let mut recorder = Recorder::fenced(&store, &fence, None);
+        for activity in discarded {
+            recorder.record(activity)?;
+        }
+    }
     let event = RecordedEvent {
         at_ms: now_ms(),
         activity: Activity::Status(record.info.status.clone()),
@@ -282,9 +291,13 @@ pub(crate) fn remove(
         .begin_step(lease.fence(), 0, "remove", &json!({}))?;
     // Best-effort: what it did goes in the log, and the removal goes on.
     let teardown = crate::workspace::teardown(yard, &record, Some(lease.fence()))?;
+    let mut recorder = Recorder::fenced(&store, lease.fence(), None);
     if let Some(report) = &teardown {
-        let mut recorder = Recorder::fenced(&store, lease.fence(), None);
         recorder.record(Activity::Workspace(report.clone()))?;
+    }
+    // Its kept sandbox and its provider snapshots go with it.
+    for activity in crate::snapshots::release_all(yard, &record) {
+        recorder.record(activity)?;
     }
     let merged = matches!(record.info.status, BranchStatus::Merged { .. });
     let branch = names::validate(name)?;

@@ -13,6 +13,11 @@ A provider is where a harness process runs. Branchyard talks to every provider t
 | `stop(name)` | End every process in the sandbox; keep its state where the provider keeps any |
 | `destroy(name)` | Stop and release everything the provider holds. Mounted host directories are kept. Destroying a missing sandbox is not an error |
 | `checkpoint`, `restore`, `branch`, `share` | Optional. A provider that lacks one returns `Unsupported` and does not declare it |
+| `pause`, `resume` | Optional (`Capabilities::pause`). Freeze a running sandbox in place and continue it later, from this process or another |
+| `branch_live(source, children)` | Optional (`Capabilities::live_branch`). New sandboxes from a running or paused one, keeping its memory and processes, each with its own mounts (a child's worktree and home are rebound through its spec); the source keeps its state |
+| `release_checkpoint` | Optional. Release what the provider holds for a checkpoint |
+
+The engine chooses among the optional operations by capability (`Capabilities::has` with `LIVE_BRANCH`, `PAUSE` and `FULL_SNAPSHOT`), never by a provider's name: a branch's sandbox kept between turns, a provider snapshot with each checkpoint, and forks, rewinds, delegated children and fans branched from them, each falling back to a fresh sandbox with git and setup. See [sandbox snapshots](sandbox-snapshots.md). `SandboxSpec::persist` asks for a sandbox that outlives its provider value and process. `branchyard_sandbox::fake::FakeProvider` models all of it in-process for tests.
 
 A `SandboxSpec` names an OCI image, CPU and memory limits, and **mounts**: each makes a host directory (such as a branch's git worktree) visible at an absolute sandbox path, writable or read-only. `SandboxSpec::guest_path` and `host_path` map paths through the longest matching mount. The mapping is lexical: it does not resolve symlinks, so code acting on a harness-supplied path must still validate it inside the sandbox ([harness integration](harness-integration.md#transport-and-callback-placement)).
 
@@ -61,12 +66,16 @@ The SDK's packages are in `Cargo.lock` (about 360 more), so `cargo fetch` downlo
 | `Process::teardown` | `exec_with("sh", ..)` of a script that lists `/proc/*/stat` for the exec's process group, prints the names, and sends the group SIGKILL |
 | `stop` | `stop_with_timeout(30s)`, then `kill()` if that fails |
 | `destroy` | `Sandbox::destroy()` (stop and remove) |
-| `checkpoint` | `Snapshot::builder(label).from_sandbox(name).create()`: a live disk snapshot |
-| `branch` | `Sandbox::restore(label).name(..).cpus(..).memory(..).volume(..).restore()`: a new sandbox from the checkpoint's disk |
+| `checkpoint` | `Snapshot::builder(label).from_sandbox(name).create()`: a live disk snapshot; with `.full()` a full one, when opted in |
+| `branch` | `Sandbox::restore(label).name(..).cpus(..).memory(..).volume(..).restore()`: a new sandbox from the checkpoint's disk (`.disk_only()`), or its memory too (`.forked()`) from a full one |
+| `pause`, `resume` | `Sandbox::pause()`/`resume()`; from another process `Sandbox::get(name)`, then `resume()` and `connect()` (or `start_detached()` for a stopped one). Opt-in |
+| `branch_live` | `SandboxHandle::branch(name).volume(guest, \|m\| m.bind(host)).branch()` per child, or one `branch_many(names)` when every child has the same mounts (the SDK gives a batch one set). Opt-in |
+| `release_checkpoint` | `Snapshot::remove(label, true)` |
+| `SandboxSpec::persist` | `create_detached()`; the provider leaves such a sandbox running when it is dropped, and adopts one by name (`Sandbox::get`, `connect`) |
 
 Evidence from the pinned source: the guest agent (`microsandbox-agentd` 0.7.3, `lib/session.rs`) makes every exec a session leader in both pipe and PTY mode and delivers `ExecSignal` to the negative PID, so `kill` reaches the whole group. After the launched process exits the agent drops the exec's registration and ignores further signals, which is why `teardown` runs its own in-guest script against the group ID (the start PID). That script is tested here against a local process group.
 
-Declared capabilities are `exec`, `checkpoint` and `branch` with one guarantee: disk scope, crash consistency, same host. The SDK also has full-memory snapshots (`SnapshotBuilder::full`), copy-on-write restores (`RestoreBuilder::forked`) and live branching (`Sandbox::branch`); they are not declared, because [design §6](design.md#6-fast-sandbox-creation) enables them only after qualification. `restore` is not declared because the SDK restores into a new sandbox, not in place. Checkpoints do **not** include bind-mounted host directories, so a branch's workspace is not in its checkpoint.
+Declared capabilities are `exec`, `checkpoint` and `branch` with one guarantee: disk scope, crash consistency, same host. The SDK also has full-memory snapshots (`SnapshotBuilder::full`), copy-on-write restores (`RestoreBuilder::forked`), pause and resume, and live branching (`Sandbox::branch`, `branch_many`); they are declared only when the branch's options opt in with `live_branch = true` (`--live-branch`, `MicrosandboxProvider::with_live_branch`), because [design §6](design.md#6-fast-sandbox-creation) enables them only after qualification: `pause`, `live_branch`, and checkpoint and branch with a full, crash-consistent, same-host guarantee as well. Branching is local only; a live-branched child keeps its source's CPUs and memory and gets no host mount or published port unless rebound, so the engine rebinds each child's worktree, home, git directory and scratch areas. `restore` is not declared because the SDK restores into a new sandbox, not in place. Checkpoints do **not** include bind-mounted host directories, so a branch's workspace is not in its checkpoint: it comes from git.
 
 It does not guarantee: qualification (see below); egress restriction (the guest gets the runtime's default network); bounded buffering (the SDK's exec event channel is unbounded while a reader is slow); or who owns files the guest writes into a bound directory. Record the last during qualification.
 
@@ -81,20 +90,21 @@ by run "Fix the flaky parser test" --provider microsandbox \
   --pass-env ANTHROPIC_API_KEY --check "cargo test" --yes
 ```
 
-Each turn gets a fresh microVM, destroyed when the turn ends:
+Each turn gets a fresh microVM, destroyed when the turn ends, unless the branch keeps it (`--keep-sandbox pause` with `--live-branch`; see [sandbox snapshots](sandbox-snapshots.md)):
 
 - The branch's worktree is mounted read-write at `/workspace`, and the harness runs there; the driver's `cwd` is `/workspace`.
 - The branch's private home, `.branchyard/homes/<name>`, is mounted at `/branchyard/home` and is `HOME`. Harness sessions persist there across sends; a forked session shares its parent's home, as under `--isolated`.
 - The repository's git directory is mounted **read-only** at its host path, so `git log` and `git diff` work in the sandbox but the harness cannot move refs. Candidates are still snapshotted on the host.
 - The harness gets `HOME`, the variables named by `--pass-env`, copied from your environment at each turn, and the variables its [provisioning](provisioning.md) sets. Nothing else from your environment crosses: not your login, not `PATH`. The names are stored with the branch; the values are not. A named variable that is unset fails the turn.
 - Before the sandbox is created, [provisioning](provisioning.md) writes the harness's native files into the private home on the host (credentials from `--secret` at mode 0600, settings, MCP configuration where the driver cannot pass it), so the mount carries them in.
+- The branch's [`[workspace]`](workspace.md) setup runs inside the microVM, through `exec`, before the harness starts on its first turn; teardown runs in one at removal.
 - Every [scratch area](storage.md) the branch may reach is mounted read-write at `/branchyard/scratch/<name>`, with `BRANCHYARD_SCRATCH_<NAME>` set to that guest path; the mount does not itself enforce the area's single-writer lock (`by scratch lock`), which is a policy over callers that use it, not a filesystem fence (design §7).
 
 The image must contain the harness executable on its `PATH` (or pass its guest path with `--command`), `sh` for teardown, and whatever the harness needs to authenticate from the passed variables. The engine does not look for the harness on the host.
 
 ### Prerequisites and the ignored tests
 
-The tests in [`crates/branchyard-microsandbox/tests/microsandbox.rs`](../crates/branchyard-microsandbox/tests/microsandbox.rs) are `#[ignore]`: the conformance checks, CPU and memory limits reaching the guest, root-disk writes staying private to each sandbox, and a disk checkpoint branching into a new sandbox. Run them on a host with:
+The tests in [`crates/branchyard-microsandbox/tests/microsandbox.rs`](../crates/branchyard-microsandbox/tests/microsandbox.rs) are `#[ignore]`: the conformance checks, CPU and memory limits reaching the guest, root-disk writes staying private to each sandbox, a disk checkpoint branching into a new sandbox, and, with live branching opted in, the mario-never-dies probe: a paused source live-branched into children that keep its processes (same PIDs) and write privately while the source stays paused, and a persisted, paused sandbox resumed by a new provider. Run them on a host with:
 
 1. Linux on x86_64 or aarch64 with KVM: `/dev/kvm` exists and your user can open it read-write (usually membership in the `kvm` group). Containers must pass `/dev/kvm` through.
 2. The workspace's Rust 1.94 (`rust-toolchain.toml`), a C toolchain, and `libcap-ng-dev`.
@@ -137,7 +147,9 @@ It guarantees, beyond the contract:
 - The bridge reaps every orphan and stops cleanly on the runtime's `SIGTERM`, so it can be the container's process 1.
 - Commits the harness makes in the actor come back as commits on the branch (a history rewritten below the commit sent is refused), with its uncommitted changes as working-tree changes on top.
 
-It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree, with file modes. [Scratch areas](storage.md) are not transferred either: a turn on this provider gets no `BRANCHYARD_SCRATCH_*` variable and no mount, whether or not it is authorized for one; implementing the same copy-in/copy-out treatment for them is future work. [Provisioning](provisioning.md) runs before the copy, so the harness's credential and configuration files go in with the home and come back with it. It cannot tell a harness's tool call from an idle harness, and it is tested only against an in-process fake cluster. It declares `exec` for a template that runs the bridge, `ingress`, and checkpoint and branch with the template's commit scope, crash consistency and portability.
+Pause and resume are `PauseActor` and `ResumeActor`; a checkpoint of a paused actor suspends it first (`SuspendActor` uploads its node-local snapshot) and tags it; `branch` creates a stopped actor from the tag (`CreateActor` with `source_tag`) and `resume` starts it; `release_checkpoint` deletes the tag. There is no live branch. See [sandbox snapshots](sandbox-snapshots.md).
+
+It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree, with file modes. [Scratch areas](storage.md) are not transferred either: a turn on this provider gets no `BRANCHYARD_SCRATCH_*` variable and no mount, whether or not it is authorized for one; implementing the same copy-in/copy-out treatment for them is future work. [Provisioning](provisioning.md) runs before the copy, so the harness's credential and configuration files go in with the home and come back with it. It cannot tell a harness's tool call from an idle harness, and it is tested only against an in-process fake cluster. It declares `exec` for a template that runs the bridge, `ingress`, `pause`, and checkpoint and branch with the template's commit scope, crash consistency and portability; not `live_branch`.
 
 `TaskOptions::provider` selects it with `Provider::Substrate(SubstrateOptions)`; the CLI flags are `--provider substrate --substrate-endpoint URL --substrate-router URL --substrate-template NAME --substrate-key FILE [--substrate-atespace NAME] [--substrate-workdir PATH] [--substrate-home PATH] [--substrate-ca FILE] [--substrate-client-cert FILE --substrate-client-key FILE] [--substrate-router-ca FILE] [--substrate-insecure] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. [Agent Substrate](substrate.md) documents the bridge protocol, the credentials, the transfer, the template and what remains unqualified; [live testing](testing-live.md#6-agent-substrate-cluster) says how to run it on a kind cluster.
 

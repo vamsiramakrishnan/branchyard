@@ -11,6 +11,7 @@
 | [Rigs](rigs.md) | How do I declare a team of harnesses in a file, check it, and run it with `by rig`, and what is refused? |
 | [Provisioning](provisioning.md) | How is a harness's home prepared before each turn: secrets, MCP servers, instructions, model, effort and telemetry, translated from Scion's provisioners, and what is not ported? |
 | [Sandbox providers](providers.md) | What is the provider contract, what does the local provider guarantee, and how do I run harnesses in Microsandbox microVMs or Agent Substrate actors? |
+| [Sandbox snapshots](sandbox-snapshots.md) | How does a branch keep its sandbox paused between turns, take a provider snapshot with each checkpoint, and fork, rewind, delegate and fan from it, with git and setup as the fallback? |
 | [Agent Substrate](substrate.md) | How does Branchyard run harnesses in Agent Substrate actors: the bridge and its protocol, per-attempt credentials, git transfer, and what is still unqualified? |
 | [Checkpoints, rewind, try and compare](checkpoints.md) | How do I fork or rewind a branch to any turn, try a branch in my own checkout and take it back out exactly, and compare attempts and pick one? |
 | [Durable execution](durability.md) | What survives a crash, how leases, journaled steps, cancellation and recovery work, what is never replayed, and how the store maps onto PostgreSQL? |

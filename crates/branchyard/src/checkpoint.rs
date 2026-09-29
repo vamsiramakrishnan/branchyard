@@ -209,11 +209,20 @@ pub(crate) fn record_turn(
             files_changed,
             insertions,
             deletions,
+            sandbox: None,
         })
     })();
     match made {
-        Ok(checkpoint) => {
+        Ok(mut checkpoint) => {
+            // The provider snapshot under this checkpoint, when the branch
+            // keeps its sandbox and its provider can take one.
+            let (snapshot, said) =
+                crate::snapshots::snapshot_turn(yard, fence, record, turn, &checkpoint.commit);
+            checkpoint.sandbox = snapshot.map(Box::new);
             recorder.record(Activity::Checkpoint(checkpoint.clone()))?;
+            for activity in said {
+                recorder.record(activity)?;
+            }
             store.backend().finish_step(
                 fence,
                 fence.turn,
@@ -571,6 +580,18 @@ fn finish(
     record.info.stalled = false;
     record.context = intent.context.clone();
     record.checkpoint = Some(intent.to);
+    // The kept sandbox holds the state after a later turn: it goes, and
+    // the next turn's sandbox comes from checkpoint N's provider snapshot
+    // when there is one (`crate::snapshots`).
+    let discarded = crate::snapshots::discard_kept(
+        yard,
+        &record,
+        &format!("the branch was rewound to checkpoint {}", intent.to),
+    );
+    record.sandbox_seed = match intent.to {
+        0 => None,
+        to => crate::snapshots::seed(&record, Some(to), &intent.commit),
+    };
     store.backend().finish_step(
         &fence,
         fence.turn,
@@ -590,6 +611,9 @@ fn finish(
         commit: intent.commit.clone(),
         session: intent.session.clone(),
     })?;
+    for activity in discarded {
+        recorder.record(activity)?;
+    }
     recorder.finish(lease, &record)?;
     Ok(Rewound {
         branch: record.info.name,
@@ -662,6 +686,7 @@ mod tests {
             files_changed: 1,
             insertions: 1,
             deletions: 0,
+            sandbox: None,
         }
     }
 

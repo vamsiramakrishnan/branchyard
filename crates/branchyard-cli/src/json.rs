@@ -226,6 +226,11 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             value["activity"] = json!("workspace");
             value
         }
+        Activity::Sandbox(event) => json!({
+            "activity": "sandbox",
+            "sandbox": event,
+            "text": event.describe(),
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value

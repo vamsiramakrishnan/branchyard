@@ -1180,6 +1180,7 @@ pub(crate) fn start_turn(
                     options: &options,
                     fork_source: None,
                     note,
+                    sandbox: Default::default(),
                 },
                 lease,
             );
@@ -1706,6 +1707,9 @@ impl Local {
                 depth: caller.info.depth + 1,
                 provision,
                 workspace: caller.workspace.as_ref().map(|w| w.spec.clone()),
+                // Resolved when it starts, from its parent as it is then
+                // (`crate::graph`).
+                seed: None,
             },
         )?;
         record.info.status = BranchStatus::Waiting;
@@ -2642,6 +2646,7 @@ mod tests {
             checkpoint: None,
             context: None,
             workspace: None,
+            sandbox_seed: None,
         }
     }
 

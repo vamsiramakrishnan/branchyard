@@ -228,6 +228,78 @@ fn a_branch_has_a_new_identity_and_never_accepts_its_parents_credential() {
     provider.destroy("parent").unwrap();
 }
 
+/// Sandbox-level branching without a live fork: pause and resume through
+/// `PauseActor`/`ResumeActor`, a checkpoint of a paused actor suspends then
+/// tags it, a branch is created stopped from the tag and resumed, the
+/// source stays where it was, live branching is refused, and a released
+/// checkpoint's tag is gone.
+#[test]
+fn pause_resume_and_suspend_tag_create_without_a_live_fork() {
+    let cluster = Cluster::start("pause");
+    let provider = cluster.provider();
+    let caps = provider.capabilities();
+    assert!(caps.has(branchyard_sandbox::PAUSE));
+    assert!(!caps.has(branchyard_sandbox::LIVE_BRANCH));
+    provider.ensure(&SandboxSpec::new("warm")).unwrap();
+    run(&provider, "warm", "echo before > state.txt").unwrap();
+
+    provider.pause("warm").unwrap();
+    assert_eq!(
+        provider.inspect("warm").unwrap().unwrap().state,
+        SandboxState::Paused
+    );
+    // Its attempt ended with the pause.
+    assert!(provider.endpoint("warm").is_err());
+    provider.pause("warm").unwrap();
+    provider.resume("warm").unwrap();
+    assert_eq!(
+        provider.inspect("warm").unwrap().unwrap().state,
+        SandboxState::Running
+    );
+    assert_eq!(run(&provider, "warm", "echo resumed").unwrap(), "resumed\n");
+
+    provider.pause("warm").unwrap();
+    let committed = caps.checkpoint[0];
+    let checkpoint = provider.checkpoint("warm", &committed).unwrap();
+    assert_eq!(checkpoint.guarantee, committed);
+    // Suspended, not paused, by the checkpoint.
+    assert_eq!(
+        provider.inspect("warm").unwrap().unwrap().state,
+        SandboxState::Stopped
+    );
+    assert!(cluster.fake.tag_names().contains(&checkpoint.reference));
+
+    assert!(matches!(
+        &provider.branch_live("warm", &[SandboxSpec::new("live")])[0],
+        Err(ProviderError::Unsupported(_))
+    ));
+    let child = provider
+        .branch(&checkpoint, &SandboxSpec::new("forked"))
+        .unwrap();
+    assert_eq!(
+        child.state,
+        SandboxState::Stopped,
+        "not live: created stopped"
+    );
+    provider.resume("forked").unwrap();
+    assert_eq!(run(&provider, "forked", "echo child").unwrap(), "child\n");
+    assert_eq!(
+        provider.inspect("warm").unwrap().unwrap().state,
+        SandboxState::Stopped,
+        "the source stays suspended"
+    );
+    provider.resume("warm").unwrap();
+    assert_eq!(run(&provider, "warm", "echo again").unwrap(), "again\n");
+
+    provider.release_checkpoint(&checkpoint).unwrap();
+    assert!(!cluster.fake.tag_names().contains(&checkpoint.reference));
+    provider.release_checkpoint(&checkpoint).unwrap();
+    for name in ["forked", "warm"] {
+        provider.destroy(name).unwrap();
+    }
+    assert!(cluster.fake.actor_names().is_empty());
+}
+
 #[test]
 fn a_name_reused_by_another_actor_is_never_acted_on() {
     let cluster = Cluster::start("reuse");

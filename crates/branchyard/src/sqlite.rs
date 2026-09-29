@@ -25,7 +25,7 @@ use serde_json::Value;
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
     now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PortBackend,
-    ProcessRow, Record, ReservationRow, SteerRow, StepRow,
+    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
@@ -201,6 +201,18 @@ CREATE TABLE IF NOT EXISTS ports (
     branch TEXT NOT NULL UNIQUE,
     reserved_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sandboxes (
+    branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    incarnation INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    turn INTEGER,
+    detail TEXT NOT NULL,
+    used_ms INTEGER NOT NULL,
+    PRIMARY KEY (branch, kind, name)
+);
+CREATE INDEX IF NOT EXISTS sandboxes_provider ON sandboxes (kind, provider, used_ms);
 ";
 
 #[derive(Debug)]
@@ -1007,6 +1019,7 @@ impl Backend for Sqlite {
                 "DELETE FROM graph_edges WHERE dependent = ?1",
                 "DELETE FROM graph_revisions WHERE parent = ?1",
                 "DELETE FROM ports WHERE branch = ?1",
+                "DELETE FROM sandboxes WHERE branch = ?1",
             ] {
                 tx.execute(sql, params![name])
                     .map_err(|e| db("delete", e))?;
@@ -1811,6 +1824,116 @@ impl PortBackend for Sqlite {
             .optional()
             .map(|p| p.map(|p| p as u16))
             .map_err(|error| db("port", error))
+        })
+    }
+}
+
+const SANDBOX_COLUMNS: &str = "branch, incarnation, kind, provider, name, turn, detail, used_ms";
+
+fn sandbox_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(SandboxRow, String)> {
+    let kind: String = r.get(2)?;
+    Ok((
+        SandboxRow {
+            branch: r.get(0)?,
+            incarnation: r.get(1)?,
+            kind: SandboxKind::Kept,
+            provider: r.get(3)?,
+            name: r.get(4)?,
+            turn: r.get::<_, Option<i64>>(5)?.map(|t| t as u32),
+            detail: r.get(6)?,
+            used_ms: uint(r.get(7)?),
+        },
+        kind,
+    ))
+}
+
+fn sandbox_rows(
+    conn: &Connection,
+    sql: &str,
+    args: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<SandboxRow>, Error> {
+    let e = |error| db("sandboxes", error);
+    let mut statement = conn.prepare(sql).map_err(e)?;
+    let rows = statement.query_map(args, sandbox_row).map_err(e)?;
+    let mut found = Vec::new();
+    for row in rows {
+        let (mut row, kind) = row.map_err(e)?;
+        row.kind = SandboxKind::parse(&kind)?;
+        found.push(row);
+    }
+    Ok(found)
+}
+
+impl SandboxBackend for Sqlite {
+    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                "INSERT OR REPLACE INTO sandboxes \
+                 (branch, incarnation, kind, provider, name, turn, detail, used_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    row.branch,
+                    row.incarnation,
+                    row.kind.as_str(),
+                    row.provider,
+                    row.name,
+                    row.turn.map(i64::from),
+                    row.detail,
+                    int(row.used_ms)
+                ],
+            )
+            .map_err(|e| db("sandbox", e))?;
+            Ok(())
+        })
+    }
+
+    fn sandboxes(&self, branch: &str) -> Result<Vec<SandboxRow>, Error> {
+        self.query(|conn| {
+            sandbox_rows(
+                conn,
+                &format!(
+                    "SELECT {SANDBOX_COLUMNS} FROM sandboxes WHERE branch = ?1 \
+                     ORDER BY used_ms, name"
+                ),
+                &[&branch],
+            )
+        })
+    }
+
+    fn sandboxes_of(&self, kind: SandboxKind, provider: &str) -> Result<Vec<SandboxRow>, Error> {
+        self.query(|conn| {
+            sandbox_rows(
+                conn,
+                &format!(
+                    "SELECT {SANDBOX_COLUMNS} FROM sandboxes WHERE kind = ?1 AND provider = ?2 \
+                     ORDER BY used_ms, branch, name"
+                ),
+                &[&kind.as_str(), &provider],
+            )
+        })
+    }
+
+    fn take_sandbox(
+        &self,
+        branch: &str,
+        kind: SandboxKind,
+        name: &str,
+    ) -> Result<Option<SandboxRow>, Error> {
+        self.tx(true, |tx| {
+            let found = sandbox_rows(
+                tx,
+                &format!(
+                    "SELECT {SANDBOX_COLUMNS} FROM sandboxes \
+                     WHERE branch = ?1 AND kind = ?2 AND name = ?3"
+                ),
+                &[&branch, &kind.as_str(), &name],
+            )?;
+            tx.execute(
+                "DELETE FROM sandboxes WHERE branch = ?1 AND kind = ?2 AND name = ?3",
+                params![branch, kind.as_str(), name],
+            )
+            .map_err(|e| db("sandbox", e))?;
+            Ok(found.into_iter().next())
         })
     }
 }

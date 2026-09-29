@@ -169,10 +169,16 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         }
         _ => "",
     };
-    let sandbox = step(placement::STEP_SANDBOX)
-        .and_then(|s| placement::recover(yard, &record, &s.intent))
+    let parked = step(crate::snapshots::STEP_PARK).and_then(|s| s.outcome.clone());
+    let mut sandbox = step(placement::STEP_SANDBOX)
+        .and_then(|s| placement::recover(yard, &record, &s.intent, parked.as_ref()))
         .map(|done| format!("; {done}"))
         .unwrap_or_default();
+    if let Some(done) =
+        crate::snapshots::recover_steps(yard, &record, step(crate::snapshots::STEP_SNAPSHOT))
+    {
+        sandbox.push_str(&format!("; {done}"));
+    }
     let ended = step(STEP_TURN_END).and_then(|s| {
         let end = serde_json::from_value::<End>(s.outcome.clone()?).ok()?;
         let submitted = s.intent.get("submitted").and_then(Value::as_bool)?;

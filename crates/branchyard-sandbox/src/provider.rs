@@ -7,8 +7,13 @@
 //! vector inside it and returns a [`Process`] with independent stdin, stdout
 //! and stderr pipes, and [`SandboxProvider::stop`] and
 //! [`SandboxProvider::destroy`] end it. Checkpoint, restore, branch and share
-//! are optional; a provider that does not offer one returns
-//! [`ProviderError::Unsupported`] and does not declare it in its
+//! are optional, and so are the sandbox-level branching operations:
+//! [`SandboxProvider::pause`] and [`SandboxProvider::resume`] of a live
+//! sandbox, [`SandboxProvider::branch_live`] of a running or paused sandbox
+//! into children that each get their own mounts (a child's own worktree and
+//! home are rebound through its [`SandboxSpec`]), and
+//! [`SandboxProvider::release_checkpoint`]. A provider that does not offer
+//! one returns [`ProviderError::Unsupported`] and does not declare it in its
 //! [`Capabilities`].
 //!
 //! The contract is synchronous and uses `std::io` traits. A provider whose
@@ -100,6 +105,10 @@ pub struct SandboxSpec {
     pub image: Option<String>,
     pub resources: Resources,
     pub mounts: Vec<Mount>,
+    /// Keep the sandbox when the provider value or its process goes away,
+    /// so a later process can resume, branch or destroy it by name. Off by
+    /// default: a provider may tie a sandbox's life to its own.
+    pub persist: bool,
 }
 
 impl SandboxSpec {
@@ -122,6 +131,12 @@ impl SandboxSpec {
 
     pub fn mount(mut self, mount: Mount) -> Self {
         self.mounts.push(mount);
+        self
+    }
+
+    /// [`SandboxSpec::persist`].
+    pub fn persist(mut self) -> Self {
+        self.persist = true;
         self
     }
 
@@ -401,6 +416,50 @@ pub trait SandboxProvider: Send + Sync {
     fn share(&self, name: &str, mount: &Mount) -> Result<(), ProviderError> {
         let _ = (name, mount);
         Err(ProviderError::unsupported(Operation::Share))
+    }
+
+    /// Freeze a running sandbox in place: its memory and processes are
+    /// kept, nothing in it runs, and [`SandboxProvider::resume`] continues
+    /// it. Pausing a paused sandbox is not an error. Declared by
+    /// [`Capabilities::pause`].
+    fn pause(&self, name: &str) -> Result<(), ProviderError> {
+        let _ = name;
+        Err(ProviderError::unsupported(Operation::Pause))
+    }
+
+    /// Continue a sandbox this provider paused, or one a checkpoint left
+    /// stopped, and make it ready for [`SandboxProvider::exec`], from this
+    /// process or another. Resuming a running sandbox is not an error.
+    fn resume(&self, name: &str) -> Result<SandboxInfo, ProviderError> {
+        let _ = name;
+        Err(ProviderError::unsupported(Operation::Resume))
+    }
+
+    /// Create one new sandbox per spec from the running or paused sandbox
+    /// `source`, each with the source's memory, processes and root disk as
+    /// they are now, and with the spec's own name and mounts (the source's
+    /// mounts are not inherited; a child's worktree and home are rebound
+    /// here). The source keeps its state: a paused source stays paused.
+    /// Every child is captured at the same point when the source is paused.
+    /// One result per spec, in order; a failed child does not undo the
+    /// others. Declared by [`Capabilities::live_branch`].
+    fn branch_live(
+        &self,
+        source: &str,
+        children: &[SandboxSpec],
+    ) -> Vec<Result<SandboxInfo, ProviderError>> {
+        let _ = source;
+        children
+            .iter()
+            .map(|_| Err(ProviderError::unsupported(Operation::LiveBranch)))
+            .collect()
+    }
+
+    /// Release what the provider holds for `checkpoint`. Releasing one that
+    /// is already gone is not an error.
+    fn release_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ProviderError> {
+        let _ = checkpoint;
+        Err(ProviderError::unsupported(Operation::Release))
     }
 }
 

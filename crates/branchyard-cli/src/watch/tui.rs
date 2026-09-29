@@ -2937,6 +2937,7 @@ mod tests {
                 files_changed: 1,
                 insertions: 1,
                 deletions: 0,
+                sandbox: None,
             })
         };
         let pr = |activity: PullRequestActivity| Activity::PullRequest(Box::new(activity));

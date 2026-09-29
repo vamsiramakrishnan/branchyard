@@ -121,6 +121,7 @@ mod record;
 mod recover;
 mod run;
 mod seats;
+mod snapshots;
 mod spotlight;
 mod sqlite;
 mod state;
@@ -168,11 +169,15 @@ pub use pull_request::{
 };
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
+pub use snapshots::{
+    SandboxConsistency, SandboxEvent, SandboxKeep, SandboxOrigin, SandboxScope, SandboxSnapshot,
+    SnapshotMethod,
+};
 pub use spotlight::{TryEntry, TryFile, TryState};
 use std::collections::BTreeMap;
 pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
 pub use workspace::{
-    check_glob as check_workspace_glob, WorkspaceInfo, WorkspacePhase, WorkspaceReport,
+    check_glob as check_workspace_glob, RanIn, WorkspaceInfo, WorkspacePhase, WorkspaceReport,
     WorkspaceSpec, ENV_PORT, ENV_WORKTREE, OUTPUT_TAIL as WORKSPACE_OUTPUT_TAIL,
     PORT_RANGE as WORKSPACE_PORT_RANGE,
 };
@@ -479,6 +484,15 @@ impl Yard {
     /// scripts; see `docs/workspace.md`.
     pub fn deny_workspace_scripts(&self) {
         self.hub.deny_scripts();
+    }
+
+    /// Run every Microsandbox-provider branch of this yard (and its clones)
+    /// through `provider` instead of the Microsandbox SDK: its capabilities
+    /// decide what is kept, snapshotted and branched. For embedding a
+    /// provider built elsewhere, and for tests with
+    /// `branchyard_sandbox::fake::FakeProvider`.
+    pub fn use_sandbox_provider(&self, provider: Arc<dyn branchyard_sandbox::SandboxProvider>) {
+        *projection::lock(&self.hub.sandbox_provider) = Some(provider);
     }
 
     /// The named branches side by side: status, turns, cost, tokens, time,
@@ -816,6 +830,25 @@ pub struct SandboxOptions {
     /// `HOME`. Names are stored with the branch; values are not.
     #[serde(default)]
     pub pass_env: Vec<String>,
+    /// What happens to the branch's microVM when a turn ends: destroyed
+    /// (the default), or paused and resumed by the next turn. Needs
+    /// [`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "SandboxKeep::is_destroy")]
+    pub keep: SandboxKeep,
+    /// With a kept sandbox, how many checkpoints keep a provider snapshot
+    /// as well (the newest; older ones are released). Unset: 3. 0: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<u32>,
+    /// At most this many kept (paused) sandboxes of this provider in the
+    /// repository; parking one more destroys the least recently used.
+    /// Unset: 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_paused: Option<u32>,
+    /// Opt in to the Microsandbox SDK's pause, resume, live branching and
+    /// full-memory snapshots, which are declared only then: unqualified
+    /// until they pass on a KVM host.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live_branch: bool,
 }
 
 /// Where an Agent Substrate cluster is and how a harness runs in it.
@@ -871,6 +904,19 @@ pub struct SubstrateOptions {
     /// than loopback, sending credentials and code unencrypted.
     #[serde(default)]
     pub insecure: bool,
+    /// What happens to the branch's actor when a turn ends: deleted (the
+    /// default), or paused (`PauseActor`) and resumed by the next turn. See
+    /// `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "SandboxKeep::is_destroy")]
+    pub keep: SandboxKeep,
+    /// With a kept actor, how many checkpoints keep a tag as well (the
+    /// newest; older tags are deleted). Unset: 3. 0: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<u32>,
+    /// At most this many kept actors in the repository for this cluster;
+    /// parking one more deletes the least recently used. Unset: 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_paused: Option<u32>,
 }
 
 impl SubstrateOptions {
@@ -1638,6 +1684,10 @@ pub enum Activity {
     /// a pull request opened or observed, feedback delivered. See
     /// [`PullRequestActivity`] and `docs/pull-requests.md`.
     PullRequest(Box<PullRequestActivity>),
+    /// Where a turn's sandbox came from (fresh, resumed, branched from a
+    /// provider snapshot) and what became of it: kept, destroyed, evicted,
+    /// a snapshot released. See `docs/sandbox-snapshots.md`.
+    Sandbox(Box<SandboxEvent>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the
@@ -1658,6 +1708,11 @@ pub struct Checkpoint {
     pub files_changed: u32,
     pub insertions: u32,
     pub deletions: u32,
+    /// The provider snapshot taken with this checkpoint, when the branch
+    /// kept its sandbox and the provider could; see
+    /// `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<Box<SandboxSnapshot>>,
 }
 
 /// How a rewound or forked-at branch's conversation continues. Serialized as
