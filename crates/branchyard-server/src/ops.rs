@@ -968,11 +968,15 @@ mod tests {
             ..Worker::current()
         };
         let store = open();
-        let lease = Duration::from_millis(100);
+        // Long enough that the first claim is still held when the second is
+        // made on a slow runner (else the second claim takes the first one
+        // over again), short enough for the takeover below to come quickly.
+        let lease = Duration::from_millis(750);
         let repos = ["r".to_owned()];
         let first = store.claim(&ghost, &repos, lease).unwrap().unwrap();
         let second = store.claim(&ghost, &repos, lease).unwrap().unwrap();
         assert_eq!(first.operation.operation.id, unstarted.id);
+        assert_eq!(second.operation.operation.id, started_op.id);
         let mut running = second.operation.clone();
         running.operation.state = OperationState::Running;
         assert!(store.start(&ghost, second.fence, &running, lease).unwrap());
