@@ -488,9 +488,13 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     let mut children = Vec::new();
     for (turn, lease) in turns.iter() {
         let child = match crate::placement::fan_spec(yard, &turn.record) {
+            // Handed to each branch's turn, which runs through a provider
+            // value of its own: it must outlive this one, which destroys
+            // what it holds when dropped. The turn destroys or keeps it.
             Ok(Some((child, _))) => SandboxSpec {
                 image: None,
                 resources: Default::default(),
+                persist: true,
                 ..child
             },
             _ => SandboxSpec::new(format!("{}-unplaced", turn.record.info.name)),
