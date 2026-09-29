@@ -61,7 +61,7 @@ Superset: press ⌘N again with the same prompt and a different agent, and you g
 
 **Take:** the review step after a fan-out. A `by compare` (or a view in `by watch`) should put the attempts side by side (diff stats, check results, cost, turns) and merge the chosen one with one keystroke.
 
-**Done** ([checkpoints](checkpoints.md#compare-attempts)): `by compare <branch>...` or `--fan <name>` shows status, turns, cost, tokens, time, check, diff stats and the files only each attempt changed (`--json` too); `--check` runs each check on its exact candidate; `--diff A B`; `--pick` merges through the validated merge, and `--discard-others` removes the rest after confirmation. Works with `by --remote` except `--check` and `--diff`. **Remains:** the `by watch` view and its keystroke, which bind to `Yard::compare`.
+**Done** ([checkpoints](checkpoints.md#compare-attempts)): `by compare <branch>...` or `--fan <name>` shows status, turns, cost, tokens, time, check, diff stats and the files only each attempt changed (`--json` too); `--check` runs each check on its exact candidate; `--diff A B`; `--pick` merges through the validated merge, and `--discard-others` removes the rest after confirmation. Works with `by --remote` except `--check` and `--diff`. In `by watch`, `c` shows the selected branch beside its siblings (the rest of its fan-out, or its parent's other children) in a pane, locally and remotely. **Remains:** picking from that pane with one keystroke; `by compare --pick` does it from the shell.
 
 ### 4. Work survives closing the app
 
@@ -95,7 +95,7 @@ emdash autosaves terminal state and resumes agents where they left off ([tasks](
 - `by pr <branch> --watch` follows the pull request with backoff. A failed CI check (with a bounded `gh run view --log-failed` tail), a review, a comment or an unresolved review comment is sent back into the branch once, by steering its running turn or with `by send`'s path, and the next candidate is pushed. Every step is an event in `by log`, and what was delivered is kept there, so a restarted watch repeats nothing.
 - `by show` (and `--json`) has a merge-readiness line: local check, pull-request state, CI summary, unresolved threads, mergeability and review decision, from the last observation; `--refresh` asks GitHub first.
 
-**What remains:** the readiness line and a `p` key in `by watch` (the functions exist for it); replying to and resolving review threads; GitHub only, local mode only; nothing tested against GitHub itself.
+In `by watch`, `p` runs `by pr` after a yes and shows its output, `P` starts `by pr --watch` in the background, and the detail pane has the readiness line. **What remains:** replying to and resolving review threads; GitHub only, local mode only; nothing tested against GitHub itself.
 
 ### 6. Undo one step, not the whole branch
 
@@ -106,7 +106,7 @@ Conductor snapshots each agent turn. Hovering a message and choosing revert disc
 - `by rewind <branch> --to N` (or `by fork <branch> --at N` for a non-destructive version).
 - Rewinding a harness's native session is not always possible, so where resume cannot follow, the rewound branch starts a fresh session with a summary, and says so.
 
-**Done** ([checkpoints](checkpoints.md)): every turn records `refs/branchyard/<branch>/<incarnation>/turn-N` as a journaled step and a `Checkpoint` event, listed by `by show` and `by log` and removed with the branch. `by fork <branch> --at N` branches from any checkpoint; `by rewind <branch> --to N` resets the branch, journaled so recovery finishes one cut short, and keeps later checkpoints so it can be undone by rewinding forward. The harness's own session continues only when it ended at that checkpoint; otherwise a fresh session starts with a summary of the turns before, and the `Rewound` or `ForkedAt` event and the output say which. **Remains:** rewind and `fork --at` through the server API, and the keys in `by watch`.
+**Done** ([checkpoints](checkpoints.md)): every turn records `refs/branchyard/<branch>/<incarnation>/turn-N` as a journaled step and a `Checkpoint` event, listed by `by show` and `by log` and removed with the branch. `by fork <branch> --at N` branches from any checkpoint; `by rewind <branch> --to N` resets the branch, journaled so recovery finishes one cut short, and keeps later checkpoints so it can be undone by rewinding forward. The harness's own session continues only when it ended at that checkpoint; otherwise a fresh session starts with a summary of the turns before, and the `Rewound` or `ForkedAt` event and the output say which. In `by watch`, `r` lists the checkpoints, takes a number and asks before rewinding, and the detail pane shows the checkpoint the branch is at. **Remains:** rewind and `fork --at` through the server API.
 
 ### 7. Try the agent's branch in the app already running
 
@@ -117,7 +117,7 @@ Conductor's Spotlight commits a workspace's tracked changes as a checkpoint and 
 - Branchyard records what it changed, so `--off` restores the checkout exactly.
 - It refuses when the user has uncommitted work.
 
-**Done** ([checkpoints](checkpoints.md#try-a-branch-in-this-checkout)): `by try <branch>` applies the candidate's diff with `git apply` (all or nothing) to a clean checkout only, saving each touched path's prior entry and permission bits in `.branchyard/try/state.json` first; `by try --off` restores them byte for byte, refusing when a tried file changed since unless `--force`; `by try <other>` swaps; `--status` reports; a try cut short is rolled back by the next call. Local mode only. **Remains:** a one-key toggle in `by watch`.
+**Done** ([checkpoints](checkpoints.md#try-a-branch-in-this-checkout)): `by try <branch>` applies the candidate's diff with `git apply` (all or nothing) to a clean checkout only, saving each touched path's prior entry and permission bits in `.branchyard/try/state.json` first; `by try --off` restores them byte for byte, refusing when a tried file changed since unless `--force`; `by try <other>` swaps; `--status` reports; a try cut short is rolled back by the next call. Local mode only. **Done too:** `t` in `by watch` tries the selected branch after a yes, and on the tried branch restores the checkout.
 
 ### 8. One MCP definition, written into every agent's own config
 
@@ -152,7 +152,7 @@ All three create a workspace straight from a GitHub issue, a Linear issue or a p
 
 Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a terminal (⌘O in emdash).
 
-**Branchyard (done, [pull requests](pull-requests.md#by-open)):** `by open <branch> [--editor code|cursor|zed|…] [--print]`, using `$VISUAL`, then `$EDITOR`, and refusing with the known names when none is set. **What remains:** the `o` key in `by watch`, which `open::plan` and `open::launch` are separated for.
+**Branchyard (done, [pull requests](pull-requests.md#by-open)):** `by open <branch> [--editor code|cursor|zed|…] [--print]`, using `$VISUAL`, then `$EDITOR`, and refusing with the known names when none is set. `o` in `by watch` opens the selected branch's worktree the same way, leaving the dashboard's screen for a terminal editor (vim, nvim, emacs, hx, …) until it exits.
 
 ### 12. Keyboard-first
 
@@ -165,7 +165,7 @@ Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a
 - `/` to filter;
 - keys to send, steer, merge, open, fork and resume without leaving the view.
 
-**Status:** done except `open`. `by watch` has the `?` sheet and `/` filter, and keys on the selected branch: `s` send (an input box), `S` steer, `R` resume, `x` cancel and `m` merge (each after a yes; the merge's check result is shown), `f` fork, `d` diff and `l` log in scrollable panes, `y`/`Y` copy the name or worktree path. Each runs the existing `by` command. The keys live in one table (`crates/branchyard-cli/src/watch/actions.rs`) that drives the handling, the footer and the `?` sheet, and reserves `p`, `o`, `r`, `c` and `t` for `by pr`, `by open`, `by rewind`, `by compare` and `by try`, so binding each is a one-row change. Not done: a command palette and remappable keys.
+**Status:** done. `by watch` has the `?` sheet and `/` filter, and keys on the selected branch: `s` send (an input box), `S` steer, `R` resume, `x` cancel and `m` merge (each after a yes; the merge's check result is shown), `f` fork, `d` diff and `l` log in scrollable panes, `y`/`Y` copy the name or worktree path, `p`/`P` `by pr` (and `--watch`), `o` `by open`, `r` `by rewind` (from the checkpoint list), `c` `by compare` and `t` `by try` (a toggle). Each runs the existing `by` command. The keys live in one table (`crates/branchyard-cli/src/watch/actions.rs`) that drives the handling, the footer and the `?` sheet. Not done: a command palette and remappable keys.
 
 ## What they struggle with, and Branchyard already handles
 
@@ -201,6 +201,8 @@ In order of what a user would feel first:
    - interrupted branches with one-key resume (done);
    - notifications (done);
    - `by open` (done, the `o` key);
-   - a keyboard sheet and actions (done).
+   - a keyboard sheet and actions (done), with `p`/`P` for pull requests, `r` rewind, `c` compare and `t` try bound after the three branches were integrated, and checkpoint and merge readiness in the detail pane.
 5. **Compare and choose** after a fan-out (§3). Done: `by compare` ([checkpoints](checkpoints.md#compare-attempts)), and `c` in `by watch` compares the selected branch with its siblings.
 6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7). Done in local mode ([checkpoints](checkpoints.md)), with `r` and `t` in `by watch`; remote rewind and `fork --at` remain.
+
+**Where the plan stands** after the checkpoints, pull-request and cockpit branches were integrated: items 3 to 6 are done in local mode, and `by watch` binds every command they added. Item 1 has `by init`, the `setup` skill and `branchyard.toml` with `[mcp]` servers ([setup](setup.md)). Item 2, the workspace lifecycle, is the one left, in its own branch, to be integrated after these. What remains inside the done items is listed under each section above: remote rewind and `fork --at`, picking from the compare pane, replying to review threads, and trackers other than GitHub.

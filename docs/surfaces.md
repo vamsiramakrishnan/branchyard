@@ -239,6 +239,32 @@ GitHub is reached through the user's `gh`, which runs where the repository and i
 | `by run`, `fan`, `spawn` | a prompt was required | optional with `--issue`; `Usage: by run [OPTIONS] [PROMPT]` |
 | `Repository::verify`, `Repository::push` (`branchyard-workspace`) | none | a check on one commit in a temporary worktree; a push of one commit to a remote branch, without hooks or a terminal prompt |
 
+## Added with the cockpit, and at integration
+
+The cockpit branch made `by watch` act on the selected branch; integrating it with the checkpoints and pull-request branches bound the keys it had reserved. Each key runs the `by` command named, with the dashboard's global flags, so remote mode is the command's own.
+
+| Key in `by watch` | Runs | by --remote |
+|---|---|---|
+| `s`, `S`, `R`, `x`, `m`, `f` | `send`, `send --steer`, `send` (resume), `cancel`, `merge`, `fork` | yes |
+| `d`, `l`, `y` | `diff` and `log` panes, copy the name | yes |
+| `Y` | copy the worktree's path | no: the worktree is on the server |
+| `p`, `P` | `pr` (waited for, output in a pane), `pr --watch` (in the background), each after a yes | no: pushes from this machine with your `gh` login |
+| `o` | `open`, in-process through `open::plan`/`launch`; a terminal editor gets the screen until it exits | no: the worktree is on the server |
+| `r` | `rewind --to N --yes`, N typed under the checkpoint list, then a yes | no: needs an API operation |
+| `c` | `compare` of the branch and its siblings, in a pane | yes, from records, events and diffs |
+| `t` | `try` after a yes; on the tried branch, `try --off` | no: changes this machine's checkout |
+
+| Surface | Before | Now |
+|---|---|---|
+| `by watch`'s detail pane | status, cost, inbox, children, prompt, events | also the checkpoint the branch is at, its merge readiness once it has pull-request steps, and whether it is being tried |
+| `--no-notify`, `[notify]` in `branchyard.toml` | none | notices from `by watch` and waiting commands ([README](../README.md#watching-branches)); `schema/branchyard.config.json` regenerated |
+| `--log-format` (server, `by serve`, `by worker`, `branchyard-herdr`) | human-readable only | `pretty` (the default) or `json`, one object per line |
+| `branchyard_workspace::git`, `Git` | private | public: the one place that starts `git` on the host; `Git::stdin` and `Git::run_bytes` added at integration for `by try`'s patches and blobs, and `by pr` uses it too |
+| `Yard::try_recorded` | none | the recorded try, read without the try lock (what `by watch` polls) |
+| `branchyard::AttemptCheck` | `branchyard::CheckRun` (from checkpoints) | renamed at integration: the pull-request branch's `CheckRun` (a check on one commit, in `schema/contract.json`) keeps the name |
+| `by serve`/`branchyard-server` shutdown | connections drained for up to 10 s, then the grace period | both at once, counted from SIGTERM or SIGINT, so the process exits within `--shutdown-grace` (at least 1 s for requests in flight); signal handlers installed before startup ([server](server.md#running-it)) |
+| `deploy/compose.yaml`, `by init deploy`'s compose | Docker's 10 s stop timeout | `stop_grace_period: 75s`, above the default 60 s grace |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |
