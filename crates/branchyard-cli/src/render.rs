@@ -1315,6 +1315,41 @@ mod tests {
 
     const PLAIN: Style = Style::PLAIN;
 
+    #[test]
+    fn sandbox_events_say_which_path_a_turn_took() {
+        use branchyard::{SandboxEvent, SandboxOrigin, SnapshotMethod};
+        let line = |event| activity_line(&Activity::Sandbox(Box::new(event)), PLAIN).unwrap();
+        assert_eq!(
+            line(SandboxEvent::Started {
+                provider: "microsandbox".into(),
+                sandbox: "by-a-1".into(),
+                origin: SandboxOrigin::Branched {
+                    branch: "a".into(),
+                    turn: 3,
+                    method: SnapshotMethod::LiveBranch,
+                },
+            }),
+            "sandbox: branched from a's checkpoint 3 (microsandbox live branch)"
+        );
+        assert_eq!(
+            line(SandboxEvent::Started {
+                provider: "substrate".into(),
+                sandbox: "by-a-2".into(),
+                origin: SandboxOrigin::Fresh {
+                    reason: Some("provider can't branch: it declares neither".into()),
+                },
+            }),
+            "sandbox: fresh (provider can't branch: it declares neither)"
+        );
+        assert_eq!(
+            line(SandboxEvent::Kept {
+                provider: "substrate".into(),
+                sandbox: "by-a-2".into(),
+            }),
+            "sandbox: kept paused for the next turn (substrate by-a-2)"
+        );
+    }
+
     fn request(tool: &str, input: Value) -> PermissionRequest {
         PermissionRequest {
             key: PermissionKey("k1".into()),

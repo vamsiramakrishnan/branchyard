@@ -429,7 +429,10 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     };
     let capabilities = provider.capabilities();
     if !capabilities.has(branchyard_sandbox::LIVE_BRANCH) {
-        return fresh(turns, "the provider can't live-branch a sandbox".into());
+        return fresh(
+            turns,
+            "provider can't live-branch: it does not declare live branch".into(),
+        );
     }
     let store = yard.store();
     let first = turns[0].0.record.info.name.clone();

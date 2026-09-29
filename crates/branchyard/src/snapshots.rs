@@ -381,7 +381,7 @@ pub(crate) fn provider_key(provider: &Provider) -> String {
 pub(crate) fn can_keep(capabilities: &Capabilities) -> Result<(), String> {
     match capabilities.has(branchyard_sandbox::PAUSE) {
         true => Ok(()),
-        false => Err("the provider can't pause a sandbox".into()),
+        false => Err("provider can't pause: it does not declare pause".into()),
     }
 }
 
@@ -396,18 +396,22 @@ pub(crate) fn method(capabilities: &Capabilities) -> Result<SnapshotMethod, Stri
         return Ok(SnapshotMethod::Checkpoint);
     }
     Err(
-        "the provider can't branch a sandbox: it declares neither live branch nor a \
-         checkpoint it can branch from"
+        "provider can't branch: it declares neither live branch nor a checkpoint it can \
+         branch from"
             .into(),
     )
 }
 
-/// The first checkpoint guarantee the provider can also branch from.
+/// The checkpoint guarantee the provider can also branch from: a full one
+/// when there is one, else the first.
 fn checkpoint_guarantee(capabilities: &Capabilities) -> Option<SnapshotGuarantee> {
-    capabilities
-        .checkpoint
-        .iter()
-        .find(|g| capabilities.branch.contains(g))
+    let branchable = |g: &&SnapshotGuarantee| capabilities.branch.contains(g);
+    let offered = capabilities.checkpoint.iter();
+    offered
+        .clone()
+        .filter(branchable)
+        .find(|g| g.scope == SnapshotScope::Full)
+        .or_else(|| offered.clone().find(branchable))
         .copied()
 }
 
