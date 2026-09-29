@@ -241,7 +241,7 @@ fn pause_resume_and_suspend_tag_create_without_a_live_fork() {
     assert!(caps.has(branchyard_sandbox::PAUSE));
     assert!(!caps.has(branchyard_sandbox::LIVE_BRANCH));
     provider.ensure(&SandboxSpec::new("warm")).unwrap();
-    run(&provider, "warm", "echo before > state.txt").unwrap();
+    assert_eq!(run(&provider, "warm", "echo before").unwrap(), "before\n");
 
     provider.pause("warm").unwrap();
     assert_eq!(
