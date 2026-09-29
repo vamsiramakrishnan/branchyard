@@ -13,7 +13,7 @@ docker run --rm -p 127.0.0.1:8421:8421 \
   branchyard-server serve --config /config/server.json --insecure-bind
 ```
 
-Multi-stage: `rust:1.90.0-bookworm` builds `by` (`cargo build --release --locked --features postgres -p branchyard-cli`; the `postgres` feature is needed for `--database`, used in `deploy/compose.yaml`), and the runtime stage is `debian:bookworm-slim` with only `ca-certificates`, `curl` (for the healthcheck) and `git` (every served repository is a git work tree) installed. The image runs as a dedicated non-root `branchyard` user, never root. `ENTRYPOINT` is `by serve`, so a bare `docker run branchyard-server --help` (no `serve`) will not do what it looks like; pass `serve`'s own flags directly, as above.
+Multi-stage: `rust:1.94.0-bookworm` builds `by` (`cargo build --release --locked --features postgres -p branchyard-cli`; the `postgres` feature is needed for `--database`, used in `deploy/compose.yaml`), and the runtime stage is `debian:bookworm-slim` with only `ca-certificates`, `curl` (for the healthcheck) and `git` (every served repository is a git work tree) installed. The image runs as a dedicated non-root `branchyard` user, never root. `ENTRYPOINT` is `by serve`, so a bare `docker run branchyard-server --help` (no `serve`) will not do what it looks like; pass `serve`'s own flags directly, as above.
 
 `HEALTHCHECK` polls `GET /healthz` (no token needed; the only unauthenticated route, `docs/server.md#authentication`) every 10 seconds.
 

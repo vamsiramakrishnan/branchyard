@@ -7,7 +7,7 @@ Record what you ran in the place each section names. A result that is not record
 ## 0. Machine and budget
 
 - Linux or macOS with git, Python 3 and a C compiler; Linux x86_64 or aarch64 with `/dev/kvm` for section 5; Docker, `kind` and `kubectl` for section 6; an OpenTelemetry collector for the telemetry row of section 7.
-- Rust 1.90 (`rust-toolchain.toml` pins it), and Rust 1.94 only for section 5.
+- Rust 1.94 (`rust-toolchain.toml` pins it).
 - The harnesses you want to test, at the versions [compatibility](compatibility.md) lists as checked against (Claude Code 2.1.283 and codex-cli 0.157.1 for the native drivers). Note any other version you use.
 - A throwaway repository with a fast test command, for example a small crate whose `cargo test` takes seconds. Never your real work: harnesses in local mode run as you.
 - A spending cap. Every section that makes model calls says so; set `--max-cost-usd` or `--budget-usd` on each run. The full list below should stay under about $10 on the Claude and Codex profiles.
@@ -104,10 +104,10 @@ by watch
 
 ## 5. Microsandbox (KVM; model calls only in the last step)
 
-Follow [sandbox providers](providers.md) to install `msb` 0.7.3 and build with the `microsandbox` feature on Rust 1.94, then:
+Follow [sandbox providers](providers.md) to install `msb` 0.7.3 and build with the `microsandbox` feature then:
 
 ```sh
-BY_MSB_IMAGE=alpine:3.20 cargo +1.94 test -p branchyard-microsandbox --features microsandbox \
+BY_MSB_IMAGE=alpine:3.20 cargo test -p branchyard-microsandbox --features microsandbox \
   -- --ignored --test-threads 1
 ```
 

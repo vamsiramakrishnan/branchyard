@@ -11,7 +11,7 @@ name = "by"
 path = "src/main.rs"
 
 [features]
-# Accept --provider microsandbox. Needs Rust 1.94 or newer; see
+# Accept --provider microsandbox. Needs libcap-ng-dev to link; see
 # docs/providers.md.
 microsandbox = ["branchyard/microsandbox"]
 # `by serve --database postgres://...`; see docs/server.md.

@@ -45,7 +45,7 @@ It guarantees nothing beyond your operating-system user. The process sees the ho
 
 ### Why it is feature-gated
 
-It pins the public Rust SDK `microsandbox = "=0.7.3"` with `default-features = false, features = ["local", "net"]`: the local runtime only, no cloud backend, no build-time runtime download, no keyring. That SDK needs **Rust 1.94 or newer**: its local backend depends on `sea-orm` 2 and `sqlx` 0.9, which declare `rust-version = "1.94.0"`, and every `sea-orm` 2.0 release does. The workspace pins Rust 1.90, so the default build leaves the SDK out and still builds offline. The newest SDK without that dependency (0.6.8) needs Rust 1.91 for its network stack (`smoltcp` 0.13), so no release builds on 1.90 with networking.
+It pins the public Rust SDK `microsandbox = "=0.7.3"` with `default-features = false, features = ["local", "net"]`: the local runtime only, no cloud backend, no build-time runtime download, no keyring. That SDK needs Rust 1.94 or newer (its local backend depends on `sea-orm` 2 and `sqlx` 0.9, which declare `rust-version = "1.94.0"`); the workspace pins 1.94, and CI builds, lints and unit-tests the feature on every change. It stays off by default because it compiles several hundred more crates and links against `libcap-ng`.
 
 The SDK's packages are in `Cargo.lock` (about 360 more), so `cargo fetch` downloads them even when the feature is off. With the feature on, the build compiles several hundred more crates, takes a few minutes, and links against `libcap-ng`, which needs its development files (`libcap-ng-dev` on Debian and Ubuntu) and a C toolchain. It compiled and its unit tests passed here with Rust 1.94.1; nothing ran against a runtime.
 
@@ -75,7 +75,7 @@ It does not guarantee: qualification (see below); egress restriction (the guest 
 `TaskOptions::provider` selects it; the CLI flags are `--provider microsandbox --image REF [--cpus N] [--memory MIB] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. A send keeps its branch's provider; a fork inherits its parent's unless the flags name one.
 
 ```sh
-cargo +1.94 install --locked --path crates/branchyard-cli --features microsandbox
+cargo install --locked --path crates/branchyard-cli --features microsandbox
 by run "Fix the flaky parser test" --provider microsandbox \
   --image ghcr.io/you/claude-code:2.1 --cpus 2 --memory 4096 \
   --pass-env ANTHROPIC_API_KEY --check "cargo test" --yes
@@ -97,7 +97,7 @@ The image must contain the harness executable on its `PATH` (or pass its guest p
 The tests in [`crates/branchyard-microsandbox/tests/microsandbox.rs`](../crates/branchyard-microsandbox/tests/microsandbox.rs) are `#[ignore]`: the conformance checks, CPU and memory limits reaching the guest, root-disk writes staying private to each sandbox, and a disk checkpoint branching into a new sandbox. Run them on a host with:
 
 1. Linux on x86_64 or aarch64 with KVM: `/dev/kvm` exists and your user can open it read-write (usually membership in the `kvm` group). Containers must pass `/dev/kvm` through.
-2. Rust 1.94 or newer (`rustup toolchain install 1.94.0`), a C toolchain, and `libcap-ng-dev`.
+2. The workspace's Rust 1.94 (`rust-toolchain.toml`), a C toolchain, and `libcap-ng-dev`.
 3. The `msb` runtime and `libkrunfw` at exactly the SDK's version, 0.7.3, installed where the SDK looks (`$MSB_HOME`, default `~/.microsandbox`). Without the `download-binaries` feature the SDK never installs it. The release archive holds two files:
 
    ```sh
@@ -117,8 +117,8 @@ The tests in [`crates/branchyard-microsandbox/tests/microsandbox.rs`](../crates/
 Then, from the repository root:
 
 ```sh
-cargo +1.94 test -p branchyard-microsandbox --features microsandbox          # unit tests; no KVM needed
-BY_MSB_IMAGE=alpine:3.20 cargo +1.94 test -p branchyard-microsandbox \
+cargo test -p branchyard-microsandbox --features microsandbox          # unit tests; no KVM needed
+BY_MSB_IMAGE=alpine:3.20 cargo test -p branchyard-microsandbox \
   --features microsandbox -- --ignored --test-threads 1                      # needs KVM and msb
 ```
 
