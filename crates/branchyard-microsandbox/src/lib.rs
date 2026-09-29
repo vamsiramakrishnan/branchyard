@@ -19,14 +19,19 @@
 //!   `sh` listing and killing the group) reach its descendants; `stop` and
 //!   `destroy` end the whole guest.
 //! - Declared capabilities are exec plus live disk checkpoints that branch
-//!   into new sandboxes ([`plan::capabilities`]). The SDK's full-memory
-//!   snapshots, live branching and in-place restore are not declared.
+//!   into new sandboxes ([`plan::capabilities`]). The SDK's pause and
+//!   resume, live branching (`Sandbox::branch`, `branch_many`) and
+//!   full-memory snapshots are declared only when opted in
+//!   ([`plan::capabilities_with`], `MicrosandboxProvider::with_live_branch`),
+//!   until the ignored KVM tests qualify them. In-place restore is never
+//!   declared.
 //!
 //! What it does not guarantee:
 //!
 //! - Qualification. Nothing here has run on a KVM host in this repository;
-//!   the `#[ignore]` tests in `tests/microsandbox.rs` are the M2 gate. See
-//!   `docs/providers.md` for the setup they need.
+//!   the `#[ignore]` tests in `tests/microsandbox.rs` are the M2 gate, the
+//!   live-branch probe included. See `docs/providers.md` for the setup they
+//!   need and `docs/sandbox-snapshots.md` for what the engine does with them.
 //! - That a checkpoint includes the workspace. Bound host directories are
 //!   outside the guest's root disk.
 //! - Network policy. The guest gets the runtime's default network; egress

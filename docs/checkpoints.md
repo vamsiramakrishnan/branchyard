@@ -23,6 +23,7 @@ Each checkpoint is also an event, `Activity::Checkpoint`:
 | `after` | The checkpoint the turn started from: the previous one, or the rewound-to one after a rewind; `Some(0)` for the base; `None` for turns recorded before checkpoints existed |
 | `session` | The harness session when the turn ended |
 | `files_changed`, `insertions`, `deletions` | Against the branch's base |
+| `sandbox` | The provider snapshot taken with the checkpoint, when the branch keeps its sandbox and its provider can: `provider`, `handle`, `scope`, `consistency`, `method`. Absent otherwise. See [sandbox snapshots](sandbox-snapshots.md) |
 
 `by show` lists them, marking the one the branch is at (`*`) and flagging a ref that no longer names its commit; `by show --json` adds a `checkpoints` object. `by log` prints each as `checkpoint N at <commit> (...)`. In the SDK, `Branch::checkpoints` returns them with each turn's prompt, and `branchyard::recorded_checkpoints` reads them from any event list, which is how `by --remote show` lists them.
 
@@ -51,7 +52,7 @@ by fork <branch> --at N "<prompt>" [task options]
 Branch::fork_at(N, prompt, options)
 ```
 
-A new branch whose base is checkpoint N's commit (the branch's base for 0), leaving the original untouched. Everything else is `by fork`'s: its name, parent, check, command, provider, provisioning, delegation envelope and budget, and a new incarnation. The session forks natively only as above (the fork's cost then counts from the parent's, as a native fork's does); otherwise the new branch starts a fresh session with the summary, without `--fresh-session` (which `--at` does not take). A `ForkedAt` event is the new branch's first, and `by` prints `forked from <branch> at checkpoint N; <new> starts a fresh session with a summary of turn 1: ...`.
+A new branch whose base is checkpoint N's commit (the branch's base for 0), leaving the original untouched. When the parent runs in a sandbox and kept a provider snapshot at checkpoint N, the fork's first sandbox is branched from it, rebound to the fork's own worktree and home, and inherits the parent's workspace setup; otherwise it is fresh, and the turn says why (`sandbox: branched from <branch>'s checkpoint N (…)` or `sandbox: fresh (…)`; [sandbox snapshots](sandbox-snapshots.md#using-the-snapshots)). Everything else is `by fork`'s: its name, parent, check, command, provider, provisioning, delegation envelope and budget, and a new incarnation. The session forks natively only as above (the fork's cost then counts from the parent's, as a native fork's does); otherwise the new branch starts a fresh session with the summary, without `--fresh-session` (which `--at` does not take). A `ForkedAt` event is the new branch's first, and `by` prints `forked from <branch> at checkpoint N; <new> starts a fresh session with a summary of turn 1: ...`.
 
 ## Rewind
 
@@ -60,7 +61,7 @@ by rewind <branch> --to N [--yes] [--json]
 Branch::rewind(N)
 ```
 
-Resets the branch itself (`by/<name>`, its worktree and its candidate) to checkpoint N. It is refused while a turn runs (the branch's lease is held, `Error::Running`), for a branch that has not started, for a merged branch (fork it instead), when the worktree is not on its branch, and when the worktree holds changes no checkpoint has; the refusal lists them. `by rewind` asks for confirmation on a terminal and is refused without `--yes` elsewhere. Afterwards the branch is `ready` (or `no_changes` at the base), its candidate is the checkpoint's commit, and its next `send` continues as the session decision says. Later checkpoints stay, so `by rewind <branch> --to <later>` undoes a rewind.
+Resets the branch itself (`by/<name>`, its worktree and its candidate) to checkpoint N. It is refused while a turn runs (the branch's lease is held, `Error::Running`), for a branch that has not started, for a merged branch (fork it instead), when the worktree is not on its branch, and when the worktree holds changes no checkpoint has; the refusal lists them. `by rewind` asks for confirmation on a terminal and is refused without `--yes` elsewhere. Afterwards the branch is `ready` (or `no_changes` at the base), its candidate is the checkpoint's commit, and its next `send` continues as the session decision says. A sandboxed branch's kept sandbox, which holds a later turn's state, is destroyed; its next turn's sandbox comes from its own provider snapshot at checkpoint N when it kept one, and is fresh otherwise ([sandbox snapshots](sandbox-snapshots.md#using-the-snapshots)). Later checkpoints stay, so `by rewind <branch> --to <later>` undoes a rewind.
 
 A rewind runs under the branch's lease, like a merge or a removal, as the journaled step `rewind`. Its intent is recorded before anything changes, and holds everything the rewind will do: the target checkpoint and commit, the branch's head before, the session decision and the summary. Then `git reset --hard` to the commit and `git clean -fd` in the worktree (ignored files stay), then the record, the outcome, a `Rewound` event and the lease release. An engine that stops anywhere in between leaves a stale lease with that intent; the next `Yard::open`, `send`, `merge` or server recovery pass takes the lease over and finishes the rewind from the intent (removing a lock a killed git left), recording `Recovered` ("a rewind to checkpoint N had begun, and recovery finished it") and `Rewound`. A crash cannot leave the worktree half-reset, and never undoes the rewind: the intent says the person asked for it.
 
@@ -124,6 +125,7 @@ The SDK calls behind them: `Branch::checkpoints`, `Branch::rewind`, `Branch::for
 | Where | What |
 |---|---|
 | [`checkpoint.rs`](../crates/branchyard/src/checkpoint.rs) | Refs, the `checkpoint` step, lineage, the session decision, summaries, the journaled rewind and its recovery |
+| [`snapshots.rs`](../crates/branchyard/src/snapshots.rs), [`tests/snapshots.rs`](../crates/branchyard/tests/snapshots.rs) | The provider snapshot with each checkpoint, and forks and rewinds branched from it ([sandbox snapshots](sandbox-snapshots.md)) |
 | [`run.rs`](../crates/branchyard/src/run.rs) | `fork --at`; a send after a rewind starting fresh with the summary |
 | [`spotlight.rs`](../crates/branchyard/src/spotlight.rs) | `try` |
 | [`compare.rs`](../crates/branchyard/src/compare.rs), `Repository::check_commit` in [`integrate.rs`](../crates/branchyard-workspace/src/integrate.rs) | Attempts, fan siblings, checks in a private worktree |

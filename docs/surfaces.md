@@ -280,6 +280,21 @@ A repository's scripts are a trust decision, so each surface takes it where its 
 | `by merge --rm` | none | merge, then remove as `by rm` does (teardown included); with `--remote` too |
 | `allow_workspace_scripts` in the server's JSON config | none | `true` or served repository names; the server reads those repositories' `[workspace]` itself, never a request's (a `workspace` field is an unknown field, `400`), and refuses every other repository's scripts |
 
+## Added with sandbox snapshots
+
+A sandboxed branch can keep its sandbox between turns and branch new sandboxes from provider snapshots under its checkpoints; see [sandbox snapshots](sandbox-snapshots.md). Unqualified on every provider.
+
+| Surface | Before | Now |
+|---|---|---|
+| `SandboxOptions::keep`, `snapshots`, `max_paused`, `live_branch`; `SubstrateOptions::keep`, `snapshots`, `max_paused` | none | `--keep-sandbox pause\|destroy`, `--sandbox-snapshots N`, `--max-paused N` (with `--provider microsandbox` or `substrate`), `--live-branch` (Microsandbox); `keep`, `snapshots`, `max_paused`, `live_branch` in `[microsandbox]`; in the `provider` object over HTTP and `by --remote`, under the server's `--allow-provider`; inherited by forks and delegated children with the provider |
+| `Activity::Sandbox` (`SandboxEvent`, `SandboxOrigin`) | none | each turn's sandbox and where it came from (fresh with a reason, resumed, branched from a checkpoint, a fan's prepared one), kept, not kept, evicted, a snapshot released or not taken; `sandbox` in `by log --json`, a `sandbox:` line in `by`'s output, and in every event stream |
+| `Checkpoint::sandbox` (`SandboxSnapshot`) | none | the provider snapshot taken with a checkpoint: provider, handle, scope, consistency, method; in `schema/contract.json` |
+| `WorkspaceReport::ran_in`, `inherited_from`; `RanIn` | none | where setup or teardown ran (host or sandbox), and the branch whose setup a branched sandbox inherited |
+| `by fork --at N`, `Branch::fork`, `fork_at`, `rewind`, a delegated child, a rig seat, a graph dependent, `by fan` | a fresh sandbox, git and setup | the matching provider snapshot first, then the fresh path, saying which; `by fan` runs setup once when its provider can live-branch |
+| `Yard::use_sandbox_provider` | none | SDK only: run Microsandbox-provider branches through a given `SandboxProvider` (tests, embedding) |
+| `SandboxProvider::pause`, `resume`, `branch_live`, `release_checkpoint`; `Capabilities::pause`, `live_branch`, `has`; `Feature`, `LIVE_BRANCH`, `PAUSE`, `FULL_SNAPSHOT`; `SandboxSpec::persist`; `SandboxState::Paused`; `branchyard_sandbox::fake` | none | the provider contract's sandbox-level branching, defaults `Unsupported` |
+| `sandboxes` table (SQLite), `by_sandboxes` (PostgreSQL) | none | kept sandboxes and snapshots per branch, deleted with it ([durability](durability.md)) |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |

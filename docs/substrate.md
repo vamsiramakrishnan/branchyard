@@ -32,8 +32,12 @@ Substrate describes itself as "not an SDK for building agents." Branchyard is th
 | `inspect` | `GetActor` | Fails if the name now refers to a different UID |
 | `exec` | none: the bridge, through the router | See [the bridge](#the-bridge) |
 | `stop` | bridge `Shutdown` and `EndAttempt`, then `SuspendActor` | A full-scope suspend would otherwise keep the processes, frozen, and resume them later; `stop` must end them. `stop_with` first asks the bridge which execs run ([quiescence](#quiescence)) |
-| `checkpoint(name)` | `CreateTag` with `TAG_SCOPE_ATESPACE` | Requires a stopped actor; never suspends implicitly. A retry adopts its own earlier tag. `checkpoint_with` stops a running actor first, refusing while an exec runs unless forced |
-| `branch(checkpoint, name)` | `CreateActor` with `source_tag` | New name, UID and credentials. The child starts stopped; `ensure` starts it |
+| `checkpoint(name)` | `CreateTag` with `TAG_SCOPE_ATESPACE` | Requires a stopped or paused actor; a running one is never suspended implicitly. A paused actor is suspended first (`SuspendActor` uploads its node-local snapshot, and nothing runs in it). A retry adopts its own earlier tag. `checkpoint_with` stops a running actor first, refusing while an exec runs unless forced |
+| `branch(checkpoint, name)` | `CreateActor` with `source_tag` | New name, UID and credentials. The child starts stopped; `ensure` or `resume` starts it. Not a live fork: the source stays as it was |
+| `pause(name)` | bridge `EndAttempt`, then `PauseActor` | The actor stays on its node with its snapshot there; pausing a paused actor succeeds |
+| `resume(name)` | `ResumeActor`, then a new attempt and the bridge's health check | From a pause or a suspend |
+| `release_checkpoint` | `DeleteTag` | Deleting an absent tag succeeds |
+| `branch_live` | none | Refused as unsupported: the API has no fork of a running actor |
 | `revert` (`Actors` only) | `RevertActor` | Returns to the **latest** suspend only; not restore to a chosen checkpoint |
 | `destroy` | bridge `EndAttempt`, then `DeleteActor` with a UID precondition | Idempotent; cannot delete a newer actor that reused the name |
 
@@ -55,6 +59,8 @@ Because a UID is never reused, equal UIDs before and after a call prove the call
 | Routed ingress | Yes | `atenet-router` activates suspended actors on request (not in the vendored source) |
 | Checkpoint | Template scope, crash consistency, portable | Suspend captures without the workload's cooperation; object storage makes it portable |
 | Branch | Same as checkpoint | Tag, then create from tag |
+| Pause | Yes | `PauseActor` and `ResumeActor` |
+| Live branch | No | No fork of a running actor; a branch goes through suspend, a tag and a new actor |
 | Restore to a chosen checkpoint | No | Only revert-to-latest exists; use `branch` instead |
 | Share | No | No API for state shared between actors |
 | Host mounts | No | Refused in `ensure`; code crosses by [transfer](#git-in-and-out) |
@@ -189,6 +195,8 @@ by run "Fix the flaky parser test" --provider substrate \
 2. Copies the worktree and the private home in, and runs the harness in the workdir with `HOME` and the `--pass-env` variables on top of the image's environment.
 3. When the turn ends, copies both back and deletes the actor. A failure to bring the result back is a warning on the turn; the actor is deleted regardless.
 
+With `--keep-sandbox pause` (`SubstrateOptions::keep`), step 3 pauses the actor (`PauseActor`) instead of deleting it and records it; the next turn resumes it (`ResumeActor`, a new attempt), removes its old worktree repository and the files git sees there (ignored files, such as what the branch's `[workspace]` setup installed in the actor, stay) and its home, and sends both again. Each checkpoint of such a branch suspends the actor and tags it, keeping the newest `--sandbox-snapshots` tags; `by fork --at N`, a rewind and a delegated child create their actor from checkpoint N's tag. See [sandbox snapshots](sandbox-snapshots.md). The branch's setup runs in the actor, through the bridge.
+
 Delegation is refused to a sandboxed harness, as for Microsandbox. If the engine dies mid-turn, the bridge tears the harness down when its connection closes. `Yard::recover` then finds the actor named by the `sandbox` step and, if it still exists, brings its work back as the turn's end would have: it begins a new attempt with the host's bridge key (superseding the dead engine's credential), pulls the actor's working files through the turn's staging repository, and applies them only if the worktree still holds exactly what was sent; it pulls the home too. It then deletes the actor (which needs only the `Control` API) and the staging directory. The `recovered` event says whether the work came back or why not, and the branch ends `interrupted`, with the recovered files in its candidate.
 
 ## Testing
@@ -205,6 +213,7 @@ The fake in `branchyard_substrate::fake` serves `Control` over real gRPC, runs a
 - every `branchyard_sandbox::conformance` check through `SubstrateProvider`, in the suite's mode for providers without mounts, where the two mount checks require a mount to be refused;
 - attempts (rotation, ending, suspend and resume, a branch refusing its parent's live credential) and a reused name never acted on;
 - the git round trip (additions, changes, deletions, a binary file, mode changes, links, files written outside the worktree and ignored files never coming back, the host repository's refs, objects and config unchanged, a concurrently changed worktree refused) and the home round trip; a harness that makes two commits by two authors and leaves a changed, a staged and a deleted file: both commits on the branch with their messages, authors, dates and order, the rest as working-tree changes, and the engine's snapshot on top; a reset below the base, an amended base and an unrelated history refused with nothing applied; a host branch that moved meanwhile refused; without commits the host repository not written;
+- pause and resume, a paused actor's checkpoint suspending it then tagging it, a branch created stopped from the tag and started while the source stays suspended, live branching refused, a released tag deleted; and through the engine, an actor kept paused between turns, resumed with the worktree sent again, tagged with each checkpoint, a fork at a checkpoint created from its tag, and actors and tags deleted with their branches ([sandbox snapshots](sandbox-snapshots.md));
 - the engine and the built `by` running the fake ACP agent in an actor, the candidate merging, commits made in the actor reaching the candidate and the merge, a turn over TLS with a client certificate and one refused without it, the home and session carrying across sends, no process left running, delegation refused, and a killed engine's work brought back by recovery (and not applied over a worktree changed since) before its actor is deleted.
 
 The ignored tests in [`tests/cluster.rs`](../crates/branchyard-substrate/tests/cluster.rs) run the conformance checks, attempt rotation and a worktree round trip against a real cluster; [live testing](testing-live.md#6-agent-substrate-cluster) says how.
@@ -219,7 +228,8 @@ The ignored tests in [`tests/cluster.rs`](../crates/branchyard-substrate/tests/c
 6. **Attempt state can be rolled back by the bridge's own user.** Memory is the authority while the bridge runs and tampering is detected and undone, but a process running as the bridge's user can reset the file while the bridge is down, and a bridge that then starts from it (after a crash, or a resume from a disk-scope snapshot) accepts the ended attempt's credential until the host's next attempt, if that process already held it. Running the harness as another user (`--run-as`) closes this within the actor; see [attempt state](#attempt-state). The guest clock decides expiry.
 7. **Work on engine death, partly recovered.** Recovery brings back the files the harness had written when the bridge ended it, and the home, then deletes the actor. Still lost: anything the harness had not yet written, and the result when the worktree changed since the turn began, when the bridge key cannot be read, or when the actor does not answer; the `recovered` event says which. Tested against the fake cluster only.
 8. **Kubernetes.** Substrate requires a cluster. It stays optional; Kubernetes is not on Branchyard's default per-spawn path.
-9. **Fork is upstream work.** Substrate lists actor forking from a state root on its roadmap. Revisit `branch` when it lands.
+9. **Fork is upstream work.** Substrate lists actor forking from a state root on its roadmap. Revisit `branch` when it lands; until then a branch is suspend, tag and create, and `live_branch` is not declared.
+10. **Pause, suspend-from-pause and tag semantics are the fake's reading of the proto.** Whether `SuspendActor` from `PAUSED` uploads the node-local snapshot as the proto comment says, whether a tag outlives its source actor's later suspends, and whether the workdir and ignored files are in a `DATA`-scope snapshot must be checked on a cluster before a kept actor or a tag is relied on.
 
 ## Qualification steps
 

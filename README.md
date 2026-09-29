@@ -189,6 +189,8 @@ by run "Fix the flaky parser test" --provider microsandbox --image ghcr.io/you/c
 
 It needs Linux with KVM and the `msb` 0.7.3 runtime, and the `microsandbox` cargo feature, which is off by default because it compiles several hundred more crates and links against `libcap-ng`; it builds on the workspace's Rust 1.94, and CI builds, lints and unit-tests it. It is **unqualified**: its unit tests pass, but its KVM tests have not run. See [sandbox providers](docs/providers.md) for the contract, each provider's guarantees, and how to run those tests.
 
+A sandbox can also branch under git: with `--keep-sandbox pause` a branch's sandbox is paused between turns instead of destroyed, each checkpoint takes a provider snapshot too, and `by fork --at N`, `by rewind --to N`, delegated children and `by fan` start from those snapshots (a fan runs its `[workspace]` setup once), falling back to a fresh sandbox, git and setup, and saying which (`sandbox: branched from a's checkpoint 3 (microsandbox live branch)`). Microsandbox's pause and live branching are declared only with `--live-branch`; Substrate pauses actors and branches through tags. Tested against fake providers only; see [sandbox snapshots](docs/sandbox-snapshots.md).
+
 The **Agent Substrate** provider, in the default build, runs each turn's harness in an [Agent Substrate](docs/substrate.md) actor on Kubernetes. Substrate has no exec API, so the actor's template runs `branchyard-bridge`, which starts the harness for connections that arrive through Substrate's router carrying a credential the host signs for that attempt. An actor cannot mount the worktree: it is copied in and the result brought back as git bundles, and applied to the worktree's files so the candidate is recorded as usual.
 
 ```sh
