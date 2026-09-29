@@ -505,3 +505,162 @@ fn recovery_does_not_apply_an_actors_work_over_a_worktree_changed_since() {
     wait_gone(bridge);
     assert!(!f.root.join(".branchyard/transfer").join(&actor).exists());
 }
+
+/// `keep = "pause"` on Substrate: the actor is paused (`PauseActor`) when a
+/// turn ends and resumed (`ResumeActor`) by the next, with the worktree and
+/// home sent again; each checkpoint suspends it and tags it (`CreateTag`);
+/// a fork at a checkpoint creates its actor from the tag (`CreateActor`
+/// with `source_tag`), created stopped and started, not a live fork: the
+/// source actor is left suspended. Removal deletes the actor and its tags.
+#[test]
+fn a_kept_actor_is_paused_resumed_tagged_and_forked_from_its_tag() {
+    use branchyard::{SandboxEvent, SandboxKeep, SandboxOrigin, SnapshotMethod};
+    let f = Fixture::new();
+    let (fake, mut substrate) = cluster(&f);
+    substrate.keep = SandboxKeep::Pause;
+    let kept = options(&f, &substrate);
+    let branch = f
+        .task("WRITE one.txt=1")
+        .options(kept.clone())
+        .name("kept-actor")
+        .policy(Policy::allow_all())
+        .run()
+        .unwrap();
+    assert_eq!(
+        branch.info().status,
+        BranchStatus::Ready,
+        "{:?}",
+        branch.events()
+    );
+    let sandbox_events = |branch: &branchyard::Branch| -> Vec<SandboxEvent> {
+        branch
+            .events()
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e.activity {
+                Activity::Sandbox(event) => Some(*event),
+                _ => None,
+            })
+            .collect()
+    };
+    let events = sandbox_events(&branch);
+    let actor = match &events[0] {
+        SandboxEvent::Started {
+            sandbox, provider, ..
+        } => {
+            assert_eq!(provider, "substrate");
+            sandbox.clone()
+        }
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        matches!(&events[1], SandboxEvent::Kept { .. }),
+        "{events:?}"
+    );
+    assert_eq!(
+        fake.actor_names(),
+        std::slice::from_ref(&actor),
+        "kept, not deleted"
+    );
+    // The checkpoint suspended it and tagged it.
+    let checkpoint = branch.checkpoints().unwrap().checkpoints[0]
+        .checkpoint
+        .clone();
+    let snapshot = checkpoint.sandbox.expect("a tag with checkpoint 1");
+    assert_eq!(snapshot.method, SnapshotMethod::Checkpoint);
+    assert_eq!(snapshot.provider, "substrate");
+    assert!(fake.tag_names().contains(&snapshot.handle));
+    let state = |name: &str| {
+        fake.actor(name)
+            .and_then(|a| a.status)
+            .map(|s| s.state)
+            .unwrap_or_default()
+    };
+    assert_eq!(state(&actor), pb::ActorState::Suspended as i32);
+
+    // The next turn resumes the same actor, with the worktree sent again.
+    let sent = branch.send("WRITE two.txt=2", kept.clone()).unwrap();
+    assert_eq!(
+        sent.info().status,
+        BranchStatus::Ready,
+        "{:?}",
+        sent.events()
+    );
+    let events = sandbox_events(&sent);
+    let resumed = events
+        .iter()
+        .filter_map(|e| match e {
+            SandboxEvent::Started {
+                sandbox, origin, ..
+            } => Some((sandbox.clone(), origin.clone())),
+            _ => None,
+        })
+        .nth(1)
+        .unwrap();
+    assert_eq!(resumed, (actor.clone(), SandboxOrigin::Resumed));
+    let candidate = sent.info().candidate.clone().unwrap().commit;
+    for file in ["one.txt", "two.txt"] {
+        git(&f.root, &["cat-file", "-e", &format!("{candidate}:{file}")]);
+    }
+
+    // A fork at checkpoint 1: a new actor from its tag, not a live fork.
+    let fork = sent
+        .fork_at(
+            1,
+            "WRITE forked.txt=f",
+            TaskOptions {
+                name: Some("from-tag".into()),
+                ..kept.clone()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fork.info().status,
+        BranchStatus::Ready,
+        "{:?}",
+        fork.events()
+    );
+    let origin = sandbox_events(&fork)
+        .into_iter()
+        .find_map(|e| match e {
+            SandboxEvent::Started { origin, .. } => Some(origin),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        origin,
+        SandboxOrigin::Branched {
+            branch: "kept-actor".into(),
+            turn: 1,
+            method: SnapshotMethod::Checkpoint,
+        }
+    );
+    let fork_candidate = fork.info().candidate.clone().unwrap().commit;
+    git(
+        &f.root,
+        &["cat-file", "-e", &format!("{fork_candidate}:one.txt")],
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["cat-file", "-e", &format!("{fork_candidate}:two.txt")])
+            .current_dir(&f.root)
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(false),
+        "the fork is at checkpoint 1"
+    );
+    assert_eq!(
+        state(&actor),
+        pb::ActorState::Suspended as i32,
+        "the source actor was left suspended"
+    );
+    assert_eq!(fake.actor_names().len(), 2);
+
+    // Removal deletes the actors and their tags.
+    let tags_before = fake.tag_names().len();
+    assert!(tags_before >= 2, "{:?}", fake.tag_names());
+    f.yard.remove("from-tag").unwrap();
+    f.yard.remove("kept-actor").unwrap();
+    assert!(fake.actor_names().is_empty(), "{:?}", fake.actor_names());
+    assert!(fake.tag_names().is_empty(), "{:?}", fake.tag_names());
+}

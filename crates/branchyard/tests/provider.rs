@@ -11,6 +11,7 @@ fn microsandbox() -> Provider {
         cpus: Some(2),
         memory_mib: Some(2048),
         pass_env: vec!["ANTHROPIC_API_KEY".into()],
+        ..SandboxOptions::default()
     })
 }
 

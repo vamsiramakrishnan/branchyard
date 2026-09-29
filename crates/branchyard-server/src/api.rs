@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -591,6 +590,48 @@ impl App {
             unapproved_tools,
             ..TaskOptions::default()
         }
+    }
+}
+
+impl App {
+    /// The `[workspace]` of `repo`'s branchyard.toml for a new branch, when
+    /// this server's operator allows that repository's scripts
+    /// (`allow_workspace_scripts`); otherwise none. Never from a request.
+    pub(crate) fn workspace(
+        &self,
+        repo: &RepoState,
+    ) -> Result<Option<branchyard::WorkspaceSpec>, ApiError> {
+        if !self.config.allow_workspace_scripts.allows(&repo.name) {
+            return Ok(None);
+        }
+        let path = repo
+            .yard
+            .root()
+            .join(branchyard_setup::config::PROJECT_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(ApiError::bad_request(format!(
+                    "{}'s branchyard.toml could not be read: {e}",
+                    repo.name
+                )))
+            }
+        };
+        let parsed = branchyard_setup::config::parse(&text)
+            .and_then(|c| {
+                c.check_layer(branchyard_setup::config::Layer::Project)?;
+                Ok(c)
+            })
+            .map_err(|e| {
+                ApiError::bad_request(format!("{}'s branchyard.toml is invalid: {e}", repo.name))
+            })?;
+        Ok(parsed.workspace.map(|w| branchyard::WorkspaceSpec {
+            copy: w.copy.clone(),
+            setup: w.setup.commands(),
+            teardown: w.teardown.commands(),
+            digest: Some(w.digest()),
+        }))
     }
 }
 
@@ -1240,28 +1281,19 @@ async fn post_reincarnate(
 
 /// The branch checked out in the served repository.
 fn current_branch(root: &std::path::Path) -> Result<String, ApiError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| ApiError::internal(format!("could not run git: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "git_error",
-            format!("could not resolve the current branch: {}", stderr.trim()),
-        ));
-    }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if name == "HEAD" {
-        return Err(ApiError::new(
+    match branchyard::current_branch(root) {
+        Ok(Some(name)) => Ok(name),
+        Ok(None) => Err(ApiError::new(
             StatusCode::CONFLICT,
             "detached_head",
             "the served repository's HEAD is detached; pass a target",
-        ));
+        )),
+        Err(error) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "git_error",
+            format!("could not resolve the current branch: {error}"),
+        )),
     }
-    Ok(name)
 }
 
 async fn post_merge(

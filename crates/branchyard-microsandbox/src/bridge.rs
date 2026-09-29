@@ -472,6 +472,16 @@ mod tests {
         )
         .unwrap();
         let child: u32 = line.trim().parse().unwrap();
+        // `$!` is known as soon as the shell forks, before the child has
+        // exec'd `sleep`; until it has, it is still named `sh`.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::read_to_string(format!("/proc/{child}/comm"))
+            .map(|comm| comm.trim() != "sleep")
+            .unwrap_or(true)
+        {
+            assert!(Instant::now() < deadline, "{child} never became sleep");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let output = Command::new("sh")
             .args(["-c", GROUP_TEARDOWN, "sh", &leader.id().to_string()])
             .output()

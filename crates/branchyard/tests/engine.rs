@@ -555,10 +555,14 @@ fn max_turns_stops_a_send_before_it_starts() {
 fn a_duration_budget_interrupts_a_hanging_turn() {
     let f = Fixture::new();
     let started = Instant::now();
+    // Long enough that the harness has finished its handshake and started
+    // the turn on a slow, loaded runner: a budget that runs out while the
+    // harness is still opening kills it without a turn to interrupt, which
+    // is a different path from the one tested here.
     let branch = f
         .task("HANG WRITE partial.txt=1")
         .name("hangs")
-        .budget(Budget::default().duration(Duration::from_millis(300)))
+        .budget(Budget::default().duration(Duration::from_secs(3)))
         .run()
         .unwrap();
     assert!(

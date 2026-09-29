@@ -5,7 +5,7 @@
 # container's own user. Harnesses run as this image's non-root user, with
 # whatever the image installs on PATH; add a harness's own package layer if
 # a served repository needs one at task time.
-FROM rust:1.90.0-bookworm AS build
+FROM rust:1.94.0-bookworm AS build
 WORKDIR /source
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates

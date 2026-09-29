@@ -111,10 +111,11 @@ fn load(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Proje
     Ok(Some(config))
 }
 
-/// `[remote]` for what `--remote`, `--token-file`, `--ca-file`, `--repo`
-/// and their variables left unset. The rest of `[remote]` applies only
+/// `[notify]`, and `[remote]` for what `--remote`, `--token-file`,
+/// `--ca-file`, `--repo` and their variables left unset. The rest of `[remote]` applies only
 /// when its `url` is the server in use.
 pub fn apply_globals(config: &ProjectConfig, globals: &mut Globals) {
+    globals.notify = config.notify.clone();
     let remote = &config.remote;
     let same_server = match (&globals.remote, &remote.url) {
         (None, Some(_)) => {
@@ -195,6 +196,15 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
                 cpus: sandbox.cpus,
                 memory_mib: sandbox.memory_mib,
                 pass_env: sandbox.pass_env.clone(),
+                lifecycle: crate::args::LifecycleArgs {
+                    keep: sandbox.keep.as_deref().map(|keep| match keep {
+                        "pause" => branchyard::SandboxKeep::Pause,
+                        _ => branchyard::SandboxKeep::Destroy,
+                    }),
+                    snapshots: sandbox.snapshots,
+                    max_paused: sandbox.max_paused,
+                },
+                live_branch: sandbox.live_branch.unwrap_or(false),
             });
         }
     }

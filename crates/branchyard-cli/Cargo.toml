@@ -11,7 +11,7 @@ name = "by"
 path = "src/main.rs"
 
 [features]
-# Accept --provider microsandbox. Needs Rust 1.94 or newer; see
+# Accept --provider microsandbox. Needs libcap-ng-dev to link; see
 # docs/providers.md.
 microsandbox = ["branchyard/microsandbox"]
 # `by serve --database postgres://...`; see docs/server.md.
@@ -24,6 +24,7 @@ schema = ["dep:schemars"]
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
 branchyard-server = { path = "../branchyard-server" }
+branchyard-workspace = { path = "../branchyard-workspace" }
 branchyard-mcp = { path = "../branchyard-mcp" }
 serde = "1"
 serde_json = "1"

@@ -103,6 +103,7 @@ impl Setup {
                 self.workspace.clone(),
                 self.guest_workspace.clone(),
             )],
+            persist: false,
         }
     }
 

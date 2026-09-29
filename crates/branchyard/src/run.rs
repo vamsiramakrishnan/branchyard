@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use branchyard_harness::profiles::{self, Profile};
 use branchyard_harness::SessionMode;
+use branchyard_sandbox::SandboxSpec;
 use branchyard_workspace::Commit;
 use serde_json::json;
 
@@ -45,6 +46,7 @@ pub(crate) struct Launch {
 /// The executable is looked for on this host only when the harness runs
 /// here; a sandbox's image must provide it.
 pub(crate) fn launch(
+    yard: &Yard,
     id: Option<&str>,
     command: Option<&[String]>,
     provider: Option<&Provider>,
@@ -53,7 +55,7 @@ pub(crate) fn launch(
     let profile = harness::select(id)?;
     harness::check_approvals(profile, unapproved_tools)?;
     let command = harness::command(profile, command);
-    placement::check(provider)?;
+    placement::check(yard, provider)?;
     if !placement::sandboxed(provider) {
         harness::check_available(id.unwrap_or(profile.harness), &command)?;
     }
@@ -83,6 +85,11 @@ pub(crate) struct NewBranch<'a> {
     pub grant: Option<Grant>,
     pub depth: u32,
     pub provision: Option<Provisioning>,
+    /// Its workspace lifecycle; see `crate::workspace`.
+    pub workspace: Option<crate::WorkspaceSpec>,
+    /// The provider snapshot its first sandbox should come from; see
+    /// `crate::snapshots`.
+    pub seed: Option<crate::snapshots::SandboxSeed>,
 }
 
 /// The journaled step that creates a branch's worktree.
@@ -138,6 +145,10 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         provision: new.provision,
         bindings: Vec::new(),
         start_base: None,
+        checkpoint: Some(0),
+        context: None,
+        workspace: new.workspace.map(crate::workspace::WorkspaceState::new),
+        sandbox_seed: new.seed,
     })
 }
 
@@ -241,6 +252,7 @@ fn seats_need_delegation() -> Error {
 
 pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Branch, Error> {
     let launch = launch(
+        yard,
         options.harness.as_deref(),
         options.command.as_deref(),
         options.provider.as_ref(),
@@ -267,6 +279,8 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             grant,
             depth: 0,
             provision: options.provision.clone(),
+            workspace: options.workspace.clone(),
+            seed: None,
         },
     );
     let (record, lease) = record.inspect_err(|_| store.release(&name))?;
@@ -281,6 +295,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             options,
             fork_source: None,
             note: None,
+            sandbox: Default::default(),
         },
         lease,
     )
@@ -299,6 +314,7 @@ pub(crate) fn run_on(
         .iter()
         .map(|id| {
             launch(
+                yard,
                 Some(id),
                 options.command.as_deref(),
                 options.provider.as_ref(),
@@ -335,6 +351,8 @@ pub(crate) fn run_on(
                 grant: grant.clone(),
                 depth: 0,
                 provision: options.provision.clone(),
+                workspace: options.workspace.clone(),
+                seed: None,
             },
         );
         match record {
@@ -349,6 +367,7 @@ pub(crate) fn run_on(
                     options,
                     fork_source: None,
                     note: None,
+                    sandbox: Default::default(),
                 },
                 lease,
             )),
@@ -363,6 +382,7 @@ pub(crate) fn run_on(
             }
         }
     }
+    prepare_fan(yard, options, &mut turns);
     let results: Vec<Result<Branch, Error>> = std::thread::scope(|scope| {
         let handles: Vec<_> = turns
             .into_iter()
@@ -379,6 +399,164 @@ pub(crate) fn run_on(
     results.into_iter().collect()
 }
 
+/// A fan of sandboxed branches that share a provider which can live-branch
+/// and have setup to run: the setup runs once, in a sandbox prepared on the
+/// first branch's worktree, which is paused and live-branched into one
+/// sandbox per branch, each rebound to its own worktree and home. The first
+/// branch's worktree then has what setup produced; each other branch gets a
+/// copy when its turn starts ([`crate::snapshots::inherited`]). The
+/// prepared sandbox is destroyed. Anything that does not work leaves the
+/// branch on the ordinary path, with the reason recorded when its sandbox
+/// starts. See `docs/sandbox-snapshots.md`.
+fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease)]) {
+    use crate::placement::SandboxPlan;
+    use crate::snapshots::{SandboxOrigin, SnapshotMethod};
+    let setup = options
+        .workspace
+        .as_ref()
+        .is_some_and(|w| !w.setup.is_empty());
+    if turns.len() < 2 || !setup || yard.hub.scripts_denied() {
+        return;
+    }
+    let fresh = |turns: &mut [(Turn<'_>, Lease)], why: String| {
+        for (turn, _) in turns.iter_mut() {
+            turn.sandbox = SandboxPlan::Fresh(format!("fan setup runs in each branch: {why}"));
+        }
+    };
+    let Ok(Some((mut spec, provider))) = crate::placement::fan_spec(yard, &turns[0].0.record)
+    else {
+        return;
+    };
+    let capabilities = provider.capabilities();
+    if !capabilities.has(branchyard_sandbox::LIVE_BRANCH) {
+        return fresh(
+            turns,
+            "provider can't live-branch: it does not declare live branch".into(),
+        );
+    }
+    let store = yard.store();
+    let first = turns[0].0.record.info.name.clone();
+    spec.name = format!("{}-fan", spec.name.chars().take(120).collect::<String>());
+    // Attached to this process where the provider ties sandboxes to it, so
+    // an engine that stops mid-fan leaves it nothing to clean up.
+    spec.persist = false;
+    if let Err(error) = provider.ensure(&spec) {
+        let _ = provider.destroy(&spec.name);
+        return fresh(
+            turns,
+            format!("could not create the prepared sandbox: {error}"),
+        );
+    }
+    let prepared = {
+        let (turn, lease) = &mut turns[0];
+        let mut recorder =
+            crate::record::Recorder::fenced(&store, lease.fence(), turn.options.observer.clone());
+        let runner = crate::workspace::Runner::Sandbox {
+            provider: provider.as_ref(),
+            name: &spec.name,
+            cwd: crate::placement::WORKSPACE.to_owned(),
+            mounted: true,
+        };
+        crate::workspace::prepare(
+            yard,
+            &mut turn.record,
+            lease.fence(),
+            &mut recorder,
+            &|| lease.lost(),
+            &runner,
+            None,
+        )
+    };
+    match prepared {
+        Ok(Ok(())) => {}
+        Ok(Err(why)) => {
+            let _ = provider.destroy(&spec.name);
+            return fresh(
+                turns,
+                format!("its setup failed in the prepared sandbox: {why}"),
+            );
+        }
+        Err(error) => {
+            let _ = provider.destroy(&spec.name);
+            return fresh(turns, format!("its setup could not run: {error}"));
+        }
+    }
+    // Paused, every child is captured at the same point.
+    if capabilities.has(branchyard_sandbox::PAUSE) {
+        let _ = provider.pause(&spec.name);
+    }
+    let mut children = Vec::new();
+    for (turn, lease) in turns.iter() {
+        let child = match crate::placement::fan_spec(yard, &turn.record) {
+            // Handed to each branch's turn, which runs through a provider
+            // value of its own: it must outlive this one, which destroys
+            // what it holds when dropped. The turn destroys or keeps it.
+            Ok(Some((child, _))) => SandboxSpec {
+                image: None,
+                resources: Default::default(),
+                persist: true,
+                ..child
+            },
+            _ => SandboxSpec::new(format!("{}-unplaced", turn.record.info.name)),
+        };
+        let _ = crate::placement::journal_handed(yard, &turn.record, lease.fence(), &child.name);
+        children.push(child);
+    }
+    let made = provider.branch_live(&spec.name, &children);
+    let _ = provider.destroy(&spec.name);
+    for (((turn, _), child), made) in turns.iter_mut().zip(children).zip(made) {
+        turn.sandbox = match made {
+            Ok(_) => SandboxPlan::Handed {
+                name: child.name,
+                origin: SandboxOrigin::Prepared {
+                    branch: first.clone(),
+                    method: SnapshotMethod::LiveBranch,
+                },
+            },
+            Err(error) => SandboxPlan::Fresh(format!(
+                "could not branch the fan's prepared sandbox: {error}"
+            )),
+        };
+    }
+    // Every other branch inherits the first one's setup now, before any
+    // harness runs: what it produced is copied into each worktree.
+    let (source, rest) = turns.split_first_mut().expect("at least two");
+    let produced = source
+        .0
+        .record
+        .workspace
+        .as_ref()
+        .map(|w| w.produced.clone())
+        .unwrap_or_default();
+    for (turn, lease) in rest {
+        let SandboxPlan::Handed { name, .. } = &turn.sandbox else {
+            continue;
+        };
+        let inherit = crate::workspace::Inherit {
+            from: first.clone(),
+            worktree: Some(source.0.record.info.worktree.clone()),
+            produced: produced.clone(),
+        };
+        let runner = crate::workspace::Runner::Sandbox {
+            provider: provider.as_ref(),
+            name,
+            cwd: crate::placement::WORKSPACE.to_owned(),
+            mounted: true,
+        };
+        let mut recorder =
+            crate::record::Recorder::fenced(&store, lease.fence(), turn.options.observer.clone());
+        let _ = crate::workspace::prepare(
+            yard,
+            &mut turn.record,
+            lease.fence(),
+            &mut recorder,
+            &|| lease.lost(),
+            &runner,
+            Some(&inherit),
+        );
+    }
+}
+
 pub(crate) fn send(
     yard: &Yard,
     name: &str,
@@ -386,6 +564,7 @@ pub(crate) fn send(
     options: &TaskOptions,
 ) -> Result<Branch, Error> {
     let prepared = prepare_send(yard, name, options, false)?;
+    let prompt = prepared.prompt(prompt);
     engine::execute(
         Turn {
             yard,
@@ -393,10 +572,11 @@ pub(crate) fn send(
             profile: prepared.profile,
             command: prepared.command,
             mode: prepared.mode,
-            prompt,
+            prompt: &prompt,
             options,
             fork_source: None,
             note: prepared.note,
+            sandbox: Default::default(),
         },
         prepared.lease,
     )
@@ -412,6 +592,17 @@ pub(crate) struct Prepared {
     pub mode: SessionMode,
     /// Recorded as a warning when the turn starts.
     pub note: Option<String>,
+}
+
+impl Prepared {
+    /// The prompt to submit: `prompt`, after the summary a rewind left for
+    /// a fresh session, if any.
+    pub fn prompt(&self, prompt: &str) -> String {
+        match &self.record.context {
+            Some(context) => crate::checkpoint::compose(context, prompt),
+            None => prompt.to_owned(),
+        }
+    }
 }
 
 /// Check that `name` can continue its session, and mark it running under
@@ -472,6 +663,21 @@ pub(crate) fn prepare_send(
             }
             (SessionMode::Resume(session), None)
         }
+        None if record.context.is_some() => (
+            SessionMode::Fresh,
+            Some(format!(
+                "{name} was rewound to a checkpoint its harness session cannot continue from; \
+                 this turn starts a fresh session whose prompt begins with a summary of the \
+                 turns before it"
+            )),
+        ),
+        None if record.checkpoint == Some(0) && record.info.turns > 0 => (
+            SessionMode::Fresh,
+            Some(format!(
+                "{name} was rewound to its base; this turn starts a fresh session with only \
+                 this prompt"
+            )),
+        ),
         None if record.info.turns == 0 => (
             SessionMode::Fresh,
             Some(format!(
@@ -493,7 +699,7 @@ pub(crate) fn prepare_send(
     }
     harness::check_approvals(profile, options.unapproved_tools)?;
     let command = harness::command(profile, record.command.as_deref());
-    placement::check(record.provider.as_ref())?;
+    placement::check(yard, record.provider.as_ref())?;
     if !placement::sandboxed(record.provider.as_ref()) {
         harness::check_available(profile.harness, &command)?;
     } else if record.home.is_none() {
@@ -562,15 +768,32 @@ pub(crate) fn fork(
     name: &str,
     prompt: &str,
     fresh_session: bool,
+    at: Option<u32>,
     options: &TaskOptions,
 ) -> Result<Branch, Error> {
     let store = yard.store();
     let parent = store.read(name)?;
-    let candidate = parent
-        .info
-        .candidate
-        .clone()
-        .ok_or_else(|| Error::NoCandidate(name.to_owned()))?;
+    // At a checkpoint: its commit, and what the parent's events say of it.
+    let checkpoint = match at {
+        Some(turn) => {
+            let events = record::read(&store, name)?;
+            let list = crate::checkpoint::recorded(&events);
+            let commit = crate::checkpoint::target_commit(yard, &parent, &list, turn)?;
+            Some((turn, commit, list, events))
+        }
+        None => None,
+    };
+    let base = match &checkpoint {
+        Some((_, commit, _, _)) => commit.clone(),
+        None => {
+            parent
+                .info
+                .candidate
+                .clone()
+                .ok_or_else(|| Error::NoCandidate(name.to_owned()))?
+                .commit
+        }
+    };
     let parent_profile = profiles::by_id(&parent.info.profile)
         .ok_or_else(|| Error::UnknownHarness(parent.info.profile.clone()))?;
     let profile = match &options.harness {
@@ -579,27 +802,49 @@ pub(crate) fn fork(
     };
     let same = profile.id == parent_profile.id;
     let session = parent.info.session.as_deref().and_then(NativeSession::new);
-    let refusal = if !same {
+    let unsupported = if !same {
         Some(format!(
             "a {} conversation cannot be forked into {}",
             parent_profile.id, profile.id
         ))
     } else if !profile.driver().capabilities().fork {
         Some(format!("{} cannot fork a session", profile.id))
-    } else if session.is_none() {
-        Some(format!("{name} has no harness session to fork"))
     } else {
         None
     };
-    let mode = match (refusal, session) {
-        (None, Some(session)) => SessionMode::Fork(session),
-        (Some(_), _) | (None, None) if fresh_session => SessionMode::Fresh,
-        (Some(reason), _) => {
+    let refusal = match (&unsupported, &session) {
+        (Some(reason), _) => Some(reason.clone()),
+        (None, None) => Some(format!("{name} has no harness session to fork")),
+        (None, Some(_)) => None,
+    };
+    // At a checkpoint the session forks natively only if it ended there;
+    // otherwise the fork starts fresh with a summary, and says so.
+    let continuity = checkpoint.as_ref().map(|(turn, commit, list, events)| {
+        let supported = match &unsupported {
+            Some(reason) => Err(reason.clone()),
+            None => Ok(()),
+        };
+        let continuity = crate::checkpoint::continuity(list, *turn, supported);
+        let context = crate::checkpoint::summary(name, events, list, *turn, commit, &continuity);
+        (*turn, commit.clone(), continuity, context)
+    });
+    let mode = match (&continuity, refusal, session) {
+        (Some((_, _, crate::SessionContinuity::Native { session }, _)), _, _) => {
+            SessionMode::Fork(NativeSession::new(session).ok_or_else(|| {
+                Error::State(format!(
+                    "{name}'s recorded session {session:?} is not usable"
+                ))
+            })?)
+        }
+        (Some(_), _, _) => SessionMode::Fresh,
+        (None, None, Some(session)) => SessionMode::Fork(session),
+        (None, Some(_), _) | (None, None, None) if fresh_session => SessionMode::Fresh,
+        (None, Some(reason), _) => {
             return Err(Error::Unsupported(format!(
                 "{reason}; fork with a fresh session to start one on its candidate"
             )))
         }
-        (None, None) => unreachable!("a missing session is a refusal"),
+        (None, None, None) => unreachable!("a missing session is a refusal"),
     };
     let forking = matches!(mode, SessionMode::Fork(_));
     let command = match (&options.command, same) {
@@ -610,7 +855,7 @@ pub(crate) fn fork(
     harness::check_approvals(profile, options.unapproved_tools)?;
     let launch_command = harness::command(profile, command.as_deref());
     let provider = options.provider.clone().or(parent.provider.clone());
-    placement::check(provider.as_ref())?;
+    placement::check(yard, provider.as_ref())?;
     if !placement::sandboxed(provider.as_ref()) {
         harness::check_available(
             options.harness.as_deref().unwrap_or(profile.harness),
@@ -637,13 +882,19 @@ pub(crate) fn fork(
         (false, _, _) | (true, None, None) => None,
         (true, own, baseline) => Some(own.unwrap_or(0.0) + baseline.unwrap_or(0.0)),
     };
+    // The fork's first sandbox, from the parent's provider snapshot at its
+    // base when there is one (`crate::snapshots`), on the same provider.
+    let seed = match provider == parent.provider {
+        true => crate::snapshots::seed(&parent, at.or(parent.checkpoint.filter(|n| *n > 0)), &base),
+        false => None,
+    };
     let record = create(
         yard,
         NewBranch {
             name: &reserved,
             prompt,
             profile,
-            base: candidate.commit,
+            base,
             parent: Some(name.to_owned()),
             check: options.check.clone().or(parent.check.clone()),
             command,
@@ -653,10 +904,41 @@ pub(crate) fn fork(
             grant,
             depth: 0,
             provision,
+            workspace: options
+                .workspace
+                .clone()
+                .or_else(|| parent.workspace.as_ref().map(|w| w.spec.clone())),
+            seed,
         },
     )
     .inspect_err(|_| store.release(&reserved))?;
     let (record, lease) = record;
+    let mut note = None;
+    let mut composed = prompt.to_owned();
+    if let Some((turn, commit, continuity, context)) = continuity {
+        if !continuity.native() {
+            note = Some(format!(
+                "forked from {name} at checkpoint {turn}; this branch {}",
+                continuity.describe()
+            ));
+        }
+        if let Some(context) = &context {
+            composed = crate::checkpoint::compose(context, prompt);
+        }
+        let event = crate::RecordedEvent {
+            at_ms: now_ms(),
+            activity: crate::Activity::ForkedAt {
+                branch: name.to_owned(),
+                turn,
+                commit,
+                session: continuity,
+            },
+        };
+        if let Err(error) = store.append(&reserved, &event, Some(lease.fence())) {
+            abandon(lease, record, &error);
+            return Err(error);
+        }
+    }
     engine::execute(
         Turn {
             yard,
@@ -664,10 +946,11 @@ pub(crate) fn fork(
             profile,
             command: launch_command,
             mode,
-            prompt,
+            prompt: &composed,
             options,
             fork_source: forking.then(|| parent.info.worktree.clone()),
-            note: None,
+            note,
+            sandbox: Default::default(),
         },
         lease,
     )
@@ -698,7 +981,7 @@ pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Res
     harness::check_approvals(profile, options.unapproved_tools)?;
     let launch_command = harness::command(profile, command.as_deref());
     let provider = options.provider.clone().or(parent.provider.clone());
-    placement::check(provider.as_ref())?;
+    placement::check(yard, provider.as_ref())?;
     if !placement::sandboxed(provider.as_ref()) {
         harness::check_available(
             options.harness.as_deref().unwrap_or(profile.harness),
@@ -737,6 +1020,11 @@ pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Res
             grant,
             depth: 0,
             provision,
+            workspace: options
+                .workspace
+                .clone()
+                .or_else(|| parent.workspace.as_ref().map(|w| w.spec.clone())),
+            seed: None,
         },
     )
     .inspect_err(|_| store.release(&reserved))?;
@@ -762,6 +1050,7 @@ pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Res
             note: Some(format!(
                 "reincarnated from {name} with a fresh session and a handoff brief"
             )),
+            sandbox: Default::default(),
         },
         lease,
     )

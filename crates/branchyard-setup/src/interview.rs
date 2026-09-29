@@ -222,6 +222,8 @@ pub enum Rule {
     CommandLine,
     /// Comma-separated names, each a [`Rule::Name`].
     NameList { max: usize },
+    /// A `[workspace] copy` glob: relative, inside the repository.
+    CopyGlob,
 }
 
 impl Rule {
@@ -283,6 +285,7 @@ impl Rule {
                 Some(program) if program.starts_with('/') => Ok(()),
                 _ => Err("must start with an absolute path to the executable".into()),
             },
+            Rule::CopyGlob => crate::config::check_copy_glob(text),
             Rule::CommandLine => match crate::config::split_words(text) {
                 Ok(words) if !words.is_empty() => Ok(()),
                 Ok(_) => Err("needs a command".into()),

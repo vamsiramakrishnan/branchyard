@@ -56,6 +56,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use backon::{BackoffBuilder, BlockingRetryable, ExponentialBackoff, ExponentialBuilder};
+
 use branchyard::{
     ArtifactRef, Asked, BranchInfo, Children, EventPage, Graph, GraphApplied, HarnessInfo, Inbox,
     Inspection, Message, ScratchArea, ScratchLock, Steer,
@@ -83,6 +85,31 @@ const MAX_BODY: usize = 256 * 1024 * 1024;
 type BinaryResponse = (Vec<(String, String)>, Vec<u8>);
 /// Attempts for one idempotent `POST`.
 const POST_ATTEMPTS: u32 = 3;
+
+/// The waits between a `POST`'s attempts after a lost connection: 250 ms,
+/// then 1 s (each four times the last), for [`POST_ATTEMPTS`] in all.
+fn post_backoff() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(Duration::from_millis(250))
+        .with_factor(4.0)
+        .with_max_delay(Duration::from_secs(4))
+        .with_max_times(POST_ATTEMPTS as usize - 1)
+}
+
+fn reconnect_builder() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(Duration::from_millis(250))
+        .with_factor(2.0)
+        .with_max_delay(Duration::from_secs(5))
+        .without_max_times()
+}
+
+/// The waits before each reconnect to an event stream after consecutive
+/// failures: 250 ms, doubling, at most 5 s, without end. [`EventStream`]
+/// uses them, and so can a caller that reconnects itself.
+pub fn reconnect_backoff() -> impl Iterator<Item = Duration> + Send + 'static {
+    reconnect_builder().build()
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -316,26 +343,22 @@ impl Client {
         key: &str,
     ) -> Result<T, Error> {
         let headers = [("Idempotency-Key", key.to_owned())];
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            let result = self
-                .call_raw(
-                    "POST",
-                    path,
-                    Some(body),
-                    Some(content_type),
-                    &headers,
-                    self.timeout,
-                )
-                .and_then(|response| self.decode(response));
-            match result {
-                Err(Error::Transport { .. }) if attempt < POST_ATTEMPTS => {
-                    std::thread::sleep(Duration::from_millis(250 * 4u64.pow(attempt - 1)));
-                }
-                other => return other,
-            }
-        }
+        let attempt = || {
+            self.call_raw(
+                "POST",
+                path,
+                Some(body),
+                Some(content_type),
+                &headers,
+                self.timeout,
+            )
+            .and_then(|response| self.decode(response))
+        };
+        attempt
+            .retry(post_backoff())
+            .sleep(std::thread::sleep)
+            .when(|e| matches!(e, Error::Transport { .. }))
+            .call()
     }
 
     /// Read a JSON body, or the structured error.
@@ -371,19 +394,15 @@ impl Client {
     ) -> Result<T, Error> {
         let body = serde_json::to_vec(body).map_err(|e| Error::Config(e.to_string()))?;
         let headers = [("Idempotency-Key", key.to_owned())];
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            let result = self
-                .call("POST", path, Some(&body), &headers, self.timeout)
-                .and_then(|response| self.decode(response));
-            match result {
-                Err(Error::Transport { .. }) if attempt < POST_ATTEMPTS => {
-                    std::thread::sleep(Duration::from_millis(250 * 4u64.pow(attempt - 1)));
-                }
-                other => return other,
-            }
-        }
+        let attempt = || {
+            self.call("POST", path, Some(&body), &headers, self.timeout)
+                .and_then(|response| self.decode(response))
+        };
+        attempt
+            .retry(post_backoff())
+            .sleep(std::thread::sleep)
+            .when(|e| matches!(e, Error::Transport { .. }))
+            .call()
     }
 }
 
@@ -663,6 +682,7 @@ impl Repo {
             cursor,
             reader: None,
             failures: 0,
+            backoff: None,
             max_failures: 8,
             done: false,
         }
@@ -677,6 +697,8 @@ pub struct EventStream {
     cursor: Option<u64>,
     reader: Option<SseReader<BufReader<http::Body>>>,
     failures: u32,
+    /// The waits between reconnects, from the first failure in a row.
+    backoff: Option<ExponentialBackoff>,
     max_failures: u32,
     done: bool,
 }
@@ -758,8 +780,12 @@ impl Iterator for EventStream {
             }
             if self.reader.is_none() {
                 if self.failures > 0 {
-                    let backoff = 250u64 << (self.failures - 1).min(5);
-                    std::thread::sleep(Duration::from_millis(backoff.min(5_000)));
+                    let delays = self
+                        .backoff
+                        .get_or_insert_with(|| reconnect_builder().build());
+                    if let Some(delay) = delays.next() {
+                        std::thread::sleep(delay);
+                    }
                 }
                 match self.connect() {
                     Ok(()) => {}
@@ -790,6 +816,7 @@ impl Iterator for EventStream {
                     "activity" => match serde_json::from_str::<FeedEntry>(&event.data) {
                         Ok(entry) => {
                             self.failures = 0;
+                            self.backoff = None;
                             if self.cursor.is_some_and(|c| entry.seq <= c) {
                                 continue;
                             }
@@ -1014,6 +1041,30 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The waits are the ones the hand-written formulas gave before backon:
+    /// `250 * 4^(attempt-1)` ms between a POST's attempts, and
+    /// `min(250 << min(failures-1, 5), 5000)` ms before each reconnect.
+    #[test]
+    fn backoff_keeps_the_old_timing() {
+        let posts: Vec<Duration> = post_backoff().build().collect();
+        let old: Vec<Duration> = (1..POST_ATTEMPTS)
+            .map(|attempt| Duration::from_millis(250 * 4u64.pow(attempt - 1)))
+            .collect();
+        assert_eq!(posts, old);
+        assert_eq!(
+            posts,
+            [Duration::from_millis(250), Duration::from_millis(1000)]
+        );
+        let reconnects: Vec<Duration> = reconnect_backoff().take(12).collect();
+        let old: Vec<Duration> = (1..=12u32)
+            .map(|failures| {
+                let backoff = 250u64 << (failures - 1).min(5);
+                Duration::from_millis(backoff.min(5_000))
+            })
+            .collect();
+        assert_eq!(reconnects, old);
+    }
 
     #[test]
     fn keys_are_unique_hex() {

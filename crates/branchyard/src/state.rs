@@ -90,6 +90,28 @@ pub(crate) struct Record {
     /// parent's branch as it is when it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_base: Option<String>,
+    /// The checkpoint the branch is at: `Some(0)` for its base, the last
+    /// turn's after a turn, the rewound-to one after a rewind. `None` for a
+    /// branch created before checkpoints were recorded. See
+    /// `crate::checkpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<u32>,
+    /// A summary of earlier turns that the next turn's prompt starts with,
+    /// because a rewind could not continue the harness's own session.
+    /// Cleared once a turn submits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// The branch's workspace lifecycle: what prepares its worktree and
+    /// cleans up after it, and whether its setup completed. See
+    /// `crate::workspace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::workspace::WorkspaceState>,
+    /// Where the branch's next sandbox should come from when it has none
+    /// kept: a provider snapshot of this branch's source (its parent, or
+    /// itself after a rewind). Cleared once a turn has used it. See
+    /// `crate::snapshots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_seed: Option<crate::snapshots::SandboxSeed>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current
@@ -494,6 +516,125 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn awaiting_answer(&self, from: &str, now_ms: u64) -> Result<bool, Error>;
 }
 
+/// Ports reserved for branches (`BRANCHYARD_PORT`), one per branch name,
+/// none shared: each is unique across the store (across every repository
+/// in a PostgreSQL database). A branch's reservation is deleted with the
+/// branch by [`Backend::delete`]. See `crate::workspace`.
+pub(crate) trait PortBackend: Send + Sync + fmt::Debug {
+    /// `branch`'s port. When it has none, reserve the first port from
+    /// `start` on, wrapping within [`crate::workspace::PORT_RANGE`], that no
+    /// branch holds and for which `usable` is true, in one transaction.
+    fn reserve_port(
+        &self,
+        branch: &str,
+        start: u16,
+        usable: &(dyn Fn(u16) -> bool + Sync),
+    ) -> Result<u16, Error>;
+    /// `branch`'s reserved port, if it has one.
+    fn port(&self, branch: &str) -> Result<Option<u16>, Error>;
+}
+
+/// What a sandbox row records: a branch's kept sandbox, or one of its
+/// sandbox snapshots. See `crate::snapshots`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SandboxKind {
+    /// The branch's sandbox, paused between turns (`keep = "pause"`).
+    Kept,
+    /// A provider snapshot taken at one of the branch's checkpoints.
+    Snapshot,
+}
+
+impl SandboxKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SandboxKind::Kept => "kept",
+            SandboxKind::Snapshot => "snapshot",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<SandboxKind, Error> {
+        match text {
+            "kept" => Ok(SandboxKind::Kept),
+            "snapshot" => Ok(SandboxKind::Snapshot),
+            other => Err(Error::State(format!("unknown sandbox kind {other:?}"))),
+        }
+    }
+}
+
+/// A provider-side sandbox or snapshot a branch owns, so that a later turn,
+/// a fork or a removal in any process can find it, and eviction can pick
+/// the least recently used across the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SandboxRow {
+    pub branch: String,
+    pub incarnation: i64,
+    pub kind: SandboxKind,
+    /// Which provider holds it, and where: `crate::snapshots::provider_key`.
+    pub provider: String,
+    /// The sandbox's name, or the snapshot's handle.
+    pub name: String,
+    /// For a snapshot, its checkpoint; for a kept sandbox, the checkpoint
+    /// its state corresponds to, once recorded.
+    pub turn: Option<u32>,
+    /// Provider details as JSON: `crate::snapshots::Detail`.
+    pub detail: String,
+    /// Last parked or taken, for least-recently-used eviction.
+    pub used_ms: u64,
+}
+
+/// Sandboxes and sandbox snapshots owned by branches. A row is claimed by
+/// deleting it ([`SandboxBackend::take_sandbox`]): whoever deletes it owns
+/// the sandbox, so an engine resuming a kept sandbox and another evicting
+/// it never both act on it. Rows of a branch are deleted with it by
+/// [`Backend::delete`]; the provider-side sandboxes are the engine's to
+/// destroy first.
+pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
+    /// Insert or replace the row for (`branch`, `kind`, `name`).
+    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error>;
+    /// Every row of `branch`, oldest first.
+    fn sandboxes(&self, branch: &str) -> Result<Vec<SandboxRow>, Error>;
+    /// Every row of `kind` in the store whose provider is `provider`, least
+    /// recently used first.
+    fn sandboxes_of(&self, kind: SandboxKind, provider: &str) -> Result<Vec<SandboxRow>, Error>;
+    /// Delete the row and return it, or `None` if another took it first.
+    fn take_sandbox(
+        &self,
+        branch: &str,
+        kind: SandboxKind,
+        name: &str,
+    ) -> Result<Option<SandboxRow>, Error>;
+}
+
+/// [`PortBackend`] and [`SandboxBackend`] together, so a [`Store`] holds
+/// one trait object for both.
+pub(crate) trait Extras: PortBackend + SandboxBackend {}
+
+impl<T: PortBackend + SandboxBackend> Extras for T {}
+
+/// The port a reservation takes: from `start`, the first not in `taken`
+/// for which `usable` holds.
+pub(crate) fn pick_port(
+    start: u16,
+    taken: &std::collections::BTreeSet<u16>,
+    usable: &(dyn Fn(u16) -> bool + Sync),
+) -> Result<u16, Error> {
+    let (low, high) = crate::workspace::PORT_RANGE;
+    let start = start.clamp(low, high);
+    let mut port = start;
+    loop {
+        if !taken.contains(&port) && usable(port) {
+            return Ok(port);
+        }
+        port = crate::workspace::next_port(port);
+        if port == start {
+            return Err(Error::State(format!(
+                "no free port between {low} and {high} for a branch"
+            )));
+        }
+    }
+}
+
 /// Wakes readers in this process when events are appended to a store.
 #[derive(Debug, Default)]
 struct Signal {
@@ -523,6 +664,10 @@ pub(crate) struct Store {
     /// Dependencies and graph revisions: the same backend again, as for
     /// `storage`. See [`crate::graph`].
     graph: Arc<dyn GraphBackend>,
+    /// Branch ports, kept sandboxes and sandbox snapshots: the same backend
+    /// again, as one trait object for both. See [`PortBackend`] and
+    /// [`SandboxBackend`].
+    extras: Arc<dyn Extras>,
     owner: Arc<Owner>,
     signal: Arc<Signal>,
 }
@@ -548,7 +693,8 @@ impl Store {
             dir,
             backend: backend.clone(),
             storage: backend.clone(),
-            graph: backend,
+            graph: backend.clone(),
+            extras: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -569,7 +715,8 @@ impl Store {
             dir,
             backend: backend.clone(),
             storage: backend.clone(),
-            graph: backend,
+            graph: backend.clone(),
+            extras: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -596,6 +743,16 @@ impl Store {
     /// Dependencies and graph revisions; see [`crate::graph`].
     pub fn graph(&self) -> &dyn GraphBackend {
         self.graph.as_ref()
+    }
+
+    /// Branch ports; see [`PortBackend`].
+    pub fn ports(&self) -> &dyn PortBackend {
+        self.extras.as_ref()
+    }
+
+    /// Kept sandboxes and sandbox snapshots; see [`SandboxBackend`].
+    pub fn sandboxes(&self) -> &dyn SandboxBackend {
+        self.extras.as_ref()
     }
 
     pub fn worktree(&self, name: &str) -> PathBuf {

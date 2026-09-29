@@ -35,6 +35,11 @@ Surfaces:
 | Steer a running turn ([harness support](harness-integration.md#steering-a-running-turn)) | `Branch::steer`, `Yard::steer_as`; `steer_state`, `wait_steer` follow it | `send --steer` | yes, as the server's caller | `POST …/steer` | `steer` | `steer` (`by send --steer`, `branchyard.steer`, `Delegate::steer`, MCP), descendants only |
 | Harness profiles | `Yard::harnesses` | `harnesses` | yes, the server's `PATH` | `GET /v1/harnesses` | `harnesses` | no |
 | Recover stopped turns | `Yard::recover`, `Yard::open` | on every open | the server, at start and every 30 s | n/a | n/a | n/a |
+| List checkpoints ([checkpoints](checkpoints.md)) | `Branch::checkpoints`; `recorded_checkpoints` from events | `show`, `log` | yes, from the event log | the `checkpoint` events | `events` | no: `events` shows them |
+| Fork at a checkpoint | `Branch::fork_at` | `fork --at N` | no: needs an API operation; refused with a message | no | no | no: children start from a revision |
+| Rewind to a checkpoint | `Branch::rewind` | `rewind --to N` | no: needs an API operation; refused with a message | no | no | no: not a delegation operation |
+| Try a branch in this checkout | `Yard::try_on`, `try_off`, `try_status`, `try_recover` | `try`, `try --off`, `try --status` | no: the server's checkout is not yours; refused | no | no | no |
+| Compare attempts | `Yard::compare`, `fan_branches`, `diff_between`; `compare_attempt`, `mark_unique`, `diff_files` | `compare` | yes, but not `--check` or `--diff` | from branches, events and diffs | the same | no |
 
 ## Task options
 
@@ -200,6 +205,95 @@ Setup and configuration are the CLI's: they write files for `by` and the server 
 | `by config show`, `path`, `validate`, `schema` | none | the effective configuration with each value's source, where the files are, a strict check, the schema; clap subcommands, `--json` before or after the action |
 | `by serve --check`, `branchyard-server --check` | none | load and validate a configuration as serving would, without serving or writing anything; a flag of the server's clap parser, which `by serve` forwards like the rest; `branchyard.toml`'s `[serve] config` is added as `--config` only when the server's parser reports no `--config`/`-c` on the command line |
 | The `setup` skill and `/branchyard:setup` | the plugin had the `delegate` skill only | `plugins/branchyard/skills/setup` drives `by init --json` with the harness's own question tool; the Claude plugin's `commands/setup.md` starts it; `install_skill.py --skill setup`; `by init plugin` installs both skills |
+
+## Added with checkpoints
+
+| Surface | Before | Now |
+|---|---|---|
+| `Activity::Checkpoint`, `Rewound`, `ForkedAt`; `Checkpoint`, `SessionContinuity` (`schema/contract.json`) | none | a checkpoint per turn and how a rewound or forked-at branch's session continues ([checkpoints](checkpoints.md)); new variants of the event enum, so a strict reader of older events is unaffected and one of newer events must accept them |
+| `by show --json` | the branch | also `checkpoints` (`current`, `base`, the list) |
+| `by fork --at N` | none | fork from checkpoint N; conflicts with `--fresh-session` |
+| `by rewind`, `by try`, `by compare` | none | new commands in *Work on branches* |
+| `Repository::check_commit`, `CheckResult` (`branchyard-workspace`) | none | a check on an exact commit in a private worktree |
+| `refs/branchyard/<branch>/<incarnation>/turn-N`, `refs/branchyard-try/*`, `.branchyard/try/` | none | checkpoint refs (deleted by `rm`), and a try's pins and saved state |
+
+## Added with pull requests
+
+GitHub is reached through the user's `gh`, which runs where the repository and its git remote are ([pull requests](pull-requests.md)). The SDK records and folds the steps; the CLI talks to `gh`.
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Start from an issue | no: pass the prompt; `slug` names the branch | `run`, `fan`, `spawn` `--issue URL\|#N\|N` | yes: `gh` runs on the client, the server gets the prompt (the link is its header; no `issue_linked` event) | n/a | n/a | `spawn --issue`, with the harness's own `gh` login; the link is the prompt's header |
+| Check the candidate alone | `Branch::verify_candidate` | inside `pr` | no: `pr` is local only | no | no | no |
+| Push the candidate | `Branch::push_candidate` | inside `pr` | no: the server's repository has its own remote and credentials; not built | no | no | no |
+| Open or update a pull request | no: the CLI's, through `gh` | `pr` | no, `unsupported` | no | no | no: `by pr` refuses inside a harness, since it pushes with the user's credentials |
+| Follow it, feeding CI and reviews back | no | `pr --watch` | no, `unsupported` | no | no | no |
+| Merge readiness | `Activity::PullRequest` events; fold them | `show`, `show --json` (`merge_readiness`) | yes, from the branch's events (a server's branches have none yet) | the events | the events | `events` shows them |
+| Observe now | no | `show --refresh` | no, `unsupported` | no | no | no |
+| Open the worktree in an editor | `BranchInfo::worktree` | `open` | no, `unsupported`: the worktree is on the server | n/a | n/a | n/a |
+
+| Surface | Before | Now |
+|---|---|---|
+| `Activity` | no pull-request steps | `pull_request` (`PullRequestActivity`, tagged by `kind`: `issue_linked`, `checked`, `pushed`, `opened`, `updated`, `observed`, `feedback_delivered`, `feedback_undelivered`, `watch_stopped`); `schema/contract.json` regenerated |
+| `by show --json` | the branch | the branch and `merge_readiness` (`null` without pull-request steps) |
+| `by run`, `fan`, `spawn` | a prompt was required | optional with `--issue`; `Usage: by run [OPTIONS] [PROMPT]` |
+| `Repository::verify`, `Repository::push` (`branchyard-workspace`) | none | a check on one commit in a temporary worktree; a push of one commit to a remote branch, without hooks or a terminal prompt |
+
+## Added with the cockpit, and at integration
+
+The cockpit branch made `by watch` act on the selected branch; integrating it with the checkpoints and pull-request branches bound the keys it had reserved. Each key runs the `by` command named, with the dashboard's global flags, so remote mode is the command's own.
+
+| Key in `by watch` | Runs | by --remote |
+|---|---|---|
+| `s`, `S`, `R`, `x`, `m`, `f` | `send`, `send --steer`, `send` (resume), `cancel`, `merge`, `fork` | yes |
+| `d`, `l`, `y` | `diff` and `log` panes, copy the name | yes |
+| `Y` | copy the worktree's path | no: the worktree is on the server |
+| `p`, `P` | `pr` (waited for, output in a pane), `pr --watch` (in the background), each after a yes | no: pushes from this machine with your `gh` login |
+| `o` | `open`, in-process through `open::plan`/`launch`; a terminal editor gets the screen until it exits | no: the worktree is on the server |
+| `r` | `rewind --to N --yes`, N typed under the checkpoint list, then a yes | no: needs an API operation |
+| `c` | `compare` of the branch and its siblings, in a pane | yes, from records, events and diffs |
+| `t` | `try` after a yes; on the tried branch, `try --off` | no: changes this machine's checkout |
+
+| Surface | Before | Now |
+|---|---|---|
+| `by watch`'s detail pane | status, cost, inbox, children, prompt, events | also the checkpoint the branch is at, its merge readiness once it has pull-request steps, and whether it is being tried |
+| `--no-notify`, `[notify]` in `branchyard.toml` | none | notices from `by watch` and waiting commands ([README](../README.md#watching-branches)); `schema/branchyard.config.json` regenerated |
+| `--log-format` (server, `by serve`, `by worker`, `branchyard-herdr`) | human-readable only | `pretty` (the default) or `json`, one object per line |
+| `branchyard_workspace::git`, `Git` | private | public: the one place that starts `git` on the host; `Git::stdin` and `Git::run_bytes` added at integration for `by try`'s patches and blobs, and `by pr` uses it too |
+| `Yard::try_recorded` | none | the recorded try, read without the try lock (what `by watch` polls) |
+| `branchyard::AttemptCheck` | `branchyard::CheckRun` (from checkpoints) | renamed at integration: the pull-request branch's `CheckRun` (a check on one commit, in `schema/contract.json`) keeps the name |
+| `by serve`/`branchyard-server` shutdown | connections drained for up to 10 s, then the grace period | both at once, counted from SIGTERM or SIGINT, so the process exits within `--shutdown-grace` (at least 1 s for requests in flight); signal handlers installed before startup ([server](server.md#running-it)) |
+| `deploy/compose.yaml`, `by init deploy`'s compose | Docker's 10 s stop timeout | `stop_grace_period: 75s`, above the default 60 s grace |
+
+## Added with the workspace lifecycle
+
+A repository's scripts are a trust decision, so each surface takes it where its owner can: a person through `by`, an operator in the server's configuration, SDK code by passing them. See [workspace](workspace.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `[workspace]` in `branchyard.toml`, `[projects."<root>".workspace]` in the user file | none | `copy`, `setup`, `run.NAME`, `teardown` (`schema/branchyard.config.json`); `by run`, `fan`, `fork`, `reincarnate` and `rig run` apply it once trusted; `send` and a harness's `by` never read it |
+| `TaskOptions::workspace`, `WorkspaceSpec` | none | copy and setup before a new branch's first turn, teardown at removal; stored with the branch and inherited by forks, reincarnations and delegated children without one |
+| `BRANCHYARD_WORKTREE`, `BRANCHYARD_PORT` | none | given to a local harness on every turn, and to workspace scripts with `BRANCHYARD_BRANCH` and `BRANCHYARD_ROOT`; the port is reserved in the store per branch |
+| `Activity::Workspace` (`workspace` in `by log --json`) | none | each copy, setup, run and teardown, with its commands, exit code and output tail |
+| `by workspace show [BRANCH]`, `trust`, `untrust`, `run [BRANCH] [NAME] [--detach]` | none | local only; refused with `--remote` |
+| `Yard::workspace`, `workspace_env`, `remove_reporting`, `record_workspace`, `deny_workspace_scripts` | none | a branch's workspace and port, the variables for running in its worktree, removal with its teardown's report |
+| `by merge --rm` | none | merge, then remove as `by rm` does (teardown included); with `--remote` too |
+| `allow_workspace_scripts` in the server's JSON config | none | `true` or served repository names; the server reads those repositories' `[workspace]` itself, never a request's (a `workspace` field is an unknown field, `400`), and refuses every other repository's scripts |
+
+## Added with sandbox snapshots
+
+A sandboxed branch can keep its sandbox between turns and branch new sandboxes from provider snapshots under its checkpoints; see [sandbox snapshots](sandbox-snapshots.md). Unqualified on every provider.
+
+| Surface | Before | Now |
+|---|---|---|
+| `SandboxOptions::keep`, `snapshots`, `max_paused`, `live_branch`; `SubstrateOptions::keep`, `snapshots`, `max_paused` | none | `--keep-sandbox pause\|destroy`, `--sandbox-snapshots N`, `--max-paused N` (with `--provider microsandbox` or `substrate`), `--live-branch` (Microsandbox); `keep`, `snapshots`, `max_paused`, `live_branch` in `[microsandbox]`; in the `provider` object over HTTP and `by --remote`, under the server's `--allow-provider`; inherited by forks and delegated children with the provider |
+| `Activity::Sandbox` (`SandboxEvent`, `SandboxOrigin`) | none | each turn's sandbox and where it came from (fresh with a reason, resumed, branched from a checkpoint, a fan's prepared one), kept, not kept, evicted, a snapshot released or not taken; `sandbox` in `by log --json`, a `sandbox:` line in `by`'s output, and in every event stream |
+| `Checkpoint::sandbox` (`SandboxSnapshot`) | none | the provider snapshot taken with a checkpoint: provider, handle, scope, consistency, method; in `schema/contract.json` |
+| `WorkspaceReport::ran_in`, `inherited_from`; `RanIn` | none | where setup or teardown ran (host or sandbox), and the branch whose setup a branched sandbox inherited |
+| `by fork --at N`, `Branch::fork`, `fork_at`, `rewind`, a delegated child, a rig seat, a graph dependent, `by fan` | a fresh sandbox, git and setup | the matching provider snapshot first, then the fresh path, saying which; `by fan` runs setup once when its provider can live-branch |
+| `Yard::use_sandbox_provider` | none | SDK only: run Microsandbox-provider branches through a given `SandboxProvider` (tests, embedding) |
+| `SandboxProvider::pause`, `resume`, `branch_live`, `release_checkpoint`; `Capabilities::pause`, `live_branch`, `has`; `Feature`, `LIVE_BRANCH`, `PAUSE`, `FULL_SNAPSHOT`; `SandboxSpec::persist`; `SandboxState::Paused`; `branchyard_sandbox::fake` | none | the provider contract's sandbox-level branching, defaults `Unsupported` |
+| `sandboxes` table (SQLite), `by_sandboxes` (PostgreSQL) | none | kept sandboxes and snapshots per branch, deleted with it ([durability](durability.md)) |
 
 ## Changed from 4609ca1
 

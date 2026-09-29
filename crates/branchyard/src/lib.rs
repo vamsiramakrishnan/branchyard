@@ -96,6 +96,8 @@
 
 mod broker;
 mod bundle;
+mod checkpoint;
+mod compare;
 #[cfg(test)]
 mod conformance;
 mod delegation;
@@ -114,21 +116,26 @@ mod policy;
 mod proc;
 mod projection;
 mod provisioning;
+mod pull_request;
 mod record;
 mod recover;
 mod run;
 mod seats;
+mod snapshots;
+mod spotlight;
 mod sqlite;
 mod state;
 mod steer;
 mod storage;
 mod tarball;
+mod workspace;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use git::current_branch;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
@@ -141,6 +148,11 @@ pub use branchyard_provision::{
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
+pub use checkpoint::{
+    entries as checkpoint_entries, recorded as recorded_checkpoints, CheckpointEntry, Checkpoints,
+    Rewound,
+};
+pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
@@ -151,10 +163,24 @@ pub use graph::{
 };
 pub use inbox::{DeliveryHook, SteerDelivery};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
+pub use pull_request::{
+    slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
+    PullRequestRef, Pushed,
+};
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
+pub use snapshots::{
+    SandboxConsistency, SandboxEvent, SandboxKeep, SandboxOrigin, SandboxScope, SandboxSnapshot,
+    SnapshotMethod,
+};
+pub use spotlight::{TryEntry, TryFile, TryState};
 use std::collections::BTreeMap;
 pub use storage::{ArtifactRef, ScratchArea, ScratchLock, DEFAULT_ARTIFACT_LIMIT};
+pub use workspace::{
+    check_glob as check_workspace_glob, RanIn, WorkspaceInfo, WorkspacePhase, WorkspaceReport,
+    WorkspaceSpec, ENV_PORT, ENV_WORKTREE, OUTPUT_TAIL as WORKSPACE_OUTPUT_TAIL,
+    PORT_RANGE as WORKSPACE_PORT_RANGE,
+};
 
 /// This process as the engine names a lease's holder: its host and boot,
 /// its pid, and its start time. For leases kept outside the engine, such as
@@ -345,6 +371,12 @@ impl Yard {
         &self.root
     }
 
+    /// The branch checked out at the repository root (the default merge
+    /// target), or `None` when HEAD is detached.
+    pub fn current_branch(&self) -> Result<Option<String>, Error> {
+        git::current_branch(&self.root)
+    }
+
     /// Start describing a task.
     pub fn task(&self, prompt: impl Into<String>) -> TaskBuilder {
         TaskBuilder {
@@ -385,12 +417,135 @@ impl Yard {
     /// and in any case the credential files provisioning wrote there; see
     /// [`Yard::remove_with`] to keep those.
     pub fn remove(&self, branch: &str) -> Result<(), Error> {
-        ops::remove(self, branch, &RemoveOptions::default())
+        ops::remove(self, branch, &RemoveOptions::default()).map(|_| ())
     }
 
     /// [`Yard::remove`], with options.
     pub fn remove_with(&self, branch: &str, options: &RemoveOptions) -> Result<(), Error> {
+        ops::remove(self, branch, options).map(|_| ())
+    }
+
+    /// [`Yard::remove_with`], returning what the branch's workspace
+    /// teardown did, when it has one; see `docs/workspace.md`. A failed
+    /// teardown does not stop the removal.
+    pub fn remove_reporting(
+        &self,
+        branch: &str,
+        options: &RemoveOptions,
+    ) -> Result<Option<WorkspaceReport>, Error> {
         ops::remove(self, branch, options)
+    }
+
+    /// `branch`'s workspace: what it was created with, whether its setup
+    /// completed, and its reserved port. See `docs/workspace.md`.
+    pub fn workspace(&self, branch: &str) -> Result<WorkspaceInfo, Error> {
+        let store = self.store();
+        let record = store.read(branch)?;
+        let port = store.ports().port(branch)?;
+        Ok(WorkspaceInfo {
+            branch: branch.to_owned(),
+            worktree: record.info.worktree.clone(),
+            spec: record.workspace.as_ref().map(|w| w.spec.clone()),
+            ready: record.workspace.as_ref().is_some_and(|w| w.ready),
+            copied: workspace::excluded(&record),
+            port,
+        })
+    }
+
+    /// The variables `branch`'s scripts and harness get:
+    /// `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and
+    /// `BRANCHYARD_PORT`, reserving the branch's port now if it has none
+    /// yet. For running a command in its worktree, as `by workspace run`
+    /// does.
+    pub fn workspace_env(&self, branch: &str) -> Result<Vec<(String, String)>, Error> {
+        let store = self.store();
+        let record = store.read(branch)?;
+        let port = workspace::reserve_port(&store, &self.root, branch)?;
+        Ok(workspace::variables(
+            self,
+            branch,
+            &record.info.worktree,
+            Some(port),
+        ))
+    }
+
+    /// Append a workspace lifecycle report to `branch`'s event log, for a
+    /// phase run outside the engine, such as `by workspace run`.
+    pub fn record_workspace(&self, branch: &str, report: WorkspaceReport) -> Result<(), Error> {
+        let store = self.store();
+        store.read(branch)?;
+        record::Recorder::open(&store, branch, None)?.record(Activity::Workspace(report))
+    }
+
+    /// Never run workspace setup or teardown commands on this yard (or its
+    /// clones): a branch that needs its setup fails, saying why, and a
+    /// teardown is skipped and recorded. Copying files still happens. A
+    /// server does this unless its operator allowed a repository's
+    /// scripts; see `docs/workspace.md`.
+    pub fn deny_workspace_scripts(&self) {
+        self.hub.deny_scripts();
+    }
+
+    /// Run every Microsandbox-provider branch of this yard (and its clones)
+    /// through `provider` instead of the Microsandbox SDK: its capabilities
+    /// decide what is kept, snapshotted and branched. For embedding a
+    /// provider built elsewhere, and for tests with
+    /// `branchyard_sandbox::fake::FakeProvider`.
+    pub fn use_sandbox_provider(&self, provider: Arc<dyn branchyard_sandbox::SandboxProvider>) {
+        *projection::lock(&self.hub.sandbox_provider) = Some(provider);
+    }
+
+    /// The named branches side by side: status, turns, cost, tokens, time,
+    /// diff stats and the files only each one changed; with `run_checks`,
+    /// each branch's check run on its exact candidate in a private
+    /// worktree. See `docs/checkpoints.md`.
+    pub fn compare(&self, branches: &[String], run_checks: bool) -> Result<Vec<Attempt>, Error> {
+        compare::compare(self, branches, run_checks)
+    }
+
+    /// The branches one `by fan` started as `<name>-<harness>`.
+    pub fn fan_branches(&self, name: &str) -> Result<Vec<String>, Error> {
+        compare::fan(self, name)
+    }
+
+    /// The diff from branch `a`'s candidate (or base) to `b`'s.
+    pub fn diff_between(&self, a: &str, b: &str) -> Result<String, Error> {
+        compare::between(self, a, b)
+    }
+
+    /// Apply `branch`'s candidate diff to this checkout, which must be
+    /// clean, recording what it changed under `.branchyard/try/` so
+    /// [`Yard::try_off`] restores it exactly. A try of another branch is
+    /// turned off first. Refused, with nothing applied, when the diff does
+    /// not apply. See `docs/checkpoints.md`.
+    pub fn try_on(&self, branch: &str) -> Result<TryState, Error> {
+        spotlight::on(self, branch)
+    }
+
+    /// Restore the checkout to what it held before [`Yard::try_on`].
+    /// Refused when a tried file changed since, or `HEAD` moved, unless
+    /// `force`. `None` when nothing was tried.
+    pub fn try_off(&self, force: bool) -> Result<Option<TryState>, Error> {
+        spotlight::off(self, force)
+    }
+
+    /// The try in effect, if any.
+    pub fn try_status(&self) -> Result<Option<TryState>, Error> {
+        spotlight::status(self)
+    }
+
+    /// The try recorded, read without taking the try lock or recovering a
+    /// half-done one: a glance for a dashboard that refreshes often, which
+    /// must not contend with a `try_*` in progress.
+    pub fn try_recorded(&self) -> Result<Option<TryState>, Error> {
+        spotlight::load(self)
+    }
+
+    /// Roll back a try a stopped process left half-applied or
+    /// half-restored; says what was done. Every `try_*` call does this
+    /// first.
+    pub fn try_recover(&self) -> Result<Option<String>, Error> {
+        spotlight::recover(self)
     }
 
     /// Known harness profiles, whether their executable is on `PATH`, and
@@ -627,6 +782,14 @@ pub struct TaskOptions {
     /// bounds every child. Stored with the branch; a send without one keeps
     /// the branch's.
     pub seats: Option<Seats>,
+    /// Prepare each new branch's worktree before its first turn (copy
+    /// untracked files, run setup) and clean up when it is removed
+    /// (teardown), with `BRANCHYARD_PORT` reserved for it. Read only when a
+    /// branch is created (run, fan, fork, reincarnate); stored with it, and
+    /// a fork, reincarnation or delegated child without one takes its
+    /// parent's. Whether a repository's scripts may run is the caller's
+    /// decision: `by` asks you to trust them. See `docs/workspace.md`.
+    pub workspace: Option<WorkspaceSpec>,
 }
 
 /// Where a branch's harness runs.
@@ -667,6 +830,25 @@ pub struct SandboxOptions {
     /// `HOME`. Names are stored with the branch; values are not.
     #[serde(default)]
     pub pass_env: Vec<String>,
+    /// What happens to the branch's microVM when a turn ends: destroyed
+    /// (the default), or paused and resumed by the next turn. Needs
+    /// [`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "SandboxKeep::is_destroy")]
+    pub keep: SandboxKeep,
+    /// With a kept sandbox, how many checkpoints keep a provider snapshot
+    /// as well (the newest; older ones are released). Unset: 3. 0: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<u32>,
+    /// At most this many kept (paused) sandboxes of this provider in the
+    /// repository; parking one more destroys the least recently used.
+    /// Unset: 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_paused: Option<u32>,
+    /// Opt in to the Microsandbox SDK's pause, resume, live branching and
+    /// full-memory snapshots, which are declared only then: unqualified
+    /// until they pass on a KVM host.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live_branch: bool,
 }
 
 /// Where an Agent Substrate cluster is and how a harness runs in it.
@@ -722,6 +904,19 @@ pub struct SubstrateOptions {
     /// than loopback, sending credentials and code unencrypted.
     #[serde(default)]
     pub insecure: bool,
+    /// What happens to the branch's actor when a turn ends: deleted (the
+    /// default), or paused (`PauseActor`) and resumed by the next turn. See
+    /// `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "SandboxKeep::is_destroy")]
+    pub keep: SandboxKeep,
+    /// With a kept actor, how many checkpoints keep a tag as well (the
+    /// newest; older tags are deleted). Unset: 3. 0: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<u32>,
+    /// At most this many kept actors in the repository for this cluster;
+    /// parking one more deletes the least recently used. Unset: 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_paused: Option<u32>,
 }
 
 impl SubstrateOptions {
@@ -910,7 +1105,48 @@ impl Branch {
         fresh_session: bool,
         options: TaskOptions,
     ) -> Result<Branch, Error> {
-        run::fork(&self.yard, &self.info.name, prompt, fresh_session, &options)
+        run::fork(
+            &self.yard,
+            &self.info.name,
+            prompt,
+            fresh_session,
+            None,
+            &options,
+        )
+    }
+
+    /// A new branch from this branch's checkpoint `turn` (0 is its base),
+    /// leaving this branch as it is. The harness session is forked natively
+    /// only when it ended at that checkpoint and the harness can fork;
+    /// otherwise the new branch starts a fresh session whose first prompt
+    /// begins with a generated summary of the turns that led there, and an
+    /// [`Activity::ForkedAt`] on the new branch says which. See
+    /// `docs/checkpoints.md`.
+    pub fn fork_at(&self, turn: u32, prompt: &str, options: TaskOptions) -> Result<Branch, Error> {
+        run::fork(
+            &self.yard,
+            &self.info.name,
+            prompt,
+            false,
+            Some(turn),
+            &options,
+        )
+    }
+
+    /// Reset this branch, its worktree and its candidate to checkpoint
+    /// `turn` (0 is its base). Refused while a turn runs, for a merged
+    /// branch, and when the worktree holds changes no checkpoint has.
+    /// Later checkpoints are kept, so rewinding to one of them undoes this.
+    /// The next turn resumes the harness's own session only if it ended at
+    /// that checkpoint; otherwise it starts fresh with a summary. Journaled:
+    /// an engine that stops mid-rewind leaves it for recovery to finish.
+    pub fn rewind(&self, turn: u32) -> Result<Rewound, Error> {
+        checkpoint::rewind(&self.yard, &self.info.name, turn)
+    }
+
+    /// This branch's checkpoints, oldest first, and the one it is at.
+    pub fn checkpoints(&self) -> Result<Checkpoints, Error> {
+        checkpoint::list(&self.yard, &self.info.name)
     }
 
     /// A new branch from this branch's latest candidate, always with a
@@ -1418,6 +1654,112 @@ pub enum Activity {
     /// Inbox messages reached this branch's turn, and by which path; see
     /// `docs/delegation.md#delivery`. Each message is delivered once.
     MessagesDelivered { ids: Vec<u64>, via: DeliveredVia },
+    /// A phase of the branch's workspace lifecycle ran: files copied into
+    /// its new worktree, setup before its first turn, or teardown at its
+    /// removal. See [`TaskOptions::workspace`].
+    Workspace(WorkspaceReport),
+    /// A turn ended and its worktree was recorded as a checkpoint ref; see
+    /// `docs/checkpoints.md`.
+    Checkpoint(Checkpoint),
+    /// The branch was rewound to an earlier (or, after a rewind, a later)
+    /// checkpoint by [`Branch::rewind`].
+    Rewound {
+        /// The checkpoint the branch was at, when known.
+        from: Option<u32>,
+        to: u32,
+        /// The commit the branch and its worktree were reset to.
+        commit: String,
+        /// How the branch's next turn continues the conversation.
+        session: SessionContinuity,
+    },
+    /// This branch was forked from another's checkpoint by
+    /// [`Branch::fork_at`]; recorded on the new branch before its turn.
+    ForkedAt {
+        branch: String,
+        turn: u32,
+        commit: String,
+        session: SessionContinuity,
+    },
+    /// A step towards a pull request: an issue linked, a check run, a push,
+    /// a pull request opened or observed, feedback delivered. See
+    /// [`PullRequestActivity`] and `docs/pull-requests.md`.
+    PullRequest(Box<PullRequestActivity>),
+    /// Where a turn's sandbox came from (fresh, resumed, branched from a
+    /// provider snapshot) and what became of it: kept, destroyed, evicted,
+    /// a snapshot released. See `docs/sandbox-snapshots.md`.
+    Sandbox(Box<SandboxEvent>),
+}
+
+/// A turn's checkpoint: the branch's commit when the turn ended, kept as the
+/// ref `refs/branchyard/<branch>/<incarnation>/turn-<N>`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// The turn's number, from 1; turn 0 is the branch's base and has no ref.
+    pub turn: u32,
+    pub commit: String,
+    pub git_ref: String,
+    /// The checkpoint the turn started from: `Some(0)` for the base, the
+    /// rewound-to checkpoint after a rewind, `None` when not recorded.
+    pub after: Option<u32>,
+    /// The harness session when the turn ended.
+    pub session: Option<String>,
+    /// Against the branch's base.
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+    /// The provider snapshot taken with this checkpoint, when the branch
+    /// kept its sandbox and the provider could; see
+    /// `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<Box<SandboxSnapshot>>,
+}
+
+/// How a rewound or forked-at branch's conversation continues. Serialized as
+/// an object tagged by `mode`, such as `{"mode": "native", "session": "..."}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SessionContinuity {
+    /// The harness's own session is resumed (a rewind) or forked (a fork):
+    /// it ended exactly at that checkpoint.
+    Native { session: String },
+    /// A fresh session, whose first prompt carries a generated summary of
+    /// these turns, because the native session could not continue from the
+    /// checkpoint, for `reason`.
+    Summary { turns: Vec<u32>, reason: String },
+    /// A fresh session with no summary: nothing ran before the checkpoint
+    /// (turn 0, the base).
+    Fresh { reason: String },
+}
+
+impl SessionContinuity {
+    /// One line for people: what the next turn continues.
+    pub fn describe(&self) -> String {
+        match self {
+            SessionContinuity::Native { session } => {
+                format!("continues the harness's own session {session}")
+            }
+            SessionContinuity::Summary { turns, reason } => {
+                let turns = match (turns.first(), turns.last()) {
+                    (Some(first), Some(last)) if first != last => {
+                        format!("turns {}", checkpoint::turn_list(turns))
+                    }
+                    (Some(only), _) => format!("turn {only}"),
+                    _ => "no earlier turns".to_owned(),
+                };
+                format!("starts a fresh session with a summary of {turns}: {reason}")
+            }
+            SessionContinuity::Fresh { reason } => {
+                format!("starts a fresh session: {reason}")
+            }
+        }
+    }
+
+    /// Whether the harness's own session continues.
+    pub fn native(&self) -> bool {
+        matches!(self, SessionContinuity::Native { .. })
+    }
 }
 
 /// How [`Activity::MessagesDelivered`] messages reached a turn. Serialized

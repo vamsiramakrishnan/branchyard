@@ -238,6 +238,65 @@ pub fn decision_line(tool: &str, allowed: bool, message: Option<&str>, style: St
     }
 }
 
+/// A workspace lifecycle phase: one line, and when it failed the last
+/// lines of its output, indented.
+pub fn workspace_line(report: &branchyard::WorkspaceReport, style: Style) -> String {
+    use branchyard::WorkspacePhase;
+    let secs = report.duration_ms as f64 / 1000.0;
+    let port = report
+        .port
+        .map(|p| format!(", port {p}"))
+        .unwrap_or_default();
+    let mut line = match report.phase {
+        WorkspacePhase::Copy => {
+            let mut text = format!("workspace copy: {} file(s)", report.copied.len());
+            if !report.copied.is_empty() {
+                text.push_str(&format!(" ({})", truncate(&report.copied.join(", "), 80)));
+            }
+            if !report.refused.is_empty() {
+                text.push_str(&format!("; refused {}", report.refused.join("; ")));
+            }
+            text
+        }
+        WorkspacePhase::Run if report.ok && report.exit_code.is_none() => format!(
+            "workspace run: started `{}`{port}; {}",
+            truncate(&report.commands.join(" && "), 60),
+            report.output.trim()
+        ),
+        WorkspacePhase::Setup | WorkspacePhase::Teardown | WorkspacePhase::Run => {
+            let phase = match report.phase {
+                WorkspacePhase::Setup => "setup",
+                WorkspacePhase::Run => "run",
+                _ => "teardown",
+            };
+            let outcome = match (report.ok, &report.error, report.exit_code) {
+                (true, _, _) => "ok".to_owned(),
+                (false, Some(error), _) => error.clone(),
+                (false, None, Some(code)) => format!("exit {code}"),
+                (false, None, None) => "failed".to_owned(),
+            };
+            let last = report.commands.last().map(String::as_str).unwrap_or("");
+            format!(
+                "workspace {phase}: {outcome} after {secs:.1}s{port} ({} command(s), last `{}`)",
+                report.commands.len(),
+                truncate(last, 60)
+            )
+        }
+    };
+    let tone = match report.ok {
+        true => Tone::Dim,
+        false => Tone::Red,
+    };
+    if !report.ok && !report.output.trim().is_empty() {
+        let lines: Vec<&str> = report.output.trim_end().lines().collect();
+        let start = lines.len().saturating_sub(20);
+        for output in &lines[start..] {
+            line.push_str(&format!("\n    {output}"));
+        }
+    }
+    style.paint(tone, &line)
+}
+
 /// One line for recorded activity. Message deltas are text, not lines, and
 /// return `None`.
 pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
@@ -343,6 +402,19 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             "stalled: no harness activity for its stall window",
         ),
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
+        Activity::Workspace(report) => workspace_line(report, style),
+        Activity::Sandbox(event) => style.paint(
+            match event.as_ref() {
+                branchyard::SandboxEvent::Started {
+                    origin: branchyard::SandboxOrigin::Fresh { reason: Some(_) },
+                    ..
+                }
+                | branchyard::SandboxEvent::NotKept { .. }
+                | branchyard::SandboxEvent::NoSnapshot { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &event.describe(),
+        ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
                 Some(id) => format!(" (re #{id})"),
@@ -367,6 +439,10 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 ),
             )
         }
+        Activity::PullRequest(activity) => {
+            let (text, tone) = crate::pr::log_line(activity);
+            style.paint(tone, &text)
+        }
         Activity::MessagesDelivered { ids, via } => {
             let ids = ids
                 .iter()
@@ -383,6 +459,45 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             };
             style.paint(Tone::Cyan, &format!("delivered {ids} {via}"))
         }
+        Activity::Checkpoint(c) => style.paint(
+            Tone::Green,
+            &format!(
+                "checkpoint {} at {} ({} file(s), +{} -{})",
+                c.turn,
+                short_commit(&c.commit),
+                c.files_changed,
+                c.insertions,
+                c.deletions
+            ),
+        ),
+        Activity::Rewound {
+            from, to, session, ..
+        } => {
+            let from = from.map(|n| format!(" from {n}")).unwrap_or_default();
+            style.paint(
+                Tone::Yellow,
+                &format!(
+                    "rewound{from} to checkpoint {to}; the next turn {}",
+                    session.describe()
+                ),
+            )
+        }
+        Activity::ForkedAt {
+            branch,
+            turn,
+            session,
+            ..
+        } => style.paint(
+            if session.native() {
+                Tone::Cyan
+            } else {
+                Tone::Yellow
+            },
+            &format!(
+                "forked from {branch} at checkpoint {turn}; this branch {}",
+                session.describe()
+            ),
+        ),
     })
 }
 
@@ -1069,7 +1184,8 @@ pub fn graph_applied(a: &branchyard::GraphApplied, style: Style) -> String {
 }
 
 /// `by show`.
-pub fn details(info: &BranchInfo, now: u64, style: Style) -> String {
+/// With `extra` `(key, value)` lines at the end, aligned with the rest.
+pub fn details(info: &BranchInfo, now: u64, style: Style, extra: Vec<(&str, String)>) -> String {
     let (status, tone) = branch_status_text(info);
     let mut pairs = vec![
         ("branch", info.name.clone()),
@@ -1101,6 +1217,7 @@ pub fn details(info: &BranchInfo, now: u64, style: Style) -> String {
     if let BranchStatus::Merged { commit, .. } = &info.status {
         pairs.push(("merge commit", short_commit(commit).to_owned()));
     }
+    pairs.extend(extra);
     key_values(&pairs, style)
 }
 
@@ -1197,6 +1314,41 @@ mod tests {
     use std::path::PathBuf;
 
     const PLAIN: Style = Style::PLAIN;
+
+    #[test]
+    fn sandbox_events_say_which_path_a_turn_took() {
+        use branchyard::{SandboxEvent, SandboxOrigin, SnapshotMethod};
+        let line = |event| activity_line(&Activity::Sandbox(Box::new(event)), PLAIN).unwrap();
+        assert_eq!(
+            line(SandboxEvent::Started {
+                provider: "microsandbox".into(),
+                sandbox: "by-a-1".into(),
+                origin: SandboxOrigin::Branched {
+                    branch: "a".into(),
+                    turn: 3,
+                    method: SnapshotMethod::LiveBranch,
+                },
+            }),
+            "sandbox: branched from a's checkpoint 3 (microsandbox live branch)"
+        );
+        assert_eq!(
+            line(SandboxEvent::Started {
+                provider: "substrate".into(),
+                sandbox: "by-a-2".into(),
+                origin: SandboxOrigin::Fresh {
+                    reason: Some("provider can't branch: it declares neither".into()),
+                },
+            }),
+            "sandbox: fresh (provider can't branch: it declares neither)"
+        );
+        assert_eq!(
+            line(SandboxEvent::Kept {
+                provider: "substrate".into(),
+                sandbox: "by-a-2".into(),
+            }),
+            "sandbox: kept paused for the next turn (substrate by-a-2)"
+        );
+    }
 
     fn request(tool: &str, input: Value) -> PermissionRequest {
         PermissionRequest {
@@ -1751,7 +1903,7 @@ mod tests {
     fn details_include_fork_parent_and_session() {
         let mut fork = info("alt", Some("flaky"));
         fork.session = Some("s-9".into());
-        let text = details(&fork, 10_000 + 120, PLAIN);
+        let text = details(&fork, 10_000 + 120, PLAIN, Vec::new());
         assert!(text.contains("forked from  flaky\n"), "{text}");
         assert!(text.contains("session      s-9\n"));
         assert!(text.contains("base         0123456789\n"));

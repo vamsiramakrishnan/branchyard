@@ -38,6 +38,9 @@ pub struct Env {
     pub stderr_tty: bool,
     /// Color only on a terminal, and never when `NO_COLOR` is set.
     pub color: bool,
+    /// Whether and how to say a branch needs you or ended; off until
+    /// `main` resolves it from the flags and configuration.
+    pub notify: crate::notify::Settings,
 }
 
 impl Env {
@@ -49,11 +52,22 @@ impl Env {
             stdout_tty,
             stderr_tty: io::stderr().is_terminal(),
             color: stdout_tty && !no_color,
+            notify: crate::notify::Settings::default(),
         }
     }
 
     fn style(&self) -> Style {
         Style { color: self.color }
+    }
+
+    /// The notifier for a command that waits for branches: its escapes go
+    /// to stderr when that is a terminal.
+    pub fn notifier(&self) -> Option<crate::notify::Notifier> {
+        let out: Option<Box<dyn Write + Send>> = match self.stderr_tty {
+            true => Some(Box::new(io::stderr())),
+            false => None,
+        };
+        crate::notify::Notifier::new(self.notify, out)
     }
 }
 
@@ -151,11 +165,14 @@ impl Live {
             true => Box::new(io::stderr()),
             false => Box::new(io::stdout()),
         };
-        let console = Arc::new(Console::new(
-            Renderer::new(env.style(), prefixed),
-            out,
-            Box::new(console::terminal_prompt),
-        ));
+        let console = Arc::new(
+            Console::new(
+                Renderer::new(env.style(), prefixed),
+                out,
+                Box::new(console::terminal_prompt),
+            )
+            .with_notifier(env.notifier()),
+        );
         let choice = console::choose(task.permissions, env.stdin_tty, env.stderr_tty);
         match provider(task).or(branch) {
             None | Some(Provider::Local) => {
@@ -210,6 +227,7 @@ impl Live {
             unapproved_tools: task.unapproved_tools,
             provision: provision(task)?,
             seats: None,
+            workspace: None,
         })
     }
 
@@ -273,13 +291,31 @@ pub fn branch_outcome(info: &BranchInfo) -> Outcome {
     }
 }
 
+/// The repository's `[workspace]` for a command that creates branches,
+/// once its scripts are trusted (docs/workspace.md).
+fn workspace(env: &Env, yard: &Yard) -> Result<Option<branchyard::WorkspaceSpec>, Failure> {
+    crate::workspace_cmd::for_new_branch(env, yard.root())
+}
+
 pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome {
     if let Target::Remote(remote) = target {
-        return remote::run(env, remote, prompt, task);
+        // The issue's link lives in the prompt's header on a server.
+        let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
+        return remote::run(env, remote, &prompt, &task);
     }
     let yard = open()?;
+    let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
+    let task = &task;
+    let workspace = workspace(env, &yard)?;
     let live = Live::start(env, task, task.delegate.is_some(), None);
-    let result = yard.task(prompt).options(live.options(task)?).run();
+    let options = TaskOptions {
+        workspace,
+        ..live.options(task)?
+    };
+    let result = yard.task(prompt).options(options).run();
+    if let (Ok(branch), Some(issue)) = (&result, &issue) {
+        crate::pr::link_issue(branch, issue)?;
+    }
     live.finish(env, result)
 }
 
@@ -291,12 +327,20 @@ pub fn fan(
     task: &TaskArgs,
 ) -> Outcome {
     if let Target::Remote(remote) = target {
-        return remote::fan(env, remote, prompt, harnesses, task);
+        let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
+        return remote::fan(env, remote, &prompt, harnesses, &task);
     }
     let yard = open()?;
+    let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
+    let (prompt, task) = (prompt.as_str(), &task);
+    let workspace = workspace(env, &yard)?;
     let live = Live::start(env, task, true, None);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
-    let builder = yard.task(prompt).options(live.options(task)?);
+    let options = TaskOptions {
+        workspace,
+        ..live.options(task)?
+    };
+    let builder = yard.task(prompt).options(options);
     // Knowing the names up front lines the prefixes up from the first line.
     if let Ok(names) = builder.planned_names(&ids) {
         live.console.reserve(&names);
@@ -309,6 +353,11 @@ pub fn fan(
             return Err(error.into());
         }
     };
+    if let Some(issue) = &issue {
+        for branch in &branches {
+            crate::pr::link_issue(branch, issue)?;
+        }
+    }
     let descendants = wait_for_descendants(&branches.iter().collect::<Vec<_>>());
     live.console.finish();
     let descendants = descendants?.unwrap_or_default();
@@ -484,9 +533,39 @@ pub fn fork(
     if let Target::Remote(remote) = target {
         return remote::fork(env, remote, branch, prompt, fresh_session, task);
     }
+    let yard = open()?;
+    let workspace = workspace(env, &yard)?;
+    let branch = yard.branch(branch)?;
+    let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
+    let options = TaskOptions {
+        workspace,
+        ..live.options(task)?
+    };
+    let result = branch.fork(prompt, fresh_session, options);
+    live.finish(env, result)
+}
+
+/// `by fork BRANCH --at N`: a new branch from checkpoint N, saying how its
+/// session continues.
+pub fn fork_at(
+    env: &Env,
+    target: &Target,
+    branch: &str,
+    turn: u32,
+    prompt: &str,
+    task: &TaskArgs,
+) -> Outcome {
+    if let Target::Remote(_) = target {
+        return Err(Failure::Message(
+            "fork --at is not available in remote mode yet; run it on the server's host".into(),
+        ));
+    }
     let branch = open()?.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
-    let result = branch.fork(prompt, fresh_session, live.options(task)?);
+    let result = branch.fork_at(turn, prompt, live.options(task)?);
+    if let Ok(forked) = &result {
+        crate::attempts::announce_fork(forked);
+    }
     live.finish(env, result)
 }
 
@@ -494,9 +573,15 @@ pub fn reincarnate(env: &Env, target: &Target, branch: &str, task: &TaskArgs) ->
     if let Target::Remote(remote) = target {
         return remote::reincarnate(env, remote, branch, task);
     }
-    let branch = open()?.branch(branch)?;
+    let yard = open()?;
+    let workspace = workspace(env, &yard)?;
+    let branch = yard.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
-    let result = branch.reincarnate(live.options(task)?);
+    let options = TaskOptions {
+        workspace,
+        ..live.options(task)?
+    };
+    let result = branch.reincarnate(options);
     live.finish(env, result)
 }
 
@@ -515,15 +600,48 @@ pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
     print(&render::branch_table(&infos, now(), env.style()))
 }
 
-pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
-    let info = match target {
-        Target::Local => open()?.branch(branch)?.info().clone(),
-        Target::Remote(remote) => remote.repo.branch(branch)?,
+/// `by show`, with the merge-readiness line `by pr` and `by pr --watch`
+/// recorded; `refresh` asks GitHub first (local mode).
+pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bool) -> Outcome {
+    let (info, events) = match target {
+        Target::Local => {
+            let yard = open()?;
+            if refresh {
+                crate::pr::refresh(&yard, branch)?;
+            }
+            let branch = yard.branch(branch)?;
+            (branch.info().clone(), branch.events()?)
+        }
+        Target::Remote(_) if refresh => {
+            return Err(Failure::Sdk(branchyard::Error::Unsupported(
+                "by show --refresh asks GitHub about a pull request by pr opened from this \
+                 repository; it works in local mode only"
+                    .into(),
+            )))
+        }
+        Target::Remote(remote) => (
+            remote.repo.branch(branch)?,
+            remote.repo.events(branch, 0)?.events,
+        ),
     };
+    let checkpoints = crate::attempts::checkpoints(target, &info)?;
+    let (readiness, line) = crate::pr::show_readiness(&info, &events, env.style());
     if as_json {
-        return print(&json::text(&json::branch(&info)));
+        let mut value = json::branch(&info);
+        value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
+        value["merge_readiness"] = readiness;
+        return print(&json::text(&value));
     }
-    print(&render::details(&info, now(), env.style()))
+    let extra = line
+        .map(|line| ("merge readiness", line))
+        .into_iter()
+        .collect();
+    let mut text = render::details(&info, now(), env.style(), extra);
+    text.push_str(&crate::attempts::checkpoint_lines(
+        &checkpoints,
+        env.style(),
+    ));
+    print(&text)
 }
 
 pub fn diff(env: &Env, target: &Target, branch: &str) -> Outcome {
@@ -683,14 +801,20 @@ fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcom
     }
 }
 
-pub fn merge(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
+pub fn merge(target: &Target, branch: &str, into: Option<&str>, remove: bool) -> Outcome {
     if let Target::Remote(remote) = target {
-        return remote::merge(remote, branch, into);
+        remote::merge(remote, branch, into)?;
+        return match remove {
+            true => rm(target, branch, false),
+            false => Ok(()),
+        };
     }
     let yard = open()?;
     let target = match into {
         Some(target) => target.to_owned(),
-        None => current_branch(yard.root())?,
+        None => yard
+            .current_branch()?
+            .ok_or_else(|| Failure::Message("HEAD is detached; pass --into <branch>".into()))?,
     };
     let merged = yard.merge(branch, &target)?;
     print_merged(
@@ -698,7 +822,11 @@ pub fn merge(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
         &merged.target,
         &merged.previous,
         &merged.commit,
-    )
+    )?;
+    match remove {
+        true => rm(&Target::Local, branch, false),
+        false => Ok(()),
+    }
 }
 
 pub fn print_merged(branch: &str, target: &str, previous: &str, commit: &str) -> Outcome {
@@ -710,32 +838,18 @@ pub fn print_merged(branch: &str, target: &str, previous: &str, commit: &str) ->
     ))
 }
 
-/// The repository's checked-out branch, the default merge target.
-fn current_branch(root: &Path) -> Result<String, Failure> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| Failure::Message(format!("could not run git: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Failure::Message(format!(
-            "could not resolve the current branch: {}",
-            stderr.trim()
-        )));
-    }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if name == "HEAD" {
-        return Err(Failure::Message(
-            "HEAD is detached; pass --into <branch>".into(),
-        ));
-    }
-    Ok(name)
-}
-
 pub fn rm(target: &Target, branch: &str, keep_credentials: bool) -> Outcome {
     match target {
-        Target::Local => open()?.remove_with(branch, &RemoveOptions { keep_credentials })?,
+        Target::Local => {
+            let teardown = open()?.remove_reporting(branch, &RemoveOptions { keep_credentials })?;
+            if let Some(report) = teardown {
+                // Best-effort: the branch is gone either way.
+                eprintln!(
+                    "by: {}",
+                    render::workspace_line(&report, render::Style { color: false })
+                );
+            }
+        }
         // The server decides what stays on its disk.
         Target::Remote(_) if keep_credentials => {
             return Err(Failure::Message(
@@ -815,7 +929,14 @@ fn required_outside(branch: Option<String>, command: &str) -> Result<String, bra
 
 pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outcome {
     let json = args.json;
-    let task = &args.task;
+    // A child's issue link lives in its prompt's header: a harness has no
+    // yard of its own to record it in.
+    let (prompt, task, _) = crate::pr::issue_task(prompt, &args.task, None)?;
+    let args = &SpawnArgs {
+        task,
+        ..args.clone()
+    };
+    let (prompt, task) = (prompt.as_str(), &args.task);
     let request = Spawn {
         prompt: prompt.to_owned(),
         harness: task.harness.clone(),
@@ -1700,6 +1821,9 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
             client_key: substrate.client_key.as_deref().map(absolute),
             router_ca: substrate.router_ca.as_deref().map(absolute),
             insecure: substrate.insecure,
+            keep: substrate.lifecycle.keep.unwrap_or_default(),
+            snapshots: substrate.lifecycle.snapshots,
+            max_paused: substrate.lifecycle.max_paused,
         }));
     }
     match (&task.sandbox, task.local) {
@@ -1708,6 +1832,10 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
             cpus: sandbox.cpus,
             memory_mib: sandbox.memory_mib,
             pass_env: sandbox.pass_env.clone(),
+            keep: sandbox.lifecycle.keep.unwrap_or_default(),
+            snapshots: sandbox.lifecycle.snapshots,
+            max_paused: sandbox.lifecycle.max_paused,
+            live_branch: sandbox.live_branch,
         })),
         (None, true) => Some(Provider::Local),
         (None, false) => None,
@@ -1761,9 +1889,13 @@ pub fn rig(env: &Env, target: &Target, args: &args::RigArgs) -> Outcome {
         unapproved_tools: args.unapproved_tools,
         ..TaskArgs::default()
     };
+    let workspace = workspace(env, &open()?)?;
     let live = Live::start_to(env, &task, true, args.json, None);
     let result = (|| {
-        let options = live.options(&task)?;
+        let options = TaskOptions {
+            workspace,
+            ..live.options(&task)?
+        };
         let mut policy = match root.policy.default {
             rig::Fallback::Allow => Policy::allow_all(),
             rig::Fallback::Deny => Policy::deny_all(),

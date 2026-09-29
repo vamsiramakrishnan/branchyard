@@ -49,6 +49,9 @@ services:
     depends_on:
       database:
         condition: service_healthy
+    # SIGTERM gives running operations shutdown_grace_seconds (60); docker
+    # stop must wait longer than that before it kills the server.
+    stop_grace_period: 75s
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8421/healthz"]
       interval: 10s

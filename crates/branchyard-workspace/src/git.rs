@@ -1,4 +1,13 @@
-//! Running the `git` executable with argument vectors.
+//! Running the `git` executable with argument vectors: the one place in
+//! Branchyard that starts `git` on the host. Every invocation goes through
+//! [`Git`], which runs in a given directory with no stdin, no terminal
+//! prompt, the C locale, and without the `GIT_DIR`-style variables that
+//! would point it at another repository; its failures are [`GitError`]s
+//! carrying the arguments, exit code and stderr. The engine
+//! (`branchyard::git`, checkpoint refs, and `by try`'s patches and blobs,
+//! fed through [`Git::stdin`]), the CLI (`by pr`'s branch names and
+//! diffstat), the server and the Substrate transfer all use it rather than
+//! a `Command` of their own.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -112,13 +121,14 @@ impl From<io::Error> for GitError {
 }
 
 /// A git invocation rooted at one directory.
-pub(crate) struct Git {
+pub struct Git {
     cmd: Command,
     args: Vec<String>,
+    input: Option<Vec<u8>>,
 }
 
 impl Git {
-    pub(crate) fn new(dir: &Path) -> Self {
+    pub fn new(dir: &Path) -> Self {
         let mut cmd = Command::new("git");
         cmd.current_dir(dir)
             .stdin(Stdio::null())
@@ -130,22 +140,30 @@ impl Git {
         Self {
             cmd,
             args: Vec::new(),
+            input: None,
         }
     }
 
+    /// Feed `bytes` to git's stdin (instead of none), as `git apply` and
+    /// `git hash-object --stdin` read it.
+    pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.input = Some(bytes.into());
+        self
+    }
+
     /// For commands that commit, merge, or check out on Branchyard's behalf.
-    pub(crate) fn no_hooks(self) -> Self {
+    pub fn no_hooks(self) -> Self {
         self.arg("-c").arg(NO_HOOKS)
     }
 
-    pub(crate) fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
+    pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
         let arg = arg.as_ref();
         self.args.push(arg.to_string_lossy().into_owned());
         self.cmd.arg(arg);
         self
     }
 
-    pub(crate) fn args<I, S>(mut self, args: I) -> Self
+    pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -156,19 +174,52 @@ impl Git {
         self
     }
 
-    pub(crate) fn env(mut self, key: &str, value: impl AsRef<OsStr>) -> Self {
+    pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.cmd.env(key, value);
         self
     }
 
     /// Runs git and returns its output whatever the exit status.
-    pub(crate) fn output(mut self) -> Result<(Output, Vec<String>), GitError> {
-        let out = self.cmd.output().map_err(GitError::Spawn)?;
+    pub fn output(mut self) -> Result<(Output, Vec<String>), GitError> {
+        let Some(input) = self.input.take() else {
+            let out = self.cmd.output().map_err(GitError::Spawn)?;
+            return Ok((out, self.args));
+        };
+        let mut child = self
+            .cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(GitError::Spawn)?;
+        let stdin = child.stdin.take();
+        // Written from another thread so a large input cannot deadlock
+        // against git filling its stdout pipe.
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            if let Some(mut stdin) = stdin {
+                // git may exit before reading everything (a failed apply);
+                // its exit status says so, not the broken pipe.
+                let _ = stdin.write_all(&input);
+            }
+        });
+        let out = child.wait_with_output().map_err(GitError::Io)?;
+        let _ = writer.join();
         Ok((out, self.args))
     }
 
+    /// Runs git, requiring success; returns stdout's bytes unchanged.
+    pub fn run_bytes(self) -> Result<Vec<u8>, GitError> {
+        let (out, args) = self.output()?;
+        if out.status.success() {
+            Ok(out.stdout)
+        } else {
+            Err(failed(args, &out))
+        }
+    }
+
     /// Runs git, requiring success; returns stdout.
-    pub(crate) fn run(self) -> Result<String, GitError> {
+    pub fn run(self) -> Result<String, GitError> {
         let (out, args) = self.output()?;
         if out.status.success() {
             String::from_utf8(out.stdout).map_err(|e| GitError::Parse(e.to_string()))
@@ -177,8 +228,15 @@ impl Git {
         }
     }
 
+    /// Runs git and says whether it exited successfully, for commands
+    /// whose failure is an answer (any non-zero exit is `false`).
+    pub fn succeeds(self) -> Result<bool, GitError> {
+        let (out, _) = self.output()?;
+        Ok(out.status.success())
+    }
+
     /// Runs git for a yes/no answer: exit 0 is true, exit 1 is false.
-    pub(crate) fn test(self) -> Result<bool, GitError> {
+    pub fn test(self) -> Result<bool, GitError> {
         let (out, args) = self.output()?;
         match out.status.code() {
             Some(0) => Ok(true),
@@ -188,7 +246,8 @@ impl Git {
     }
 }
 
-pub(crate) fn failed(args: Vec<String>, out: &Output) -> GitError {
+/// The error for a git run that exited unsuccessfully.
+pub fn failed(args: Vec<String>, out: &Output) -> GitError {
     GitError::Failed {
         args,
         code: out.status.code(),
@@ -261,4 +320,10 @@ pub(crate) fn worktrees(dir: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
     }
     entries.extend(current);
     Ok(entries)
+}
+
+/// The branch checked out in the working tree at `dir` (such as `main`),
+/// or `None` when HEAD is detached.
+pub fn current_branch(dir: &Path) -> Result<Option<String>, GitError> {
+    crate::repo::current_branch_in(dir)
 }

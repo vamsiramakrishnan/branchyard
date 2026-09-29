@@ -34,6 +34,11 @@
       "value": "cargo test"
     },
     {
+      "id": "workspace",
+      "label": "Suggested workspace",
+      "value": "setup cargo fetch (from Cargo.toml)"
+    },
+    {
       "id": "config",
       "label": "Configuration",
       "value": "project branchyard.toml not found; user /home/dev/.config/branchyard/config.toml not found"
@@ -223,5 +228,5 @@
       ]
     }
   ],
-  "remaining": 11
+  "remaining": 16
 }

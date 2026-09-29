@@ -451,6 +451,21 @@
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
         },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
         "SandboxOptions": {
           "type": "object",
           "properties": {
@@ -482,6 +497,32 @@
               },
               "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
               "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
             }
           },
           "required": [
@@ -566,6 +607,28 @@
               "type": "boolean",
               "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
               "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
             }
           },
           "required": [
@@ -1737,6 +1800,21 @@
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
         },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
         "SandboxOptions": {
           "type": "object",
           "properties": {
@@ -1768,6 +1846,32 @@
               },
               "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
               "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
             }
           },
           "required": [
@@ -1852,6 +1956,28 @@
               "type": "boolean",
               "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
               "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
             }
           },
           "required": [
@@ -2376,6 +2502,21 @@
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
         },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
         "SandboxOptions": {
           "type": "object",
           "properties": {
@@ -2407,6 +2548,32 @@
               },
               "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
               "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
             }
           },
           "required": [
@@ -2491,6 +2658,28 @@
               "type": "boolean",
               "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
               "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
             }
           },
           "required": [
@@ -5791,6 +5980,135 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "workspace": {
+                  "$ref": "#/$defs/WorkspaceReport"
+                }
+              },
+              "required": [
+                "workspace"
+              ],
+              "additionalProperties": false,
+              "description": "A phase of the branch's workspace lifecycle ran: files copied into\nits new worktree, setup before its first turn, or teardown at its\nremoval. See [`TaskOptions::workspace`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/$defs/Checkpoint"
+                }
+              },
+              "required": [
+                "checkpoint"
+              ],
+              "additionalProperties": false,
+              "description": "A turn ended and its worktree was recorded as a checkpoint ref; see\n`docs/checkpoints.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rewound": {
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "The checkpoint the branch was at, when known.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "to": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "description": "The commit the branch and its worktree were reset to.",
+                      "type": "string"
+                    },
+                    "session": {
+                      "description": "How the branch's next turn continues the conversation.",
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "to",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "rewound"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was rewound to an earlier (or, after a rewind, a later)\ncheckpoint by [`Branch::rewind`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "forked_at": {
+                  "type": "object",
+                  "properties": {
+                    "branch": {
+                      "type": "string"
+                    },
+                    "turn": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "branch",
+                    "turn",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "forked_at"
+              ],
+              "additionalProperties": false,
+              "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "pull_request": {
+                  "$ref": "#/$defs/PullRequestActivity"
+                }
+              },
+              "required": [
+                "pull_request"
+              ],
+              "additionalProperties": false,
+              "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sandbox": {
+                  "$ref": "#/$defs/SandboxEvent"
+                }
+              },
+              "required": [
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -6789,6 +7107,969 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "WorkspaceReport": {
+          "type": "object",
+          "properties": {
+            "phase": {
+              "$ref": "#/$defs/WorkspacePhase"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The commands that ran, in order, up to and including one that failed."
+            },
+            "copied": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths copied, relative to the repository root; a directory a glob\nmatched is named once for everything copied under it."
+            },
+            "refused": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths or globs not copied, each with why."
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The last command's exit code; `None` when it was killed or never\nstarted."
+            },
+            "output": {
+              "type": "string",
+              "description": "The commands' combined standard output and error, at most its last\n[`OUTPUT_TAIL`] bytes."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it failed when no exit code says so: a timeout, a cancel, a\ncommand that could not start, scripts denied on this yard."
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The branch's reserved port, as the commands saw it."
+            },
+            "ran_in": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RanIn"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the commands ran: on this host, or in the sandbox the\nbranch's harness runs in."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
+            }
+          },
+          "required": [
+            "phase",
+            "ok"
+          ],
+          "description": "What one phase of a branch's workspace lifecycle did."
+        },
+        "WorkspacePhase": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "copy",
+              "description": "Untracked files copied into the new worktree."
+            },
+            {
+              "type": "string",
+              "const": "setup",
+              "description": "The setup commands, before the first turn."
+            },
+            {
+              "type": "string",
+              "const": "teardown",
+              "description": "The teardown commands, at removal."
+            },
+            {
+              "type": "string",
+              "const": "run",
+              "description": "A named run script, from `by workspace run`."
+            }
+          ],
+          "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
+        },
+        "RanIn": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "host",
+              "description": "On this host, in the worktree."
+            },
+            {
+              "type": "string",
+              "const": "sandbox",
+              "description": "In the branch's sandbox, through its provider."
+            }
+          ],
+          "description": "Where a workspace phase's commands ran."
+        },
+        "Checkpoint": {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The turn's number, from 1; turn 0 is the branch's base and has no ref."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "git_ref": {
+              "type": "string"
+            },
+            "after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint the turn started from: `Some(0)` for the base, the\nrewound-to checkpoint after a rewind, `None` when not recorded."
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The harness session when the turn ended."
+            },
+            "files_changed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Against the branch's base."
+            },
+            "insertions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SandboxSnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The provider snapshot taken with this checkpoint, when the branch\nkept its sandbox and the provider could; see\n`docs/sandbox-snapshots.md`."
+            }
+          },
+          "required": [
+            "turn",
+            "commit",
+            "git_ref",
+            "files_changed",
+            "insertions",
+            "deletions"
+          ],
+          "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SandboxSnapshot": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "`microsandbox` or `substrate`."
+            },
+            "handle": {
+              "type": "string",
+              "description": "The provider's name for it: a paused sandbox, or a checkpoint\nreference such as a Substrate tag."
+            },
+            "scope": {
+              "$ref": "#/$defs/SandboxScope"
+            },
+            "consistency": {
+              "$ref": "#/$defs/SandboxConsistency"
+            },
+            "method": {
+              "$ref": "#/$defs/SnapshotMethod"
+            }
+          },
+          "required": [
+            "provider",
+            "handle",
+            "scope",
+            "consistency",
+            "method"
+          ],
+          "description": "The provider snapshot a checkpoint took, on\n[`crate::Checkpoint::sandbox`]."
+        },
+        "SandboxScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Memory, processes and disk."
+            },
+            {
+              "type": "string",
+              "const": "disk",
+              "description": "The disk only; a restore boots it fresh."
+            }
+          ],
+          "description": "What a snapshot captured: [`SnapshotScope`] as recorded."
+        },
+        "SandboxConsistency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "crash",
+              "description": "Taken without the workload's cooperation."
+            },
+            {
+              "type": "string",
+              "const": "application",
+              "description": "At a point the workload reached deliberately."
+            }
+          ],
+          "description": "[`Consistency`] as recorded."
+        },
+        "SnapshotMethod": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "live_branch",
+              "description": "A paused child of the branch's sandbox (live branch), branched\nagain for each new sandbox."
+            },
+            {
+              "type": "string",
+              "const": "checkpoint",
+              "description": "A provider checkpoint (Substrate: suspend and a tag), from which new\nsandboxes are created."
+            }
+          ],
+          "description": "How a provider snapshot was taken, and so how a sandbox is branched\nfrom it."
+        },
+        "SessionContinuity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "native"
+                }
+              },
+              "required": [
+                "mode",
+                "session"
+              ],
+              "description": "The harness's own session is resumed (a rewind) or forked (a fork):\nit ended exactly at that checkpoint."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "mode",
+                "turns",
+                "reason"
+              ],
+              "description": "A fresh session, whose first prompt carries a generated summary of\nthese turns, because the native session could not continue from the\ncheckpoint, for `reason`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "description": "A fresh session with no summary: nothing ran before the checkpoint\n(turn 0, the base)."
+            }
+          ],
+          "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
+        },
+        "PullRequestActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IssueLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "issue_linked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch works on this issue; its pull request closes it."
+            },
+            {
+              "$ref": "#/$defs/CheckRun",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "checked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's check ran on its candidate, in a temporary worktree."
+            },
+            {
+              "$ref": "#/$defs/Pushed",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "pushed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The candidate was pushed to a git remote."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "opened"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A pull request was created for the branch."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "updated"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's existing pull request was updated."
+            },
+            {
+              "$ref": "#/$defs/PullRequestObservation",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "observed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "What the forge said about the pull request, recorded when it\nchanged."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "via": {
+                  "type": "string",
+                  "description": "`steer` into a running turn, or `send` as a new turn."
+                },
+                "summary": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "One line per piece, for the log."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_delivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "via",
+                "summary"
+              ],
+              "description": "Feedback (failed CI checks, review comments) was sent into the\nbranch, each piece named by a key so it is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_undelivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "reason"
+              ],
+              "description": "Feedback recorded as delivered did not reach the branch after all;\nits keys are delivered again later."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "watch_stopped"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "`by pr --watch` stopped following the pull request."
+            }
+          ],
+          "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
+        },
+        "IssueLink": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "title"
+          ],
+          "description": "An issue a branch works on."
+        },
+        "CheckRun": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "passed": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "type": "boolean",
+              "default": false
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The end of its combined output, at most 4096 bytes.",
+              "default": ""
+            }
+          },
+          "required": [
+            "commit",
+            "argv",
+            "passed"
+          ],
+          "description": "A check run on one commit; see [`Branch::verify_candidate`]."
+        },
+        "Pushed": {
+          "type": "object",
+          "properties": {
+            "remote": {
+              "type": "string",
+              "description": "The git remote's name (or URL)."
+            },
+            "remote_branch": {
+              "type": "string",
+              "description": "The branch on the remote, without `refs/heads/`."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "forced": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "remote",
+            "remote_branch",
+            "commit"
+          ],
+          "description": "A candidate pushed to a git remote."
+        },
+        "PullRequestRef": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string",
+              "description": "Its head: the branch on the remote."
+            },
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its base, when `by pr` set one.",
+              "default": null
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "head"
+          ],
+          "description": "A pull request as `by pr` last opened or updated it."
+        },
+        "CiSummary": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failing": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The names of the failed checks.",
+              "default": []
+            }
+          },
+          "required": [
+            "passed",
+            "failed",
+            "pending",
+            "skipped"
+          ],
+          "description": "The pull request's CI checks, counted by outcome."
+        },
+        "PullRequestObservation": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "description": "`open`, `merged` or `closed`."
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            },
+            "head_commit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the pull request's head is at.",
+              "default": null
+            },
+            "review_decision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's review decision: `approved`, `changes_requested`,\n`review_required`, or none.",
+              "default": null
+            },
+            "mergeable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`mergeable`, `conflicting` or `unknown`.",
+              "default": null
+            },
+            "merge_state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's merge state: `clean`, `blocked`, `behind`, `dirty`,\n`unstable`, `has_hooks`, `draft` or `unknown`.",
+              "default": null
+            },
+            "ci": {
+              "$ref": "#/$defs/CiSummary"
+            },
+            "unresolved_threads": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Review threads not yet resolved.",
+              "default": 0
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "state",
+            "ci"
+          ],
+          "description": "What was observed of a pull request at one moment."
+        },
+        "SandboxEvent": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "origin": {
+                  "$ref": "#/$defs/SandboxOrigin"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "origin"
+              ],
+              "description": "The turn's sandbox, and where it came from."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox"
+              ],
+              "description": "Paused and recorded when the turn ended, for the next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "not_kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "reason"
+              ],
+              "description": "Destroyed when the turn ended although it was to be kept."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "branch": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "evicted"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch"
+              ],
+              "description": "Another branch's kept sandbox, destroyed to stay within\n`max_paused`: the least recently used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "event": {
+                  "type": "string",
+                  "const": "released"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "handle",
+                "turn"
+              ],
+              "description": "A checkpoint's provider snapshot, released to keep the newest\n`snapshots`, or with its branch's sandbox."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "no_snapshot"
+                }
+              },
+              "required": [
+                "event",
+                "turn",
+                "reason"
+              ],
+              "description": "No provider snapshot was taken with checkpoint `turn`."
+            }
+          ],
+          "description": "What happened to a branch's sandbox, as [`Activity::Sandbox`]."
+        },
+        "SandboxOrigin": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "Created fresh; `reason` says why a kept or branched one was not\nused, when one was wanted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "const": "resumed"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "The branch's own sandbox, kept since its last turn, resumed."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branched"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "turn",
+                "method"
+              ],
+              "description": "Branched from `branch`'s provider snapshot at checkpoint `turn`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "prepared"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "method"
+              ],
+              "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            }
+          ],
+          "description": "Where a turn's sandbox came from."
         }
       }
     },
@@ -7163,6 +8444,135 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "workspace": {
+                  "$ref": "#/$defs/WorkspaceReport"
+                }
+              },
+              "required": [
+                "workspace"
+              ],
+              "additionalProperties": false,
+              "description": "A phase of the branch's workspace lifecycle ran: files copied into\nits new worktree, setup before its first turn, or teardown at its\nremoval. See [`TaskOptions::workspace`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/$defs/Checkpoint"
+                }
+              },
+              "required": [
+                "checkpoint"
+              ],
+              "additionalProperties": false,
+              "description": "A turn ended and its worktree was recorded as a checkpoint ref; see\n`docs/checkpoints.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rewound": {
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "The checkpoint the branch was at, when known.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "to": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "description": "The commit the branch and its worktree were reset to.",
+                      "type": "string"
+                    },
+                    "session": {
+                      "description": "How the branch's next turn continues the conversation.",
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "to",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "rewound"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was rewound to an earlier (or, after a rewind, a later)\ncheckpoint by [`Branch::rewind`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "forked_at": {
+                  "type": "object",
+                  "properties": {
+                    "branch": {
+                      "type": "string"
+                    },
+                    "turn": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "branch",
+                    "turn",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "forked_at"
+              ],
+              "additionalProperties": false,
+              "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "pull_request": {
+                  "$ref": "#/$defs/PullRequestActivity"
+                }
+              },
+              "required": [
+                "pull_request"
+              ],
+              "additionalProperties": false,
+              "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sandbox": {
+                  "$ref": "#/$defs/SandboxEvent"
+                }
+              },
+              "required": [
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -8161,6 +9571,969 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "WorkspaceReport": {
+          "type": "object",
+          "properties": {
+            "phase": {
+              "$ref": "#/$defs/WorkspacePhase"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The commands that ran, in order, up to and including one that failed."
+            },
+            "copied": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths copied, relative to the repository root; a directory a glob\nmatched is named once for everything copied under it."
+            },
+            "refused": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths or globs not copied, each with why."
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The last command's exit code; `None` when it was killed or never\nstarted."
+            },
+            "output": {
+              "type": "string",
+              "description": "The commands' combined standard output and error, at most its last\n[`OUTPUT_TAIL`] bytes."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it failed when no exit code says so: a timeout, a cancel, a\ncommand that could not start, scripts denied on this yard."
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The branch's reserved port, as the commands saw it."
+            },
+            "ran_in": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RanIn"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the commands ran: on this host, or in the sandbox the\nbranch's harness runs in."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
+            }
+          },
+          "required": [
+            "phase",
+            "ok"
+          ],
+          "description": "What one phase of a branch's workspace lifecycle did."
+        },
+        "WorkspacePhase": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "copy",
+              "description": "Untracked files copied into the new worktree."
+            },
+            {
+              "type": "string",
+              "const": "setup",
+              "description": "The setup commands, before the first turn."
+            },
+            {
+              "type": "string",
+              "const": "teardown",
+              "description": "The teardown commands, at removal."
+            },
+            {
+              "type": "string",
+              "const": "run",
+              "description": "A named run script, from `by workspace run`."
+            }
+          ],
+          "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
+        },
+        "RanIn": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "host",
+              "description": "On this host, in the worktree."
+            },
+            {
+              "type": "string",
+              "const": "sandbox",
+              "description": "In the branch's sandbox, through its provider."
+            }
+          ],
+          "description": "Where a workspace phase's commands ran."
+        },
+        "Checkpoint": {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The turn's number, from 1; turn 0 is the branch's base and has no ref."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "git_ref": {
+              "type": "string"
+            },
+            "after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint the turn started from: `Some(0)` for the base, the\nrewound-to checkpoint after a rewind, `None` when not recorded."
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The harness session when the turn ended."
+            },
+            "files_changed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Against the branch's base."
+            },
+            "insertions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SandboxSnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The provider snapshot taken with this checkpoint, when the branch\nkept its sandbox and the provider could; see\n`docs/sandbox-snapshots.md`."
+            }
+          },
+          "required": [
+            "turn",
+            "commit",
+            "git_ref",
+            "files_changed",
+            "insertions",
+            "deletions"
+          ],
+          "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SandboxSnapshot": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "`microsandbox` or `substrate`."
+            },
+            "handle": {
+              "type": "string",
+              "description": "The provider's name for it: a paused sandbox, or a checkpoint\nreference such as a Substrate tag."
+            },
+            "scope": {
+              "$ref": "#/$defs/SandboxScope"
+            },
+            "consistency": {
+              "$ref": "#/$defs/SandboxConsistency"
+            },
+            "method": {
+              "$ref": "#/$defs/SnapshotMethod"
+            }
+          },
+          "required": [
+            "provider",
+            "handle",
+            "scope",
+            "consistency",
+            "method"
+          ],
+          "description": "The provider snapshot a checkpoint took, on\n[`crate::Checkpoint::sandbox`]."
+        },
+        "SandboxScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Memory, processes and disk."
+            },
+            {
+              "type": "string",
+              "const": "disk",
+              "description": "The disk only; a restore boots it fresh."
+            }
+          ],
+          "description": "What a snapshot captured: [`SnapshotScope`] as recorded."
+        },
+        "SandboxConsistency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "crash",
+              "description": "Taken without the workload's cooperation."
+            },
+            {
+              "type": "string",
+              "const": "application",
+              "description": "At a point the workload reached deliberately."
+            }
+          ],
+          "description": "[`Consistency`] as recorded."
+        },
+        "SnapshotMethod": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "live_branch",
+              "description": "A paused child of the branch's sandbox (live branch), branched\nagain for each new sandbox."
+            },
+            {
+              "type": "string",
+              "const": "checkpoint",
+              "description": "A provider checkpoint (Substrate: suspend and a tag), from which new\nsandboxes are created."
+            }
+          ],
+          "description": "How a provider snapshot was taken, and so how a sandbox is branched\nfrom it."
+        },
+        "SessionContinuity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "native"
+                }
+              },
+              "required": [
+                "mode",
+                "session"
+              ],
+              "description": "The harness's own session is resumed (a rewind) or forked (a fork):\nit ended exactly at that checkpoint."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "mode",
+                "turns",
+                "reason"
+              ],
+              "description": "A fresh session, whose first prompt carries a generated summary of\nthese turns, because the native session could not continue from the\ncheckpoint, for `reason`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "description": "A fresh session with no summary: nothing ran before the checkpoint\n(turn 0, the base)."
+            }
+          ],
+          "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
+        },
+        "PullRequestActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IssueLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "issue_linked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch works on this issue; its pull request closes it."
+            },
+            {
+              "$ref": "#/$defs/CheckRun",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "checked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's check ran on its candidate, in a temporary worktree."
+            },
+            {
+              "$ref": "#/$defs/Pushed",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "pushed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The candidate was pushed to a git remote."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "opened"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A pull request was created for the branch."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "updated"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's existing pull request was updated."
+            },
+            {
+              "$ref": "#/$defs/PullRequestObservation",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "observed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "What the forge said about the pull request, recorded when it\nchanged."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "via": {
+                  "type": "string",
+                  "description": "`steer` into a running turn, or `send` as a new turn."
+                },
+                "summary": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "One line per piece, for the log."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_delivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "via",
+                "summary"
+              ],
+              "description": "Feedback (failed CI checks, review comments) was sent into the\nbranch, each piece named by a key so it is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_undelivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "reason"
+              ],
+              "description": "Feedback recorded as delivered did not reach the branch after all;\nits keys are delivered again later."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "watch_stopped"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "`by pr --watch` stopped following the pull request."
+            }
+          ],
+          "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
+        },
+        "IssueLink": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "title"
+          ],
+          "description": "An issue a branch works on."
+        },
+        "CheckRun": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "passed": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "type": "boolean",
+              "default": false
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The end of its combined output, at most 4096 bytes.",
+              "default": ""
+            }
+          },
+          "required": [
+            "commit",
+            "argv",
+            "passed"
+          ],
+          "description": "A check run on one commit; see [`Branch::verify_candidate`]."
+        },
+        "Pushed": {
+          "type": "object",
+          "properties": {
+            "remote": {
+              "type": "string",
+              "description": "The git remote's name (or URL)."
+            },
+            "remote_branch": {
+              "type": "string",
+              "description": "The branch on the remote, without `refs/heads/`."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "forced": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "remote",
+            "remote_branch",
+            "commit"
+          ],
+          "description": "A candidate pushed to a git remote."
+        },
+        "PullRequestRef": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string",
+              "description": "Its head: the branch on the remote."
+            },
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its base, when `by pr` set one.",
+              "default": null
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "head"
+          ],
+          "description": "A pull request as `by pr` last opened or updated it."
+        },
+        "CiSummary": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failing": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The names of the failed checks.",
+              "default": []
+            }
+          },
+          "required": [
+            "passed",
+            "failed",
+            "pending",
+            "skipped"
+          ],
+          "description": "The pull request's CI checks, counted by outcome."
+        },
+        "PullRequestObservation": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "description": "`open`, `merged` or `closed`."
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            },
+            "head_commit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the pull request's head is at.",
+              "default": null
+            },
+            "review_decision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's review decision: `approved`, `changes_requested`,\n`review_required`, or none.",
+              "default": null
+            },
+            "mergeable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`mergeable`, `conflicting` or `unknown`.",
+              "default": null
+            },
+            "merge_state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's merge state: `clean`, `blocked`, `behind`, `dirty`,\n`unstable`, `has_hooks`, `draft` or `unknown`.",
+              "default": null
+            },
+            "ci": {
+              "$ref": "#/$defs/CiSummary"
+            },
+            "unresolved_threads": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Review threads not yet resolved.",
+              "default": 0
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "state",
+            "ci"
+          ],
+          "description": "What was observed of a pull request at one moment."
+        },
+        "SandboxEvent": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "origin": {
+                  "$ref": "#/$defs/SandboxOrigin"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "origin"
+              ],
+              "description": "The turn's sandbox, and where it came from."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox"
+              ],
+              "description": "Paused and recorded when the turn ended, for the next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "not_kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "reason"
+              ],
+              "description": "Destroyed when the turn ended although it was to be kept."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "branch": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "evicted"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch"
+              ],
+              "description": "Another branch's kept sandbox, destroyed to stay within\n`max_paused`: the least recently used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "event": {
+                  "type": "string",
+                  "const": "released"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "handle",
+                "turn"
+              ],
+              "description": "A checkpoint's provider snapshot, released to keep the newest\n`snapshots`, or with its branch's sandbox."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "no_snapshot"
+                }
+              },
+              "required": [
+                "event",
+                "turn",
+                "reason"
+              ],
+              "description": "No provider snapshot was taken with checkpoint `turn`."
+            }
+          ],
+          "description": "What happened to a branch's sandbox, as [`Activity::Sandbox`]."
+        },
+        "SandboxOrigin": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "Created fresh; `reason` says why a kept or branched one was not\nused, when one was wanted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "const": "resumed"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "The branch's own sandbox, kept since its last turn, resumed."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branched"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "turn",
+                "method"
+              ],
+              "description": "Branched from `branch`'s provider snapshot at checkpoint `turn`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "prepared"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "method"
+              ],
+              "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            }
+          ],
+          "description": "Where a turn's sandbox came from."
         }
       }
     },
@@ -10033,6 +12406,135 @@
               ],
               "additionalProperties": false,
               "description": "Inbox messages reached this branch's turn, and by which path; see\n`docs/delegation.md#delivery`. Each message is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "workspace": {
+                  "$ref": "#/$defs/WorkspaceReport"
+                }
+              },
+              "required": [
+                "workspace"
+              ],
+              "additionalProperties": false,
+              "description": "A phase of the branch's workspace lifecycle ran: files copied into\nits new worktree, setup before its first turn, or teardown at its\nremoval. See [`TaskOptions::workspace`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/$defs/Checkpoint"
+                }
+              },
+              "required": [
+                "checkpoint"
+              ],
+              "additionalProperties": false,
+              "description": "A turn ended and its worktree was recorded as a checkpoint ref; see\n`docs/checkpoints.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rewound": {
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "The checkpoint the branch was at, when known.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "to": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "description": "The commit the branch and its worktree were reset to.",
+                      "type": "string"
+                    },
+                    "session": {
+                      "description": "How the branch's next turn continues the conversation.",
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "to",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "rewound"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was rewound to an earlier (or, after a rewind, a later)\ncheckpoint by [`Branch::rewind`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "forked_at": {
+                  "type": "object",
+                  "properties": {
+                    "branch": {
+                      "type": "string"
+                    },
+                    "turn": {
+                      "type": "integer",
+                      "format": "uint32",
+                      "minimum": 0
+                    },
+                    "commit": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "$ref": "#/$defs/SessionContinuity"
+                    }
+                  },
+                  "required": [
+                    "branch",
+                    "turn",
+                    "commit",
+                    "session"
+                  ]
+                }
+              },
+              "required": [
+                "forked_at"
+              ],
+              "additionalProperties": false,
+              "description": "This branch was forked from another's checkpoint by\n[`Branch::fork_at`]; recorded on the new branch before its turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "pull_request": {
+                  "$ref": "#/$defs/PullRequestActivity"
+                }
+              },
+              "required": [
+                "pull_request"
+              ],
+              "additionalProperties": false,
+              "description": "A step towards a pull request: an issue linked, a check run, a push,\na pull request opened or observed, feedback delivered. See\n[`PullRequestActivity`] and `docs/pull-requests.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sandbox": {
+                  "$ref": "#/$defs/SandboxEvent"
+                }
+              },
+              "required": [
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -11031,6 +13533,969 @@
             }
           ],
           "description": "How [`Activity::MessagesDelivered`] messages reached a turn. Serialized\nas an object tagged by `path`, such as\n`{\"path\": \"steer\", \"steer\": 3, \"boundary\": \"codex_turn_steer\"}`.\n\n`boundary` names the protocol boundary the message actually landed at,\nper harness (Straitjacket's relay names an equivalent boundary for its\nown capsules; see `docs/comparison.md`): `\"turn_start\"` for every\nprofile's turn start, or a driver-specific name such as\n`\"claude_next_model_call\"`, `\"codex_turn_steer\"`, `\"pi_steer\"` or\n`\"acp_session_steering\"` for a steer, from\n[`branchyard_harness::Driver::steer_boundary`]. Old rows recorded before\nthis field existed deserialize with `\"not_recorded\"`, never a guess."
+        },
+        "WorkspaceReport": {
+          "type": "object",
+          "properties": {
+            "phase": {
+              "$ref": "#/$defs/WorkspacePhase"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The commands that ran, in order, up to and including one that failed."
+            },
+            "copied": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths copied, relative to the repository root; a directory a glob\nmatched is named once for everything copied under it."
+            },
+            "refused": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths or globs not copied, each with why."
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The last command's exit code; `None` when it was killed or never\nstarted."
+            },
+            "output": {
+              "type": "string",
+              "description": "The commands' combined standard output and error, at most its last\n[`OUTPUT_TAIL`] bytes."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it failed when no exit code says so: a timeout, a cancel, a\ncommand that could not start, scripts denied on this yard."
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The branch's reserved port, as the commands saw it."
+            },
+            "ran_in": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RanIn"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the commands ran: on this host, or in the sandbox the\nbranch's harness runs in."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
+            }
+          },
+          "required": [
+            "phase",
+            "ok"
+          ],
+          "description": "What one phase of a branch's workspace lifecycle did."
+        },
+        "WorkspacePhase": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "copy",
+              "description": "Untracked files copied into the new worktree."
+            },
+            {
+              "type": "string",
+              "const": "setup",
+              "description": "The setup commands, before the first turn."
+            },
+            {
+              "type": "string",
+              "const": "teardown",
+              "description": "The teardown commands, at removal."
+            },
+            {
+              "type": "string",
+              "const": "run",
+              "description": "A named run script, from `by workspace run`."
+            }
+          ],
+          "description": "Which part of the lifecycle an [`Activity::Workspace`] event reports."
+        },
+        "RanIn": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "host",
+              "description": "On this host, in the worktree."
+            },
+            {
+              "type": "string",
+              "const": "sandbox",
+              "description": "In the branch's sandbox, through its provider."
+            }
+          ],
+          "description": "Where a workspace phase's commands ran."
+        },
+        "Checkpoint": {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The turn's number, from 1; turn 0 is the branch's base and has no ref."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "git_ref": {
+              "type": "string"
+            },
+            "after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint the turn started from: `Some(0)` for the base, the\nrewound-to checkpoint after a rewind, `None` when not recorded."
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The harness session when the turn ended."
+            },
+            "files_changed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Against the branch's base."
+            },
+            "insertions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SandboxSnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The provider snapshot taken with this checkpoint, when the branch\nkept its sandbox and the provider could; see\n`docs/sandbox-snapshots.md`."
+            }
+          },
+          "required": [
+            "turn",
+            "commit",
+            "git_ref",
+            "files_changed",
+            "insertions",
+            "deletions"
+          ],
+          "description": "A turn's checkpoint: the branch's commit when the turn ended, kept as the\nref `refs/branchyard/<branch>/<incarnation>/turn-<N>`."
+        },
+        "SandboxSnapshot": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "`microsandbox` or `substrate`."
+            },
+            "handle": {
+              "type": "string",
+              "description": "The provider's name for it: a paused sandbox, or a checkpoint\nreference such as a Substrate tag."
+            },
+            "scope": {
+              "$ref": "#/$defs/SandboxScope"
+            },
+            "consistency": {
+              "$ref": "#/$defs/SandboxConsistency"
+            },
+            "method": {
+              "$ref": "#/$defs/SnapshotMethod"
+            }
+          },
+          "required": [
+            "provider",
+            "handle",
+            "scope",
+            "consistency",
+            "method"
+          ],
+          "description": "The provider snapshot a checkpoint took, on\n[`crate::Checkpoint::sandbox`]."
+        },
+        "SandboxScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Memory, processes and disk."
+            },
+            {
+              "type": "string",
+              "const": "disk",
+              "description": "The disk only; a restore boots it fresh."
+            }
+          ],
+          "description": "What a snapshot captured: [`SnapshotScope`] as recorded."
+        },
+        "SandboxConsistency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "crash",
+              "description": "Taken without the workload's cooperation."
+            },
+            {
+              "type": "string",
+              "const": "application",
+              "description": "At a point the workload reached deliberately."
+            }
+          ],
+          "description": "[`Consistency`] as recorded."
+        },
+        "SnapshotMethod": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "live_branch",
+              "description": "A paused child of the branch's sandbox (live branch), branched\nagain for each new sandbox."
+            },
+            {
+              "type": "string",
+              "const": "checkpoint",
+              "description": "A provider checkpoint (Substrate: suspend and a tag), from which new\nsandboxes are created."
+            }
+          ],
+          "description": "How a provider snapshot was taken, and so how a sandbox is branched\nfrom it."
+        },
+        "SessionContinuity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "native"
+                }
+              },
+              "required": [
+                "mode",
+                "session"
+              ],
+              "description": "The harness's own session is resumed (a rewind) or forked (a fork):\nit ended exactly at that checkpoint."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "mode",
+                "turns",
+                "reason"
+              ],
+              "description": "A fresh session, whose first prompt carries a generated summary of\nthese turns, because the native session could not continue from the\ncheckpoint, for `reason`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "description": "A fresh session with no summary: nothing ran before the checkpoint\n(turn 0, the base)."
+            }
+          ],
+          "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
+        },
+        "PullRequestActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IssueLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "issue_linked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch works on this issue; its pull request closes it."
+            },
+            {
+              "$ref": "#/$defs/CheckRun",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "checked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's check ran on its candidate, in a temporary worktree."
+            },
+            {
+              "$ref": "#/$defs/Pushed",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "pushed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The candidate was pushed to a git remote."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "opened"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A pull request was created for the branch."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "updated"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch's existing pull request was updated."
+            },
+            {
+              "$ref": "#/$defs/PullRequestObservation",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "observed"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "What the forge said about the pull request, recorded when it\nchanged."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "via": {
+                  "type": "string",
+                  "description": "`steer` into a running turn, or `send` as a new turn."
+                },
+                "summary": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "One line per piece, for the log."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_delivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "via",
+                "summary"
+              ],
+              "description": "Feedback (failed CI checks, review comments) was sent into the\nbranch, each piece named by a key so it is delivered once."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "feedback_undelivered"
+                }
+              },
+              "required": [
+                "kind",
+                "keys",
+                "reason"
+              ],
+              "description": "Feedback recorded as delivered did not reach the branch after all;\nits keys are delivered again later."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "watch_stopped"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "`by pr --watch` stopped following the pull request."
+            }
+          ],
+          "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
+        },
+        "IssueLink": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "title"
+          ],
+          "description": "An issue a branch works on."
+        },
+        "CheckRun": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "passed": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "type": "boolean",
+              "default": false
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The end of its combined output, at most 4096 bytes.",
+              "default": ""
+            }
+          },
+          "required": [
+            "commit",
+            "argv",
+            "passed"
+          ],
+          "description": "A check run on one commit; see [`Branch::verify_candidate`]."
+        },
+        "Pushed": {
+          "type": "object",
+          "properties": {
+            "remote": {
+              "type": "string",
+              "description": "The git remote's name (or URL)."
+            },
+            "remote_branch": {
+              "type": "string",
+              "description": "The branch on the remote, without `refs/heads/`."
+            },
+            "commit": {
+              "type": "string"
+            },
+            "forced": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "remote",
+            "remote_branch",
+            "commit"
+          ],
+          "description": "A candidate pushed to a git remote."
+        },
+        "PullRequestRef": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string",
+              "description": "Its head: the branch on the remote."
+            },
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its base, when `by pr` set one.",
+              "default": null
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "head"
+          ],
+          "description": "A pull request as `by pr` last opened or updated it."
+        },
+        "CiSummary": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "failing": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The names of the failed checks.",
+              "default": []
+            }
+          },
+          "required": [
+            "passed",
+            "failed",
+            "pending",
+            "skipped"
+          ],
+          "description": "The pull request's CI checks, counted by outcome."
+        },
+        "PullRequestObservation": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "url": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "description": "`open`, `merged` or `closed`."
+            },
+            "draft": {
+              "type": "boolean",
+              "default": false
+            },
+            "head_commit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the pull request's head is at.",
+              "default": null
+            },
+            "review_decision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's review decision: `approved`, `changes_requested`,\n`review_required`, or none.",
+              "default": null
+            },
+            "mergeable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`mergeable`, `conflicting` or `unknown`.",
+              "default": null
+            },
+            "merge_state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub's merge state: `clean`, `blocked`, `behind`, `dirty`,\n`unstable`, `has_hooks`, `draft` or `unknown`.",
+              "default": null
+            },
+            "ci": {
+              "$ref": "#/$defs/CiSummary"
+            },
+            "unresolved_threads": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Review threads not yet resolved.",
+              "default": 0
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "state",
+            "ci"
+          ],
+          "description": "What was observed of a pull request at one moment."
+        },
+        "SandboxEvent": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "origin": {
+                  "$ref": "#/$defs/SandboxOrigin"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "origin"
+              ],
+              "description": "The turn's sandbox, and where it came from."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox"
+              ],
+              "description": "Paused and recorded when the turn ended, for the next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "not_kept"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "reason"
+              ],
+              "description": "Destroyed when the turn ended although it was to be kept."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "branch": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "evicted"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch"
+              ],
+              "description": "Another branch's kept sandbox, destroyed to stay within\n`max_paused`: the least recently used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "event": {
+                  "type": "string",
+                  "const": "released"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "handle",
+                "turn"
+              ],
+              "description": "A checkpoint's provider snapshot, released to keep the newest\n`snapshots`, or with its branch's sandbox."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "const": "no_snapshot"
+                }
+              },
+              "required": [
+                "event",
+                "turn",
+                "reason"
+              ],
+              "description": "No provider snapshot was taken with checkpoint `turn`."
+            }
+          ],
+          "description": "What happened to a branch's sandbox, as [`Activity::Sandbox`]."
+        },
+        "SandboxOrigin": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "Created fresh; `reason` says why a kept or branched one was not\nused, when one was wanted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "const": "resumed"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "description": "The branch's own sandbox, kept since its last turn, resumed."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branched"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "turn",
+                "method"
+              ],
+              "description": "Branched from `branch`'s provider snapshot at checkpoint `turn`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "prepared"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "method"
+              ],
+              "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            }
+          ],
+          "description": "Where a turn's sandbox came from."
         }
       }
     },

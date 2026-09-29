@@ -65,6 +65,9 @@ pub fn read_layer(path: &Path) -> Result<ProjectConfig, ConfigError> {
         fs::read_to_string(path).map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
     let mut parsed =
         config::parse(&text).map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
+    parsed
+        .check_layer(config::Layer::of(path))
+        .map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
     parsed.resolve_paths(path.parent().unwrap_or(Path::new(".")), home().as_deref());
     Ok(parsed)
 }

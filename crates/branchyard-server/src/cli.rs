@@ -249,6 +249,10 @@ struct Flags {
     /// Do not log requests
     #[arg(short, long)]
     quiet: bool,
+    /// Log lines on stderr as pretty text or one JSON object each (default:
+    /// BRANCHYARD_LOG_FORMAT, else pretty)
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    log_format: Option<crate::logging::LogFormat>,
     /// Load and check the configuration as serving would, print any warnings, and exit
     /// without serving or writing a file
     #[arg(long)]
@@ -586,6 +590,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.allow_delegation = partial.allow_delegation || flags.allow_delegation;
     config.by_path = flags.by_path.or(partial.by_path);
     config.allow_unapproved_tools = partial.allow_unapproved_tools || flags.allow_unapproved_tools;
+    config.allow_workspace_scripts = partial.allow_workspace_scripts;
     config.secrets = partial.secrets;
     config
         .secrets
@@ -658,25 +663,41 @@ fn check_flags(flags: Flags) -> Result<Vec<String>, String> {
     Ok(warnings)
 }
 
-/// Wait for SIGINT or SIGTERM.
-async fn signal() {
+/// SIGINT and SIGTERM, which both shut the server down the same way.
+/// Registered before the server starts, so one that arrives during startup
+/// is kept rather than lost (a container's PID 1 ignores a signal it has no
+/// handler for, and `docker stop` then waits for its timeout) and stops the
+/// server as soon as it is serving.
+struct Signals {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
+    streams: Option<(tokio::signal::unix::Signal, tokio::signal::unix::Signal)>,
+}
+
+impl Signals {
+    /// Needs a Tokio runtime.
+    fn new() -> Signals {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let streams = signal(SignalKind::interrupt())
+                .and_then(|interrupt| Ok((interrupt, signal(SignalKind::terminate())?)))
+                .ok();
+            Signals { streams }
         }
+        #[cfg(not(unix))]
+        Signals {}
     }
-    #[cfg(not(unix))]
-    {
+
+    /// The next SIGINT or SIGTERM (Ctrl-C where there are no signals).
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        if let Some((interrupt, terminate)) = &mut self.streams {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
         let _ = tokio::signal::ctrl_c().await;
     }
 }
@@ -714,7 +735,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     }
     // `--quiet` keeps meaning "warn and above" for anyone who does not set
     // `BRANCHYARD_LOG`/`RUST_LOG` themselves; see `logging::init`.
-    crate::logging::init(flags.quiet);
+    crate::logging::init(flags.quiet, flags.log_format);
     let (config, warnings) = match build(flags) {
         Ok(built) => built,
         Err(error) => {
@@ -747,6 +768,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     };
     let repos: Vec<String> = config.repos.iter().map(|(n, _)| n.clone()).collect();
     let code = runtime.block_on(async move {
+        let mut signals = Signals::new();
         let running = match serve::start(config).await {
             Ok(running) => running,
             Err(error) => {
@@ -773,12 +795,12 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
         }
         let handle = running.handle();
         tokio::spawn(async move {
-            signal().await;
+            signals.recv().await;
             tracing::info!(
                 "shutting down; running operations may finish (signal again to stop waiting)"
             );
             handle.shutdown();
-            signal().await;
+            signals.recv().await;
             handle.force();
         });
         let stopped = running.wait().await;
@@ -862,6 +884,13 @@ mod tests {
         let flags = parse(&args("-c conf.json -q")).unwrap();
         assert_eq!(flags.config, Some(PathBuf::from("conf.json")));
         assert!(flags.quiet);
+        assert_eq!(flags.log_format, None);
+        let json = parse(&args("--log-format json")).unwrap();
+        assert_eq!(json.log_format, Some(crate::logging::LogFormat::Json));
+        assert!(parse(&args("--log-format yaml"))
+            .unwrap_err()
+            .contains("invalid value 'yaml' for '--log-format <FORMAT>'"));
+        assert!(help("by serve").contains("--log-format <FORMAT>"));
         assert!(help("by worker").contains("Usage: by worker [OPTIONS]"));
         assert!(help("branchyard-server").contains("--webhook-events <KINDS>"));
         command("branchyard-server").debug_assert();

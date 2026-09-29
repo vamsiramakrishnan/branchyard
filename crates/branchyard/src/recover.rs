@@ -137,12 +137,22 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     }
     let steps = store.backend().steps(&row.branch, row.turn)?;
     let step = |name: &str| steps.iter().find(|s| s.step == name);
+    // A rewind is finished from its journaled intent, never left half-done.
+    if let Some(rewind) = step(crate::checkpoint::STEP_REWIND) {
+        let recovery = crate::checkpoint::recover(yard, lease, record, &rewind.intent, why)?;
+        crate::graph::settled(yard, &row.branch, None);
+        return Ok(Some(recovery));
+    }
     // What carries the start's marker: a harness spawned just before the
     // engine stopped, whose pid was never recorded, and anything that left
     // the harness's process group.
-    if let Some(start) = step(STEP_START) {
-        let here = start.intent.get("host").and_then(Value::as_str) == Some(proc::host());
-        if let (true, Some(marker)) = (here, start.intent.get("spawn").and_then(Value::as_str)) {
+    // The workspace setup's commands carry a marker of their own.
+    for started in [step(STEP_START), step(crate::workspace::STEP_SETUP)]
+        .into_iter()
+        .flatten()
+    {
+        let here = started.intent.get("host").and_then(Value::as_str) == Some(proc::host());
+        if let (true, Some(marker)) = (here, started.intent.get("spawn").and_then(Value::as_str)) {
             for pid in proc::kill_marked(marker) {
                 if !killed.contains(&pid) {
                     killed.push(pid);
@@ -150,10 +160,25 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
             }
         }
     }
-    let sandbox = step(placement::STEP_SANDBOX)
-        .and_then(|s| placement::recover(yard, &record, &s.intent))
+    // Setup cut short: the record still says it is not ready, so the
+    // branch's next turn runs it again from the start.
+    let setup = match step(crate::workspace::STEP_SETUP) {
+        Some(s) if s.outcome.is_none() => {
+            "; its workspace setup was cut short and runs again, from the start, before its \
+             next turn"
+        }
+        _ => "",
+    };
+    let parked = step(crate::snapshots::STEP_PARK).and_then(|s| s.outcome.clone());
+    let mut sandbox = step(placement::STEP_SANDBOX)
+        .and_then(|s| placement::recover(yard, &record, &s.intent, parked.as_ref()))
         .map(|done| format!("; {done}"))
         .unwrap_or_default();
+    if let Some(done) =
+        crate::snapshots::recover_steps(yard, &record, step(crate::snapshots::STEP_SNAPSHOT))
+    {
+        sandbox.push_str(&format!("; {done}"));
+    }
     let ended = step(STEP_TURN_END).and_then(|s| {
         let end = serde_json::from_value::<End>(s.outcome.clone()?).ok()?;
         let submitted = s.intent.get("submitted").and_then(Value::as_bool)?;
@@ -191,7 +216,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
                 Some(_) => "the prompt was submitted",
                 None => "the harness was started",
             };
-            let reason = format!("{why} before {started}; the turn never ran{sandbox}");
+            let reason = format!("{why} before {started}; the turn never ran{setup}{sandbox}");
             (
                 End::Lost {
                     reason: reason.clone(),

@@ -11,7 +11,6 @@ sources, license and modification, or when a vendored source changed since
 the translation was reviewed.
 """
 import difflib
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -33,11 +32,6 @@ def verify_herdr():
     print("Verified Herdr extraction provenance patch.")
 
 
-def blob(path):
-    data = path.read_bytes()
-    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
-
-
 def _header(path):
     header = "".join(line for line in path.read_text().splitlines(True)[:20]
                      if line.startswith("//"))
@@ -57,13 +51,16 @@ def verify_scion():
             if needed not in header:
                 problems.append(f"{derived['path']}: its header does not name {needed!r}")
         for source, recorded in derived["from"].items():
-            vendored = ROOT / prefix / source
             if source not in header:
                 problems.append(f"{derived['path']}: its header does not name {source}")
             entry = lock.get(f"{prefix}/{source}")
             if entry is None or entry["commit"] != commit:
                 problems.append(f"{source} is not vendored at {commit}")
-            elif blob(vendored) != recorded:
+            # The upstream pin, not the file: a local patch to the vendored
+            # copy (vendor.patches.json) does not change what the
+            # translation follows, and verify_vendor.py checks an
+            # unpatched file against its pin.
+            elif entry["git_blob"] != recorded:
                 problems.append(f"{source} changed upstream since {derived['path']} was "
                                 "translated: review the change, port it, and record the new blob")
     # A `rewritten` file was once translated line for line from these

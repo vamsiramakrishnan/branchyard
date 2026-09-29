@@ -309,34 +309,59 @@ impl Drop for LocalProcess {
     }
 }
 
-/// Command names of the live (non-zombie) members of process group `pgid`.
-/// Empty when `ps` is unavailable.
+/// Command names of the live (non-zombie) members of process group `pgid`:
+/// from `/proc` on Linux, else from `ps`. Empty when neither is available.
 fn group_members(pgid: u32) -> Vec<String> {
-    let Ok(listing) = Command::new("ps")
-        .args(["-A", "-o", "pgid=", "-o", "stat=", "-o", "comm="])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return Vec::new();
-    };
-    let pgid = pgid.to_string();
-    String::from_utf8_lossy(&listing.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let (group, stat) = (fields.next()?, fields.next()?);
-            let name = fields.collect::<Vec<_>>().join(" ");
-            (group == pgid && !stat.starts_with('Z') && !name.is_empty()).then_some(name)
-        })
-        .collect()
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .filter_map(|pid| {
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                // `pid (comm) state ppid pgrp ...`; comm may hold spaces
+                // and parentheses, so split around its last `)`.
+                let open = stat.find('(')?;
+                let close = stat.rfind(')')?;
+                let name = stat.get(open + 1..close)?.to_owned();
+                let mut fields = stat.get(close + 1..)?.split_whitespace();
+                let state = fields.next()?;
+                let group = fields.nth(1)?.parse::<u32>().ok()?;
+                (group == pgid && state != "Z" && !name.is_empty()).then_some(name)
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Ok(listing) = Command::new("ps")
+            .args(["-A", "-o", "pgid=", "-o", "stat=", "-o", "comm="])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return Vec::new();
+        };
+        let pgid = pgid.to_string();
+        String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let (group, stat) = (fields.next()?, fields.next()?);
+                let name = fields.collect::<Vec<_>>().join(" ");
+                (group == pgid && !stat.starts_with('Z') && !name.is_empty()).then_some(name)
+            })
+            .collect()
+    }
 }
 
+/// SIGKILL the whole process group, through killpg(2).
 fn signal_group(pgid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pgid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    if let Some(pgid) = i32::try_from(pgid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+    }
 }

@@ -8,7 +8,10 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use crate::graph::GraphBackend;
-use crate::state::{now_ms, Acquired, Backend, Begun, Fence, Owner, ProcessRow, Record};
+use crate::state::{
+    now_ms, Acquired, Backend, Begun, Fence, Owner, PortBackend, ProcessRow, Record,
+    SandboxBackend, SandboxKind, SandboxRow,
+};
 use crate::storage::StorageBackend;
 use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
 
@@ -21,8 +24,16 @@ pub(crate) struct Opened {
     pub storage: Arc<dyn StorageBackend>,
     /// The same backend, as [`GraphBackend`]: see [`crate::graph`].
     pub graph: Arc<dyn GraphBackend>,
+    /// The same backend, as [`PortBackend`].
+    pub ports: Arc<dyn PortBackend>,
     /// Opens another handle on the same store, as a second engine would.
     pub again: Box<dyn Fn() -> Arc<dyn Backend>>,
+    /// [`Opened::again`], as [`PortBackend`].
+    pub again_ports: Box<dyn Fn() -> Arc<dyn PortBackend> + Send + Sync>,
+    /// The same backend, as [`SandboxBackend`].
+    pub sandboxes: Arc<dyn SandboxBackend>,
+    /// [`Opened::again`], as [`SandboxBackend`].
+    pub again_sandboxes: Box<dyn Fn() -> Arc<dyn SandboxBackend> + Send + Sync>,
     _cleanup: Box<dyn std::any::Any>,
 }
 
@@ -51,11 +62,23 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn Backend>
     };
+    let open_ports = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn PortBackend>
+    };
+    let open_sandboxes = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn SandboxBackend>
+    };
     Opened {
         backend: shared.clone(),
         storage: shared.clone(),
-        graph: shared,
+        graph: shared.clone(),
+        ports: shared.clone(),
+        sandboxes: shared,
         again: Box::new(open),
+        again_ports: Box::new(open_ports),
+        again_sandboxes: Box::new(open_sandboxes),
         _cleanup: Box::new(Temp(dir)),
     }
 }
@@ -78,10 +101,26 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
         let scope = scope.clone();
         move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn Backend>
     };
+    let open_ports = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn PortBackend>
+    };
+    let open_sandboxes = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || {
+            Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn SandboxBackend>
+        }
+    };
     Some(Opened {
         backend: shared.clone(),
         storage: shared.clone(),
-        graph: shared,
+        graph: shared.clone(),
+        ports: shared.clone(),
+        sandboxes: shared,
+        again_ports: Box::new(open_ports),
+        again_sandboxes: Box::new(open_sandboxes),
         again: Box::new(open),
         _cleanup: Box::new(()),
     })
@@ -1353,11 +1392,150 @@ pub(crate) fn graph(s: Opened) {
     assert_eq!(graph.dependencies("root").unwrap().len(), 1);
 }
 
+/// Branch ports: stable per branch, never shared, `usable` honored,
+/// wrapping within the range, released when the branch is deleted, and
+/// distinct when several engines reserve at once.
+pub(crate) fn ports(s: Opened) {
+    let (low, high) = crate::workspace::PORT_RANGE;
+    let ports = &s.ports;
+    let branches = &s.backend;
+    let a = ports.reserve_port("a", low + 100, &|_| true).unwrap();
+    assert!((low..=high).contains(&a));
+    assert_eq!(ports.reserve_port("a", low + 7, &|_| true).unwrap(), a);
+    assert_eq!(ports.port("a").unwrap(), Some(a));
+    assert_eq!(ports.port("b").unwrap(), None);
+    let b = ports.reserve_port("b", a, &|p| p % 5 == 0).unwrap();
+    assert_ne!(a, b);
+    assert_eq!(b % 5, 0, "only a usable port is reserved");
+    let c = ports.reserve_port("c", high, &|_| true).unwrap();
+    assert!((low..=high).contains(&c) && c != a && c != b);
+    let none = ports.reserve_port("d", low, &|_| false);
+    assert!(matches!(none, Err(Error::State(_))), "{none:?}");
+    assert_eq!(ports.port("d").unwrap(), None);
+
+    // Deleting the branch releases its port.
+    assert!(branches.reserve("a", &owner("o")).unwrap());
+    granted(branches.acquire(&record("a"), &owner("o"), TTL).unwrap());
+    branches.delete("a").unwrap();
+    assert_eq!(ports.port("a").unwrap(), None);
+    assert_eq!(ports.port("b").unwrap(), Some(b));
+
+    // Engines reserving at once from the same start get distinct ports.
+    let barrier = Barrier::new(6);
+    let reserved: Vec<u16> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..6)
+            .map(|i| {
+                let handle = (s.again_ports)();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    handle
+                        .reserve_port(&format!("racer-{i}"), low + 500, &|_| true)
+                        .unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let distinct: std::collections::BTreeSet<u16> = reserved.iter().copied().collect();
+    assert_eq!(distinct.len(), reserved.len(), "{reserved:?}");
+    assert!(!distinct.contains(&b) && !distinct.contains(&c));
+}
+
+/// Kept sandboxes and sandbox snapshots: rows survive a reopen, list per
+/// branch and per provider least recently used first, are replaced by key,
+/// are taken by exactly one of several engines racing for them, and go
+/// with their branch.
+pub(crate) fn sandboxes(s: Opened) {
+    let rows = &s.sandboxes;
+    let row = |branch: &str, kind, name: &str, used_ms| SandboxRow {
+        branch: branch.into(),
+        incarnation: 7,
+        kind,
+        provider: "microsandbox".into(),
+        name: name.into(),
+        turn: Some(2),
+        detail: r#"{"method":"live_branch"}"#.into(),
+        used_ms,
+    };
+    rows.put_sandbox(&row("a", SandboxKind::Kept, "by-a-1", 30))
+        .unwrap();
+    rows.put_sandbox(&row("b", SandboxKind::Kept, "by-b-1", 10))
+        .unwrap();
+    rows.put_sandbox(&row("a", SandboxKind::Snapshot, "by-a-1-turn-2", 20))
+        .unwrap();
+    let other = SandboxRow {
+        provider: "substrate:http://x/yard/t".into(),
+        ..row("c", SandboxKind::Kept, "by-c-1", 5)
+    };
+    rows.put_sandbox(&other).unwrap();
+    // Replaced by key, not duplicated.
+    let moved = SandboxRow {
+        turn: None,
+        ..row("a", SandboxKind::Kept, "by-a-1", 40)
+    };
+    rows.put_sandbox(&moved).unwrap();
+    let again = (s.again_sandboxes)();
+    let of_a = again.sandboxes("a").unwrap();
+    assert_eq!(
+        of_a,
+        vec![
+            row("a", SandboxKind::Snapshot, "by-a-1-turn-2", 20),
+            moved.clone()
+        ]
+    );
+    let kept: Vec<String> = again
+        .sandboxes_of(SandboxKind::Kept, "microsandbox")
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(kept, ["by-b-1", "by-a-1"], "least recently used first");
+    assert_eq!(
+        again
+            .sandboxes_of(SandboxKind::Kept, "substrate:http://x/yard/t")
+            .unwrap(),
+        vec![other]
+    );
+
+    // Several engines take one row at once: exactly one gets it.
+    let barrier = Barrier::new(4);
+    let taken: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let handle = (s.again_sandboxes)();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    handle
+                        .take_sandbox("b", SandboxKind::Kept, "by-b-1")
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(taken.iter().filter(|t| **t).count(), 1, "{taken:?}");
+    assert_eq!(
+        rows.take_sandbox("b", SandboxKind::Kept, "by-b-1").unwrap(),
+        None
+    );
+
+    // The branch's rows go with it.
+    let branches = &s.backend;
+    assert!(branches.reserve("a", &owner("o")).unwrap());
+    granted(branches.acquire(&record("a"), &owner("o"), TTL).unwrap());
+    branches.delete("a").unwrap();
+    assert!(rows.sandboxes("a").unwrap().is_empty());
+    assert_eq!(rows.sandboxes("c").unwrap().len(), 1);
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
-            concurrent_appends, races, storage, messages, delivery, graph);
+            concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes);
     };
     ($open:expr; $($check:ident),*) => {
         $(

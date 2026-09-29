@@ -495,6 +495,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+ "tokio",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -632,9 +642,11 @@ dependencies = [
  "branchyard-sandbox",
  "branchyard-substrate",
  "branchyard-workspace",
+ "glob",
  "postgres",
  "rcgen",
  "rusqlite",
+ "rustix",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -668,6 +680,7 @@ dependencies = [
  "branchyard-server",
  "branchyard-setup",
  "branchyard-substrate",
+ "branchyard-workspace",
  "clap",
  "clap_complete",
  "clap_mangen",
@@ -687,6 +700,7 @@ dependencies = [
 name = "branchyard-client"
 version = "0.0.1"
 dependencies = [
+ "backon",
  "blake3",
  "branchyard",
  "httparse",
@@ -778,6 +792,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-sandbox",
+ "rustix",
  "serde_json",
 ]
 
@@ -790,9 +805,11 @@ name = "branchyard-server"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "backon",
  "blake3",
  "branchyard",
  "branchyard-client",
+ "branchyard-setup",
  "clap",
  "futures-util",
  "hex",
@@ -823,6 +840,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-provision",
+ "glob",
  "hex",
  "schemars 1.2.2",
  "serde",
@@ -839,6 +857,7 @@ dependencies = [
  "branchyard-bridge",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-workspace",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
@@ -853,6 +872,9 @@ dependencies = [
 [[package]]
 name = "branchyard-workspace"
 version = "0.0.1"
+dependencies = [
+ "rustix",
+]
 
 [[package]]
 name = "bs58"

@@ -106,6 +106,9 @@ pub struct TaskArgs {
     pub provision: Option<branchyard::Provisioning>,
     /// `--instructions FILE`, read when the command runs.
     pub instructions: Option<String>,
+    /// `--issue URL|#N|N`: the GitHub issue that is the task; see
+    /// `crate::pr::issue_task`.
+    pub issue: Option<String>,
 }
 
 /// Options for `--provider microsandbox`.
@@ -115,6 +118,20 @@ pub struct SandboxArgs {
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
     pub pass_env: Vec<String>,
+    /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`.
+    pub lifecycle: LifecycleArgs,
+    /// `--live-branch`: declare the SDK's pause, live branch and full
+    /// snapshots (unqualified).
+    pub live_branch: bool,
+}
+
+/// What happens to a sandboxed branch's sandbox between turns; see
+/// docs/sandbox-snapshots.md.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LifecycleArgs {
+    pub keep: Option<branchyard::SandboxKeep>,
+    pub snapshots: Option<u32>,
+    pub max_paused: Option<u32>,
 }
 
 /// Options for `--provider substrate`.
@@ -141,6 +158,8 @@ pub struct SubstrateArgs {
     /// `--substrate-insecure`: allow `http://` or `ws://` to hosts other
     /// than loopback.
     pub insecure: bool,
+    /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`.
+    pub lifecycle: LifecycleArgs,
 }
 
 /// Options of `by spawn`.
@@ -281,6 +300,12 @@ pub struct Globals {
         value_parser = non_blank
     )]
     pub ca_file: Option<String>,
+    /// No bell or desktop notification when a branch needs you or ends
+    #[arg(long, global = true, display_order = 5)]
+    pub no_notify: bool,
+    /// `[notify]` from the configuration files.
+    #[arg(skip)]
+    pub notify: branchyard_setup::config::Notify,
 }
 
 /// Unset each of [`GLOBAL_ENV`] that is set but blank, so that clap, which
@@ -357,6 +382,36 @@ const FORK_EXAMPLES: &str = "\
 Examples:
   by fork fix-the-flaky-test \"try a lock instead\" -n with-lock";
 
+const REWIND_EXAMPLES: &str = "\
+Each turn ends with a checkpoint, refs/branchyard/<branch>/<incarnation>/turn-<N>;
+`by show` lists them. Later checkpoints are kept until the branch is removed, so
+a rewind is undone by rewinding forward again. The next turn resumes the
+harness's session only if it ended at that checkpoint; otherwise it starts a
+fresh session with a summary of the turns before, and says so.
+
+Examples:
+  by rewind fix-the-flaky-test --to 2
+  by rewind fix-the-flaky-test --to 4 --yes      # forward again
+  by fork fix-the-flaky-test --at 1 \"try a lock instead\"";
+
+const TRY_EXAMPLES: &str = "\
+Applies the branch's diff against its base to this checkout, only when it is
+clean, and records what it changed under .branchyard/try/ so --off restores
+it exactly. Local mode only.
+
+Examples:
+  by try fix-the-flaky-test
+  by try --status
+  by try other-attempt      # swaps: the first try is turned off
+  by try --off";
+
+const COMPARE_EXAMPLES: &str = "\
+Examples:
+  by compare --fan speed-up-the-parser
+  by compare a b c --check --json
+  by compare --fan speed-up-the-parser --diff speed-up-the-parser-codex speed-up-the-parser-claude-code
+  by compare --fan speed-up-the-parser --pick speed-up-the-parser-codex --discard-others";
+
 const SPAWN_EXAMPLES: &str = "\
 Examples (inside a harness, the parent is the harness's own branch):
   by spawn \"write the tokenizer\" --harness codex --budget-usd 1 --wait
@@ -366,7 +421,36 @@ Examples (inside a harness, the parent is the harness's own branch):
 const MERGE_EXAMPLES: &str = "\
 Examples:
   by merge fix-the-flaky-test
-  by merge fix-the-flaky-test --into release";
+  by merge fix-the-flaky-test --into release
+  by merge fix-the-flaky-test --rm";
+
+const WORKSPACE_EXAMPLES: &str = "\
+Examples:
+  by workspace show
+  by workspace trust
+  by workspace run fix-the-flaky-test dev
+  by workspace show fix-the-flaky-test --json
+
+[workspace] in branchyard.toml copies untracked files into each new worktree,
+runs setup before its first turn and teardown when it is removed. Its scripts
+never run until you trust them; see docs/workspace.md.";
+
+const PR_EXAMPLES: &str = "\
+Examples:
+  by pr fix-the-flaky-test                       # push, then open or update the PR
+  by pr fix-the-flaky-test --draft --base release
+  by pr fix-the-flaky-test --watch --yes         # feed CI failures and reviews back
+  by run --issue 42 --check \"cargo test\" && by pr issue-42-parser-crash
+
+Needs the GitHub CLI, gh, logged in (gh auth login). The branch must be
+ready and its check must pass on its candidate; --allow-not-ready and
+--allow-failing-check override that. Local mode only. See docs/pull-requests.md.";
+
+const OPEN_EXAMPLES: &str = "\
+Examples:
+  by open fix-the-flaky-test
+  by open fix-the-flaky-test --editor cursor
+  cd \"$(by open fix-the-flaky-test --print)\"";
 
 const WATCH_EXAMPLES: &str = "\
 Examples:
@@ -415,7 +499,12 @@ pub enum Command {
     /// Run a task on a new branch
     #[command(display_order = 100, after_help = RUN_EXAMPLES)]
     Run {
-        /// The task for the harness; quote it
+        /// The task for the harness; quote it (with --issue, added to the issue's text)
+        #[arg(
+            required_unless_present = "issue",
+            default_value = "",
+            hide_default_value = true
+        )]
         prompt: String,
         #[command(flatten)]
         task: Checked<RunFlags>,
@@ -423,7 +512,12 @@ pub enum Command {
     /// Run a task on several harnesses in parallel, then compare
     #[command(display_order = 101, after_help = FAN_EXAMPLES)]
     Fan {
-        /// The task for every harness; quote it
+        /// The task for every harness; quote it (with --issue, added to the issue's text)
+        #[arg(
+            required_unless_present = "issue",
+            default_value = "",
+            hide_default_value = true
+        )]
         prompt: String,
         /// Harnesses to run on, one branch each
         #[arg(
@@ -464,6 +558,10 @@ pub enum Command {
         /// Start a new session if the harness cannot fork its conversation
         #[arg(long)]
         fresh_session: bool,
+        /// Fork from the branch's checkpoint N (0 is its base) instead of its candidate; the
+        /// session forks only if it ended there, else a fresh one starts with a summary
+        #[arg(long, value_name = "N", conflicts_with = "fresh_session")]
+        at: Option<u32>,
         #[command(flatten)]
         task: Checked<ForkFlags>,
     },
@@ -481,6 +579,18 @@ pub enum Command {
         /// Local branch to merge into (default: the current branch)
         #[arg(long, value_name = "TARGET")]
         into: Option<String>,
+        /// Then remove the branch, running its workspace teardown, as `by rm` does
+        #[arg(long)]
+        rm: bool,
+    },
+    /// A branch's workspace: trust its scripts, show it, or run a named script in it
+    #[command(display_order = 110, subcommand_required = true, after_help = WORKSPACE_EXAMPLES)]
+    Workspace {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: WorkspaceAction,
     },
     /// Remove a branch's worktree and record
     #[command(display_order = 106)]
@@ -489,6 +599,78 @@ pub enum Command {
         /// Keep the credential files provisioning wrote in a home a fork still uses
         #[arg(long)]
         keep_credentials: bool,
+    },
+    /// Reset a branch to one of its per-turn checkpoints
+    #[command(display_order = 107, after_help = REWIND_EXAMPLES)]
+    Rewind {
+        branch: String,
+        /// The checkpoint to go to: a turn number, or 0 for the branch's base
+        #[arg(long, value_name = "N")]
+        to: u32,
+        /// Do not ask for confirmation
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a branch's changes to this checkout to try them; --off restores it
+    #[command(display_order = 108, after_help = TRY_EXAMPLES)]
+    Try {
+        /// The branch to try (another branch's try is turned off first)
+        #[arg(required_unless_present_any = ["off", "status"], conflicts_with_all = ["off", "status"])]
+        branch: Option<String>,
+        /// Restore the checkout to what it held before the try
+        #[arg(long, conflicts_with = "status")]
+        off: bool,
+        /// Show what is being tried
+        #[arg(long)]
+        status: bool,
+        /// With --off: restore even files changed since the try, discarding those changes
+        #[arg(long, conflicts_with_all = ["branch", "status"])]
+        force: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare attempts side by side, and pick one to merge
+    #[command(display_order = 109, after_help = COMPARE_EXAMPLES)]
+    Compare {
+        /// Branches to compare
+        #[arg(required_unless_present_any = ["fan", "diff"], conflicts_with = "fan")]
+        branches: Vec<String>,
+        /// Compare the branches one `by fan` started, named NAME-<harness>
+        #[arg(long, value_name = "NAME")]
+        fan: Option<String>,
+        /// Run each branch's check on its exact candidate, in a private worktree
+        #[arg(long)]
+        check: bool,
+        /// Show the diff from attempt A's candidate to B's
+        #[arg(long, num_args = 2, value_names = ["A", "B"], conflicts_with = "pick")]
+        diff: Option<Vec<String>>,
+        /// Merge this attempt (its check must pass, as with by merge)
+        #[arg(long, value_name = "BRANCH")]
+        pick: Option<String>,
+        /// Local branch to merge the pick into (default: the current branch)
+        #[arg(long, value_name = "TARGET", requires = "pick")]
+        into: Option<String>,
+        /// After the pick merges, remove the other attempts
+        #[arg(long, requires = "pick")]
+        discard_others: bool,
+        /// Do not ask before removing the others
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Push a ready branch and open or update its GitHub pull request; --watch feeds CI and
+    /// reviews back
+    #[command(display_order = 110, after_help = PR_EXAMPLES)]
+    Pr {
+        branch: String,
+        #[command(flatten)]
+        pr: Checked<PrFlags>,
     },
     /// List branches
     #[command(display_order = 200)]
@@ -504,6 +686,10 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
+        /// Ask GitHub (through gh) for the branch's pull request state first, instead of
+        /// showing the last one recorded (local mode)
+        #[arg(long)]
+        refresh: bool,
     },
     /// Show a branch's candidate diff against its base
     #[command(display_order = 202)]
@@ -537,10 +723,27 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Open a branch's worktree in your editor
+    #[command(display_order = 206, after_help = OPEN_EXAMPLES)]
+    Open {
+        branch: String,
+        /// The editor: code, cursor, zed, windsurf, subl, idea, nvim, ... or a command line
+        /// (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR")]
+        editor: Option<String>,
+        /// Print the worktree's path instead of opening it
+        #[arg(long, conflicts_with = "editor")]
+        print: bool,
+    },
     /// Delegate to a new child branch of this branch
     #[command(display_order = 300, after_help = SPAWN_EXAMPLES)]
     Spawn {
-        /// The child's task; quote it
+        /// The child's task; quote it (with --issue, added to the issue's text)
+        #[arg(
+            required_unless_present = "issue",
+            default_value = "",
+            hide_default_value = true
+        )]
         prompt: String,
         #[command(flatten)]
         spawn: Checked<SpawnFlags>,
@@ -754,6 +957,30 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: ConfigAction,
+    },
+}
+
+/// `by workspace ...`; see docs/workspace.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceAction {
+    /// The effective [workspace], where it came from, whether it is trusted, and ports
+    Show {
+        /// One branch's workspace: what it was created with, its setup, its port
+        branch: Option<String>,
+    },
+    /// Trust this repository's [workspace] scripts as they are now
+    Trust,
+    /// Forget the trust decision for this repository
+    Untrust,
+    /// Run a named [workspace.run] script in a branch's worktree
+    Run {
+        /// The branch (default: $BRANCHYARD_BRANCH inside a harness), then the
+        /// script's name (default: the one marked default, or the only one)
+        #[arg(value_name = "BRANCH [NAME]", num_args = 0..=2)]
+        args: Vec<String>,
+        /// Start it in the background, output to a log file, and return
+        #[arg(long)]
+        detach: bool,
     },
 }
 
@@ -1404,6 +1631,51 @@ pub struct Launch {
     microsandbox: MicrosandboxFlags,
     #[command(flatten)]
     substrate: SubstrateFlags,
+    #[command(flatten)]
+    lifecycle: LifecycleFlags,
+}
+
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Sandbox lifecycle (--provider microsandbox or substrate)")]
+pub struct LifecycleFlags {
+    /// Between turns: destroy the sandbox (default) or pause it for the next turn
+    #[arg(long, value_name = "WHAT", value_parser = keep_sandbox)]
+    keep_sandbox: Option<branchyard::SandboxKeep>,
+    /// Checkpoints that also keep a provider snapshot, with a kept sandbox (default 3)
+    #[arg(long, value_name = "N")]
+    sandbox_snapshots: Option<u32>,
+    /// Kept sandboxes of this provider in the repository before the least recently used
+    /// is destroyed (default 4)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    max_paused: Option<u32>,
+}
+
+impl LifecycleFlags {
+    fn first_given(&self) -> Option<&'static str> {
+        [
+            ("keep-sandbox", self.keep_sandbox.is_some()),
+            ("sandbox-snapshots", self.sandbox_snapshots.is_some()),
+            ("max-paused", self.max_paused.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(flag, given)| given.then_some(flag))
+    }
+
+    fn args(&self) -> LifecycleArgs {
+        LifecycleArgs {
+            keep: self.keep_sandbox,
+            snapshots: self.sandbox_snapshots,
+            max_paused: self.max_paused,
+        }
+    }
+}
+
+fn keep_sandbox(value: &str) -> Result<branchyard::SandboxKeep, String> {
+    match value {
+        "pause" => Ok(branchyard::SandboxKeep::Pause),
+        "destroy" => Ok(branchyard::SandboxKeep::Destroy),
+        other => Err(format!("{other:?} is not pause or destroy")),
+    }
 }
 
 #[derive(Args, Clone, Debug, Default, PartialEq)]
@@ -1418,6 +1690,9 @@ pub struct MicrosandboxFlags {
     /// Sandbox memory in MiB
     #[arg(long, value_name = "MIB", value_parser = memory)]
     memory: Option<u32>,
+    /// Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM)
+    #[arg(long)]
+    live_branch: bool,
 }
 
 #[derive(Args, Clone, Debug, Default, PartialEq)]
@@ -1497,6 +1772,7 @@ impl Launch {
                 ("image", micro.image.is_some()),
                 ("cpus", micro.cpus.is_some()),
                 ("memory", micro.memory.is_some()),
+                ("live-branch", micro.live_branch),
             ]
             .into_iter()
             .find_map(|(flag, given)| given.then_some(flag));
@@ -1512,6 +1788,14 @@ impl Launch {
         if matches!(chosen, None | Some(ProviderArg::Local)) && self.pass_env.is_some() {
             return Err("--pass-env needs --provider microsandbox or substrate".into());
         }
+        if matches!(chosen, None | Some(ProviderArg::Local)) {
+            if let Some(flag) = self.lifecycle.first_given() {
+                return Err(format!(
+                    "--{flag} needs --provider microsandbox or substrate"
+                ));
+            }
+        }
+        let lifecycle = self.lifecycle.args();
         let pass_env = self.pass_env.map(|list| list.0).unwrap_or_default();
         match chosen {
             None => {}
@@ -1527,6 +1811,8 @@ impl Launch {
                     cpus: self.microsandbox.cpus,
                     memory_mib: self.microsandbox.memory,
                     pass_env,
+                    lifecycle,
+                    live_branch: self.microsandbox.live_branch,
                 });
             }
             Some(ProviderArg::Substrate) => {
@@ -1550,6 +1836,7 @@ impl Launch {
                     client_key: s.substrate_client_key,
                     router_ca: s.substrate_router_ca,
                     insecure: s.substrate_insecure,
+                    lifecycle,
                 });
             }
         }
@@ -1638,6 +1925,9 @@ pub struct RunFlags {
     /// Harness or profile ID (default: claude-code)
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
+    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
+    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    issue: Option<String>,
     /// Branch name (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
@@ -1663,6 +1953,7 @@ impl Flags for RunFlags {
             harness: self.harness,
             name: self.name,
             base: self.base,
+            issue: self.issue,
             ..TaskArgs::default()
         };
         self.limits.apply(&mut task);
@@ -1681,6 +1972,9 @@ pub struct FanFlags {
     /// Branch name prefix (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
+    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
+    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    issue: Option<String>,
     /// Base revision (default: HEAD)
     #[arg(short, long, value_name = "REV")]
     base: Option<String>,
@@ -1701,6 +1995,7 @@ impl Flags for FanFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: None,
+            issue: self.issue,
             name: self.name,
             base: self.base,
             limits: self.limits,
@@ -1768,6 +2063,7 @@ impl Flags for ForkFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: None,
+            issue: None,
             name: self.name,
             base: None,
             limits: self.limits,
@@ -1806,6 +2102,7 @@ impl Flags for ReincarnateFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: self.harness,
+            issue: None,
             name: self.name,
             base: None,
             limits: self.limits,
@@ -1831,6 +2128,9 @@ pub struct SpawnFlags {
     /// Harness or profile ID (default: claude-code)
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
+    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
+    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    issue: Option<String>,
     /// Branch name (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
@@ -1880,6 +2180,7 @@ impl Flags for SpawnFlags {
             harness: self.harness,
             name: self.name,
             base: self.base,
+            issue: self.issue,
             ..TaskArgs::default()
         };
         self.limits.apply(&mut task);
@@ -1894,6 +2195,133 @@ impl Flags for SpawnFlags {
             depends_on: self.graph.depends_on.map(|list| list.0).unwrap_or_default(),
             after: self.graph.after.map(Into::into).unwrap_or_default(),
             bindings: self.graph.bindings,
+            json: self.json,
+        })
+    }
+}
+
+/// `by pr`, checked.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PrArgs {
+    /// The git remote to push to.
+    pub git_remote: String,
+    /// The branch on the remote (default: the branch's git branch).
+    pub head: Option<String>,
+    pub base: Option<String>,
+    pub title: Option<String>,
+    pub draft: bool,
+    /// `-R OWNER/REPO` for gh, when it cannot tell from the remotes.
+    pub gh_repo: Option<String>,
+    pub force: bool,
+    pub no_check: bool,
+    pub allow_failing_check: bool,
+    pub allow_not_ready: bool,
+    pub watch: bool,
+    /// First poll interval of `--watch`; it backs off to ten times this.
+    pub interval: Duration,
+    /// `--max-rounds`: stop after delivering feedback this many times.
+    pub max_rounds: Option<u32>,
+    /// Limits and permissions for the turns `--watch` starts.
+    pub task: TaskArgs,
+    pub json: bool,
+}
+
+/// `by pr`'s options.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct PrFlags {
+    /// The git remote to push to (not --remote, which names a Branchyard server)
+    #[arg(long, value_name = "NAME", default_value = "origin", value_parser = non_blank)]
+    git_remote: String,
+    /// The branch to push to on the remote (default: the branch's git branch, by/<name>)
+    #[arg(long, value_name = "BRANCH", value_parser = non_blank)]
+    head: Option<String>,
+    /// The pull request's base branch (default: the repository's default branch)
+    #[arg(long, value_name = "BRANCH", value_parser = non_blank)]
+    base: Option<String>,
+    /// The pull request's title (default: the issue's title, or the prompt's first line); on
+    /// an update, only when given
+    #[arg(long, value_parser = non_blank)]
+    title: Option<String>,
+    /// Open the pull request as a draft (when creating it)
+    #[arg(long)]
+    draft: bool,
+    /// The GitHub repository, when gh cannot tell it from the git remotes
+    #[arg(long, value_name = "OWNER/REPO", value_parser = non_blank)]
+    gh_repo: Option<String>,
+    /// Replace the remote branch even if the candidate does not descend from it
+    #[arg(long)]
+    force: bool,
+    /// Push without running the branch's check on its candidate
+    #[arg(long, help_heading = "Readiness")]
+    no_check: bool,
+    /// Push even though the branch's check fails on its candidate
+    #[arg(long, help_heading = "Readiness", conflicts_with = "no_check")]
+    allow_failing_check: bool,
+    /// Push a branch that is not ready (failed, interrupted, at a limit) if it has a candidate
+    #[arg(long, help_heading = "Readiness")]
+    allow_not_ready: bool,
+    /// Then follow the pull request: send failed CI checks and new review comments into the
+    /// branch, and push again after each turn, until it is merged or closed
+    #[arg(long, help_heading = "Watching")]
+    watch: bool,
+    /// With --watch: the first time between polls, backing off to ten times it
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value = "30",
+        value_parser = watch_interval,
+        requires = "watch",
+        help_heading = "Watching"
+    )]
+    interval: Duration,
+    /// With --watch: stop after delivering feedback N times
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = positive_turns,
+        requires = "watch",
+        help_heading = "Watching"
+    )]
+    max_rounds: Option<u32>,
+    /// Print JSON
+    #[arg(long, conflicts_with = "watch")]
+    json: bool,
+    #[command(flatten)]
+    perms: Perms,
+    /// Launch this instead of the profile's executable for --watch's turns, for development and
+    /// testing
+    #[arg(long, value_name = "CMD", value_parser = command_argv, help_heading = "Launch")]
+    command: Option<Argv>,
+}
+
+impl Flags for PrFlags {
+    type Output = PrArgs;
+    fn check(self) -> Result<PrArgs, String> {
+        let mut task = TaskArgs {
+            command: self.command.map(|argv| argv.0),
+            ..TaskArgs::default()
+        };
+        if !self.watch && (self.perms != Perms::default() || task.command.is_some()) {
+            return Err(
+                "permissions and --command apply to the turns --watch starts; add --watch".into(),
+            );
+        }
+        self.perms.apply(&mut task);
+        Ok(PrArgs {
+            git_remote: self.git_remote,
+            head: self.head,
+            base: self.base,
+            title: self.title,
+            draft: self.draft,
+            gh_repo: self.gh_repo,
+            force: self.force,
+            no_check: self.no_check,
+            allow_failing_check: self.allow_failing_check,
+            allow_not_ready: self.allow_not_ready,
+            watch: self.watch,
+            interval: self.interval,
+            max_rounds: self.max_rounds,
+            task,
             json: self.json,
         })
     }
@@ -2347,6 +2775,7 @@ mod tests {
                 unapproved_tools: false,
                 provision: None,
                 instructions: None,
+                issue: None,
             }
         );
     }
@@ -2455,7 +2884,35 @@ mod tests {
                 cpus: Some(2),
                 memory_mib: Some(4096),
                 pass_env: vec!["ANTHROPIC_API_KEY".into(), "GH_TOKEN".into()],
+                ..SandboxArgs::default()
             })
+        );
+        let kept = self::task(
+            "run go --provider microsandbox --image a --live-branch --keep-sandbox pause \
+             --sandbox-snapshots 2 --max-paused 6",
+        );
+        assert_eq!(
+            kept.sandbox,
+            Some(SandboxArgs {
+                image: "a".into(),
+                lifecycle: LifecycleArgs {
+                    keep: Some(branchyard::SandboxKeep::Pause),
+                    snapshots: Some(2),
+                    max_paused: Some(6),
+                },
+                live_branch: true,
+                ..SandboxArgs::default()
+            })
+        );
+        assert!(err("run go --keep-sandbox pause")
+            .contains("--keep-sandbox needs --provider microsandbox or substrate"));
+        assert!(
+            err("run go --provider microsandbox --image a --keep-sandbox forever")
+                .contains("not pause or destroy")
+        );
+        assert!(err("run go --live-branch").contains("--live-branch needs --provider microsandbox"));
+        assert!(
+            err("run go --provider microsandbox --image a --max-paused 0").contains("--max-paused")
         );
         assert!(!task.local);
         let task = self::task("fork b go --provider local");
@@ -2703,6 +3160,7 @@ mod tests {
             branch,
             prompt,
             fresh_session,
+            at: None,
             task,
         } = parse_str("fork flaky 'try another way' --fresh-session --name alt").unwrap()
         else {
@@ -2726,6 +3184,76 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_try_and_compare_commands() {
+        assert_eq!(
+            parse_str("rewind b --to 2 -y").unwrap(),
+            Command::Rewind {
+                branch: "b".into(),
+                to: 2,
+                yes: true,
+                json: false
+            }
+        );
+        assert!(err("rewind b").contains("--to <N>"));
+        let Command::Fork { at, .. } = parse_str("fork b next --at 0").unwrap() else {
+            panic!("not fork")
+        };
+        assert_eq!(at, Some(0));
+        assert_eq!(
+            kind("fork b next --at 1 --fresh-session"),
+            ErrorKind::ArgumentConflict
+        );
+        assert!(matches!(
+            parse_str("try --off --force").unwrap(),
+            Command::Try {
+                branch: None,
+                off: true,
+                force: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_str("try b").unwrap(),
+            Command::Try {
+                branch: Some(_),
+                off: false,
+                status: false,
+                ..
+            }
+        ));
+        assert_eq!(kind("try"), ErrorKind::MissingRequiredArgument);
+        assert_eq!(kind("try b --off"), ErrorKind::ArgumentConflict);
+        assert_eq!(kind("try b --force"), ErrorKind::ArgumentConflict);
+        assert_eq!(kind("try --force"), ErrorKind::MissingRequiredArgument);
+        let Command::Compare {
+            branches,
+            fan,
+            diff,
+            pick,
+            discard_others,
+            ..
+        } = parse_str("compare --fan speed --pick speed-codex --discard-others").unwrap()
+        else {
+            panic!("not compare")
+        };
+        assert!(branches.is_empty() && discard_others);
+        assert_eq!(
+            (fan.as_deref(), pick.as_deref(), diff),
+            (Some("speed"), Some("speed-codex"), None)
+        );
+        assert!(matches!(
+            parse_str("compare --diff a b").unwrap(),
+            Command::Compare { diff: Some(pair), .. } if pair == ["a", "b"]
+        ));
+        assert_eq!(kind("compare"), ErrorKind::MissingRequiredArgument);
+        assert_eq!(kind("compare a --fan x"), ErrorKind::ArgumentConflict);
+        assert_eq!(
+            kind("compare a --discard-others"),
+            ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
     fn inspection_commands() {
         assert_eq!(parse_str("ls").unwrap(), Command::Ls { json: false });
         assert_eq!(parse_str("ls --json").unwrap(), Command::Ls { json: true });
@@ -2733,7 +3261,8 @@ mod tests {
             parse_str("show b --json").unwrap(),
             Command::Show {
                 branch: "b".into(),
-                json: true
+                json: true,
+                refresh: false
             }
         );
         assert_eq!(
@@ -2769,14 +3298,16 @@ mod tests {
             parse_str("merge b").unwrap(),
             Command::Merge {
                 branch: "b".into(),
-                into: None
+                into: None,
+                rm: false
             }
         );
         assert_eq!(
             parse_str("merge b --into release").unwrap(),
             Command::Merge {
                 branch: "b".into(),
-                into: Some("release".into())
+                into: Some("release".into()),
+                rm: false
             }
         );
         assert_eq!(
@@ -2787,6 +3318,65 @@ mod tests {
             }
         );
         assert!(err("merge b --into").contains("a value is required for '--into <TARGET>'"));
+        assert_eq!(
+            parse_str("merge b --rm").unwrap(),
+            Command::Merge {
+                branch: "b".into(),
+                into: None,
+                rm: true
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_actions_parse_with_json_anywhere() {
+        let workspace = |line: &str| match parse_str(line).unwrap() {
+            Command::Workspace { json, action } => (json, action),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            workspace("workspace show"),
+            (false, WorkspaceAction::Show { branch: None })
+        );
+        assert_eq!(
+            workspace("workspace --json show b"),
+            (
+                true,
+                WorkspaceAction::Show {
+                    branch: Some("b".into())
+                }
+            )
+        );
+        assert_eq!(
+            workspace("workspace trust"),
+            (false, WorkspaceAction::Trust)
+        );
+        assert_eq!(
+            workspace("workspace untrust --json"),
+            (true, WorkspaceAction::Untrust)
+        );
+        assert_eq!(
+            workspace("workspace run b dev --detach"),
+            (
+                false,
+                WorkspaceAction::Run {
+                    args: vec!["b".into(), "dev".into()],
+                    detach: true
+                }
+            )
+        );
+        assert_eq!(
+            workspace("workspace run"),
+            (
+                false,
+                WorkspaceAction::Run {
+                    args: vec![],
+                    detach: false
+                }
+            )
+        );
+        assert!(err("workspace run a b c").contains("no more were expected"));
+        assert!(err("workspace").contains("Usage"));
     }
 
     #[test]
@@ -2878,9 +3468,11 @@ mod tests {
             remote: Some("http://h:1".into()),
             token_file: Some("t".into()),
             repo: Some("app".into()),
-            ca_file: None,
+            ..Globals::default()
         };
         assert_eq!(before.globals, expected);
+        let quiet = parse_from(split_words("by watch --no-notify").unwrap()).unwrap();
+        assert!(quiet.globals.no_notify);
         assert_eq!(before.command, Some(Command::Ls { json: true }));
         let after = parse_from(
             split_words("by ls --json --remote http://h:1 --repo app --token-file t").unwrap(),

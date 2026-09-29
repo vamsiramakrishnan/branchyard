@@ -11,6 +11,9 @@
 //!   the actor's identity files, stopped (with every process it started) on
 //!   suspend, revert and delete. Its attempt state lives in a per-actor
 //!   directory that survives suspend, as a root filesystem would.
+//! - Actors pause (`PauseActor`) and resume from a pause; a paused actor's
+//!   bridge is stopped like a suspended one's (process memory is not
+//!   modelled), and a paused actor cannot be tagged until it is suspended.
 //! - Tags copy a suspended actor's directory; an actor created from a tag
 //!   starts from that copy, with its own UID.
 //! - The router forwards `/actors/<atespace>/<actor>/<rest>` to the running
@@ -447,6 +450,20 @@ impl Control for Service {
         Ok(Response::new(pb::SuspendActorResponse {
             actor: Some(actor),
         }))
+    }
+
+    async fn pause_actor(
+        &self,
+        request: Request<pb::PauseActorRequest>,
+    ) -> Result<Response<pb::PauseActorResponse>, Status> {
+        let inner = self.0.clone();
+        let reference = request.into_inner().actor;
+        let actor = tokio::task::spawn_blocking(move || {
+            inner.transition("PauseActor", reference, pb::ActorState::Paused)
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))??;
+        Ok(Response::new(pb::PauseActorResponse { actor: Some(actor) }))
     }
 
     async fn revert_actor(

@@ -41,12 +41,12 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use branchyard_bridge::Endpoint;
 use branchyard_sandbox::{ExecSpec, Process, ProviderError};
+use branchyard_workspace::Git;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -56,18 +56,6 @@ const IDENTITY: [(&str, &str); 4] = [
     ("GIT_AUTHOR_EMAIL", "branchyard@localhost"),
     ("GIT_COMMITTER_NAME", "Branchyard"),
     ("GIT_COMMITTER_EMAIL", "branchyard@localhost"),
-];
-
-/// Variables that would point git at another repository.
-const SCRUBBED_ENV: &[&str] = &[
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_NAMESPACE",
-    "GIT_PREFIX",
 ];
 
 /// Why a transfer failed.
@@ -240,20 +228,17 @@ fn host_output(
     args: &[&str],
     env: &[(OsString, OsString)],
 ) -> Result<(bool, String, String), Error> {
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C");
-    for var in SCRUBBED_ENV {
-        command.env_remove(var);
+    // branchyard-workspace's `Git` scrubs the variables that would point
+    // git elsewhere; `env` then names this transfer's own index and object
+    // store.
+    let mut git = Git::new(dir).args(args);
+    for (key, value) in IDENTITY {
+        git = git.env(key, value);
     }
-    command.envs(IDENTITY).envs(env.iter().cloned());
-    let out = command
-        .output()
-        .map_err(|e| Error::Host(format!("could not run git: {e}")))?;
+    for (key, value) in env {
+        git = git.env(key, value);
+    }
+    let (out, _) = git.output().map_err(|e| Error::Host(e.to_string()))?;
     Ok((
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -714,6 +699,57 @@ fn advance(worktree: &Path, base: &str, head: &str) -> Result<(), Error> {
     // uncommitted changes, so a non-zero exit is expected.
     let _ = host_output(worktree, &["update-index", "-q", "--refresh"], &[]);
     Ok(())
+}
+
+/// Run in the actor by [`clear_for_push`]: `sh -c CLEAR sh WORKDIR HOME`.
+/// In the worktree's repository, every file git tracks or would track
+/// (untracked and not ignored) is removed, then the repository itself;
+/// ignored files, such as what a workspace setup installed, stay. The home
+/// is emptied.
+pub const CLEAR: &str = r#"w=$1 h=$2
+if [ -d "$w/.git" ]; then
+  cd "$w" || exit 1
+  git ls-files -c -o --exclude-standard | while IFS= read -r f; do rm -f -- "$f"; done
+  rm -rf .git
+fi
+if [ -n "$h" ] && [ "$h" != / ]; then rm -rf "$h"; fi
+exit 0"#;
+
+/// Make a resumed or branched actor ready for [`push`] again: its old
+/// worktree repository and the files git sees in it are removed (ignored
+/// files stay), and its home is removed. The actor needs `sh` and `git`.
+pub fn clear_for_push(endpoint: &Endpoint, workdir: &Path, home: &Path) -> Result<(), Error> {
+    let spec = ExecSpec {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            CLEAR.into(),
+            "sh".into(),
+            path_str(workdir)?.to_owned(),
+            path_str(home)?.to_owned(),
+        ],
+        cwd: PathBuf::from("/"),
+        env: BTreeMap::from([("LC_ALL".into(), "C".into())]),
+    };
+    let mut process = endpoint
+        .exec(&spec)
+        .map_err(|e| Error::Guest(format!("could not clear {}: {e}", workdir.display())))?;
+    drop(process.take_stdin());
+    let mut stderr = String::new();
+    let _ = process
+        .take_stderr()
+        .expect("stderr is piped")
+        .read_to_string(&mut stderr);
+    let status = process.wait()?;
+    process.teardown();
+    match status.success() {
+        true => Ok(()),
+        false => Err(Error::Guest(format!(
+            "clearing {} failed with {status}: {}",
+            workdir.display(),
+            stderr.trim()
+        ))),
+    }
 }
 
 /// Copy the host directory `from` to `to` in the actor, if it exists.

@@ -36,6 +36,16 @@
 //!   is set.
 //! - Anything about a real cluster. It is exercised only against the fake in
 //!   [`crate::fake`].
+//!
+//! Sandbox-level branching maps onto the `Control` API without a live fork:
+//! [`SandboxProvider::pause`] is `PauseActor` (the attempt is ended first),
+//! [`SandboxProvider::resume`] is `ResumeActor` and a new attempt,
+//! [`SandboxProvider::checkpoint`] suspends a paused actor (`SuspendActor`
+//! uploads its node-local snapshot) and tags it (`CreateTag`),
+//! [`SandboxProvider::branch`] creates a stopped actor from the tag
+//! (`CreateActor` with `source_tag`), and
+//! [`SandboxProvider::release_checkpoint`] deletes the tag. `branch_live`
+//! is not offered.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -757,6 +767,13 @@ impl SandboxProvider for SubstrateProvider {
         let handle = self
             .handle(name)?
             .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;
+        // A paused actor runs nothing; suspending uploads its node-local
+        // snapshot, which the tag then names.
+        if self.inspect(name)?.map(|i| i.state) == Some(SandboxState::Paused) {
+            let _ = self.end_attempt(name);
+            let paused = handle.clone();
+            self.block(async move |actors| actors.stop(&paused).await)?;
+        }
         // Tag names are DNS labels of at most 63 characters.
         let suffix = format!("-{}", unix_now().as_millis());
         let stem: String = name.chars().take(63 - suffix.len()).collect();
@@ -797,5 +814,47 @@ impl SandboxProvider for SubstrateProvider {
             name: spec.name.clone(),
             state: SandboxState::Stopped,
         })
+    }
+
+    /// End the current attempt, then `PauseActor`: the actor stays on its
+    /// node with its snapshot there. Pausing a paused actor succeeds.
+    fn pause(&self, name: &str) -> Result<(), ProviderError> {
+        let handle = self
+            .handle(name)?
+            .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;
+        if self.inspect(name)?.map(|i| i.state) == Some(SandboxState::Paused) {
+            return Ok(());
+        }
+        let _ = self.end_attempt(name);
+        self.block(async move |actors| actors.pause(&handle).await)
+    }
+
+    /// `ResumeActor` from a pause or a suspend, then a new attempt whose
+    /// bridge must answer.
+    fn resume(&self, name: &str) -> Result<SandboxInfo, ProviderError> {
+        let handle = self
+            .handle(name)?
+            .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;
+        let started = handle.clone();
+        self.block(async move |actors| actors.start(&started).await)?;
+        self.lock().insert(
+            name.to_owned(),
+            Live {
+                handle,
+                attempt: None,
+            },
+        );
+        self.begin_attempt(name, name)?;
+        self.wait_ready(name)?;
+        Ok(SandboxInfo {
+            name: name.to_owned(),
+            state: SandboxState::Running,
+        })
+    }
+
+    /// Delete the checkpoint's tag.
+    fn release_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ProviderError> {
+        let tag = checkpoint.reference.clone();
+        self.block(async move |actors| actors.delete_tag(&tag).await)
     }
 }

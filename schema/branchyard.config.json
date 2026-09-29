@@ -47,6 +47,28 @@
         }
       ],
       "description": "Options for `provider = \"microsandbox\"`."
+    },
+    "notify": {
+      "$ref": "#/$defs/Notify",
+      "description": "Telling you when a branch needs you or ends, from `by watch` and a\nwaiting `by run`, `by fan`, `by send` or `by fork`."
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What prepares each new branch's worktree and cleans up after it\n(docs/workspace.md). Project file only; its scripts run only once\nyou trust them (`by workspace trust`)."
+    },
+    "projects": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ProjectOverride"
+      },
+      "description": "Per-repository settings, keyed by the repository root's absolute\npath. User file only: `[projects.\"/src/app\".workspace]` replaces\nthat repository's own `[workspace]` for you."
     }
   },
   "title": "Branchyard configuration",
@@ -265,11 +287,185 @@
             "type": "string"
           },
           "description": "Variables to copy into the sandbox, by name."
+        },
+        "keep": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Between turns: `\"destroy\"` the microVM (the default) or `\"pause\"`\nit for the next turn. Pausing needs `live_branch`. See\ndocs/sandbox-snapshots.md.",
+          "pattern": "^(pause|destroy)$"
+        },
+        "snapshots": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "With a kept sandbox, checkpoints that also keep a snapshot (default 3)."
+        },
+        "max_paused": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Kept sandboxes per repository before the least recently used is\ndestroyed (default 4)."
+        },
+        "live_branch": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Use the SDK's pause, live branching and full snapshots: unqualified\nuntil they pass on a KVM host."
         }
       },
       "required": [
         "image"
       ]
+    },
+    "Notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Notify at all. Unset: yes; `--no-notify` turns it off for one command."
+        },
+        "desktop": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Also show a desktop notification through `notify-send` (Linux and\nother Unix) or `osascript` (macOS). Unset: no."
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotifyTerminal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to write to the terminal. Unset: `auto`."
+        }
+      },
+      "description": "`[notify]`: when a branch asks for permission or asks a question,\nstalls, fails, is interrupted or finishes."
+    },
+    "NotifyTerminal": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "auto",
+          "description": "A bell, and the desktop-notification escape this terminal is known\nto take: OSC 777 on foot, urxvt and VTE terminals, OSC 9 elsewhere."
+        },
+        {
+          "type": "string",
+          "const": "osc9",
+          "description": "A bell and OSC 9 (iTerm2, WezTerm, kitty, Ghostty, Windows Terminal)."
+        },
+        {
+          "type": "string",
+          "const": "osc777",
+          "description": "A bell and OSC 777 (foot, urxvt, VTE terminals such as GNOME Terminal, WezTerm)."
+        },
+        {
+          "type": "string",
+          "const": "bell",
+          "description": "Only a bell."
+        },
+        {
+          "type": "string",
+          "const": "none",
+          "description": "Nothing on the terminal (the desktop notification, if on, still runs)."
+        }
+      ],
+      "description": "The terminal side of a notification."
+    },
+    "WorkspaceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "copy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Globs, relative to the repository root, of untracked files copied\ninto each new worktree, such as `.env` or `.env.*`. Never outside\nthe repository; symbolic links are not copied."
+        },
+        "setup": {
+          "$ref": "#/$defs/Script",
+          "description": "Run in each new worktree before its first turn: one command or a\nlist, each with `sh -c`, stopping at the first that fails."
+        },
+        "run": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RunScript"
+          },
+          "description": "Named commands `by workspace run [BRANCH] [NAME]` runs in a\nbranch's worktree, such as a dev server on `$BRANCHYARD_PORT`."
+        },
+        "teardown": {
+          "$ref": "#/$defs/Script",
+          "description": "Run in the worktree when the branch is removed (`by rm`, `by merge\n--rm`), best-effort."
+        }
+      },
+      "description": "A branch's workspace lifecycle: `[workspace]`."
+    },
+    "Script": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "One command, or a list run in order."
+    },
+    "RunScript": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/Script",
+          "description": "One command or a list, run with `sh -c` in the branch's worktree."
+        },
+        "default": {
+          "type": "boolean",
+          "description": "What `by workspace run` runs when given no name; at most one."
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "description": "A named command: `[workspace.run.NAME]`."
+    },
+    "ProjectOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Replaces the repository's own `[workspace]` whole, for you, with no\ntrust step: it is your own file."
+        }
+      },
+      "description": "`[projects.\"<repository root>\"]` in the user file."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

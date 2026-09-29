@@ -13,7 +13,7 @@ docker run --rm -p 127.0.0.1:8421:8421 \
   branchyard-server serve --config /config/server.json --insecure-bind
 ```
 
-Multi-stage: `rust:1.90.0-bookworm` builds `by` (`cargo build --release --locked --features postgres -p branchyard-cli`; the `postgres` feature is needed for `--database`, used in `deploy/compose.yaml`), and the runtime stage is `debian:bookworm-slim` with only `ca-certificates`, `curl` (for the healthcheck) and `git` (every served repository is a git work tree) installed. The image runs as a dedicated non-root `branchyard` user, never root. `ENTRYPOINT` is `by serve`, so a bare `docker run branchyard-server --help` (no `serve`) will not do what it looks like; pass `serve`'s own flags directly, as above.
+Multi-stage: `rust:1.94.0-bookworm` builds `by` (`cargo build --release --locked --features postgres -p branchyard-cli`; the `postgres` feature is needed for `--database`, used in `deploy/compose.yaml`), and the runtime stage is `debian:bookworm-slim` with only `ca-certificates`, `curl` (for the healthcheck) and `git` (every served repository is a git work tree) installed. The image runs as a dedicated non-root `branchyard` user, never root. `ENTRYPOINT` is `by serve`, so a bare `docker run branchyard-server --help` (no `serve`) will not do what it looks like; pass `serve`'s own flags directly, as above.
 
 `HEALTHCHECK` polls `GET /healthz` (no token needed; the only unauthenticated route, `docs/server.md#authentication`) every 10 seconds.
 
@@ -39,6 +39,8 @@ docker compose -f deploy/compose.yaml up --build
 ```
 
 The server listens on `0.0.0.0:8421` **inside the compose network only** (nothing is published except `127.0.0.1:8421` on the host itself); `--insecure-bind` is needed because that address is not loopback (`docs/server.md`'s non-loopback rule). Put a real TLS-terminating reverse proxy in front before exposing this beyond the host, or configure `--tls-cert`/`--tls-key` on the server instead and drop `--insecure-bind`.
+
+**Stopping.** `docker stop` and `docker compose down` send SIGTERM, which `by serve` (the container's PID 1, through `exec`) handles like Ctrl-C: it stops taking work, drains connections and gives running operations `shutdown_grace_seconds` (60 by default), all within that period, then records what is still running as `interrupted` and exits 0. Docker kills the container 10 seconds after SIGTERM unless told otherwise, which would cut the grace period short and leave the records to the next start's recovery, so the compose files set `stop_grace_period: 75s`; with `docker run`, pass `--stop-timeout 75`. Keep it above the configured grace. A SIGTERM that arrives while the server is still starting is kept and stops it once it serves. See [the server reference](server.md#running-it).
 
 ## Configuration
 

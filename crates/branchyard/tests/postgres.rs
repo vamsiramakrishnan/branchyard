@@ -436,3 +436,163 @@ fn concurrent_resume_graph_on_one_database_starts_a_dependent_once() {
     }
     assert_eq!(prompts(&pg.yard, "second"), 1);
 }
+
+#[test]
+fn a_workspace_port_is_reserved_in_postgres_stable_and_released_on_removal() {
+    let Some(pg) = Pg::new() else { return };
+    let spec = branchyard::WorkspaceSpec {
+        setup: vec!["echo $BRANCHYARD_PORT > port.txt".into()],
+        teardown: vec!["echo $BRANCHYARD_PORT > $BRANCHYARD_ROOT/torn.txt".into()],
+        ..Default::default()
+    };
+    let options = branchyard::TaskOptions {
+        workspace: Some(spec),
+        ..pg.f.options()
+    };
+    let one = pg
+        .yard
+        .task("ENV BRANCHYARD_PORT")
+        .options(options.clone())
+        .name("ws-one")
+        .run()
+        .unwrap();
+    let two = pg
+        .yard
+        .task("ENV BRANCHYARD_PORT")
+        .options(options)
+        .name("ws-two")
+        .run()
+        .unwrap();
+    let port = pg.yard.workspace("ws-one").unwrap().port.unwrap();
+    assert_ne!(Some(port), pg.yard.workspace("ws-two").unwrap().port);
+    assert_eq!(
+        std::fs::read_to_string(one.info().worktree.join("port.txt"))
+            .unwrap()
+            .trim(),
+        port.to_string()
+    );
+    // Another engine on the database: the same port on the next turn.
+    let again = pg
+        .open()
+        .branch("ws-one")
+        .unwrap()
+        .send("ENV BRANCHYARD_PORT", pg.f.options())
+        .unwrap();
+    let said = text(&again.events().unwrap());
+    assert_eq!(said.matches(&format!("BRANCHYARD_PORT={port}")).count(), 2);
+    let report = pg
+        .yard
+        .remove_reporting("ws-one", &Default::default())
+        .unwrap()
+        .unwrap();
+    assert!(report.ok, "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(pg.f.root.join("torn.txt"))
+            .unwrap()
+            .trim(),
+        port.to_string()
+    );
+    assert!(pg.yard.workspace("ws-one").is_err());
+    assert!(pg.yard.workspace("ws-two").unwrap().ready);
+    drop(two);
+}
+
+/// A kept sandbox and its snapshots recorded in PostgreSQL: a second
+/// engine (another `Yard::open_postgres`) resumes the sandbox the first
+/// parked, forks from a snapshot the first took, and removal releases
+/// everything; the fake provider stands in for Microsandbox.
+#[test]
+fn kept_sandboxes_and_snapshots_are_recorded_in_postgres_across_engines() {
+    use branchyard::{
+        Provider, SandboxEvent, SandboxKeep, SandboxOptions, SandboxOrigin, SnapshotMethod,
+        TaskOptions,
+    };
+    use branchyard_sandbox::fake::FakeProvider;
+    let Some(pg) = Pg::new() else { return };
+    let fake = std::sync::Arc::new(FakeProvider::live(
+        Box::new(branchyard_runtime::LocalProvider::new()),
+        pg.f.dir.join("fake-provider"),
+    ));
+    let options = TaskOptions {
+        provider: Some(Provider::Microsandbox(SandboxOptions {
+            image: "registry.example/harness:1".into(),
+            keep: SandboxKeep::Pause,
+            ..SandboxOptions::default()
+        })),
+        policy: Policy::allow_all(),
+        ..pg.f.options()
+    };
+    pg.yard.use_sandbox_provider(fake.clone());
+    let first = pg
+        .yard
+        .task("SH printf one > \"$BY_FAKE_ROOTFS/marker\"")
+        .options(options.clone())
+        .name("pg-kept")
+        .run()
+        .unwrap();
+    assert!(
+        first
+            .events()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(&e.activity, Activity::Sandbox(event) if matches!(**event, SandboxEvent::Kept { .. }))),
+        "{:?}",
+        first.events()
+    );
+    let other = pg.open();
+    other.use_sandbox_provider(fake.clone());
+    let sent = other
+        .branch("pg-kept")
+        .unwrap()
+        .send("SH cat \"$BY_FAKE_ROOTFS/marker\"", options.clone())
+        .unwrap();
+    let origins: Vec<SandboxOrigin> = sent
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Sandbox(event) => match *event {
+                SandboxEvent::Started { origin, .. } => Some(origin),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(origins.last(), Some(&SandboxOrigin::Resumed));
+    assert!(text(&sent.events().unwrap()).contains("one"));
+    let fork = other
+        .branch("pg-kept")
+        .unwrap()
+        .fork_at(
+            1,
+            "SH cat \"$BY_FAKE_ROOTFS/marker\"",
+            TaskOptions {
+                name: Some("pg-fork".into()),
+                ..options.clone()
+            },
+        )
+        .unwrap();
+    let origin = fork
+        .events()
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.activity {
+            Activity::Sandbox(event) => match *event {
+                SandboxEvent::Started { origin, .. } => Some(origin),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        origin,
+        SandboxOrigin::Branched {
+            branch: "pg-kept".into(),
+            turn: 1,
+            method: SnapshotMethod::LiveBranch,
+        }
+    );
+    pg.yard.remove("pg-fork").unwrap();
+    pg.yard.remove("pg-kept").unwrap();
+    assert!(fake.sandboxes().is_empty(), "{:?}", fake.sandboxes());
+}

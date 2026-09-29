@@ -44,7 +44,7 @@ pub(crate) fn open_with(
 
 /// Take `name`'s lease for a step outside any turn, such as a merge or a
 /// removal, keeping its record. Refused while a turn runs on it.
-fn hold(yard: &Yard, name: &str) -> Result<(Record, Lease), Error> {
+pub(crate) fn hold(yard: &Yard, name: &str) -> Result<(Record, Lease), Error> {
     recover::stale(yard, name)?;
     let store = yard.store();
     let record = store.read(name)?;
@@ -150,6 +150,15 @@ pub(crate) fn merge(yard: &Yard, name: &str, target: &str) -> Result<Merged, Err
         target: target.to_owned(),
         commit: merged.commit.clone(),
     };
+    // A merged branch runs no more turns: its kept sandbox goes. Its
+    // snapshots stay, for forks, until it is removed.
+    let discarded = crate::snapshots::discard_kept(yard, &record, "the branch was merged");
+    if !discarded.is_empty() {
+        let mut recorder = Recorder::fenced(&store, &fence, None);
+        for activity in discarded {
+            recorder.record(activity)?;
+        }
+    }
     let event = RecordedEvent {
         at_ms: now_ms(),
         activity: Activity::Status(record.info.status.clone()),
@@ -170,12 +179,10 @@ fn landed(
     let Some(head) = git::local_branch(&yard.root, target)? else {
         return Ok(None);
     };
-    let contained = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", candidate, &head])
-        .current_dir(&yard.root)
-        .status()
-        .map_err(|e| Error::Git(format!("could not run git: {e}")))?
-        .success();
+    let contained = git::test(
+        &yard.root,
+        &["merge-base", "--is-ancestor", candidate, &head],
+    )?;
     Ok(contained.then(|| Merged {
         branch: name.to_owned(),
         target: target.to_owned(),
@@ -271,13 +278,27 @@ fn integration_error(error: IntegrationError, target: &str) -> Error {
     }
 }
 
-pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result<(), Error> {
+pub(crate) fn remove(
+    yard: &Yard,
+    name: &str,
+    options: &RemoveOptions,
+) -> Result<Option<crate::WorkspaceReport>, Error> {
     let store = yard.store();
     let (record, lease) = hold(yard, name)?;
     // Journaled so a removal cut short says so; repeating it finishes it.
     store
         .backend()
         .begin_step(lease.fence(), 0, "remove", &json!({}))?;
+    // Best-effort: what it did goes in the log, and the removal goes on.
+    let teardown = crate::workspace::teardown(yard, &record, Some(lease.fence()))?;
+    let mut recorder = Recorder::fenced(&store, lease.fence(), None);
+    if let Some(report) = &teardown {
+        recorder.record(Activity::Workspace(report.clone()))?;
+    }
+    // Its kept sandbox and its provider snapshots go with it.
+    for activity in crate::snapshots::release_all(yard, &record) {
+        recorder.record(activity)?;
+    }
     let merged = matches!(record.info.status, BranchStatus::Merged { .. });
     let branch = names::validate(name)?;
     {
@@ -292,6 +313,7 @@ pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result
             }
         }
     }
+    crate::checkpoint::remove_refs(&yard.root, name)?;
     store.delete(name)?;
     // What waited for it can never start now.
     crate::graph::settled(yard, name, None);
@@ -300,7 +322,7 @@ pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result
         remove_credentials(&store, &record)?;
     }
     remove_home(&store, &record)?;
-    Ok(())
+    Ok(teardown)
 }
 
 /// Remove the credentials provisioning wrote in the branch's private home,

@@ -174,8 +174,88 @@ fn open_resolve_and_current_branch() {
         fixture.repo.current_branch().unwrap().as_deref(),
         Some("main")
     );
+    assert_eq!(
+        branchyard_workspace::git::current_branch(&sub)
+            .unwrap()
+            .as_deref(),
+        Some("main")
+    );
     git(&fixture.root(), &["checkout", "-q", "--detach"]);
     assert_eq!(fixture.repo.current_branch().unwrap(), None);
+    assert_eq!(
+        branchyard_workspace::git::current_branch(&fixture.root()).unwrap(),
+        None
+    );
+}
+
+/// The shared `Git` choke point: stdout, a failure's arguments, exit code
+/// and stderr, yes/no answers, and a directory that is not there.
+#[test]
+fn the_git_runner_reports_output_and_failures() {
+    use branchyard_workspace::Git;
+    let fixture = Fixture::new();
+    let root = &fixture.root();
+    let out = Git::new(root)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .run();
+    assert_eq!(out.unwrap(), "main\n");
+    match Git::new(root).args(["rev-parse", "--verify", "nope"]).run() {
+        Err(GitError::Failed { args, code, stderr }) => {
+            assert_eq!(args, ["rev-parse", "--verify", "nope"]);
+            assert_eq!(code, Some(128));
+            assert!(!stderr.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    let exists = |r: &str| {
+        Git::new(root)
+            .args(["show-ref", "--verify", "--quiet", r])
+            .succeeds()
+            .unwrap()
+    };
+    assert!(exists("refs/heads/main"));
+    assert!(!exists("refs/heads/nope"));
+    // The variables that would point git elsewhere are not inherited.
+    let dir = Git::new(root)
+        .env("GIT_TEST_UNUSED", "1")
+        .args(["rev-parse", "--show-toplevel"])
+        .run()
+        .unwrap();
+    assert_eq!(Path::new(dir.trim()), root);
+    assert!(matches!(
+        Git::new(&fixture.dir.join("missing")).arg("status").run(),
+        Err(GitError::Spawn(_))
+    ));
+}
+
+/// Input on stdin and raw stdout bytes, as `by try` hashes, reads and
+/// applies through the choke point.
+#[test]
+fn the_git_runner_feeds_stdin_and_returns_bytes() {
+    use branchyard_workspace::Git;
+    let fixture = Fixture::new();
+    let root = &fixture.root();
+    let bytes: Vec<u8> = (0..=255u8).cycle().take(300_000).collect();
+    let blob = Git::new(root)
+        .args(["hash-object", "-w", "--no-filters", "--stdin"])
+        .stdin(bytes.clone())
+        .run()
+        .unwrap();
+    let back = Git::new(root)
+        .args(["cat-file", "blob", blob.trim()])
+        .run_bytes()
+        .unwrap();
+    assert_eq!(back, bytes);
+    // A failing command that stops reading its input early is a failure,
+    // not a broken pipe.
+    match Git::new(root)
+        .args(["apply", "--check"])
+        .stdin("not a patch\n".repeat(50_000))
+        .run()
+    {
+        Err(GitError::Failed { args, .. }) => assert_eq!(args, ["apply", "--check"]),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -651,5 +731,89 @@ fn fallback_identity_when_none_configured() {
             .trim(),
             "Branchyard <branchyard@localhost>"
         );
+    }
+}
+
+#[test]
+fn verify_runs_a_check_on_one_commit_without_merging() {
+    let fixture = Fixture::new();
+    let candidate = fixture.candidate("feature", "feature.txt", "feature\n");
+    let main = fixture.head("main");
+    let pass = sh(
+        "test -f feature.txt && echo verified",
+        Duration::from_secs(30),
+    );
+    let verified = fixture.repo.verify(&candidate.head, &pass).unwrap();
+    assert!(verified.passed && !verified.timed_out);
+    assert_eq!(verified.commit, candidate.head);
+    assert!(verified.output_tail.contains("verified"));
+    let fail = sh("echo nope; exit 3", Duration::from_secs(30));
+    let verified = fixture.repo.verify(&candidate.head, &fail).unwrap();
+    assert!(!verified.passed && !verified.timed_out);
+    assert!(verified.output_tail.contains("nope"));
+    let slow = sh("sleep 5", Duration::from_millis(200));
+    assert!(
+        fixture
+            .repo
+            .verify(&candidate.head, &slow)
+            .unwrap()
+            .timed_out
+    );
+    let missing = Check {
+        argv: vec!["/nonexistent/check".into()],
+        timeout: Duration::from_secs(5),
+    };
+    assert!(matches!(
+        fixture.repo.verify(&candidate.head, &missing),
+        Err(IntegrationError::CheckNotStarted(_))
+    ));
+    // Nothing moved and nothing was left behind.
+    assert_eq!(fixture.head("main"), main);
+    fixture.assert_no_integration_worktrees();
+}
+
+#[test]
+fn push_sends_exactly_the_commit_to_a_remote_branch() {
+    let fixture = Fixture::new();
+    let remote = fixture.dir.join("remote.git");
+    git(
+        &fixture.dir,
+        &["init", "-q", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        &fixture.root(),
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let first = fixture.candidate("feature", "feature.txt", "feature\n");
+    fixture
+        .repo
+        .push("origin", &first.head, "by/feature", false)
+        .unwrap();
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/by/feature"]).trim(),
+        first.head.as_str()
+    );
+    // A commit that does not descend from what is there needs force.
+    let other = fixture.candidate("other", "other.txt", "other\n");
+    let refused = fixture
+        .repo
+        .push("origin", &other.head, "by/feature", false);
+    assert!(
+        matches!(refused, Err(GitError::Failed { .. })),
+        "{refused:?}"
+    );
+    fixture
+        .repo
+        .push("origin", &other.head, "by/feature", true)
+        .unwrap();
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/by/feature"]).trim(),
+        other.head.as_str()
+    );
+    for (remote_name, branch) in [("-u", "x"), ("origin", "-x"), ("origin", "a..b"), ("", "x")] {
+        assert!(matches!(
+            fixture.repo.push(remote_name, &other.head, branch, false),
+            Err(GitError::InvalidRef(_))
+        ));
     }
 }

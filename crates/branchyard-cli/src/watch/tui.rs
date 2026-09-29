@@ -1,11 +1,18 @@
 //! `by watch`'s live dashboard, in the Elm shape: a [`Model`] of what is
-//! known, [`update`] folding a [`Msg`] (a key, or a fresh [`Snapshot`] of
-//! the branches and their new events) into it, and [`view`] drawing it with
+//! known, [`update`] folding a [`Msg`] (a key, a fresh [`Snapshot`] of the
+//! branches and their new events, or the result of a command) into it and
+//! returning the [`Cmd`]s to carry out, and [`view`] drawing it with
 //! ratatui. Neither `update` nor `view` does I/O, so both are tested
 //! directly, `view` against ratatui's `TestBackend`. [`run`] is the only
-//! part that touches the terminal (through crossterm) or the data source.
+//! part that touches the terminal (through crossterm); it hands every
+//! command to an [`Effects`], which owns the data source and runs `by`.
+//!
+//! The keys that act on the selected branch come from the registry in
+//! [`super::actions`]: its table drives the key handling, the footer's
+//! hints and the `?` sheet.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use branchyard::{Activity, BranchInfo, BranchStatus, Event, RecordedEvent};
@@ -18,7 +25,9 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
+use super::actions::{self, Action, ActionId, Ask, CopyWhat, PaneKind, Run};
 use super::Doing;
+use crate::notify;
 use crate::render;
 
 /// Recent events kept per branch for the detail pane.
@@ -26,6 +35,13 @@ const RECENT: usize = 50;
 
 /// Rows PageUp and PageDown move.
 const PAGE: usize = 10;
+
+/// How long a result stays in the status line, in milliseconds of the data
+/// source's clock.
+const TOAST_MS: u64 = 10_000;
+
+/// Output lines kept in a result pane.
+const OUTPUT_LINES: usize = 2_000;
 
 /// A refresh from the data source.
 #[derive(Clone, Debug, Default)]
@@ -36,6 +52,8 @@ pub struct Snapshot {
     /// Events recorded since the previous snapshot, by branch.
     pub events: Vec<(String, RecordedEvent)>,
     pub now_ms: u64,
+    /// The branch `by try` has applied to this checkout, if any.
+    pub trying: Option<String>,
 }
 
 /// A key, as the dashboard reads it.
@@ -87,18 +105,66 @@ impl Key {
 #[derive(Clone, Debug)]
 pub enum Msg {
     Key(Key),
+    /// Text pasted into the terminal (bracketed paste).
+    Paste(String),
+    /// The terminal's size, in cells.
+    Resize(u16, u16),
     Refreshed(Snapshot),
+    /// A background command started; its output goes to `log`.
+    Started {
+        action: ActionId,
+        branch: String,
+        log: String,
+    },
+    /// A command ended: its exit status and its output (for a background
+    /// command, the end of its log).
+    Done {
+        action: ActionId,
+        branch: String,
+        ok: bool,
+        output: String,
+    },
+    /// A pane's text, or why it could not be loaded.
+    Loaded {
+        kind: PaneKind,
+        branch: String,
+        result: Result<String, String>,
+    },
 }
 
-/// Whether the loop goes on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flow {
-    Continue,
+/// What [`update`] asks [`run`] to do: the effects, kept out of the model.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cmd {
     Quit,
+    /// Run `by` with these arguments; see [`actions::Run`].
+    Run(Invocation),
+    /// Load a pane's text for a branch.
+    Load {
+        kind: PaneKind,
+        branch: String,
+    },
+    /// Put text on the clipboard through the terminal.
+    Copy(String),
+    /// Open a branch's worktree in the editor (`by open`); [`run`] leaves
+    /// the screen for an editor that takes over the terminal.
+    Open(String),
+    /// Tell the person a branch needs them or ended; see [`crate::notify`].
+    Notify(notify::Notice),
+}
+
+/// One run of `by` for an action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invocation {
+    pub action: ActionId,
+    pub branch: String,
+    /// After `by` and the global flags.
+    pub argv: Vec<String>,
+    /// Detached, with its output in a log, rather than waited for.
+    pub background: bool,
 }
 
 /// What keys do right now.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Mode {
     #[default]
     Browse,
@@ -106,6 +172,108 @@ pub enum Mode {
     Filter,
     /// The `?` sheet is open.
     Help,
+    /// Typing the text an action asks for.
+    Input(Input),
+    /// Asking before an action runs.
+    Confirm(Pending),
+    /// A scrollable pane over the dashboard.
+    Pane(Pane),
+}
+
+/// The one-line text box an action such as `s` opens.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Input {
+    pub action: Option<ActionId>,
+    pub branch: String,
+    pub text: String,
+    /// In characters.
+    pub cursor: usize,
+    /// Lines shown above the box to choose from (`r`'s checkpoints):
+    /// `None` while loading, `Err` when they could not be.
+    pub list: Option<Result<Vec<String>, String>>,
+}
+
+impl Input {
+    fn byte(&self, at: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(at)
+            .map_or(self.text.len(), |(i, _)| i)
+    }
+
+    fn insert(&mut self, text: &str) {
+        let at = self.byte(self.cursor);
+        self.text.insert_str(at, text);
+        self.cursor += text.chars().count();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            let at = self.byte(self.cursor);
+            self.text.remove(at);
+        }
+    }
+}
+
+/// An action waiting for a yes or no.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    pub action: ActionId,
+    pub branch: String,
+    /// What was typed first, for an action that asks both (`r`).
+    pub text: String,
+    /// The `off` form of a [`Run::Toggle`].
+    pub off: bool,
+}
+
+/// A diff, a log or a command's output, scrolled by line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pane {
+    pub kind: PaneKind,
+    pub branch: String,
+    pub title: String,
+    /// `None` while loading; `Err` says why it could not be.
+    pub lines: Option<Result<Vec<String>, String>>,
+    /// The first line shown.
+    pub scroll: usize,
+    /// Keep the end in view as lines arrive.
+    pub follow: bool,
+}
+
+impl Pane {
+    fn loading(kind: PaneKind, branch: &str) -> Pane {
+        let title = match kind {
+            PaneKind::Diff => format!("diff {branch}"),
+            PaneKind::Log => format!("log {branch}"),
+            PaneKind::Output => branch.to_owned(),
+            PaneKind::Checkpoints => format!("checkpoints {branch}"),
+            PaneKind::Compare => format!("compare {branch} with its siblings"),
+        };
+        Pane {
+            kind,
+            branch: branch.to_owned(),
+            title,
+            lines: None,
+            scroll: 0,
+            follow: kind == PaneKind::Log,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.lines {
+            Some(Ok(lines)) => lines.len(),
+            _ => 1,
+        }
+    }
+}
+
+/// The status line: the latest result or refusal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toast {
+    pub text: String,
+    pub tone: Tone,
+    pub at_ms: u64,
 }
 
 /// What the detail pane shows beyond [`BranchInfo`], from the events.
@@ -116,6 +284,12 @@ pub struct Detail {
     /// Inbox messages sent to this branch and not yet delivered to it.
     pub unread: BTreeSet<u64>,
     pub tokens: Tokens,
+    /// The branch's pull-request steps, folded into merge readiness.
+    pub pull_request: Vec<RecordedEvent>,
+    /// The checkpoint the branch is at (0 is its base), and the latest
+    /// turn with one.
+    pub checkpoint: Option<u32>,
+    pub last_checkpoint: u32,
 }
 
 /// Token counts the harness reported, summed over turns.
@@ -185,6 +359,15 @@ pub struct Model {
     pub now_ms: u64,
     /// Refreshes applied; 0 until the first data arrives.
     pub refreshes: u64,
+    /// Watching a server: actions that are local only are refused.
+    pub remote: bool,
+    pub toast: Option<Toast>,
+    /// The terminal's size, for paging a pane.
+    pub size: (u16, u16),
+    /// What has been notified, so each event is said once.
+    pub notified: notify::Tracker,
+    /// The branch `by try` has applied to this checkout.
+    pub trying: Option<String>,
 }
 
 /// One row of the tree as shown.
@@ -309,13 +492,55 @@ impl Model {
         self.selected = Some(self.infos[rows[next].index].name.clone());
     }
 
-    fn apply(&mut self, snapshot: Snapshot) {
+    /// The selected branch, if any is shown.
+    pub fn selected_info(&self) -> Option<&BranchInfo> {
+        let rows = self.visible();
+        self.cursor(&rows).map(|at| &self.infos[rows[at].index])
+    }
+
+    fn toast(&mut self, tone: Tone, text: impl Into<String>) {
+        self.toast = Some(Toast {
+            text: text.into(),
+            tone,
+            at_ms: self.now_ms,
+        });
+    }
+
+    /// Fold in a refresh. Returns a reload of the log pane when its branch
+    /// has new events and the pane is following them.
+    fn apply(&mut self, snapshot: Snapshot) -> Vec<Cmd> {
         let rows = self.visible();
         let previous = self.cursor(&rows);
         self.label = snapshot.label;
         self.now_ms = snapshot.now_ms;
         self.infos = snapshot.infos;
+        self.trying = snapshot.trying;
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|t| self.now_ms.saturating_sub(t.at_ms) > TOAST_MS)
+        {
+            self.toast = None;
+        }
+        let mut cmds = Vec::new();
+        if let Mode::Pane(pane) = &self.mode {
+            let fresh = snapshot.events.iter().any(|(b, _)| *b == pane.branch);
+            if pane.kind == PaneKind::Log && pane.follow && fresh && pane.lines.is_some() {
+                cmds.push(Cmd::Load {
+                    kind: PaneKind::Log,
+                    branch: pane.branch.clone(),
+                });
+            }
+        }
         for (branch, event) in snapshot.events {
+            // The first refresh reads every log from the start, and a
+            // server's stream may replay older events: those only prime
+            // the tracker, so what it already said is not said again.
+            if let Some(notice) = self.notified.observe(&branch, &event.activity) {
+                if self.refreshes > 0 && notify::fresh(event.at_ms, self.now_ms) {
+                    cmds.push(Cmd::Notify(notice));
+                }
+            }
             self.doing.entry(branch.clone()).or_default().apply(&event);
             let detail = self.detail.entry(branch.clone()).or_default();
             match &event.activity {
@@ -331,6 +556,12 @@ impl Model {
                         detail.unread.remove(id);
                     }
                 }
+                Activity::PullRequest(_) => detail.pull_request.push(event.clone()),
+                Activity::Checkpoint(checkpoint) => {
+                    detail.checkpoint = Some(checkpoint.turn);
+                    detail.last_checkpoint = detail.last_checkpoint.max(checkpoint.turn);
+                }
+                Activity::Rewound { to, .. } => detail.checkpoint = Some(*to),
                 _ => {}
             }
             if let Some(line) =
@@ -352,27 +583,86 @@ impl Model {
         }
         self.refreshes += 1;
         self.settle(previous);
+        cmds
     }
 }
 
-/// Fold one message into the model.
-pub fn update(model: &mut Model, msg: Msg) -> Flow {
+/// Fold one message into the model, returning what to do about it.
+pub fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
     let key = match msg {
-        Msg::Refreshed(snapshot) => {
-            model.apply(snapshot);
-            return Flow::Continue;
-        }
         Msg::Key(key) => key,
+        Msg::Refreshed(snapshot) => return model.apply(snapshot),
+        Msg::Resize(width, height) => {
+            model.size = (width, height);
+            return Vec::new();
+        }
+        Msg::Paste(text) => {
+            if let Mode::Input(input) = &mut model.mode {
+                // One line: a pasted newline would otherwise send early.
+                let line: Vec<&str> = text.lines().map(str::trim_end).collect();
+                input.insert(&line.join(" "));
+            }
+            return Vec::new();
+        }
+        Msg::Started {
+            action,
+            branch,
+            log,
+        } => {
+            let name = actions::by_id(action).name;
+            model.toast(
+                Tone::Accent,
+                format!("{name} {branch}: started in the background; output in {log}"),
+            );
+            return Vec::new();
+        }
+        Msg::Done {
+            action,
+            branch,
+            ok,
+            output,
+        } => {
+            finished(model, actions::by_id(action), &branch, ok, &output);
+            return Vec::new();
+        }
+        Msg::Loaded {
+            kind,
+            branch,
+            result,
+        } => {
+            if let Mode::Input(input) = &mut model.mode {
+                if kind == PaneKind::Checkpoints && input.branch == branch {
+                    input.list = Some(result.map(|text| text.lines().map(str::to_owned).collect()));
+                }
+                return Vec::new();
+            }
+            if let Mode::Pane(pane) = &mut model.mode {
+                if pane.kind == kind && pane.branch == branch {
+                    pane.lines = Some(result.map(|text| match text.is_empty() {
+                        true => vec![match kind {
+                            PaneKind::Diff => "no changes against the base".to_owned(),
+                            PaneKind::Compare => "nothing to compare".to_owned(),
+                            _ => "nothing recorded yet".to_owned(),
+                        }],
+                        false => text.lines().map(str::to_owned).collect(),
+                    }));
+                    if pane.follow {
+                        pane.scroll = pane.len().saturating_sub(1);
+                    }
+                }
+            }
+            return Vec::new();
+        }
     };
     if key == Key::Interrupt {
-        return Flow::Quit;
+        return vec![Cmd::Quit];
     }
-    match model.mode {
+    match &mut model.mode {
         Mode::Help => {
             // Any key closes the sheet; q still quits.
             model.mode = Mode::Browse;
             if key == Key::Char('q') {
-                return Flow::Quit;
+                return vec![Cmd::Quit];
             }
         }
         Mode::Filter => {
@@ -394,17 +684,99 @@ pub fn update(model: &mut Model, msg: Msg) -> Flow {
             }
             model.settle(previous);
         }
-        Mode::Browse => match key {
-            Key::Char('q') => return Flow::Quit,
+        Mode::Input(input) => match key {
             Key::Esc => {
-                // Esc backs out one level: the filter, then the focus, then
-                // the dashboard.
-                if !model.filter.is_empty() {
+                model.mode = Mode::Browse;
+                model.toast(Tone::Dim, "cancelled; nothing was sent");
+            }
+            Key::Enter => {
+                let text = input.text.trim().to_owned();
+                if text.is_empty() {
+                    model.toast(Tone::Warn, "type something first, or Esc to cancel");
+                    return Vec::new();
+                }
+                let branch = input.branch.clone();
+                let Some(action) = input.action.map(actions::by_id) else {
+                    model.mode = Mode::Browse;
+                    return Vec::new();
+                };
+                if let Ask::Checkpoint { .. } = action.ask {
+                    // A number first, then a yes naming it.
+                    match actions::checkpoint_number(&text) {
+                        Ok(turn) => {
+                            model.mode = Mode::Confirm(Pending {
+                                action: action.id,
+                                branch,
+                                text: turn.to_string(),
+                                off: false,
+                            });
+                        }
+                        Err(why) => model.toast(Tone::Warn, why),
+                    }
+                    return Vec::new();
+                }
+                model.mode = Mode::Browse;
+                return start(model, action, &branch, &text, false);
+            }
+            Key::Backspace => input.backspace(),
+            Key::Left => input.cursor = input.cursor.saturating_sub(1),
+            Key::Right => input.cursor = (input.cursor + 1).min(input.text.chars().count()),
+            Key::Home => input.cursor = 0,
+            Key::End => input.cursor = input.text.chars().count(),
+            Key::Char(c) => input.insert(c.encode_utf8(&mut [0; 4])),
+            _ => {}
+        },
+        Mode::Confirm(pending) => match key {
+            Key::Char('y' | 'Y') | Key::Enter => {
+                let pending = pending.clone();
+                model.mode = Mode::Browse;
+                return start(
+                    model,
+                    actions::by_id(pending.action),
+                    &pending.branch,
+                    &pending.text,
+                    pending.off,
+                );
+            }
+            Key::Char('n' | 'N' | 'q') | Key::Esc => {
+                let name = actions::by_id(pending.action).name;
+                model.mode = Mode::Browse;
+                model.toast(Tone::Dim, format!("{name}: not done"));
+            }
+            _ => {}
+        },
+        Mode::Pane(pane) => {
+            let page = usize::from(model.size.1.saturating_sub(4)).max(1);
+            let last = pane.len().saturating_sub(1);
+            match key {
+                Key::Char('q') | Key::Esc | Key::Backspace | Key::Left => {
+                    model.mode = Mode::Browse;
+                    return Vec::new();
+                }
+                Key::Char('j') | Key::Down => pane.scroll += 1,
+                Key::Char('k') | Key::Up => pane.scroll = pane.scroll.saturating_sub(1),
+                Key::PageDown | Key::Char(' ') => pane.scroll += page,
+                Key::PageUp => pane.scroll = pane.scroll.saturating_sub(page),
+                Key::Char('g') | Key::Home => pane.scroll = 0,
+                Key::Char('G') | Key::End => pane.scroll = last,
+                _ => {}
+            }
+            pane.scroll = pane.scroll.min(last);
+            pane.follow = pane.kind == PaneKind::Log && pane.scroll == last;
+        }
+        Mode::Browse => match key {
+            Key::Char('q') => return vec![Cmd::Quit],
+            Key::Esc => {
+                // Esc backs out one level: the status line, the filter,
+                // then the focus, then the dashboard.
+                if model.toast.is_some() {
+                    model.toast = None;
+                } else if !model.filter.is_empty() {
                     model.filter.clear();
                 } else if model.focus.is_some() {
                     model.focus = None;
                 } else {
-                    return Flow::Quit;
+                    return vec![Cmd::Quit];
                 }
                 model.settle(None);
             }
@@ -416,7 +788,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Flow {
             Key::PageUp => model.step(-(PAGE as isize)),
             Key::Char('g') | Key::Home => model.step(isize::MIN / 2),
             Key::Char('G') | Key::End => model.step(isize::MAX / 2),
-            Key::Enter | Key::Char('l') | Key::Right => {
+            Key::Enter | Key::Right => {
                 if let Some(name) = model.selected.clone() {
                     model.focus = match model.focus.as_deref() == Some(name.as_str()) {
                         // Enter on the focused branch goes back out.
@@ -432,10 +804,155 @@ pub fn update(model: &mut Model, msg: Msg) -> Flow {
                     model.selected = Some(focus);
                 }
             }
+            Key::Char(c) => {
+                if let Some(action) = actions::by_key(c) {
+                    return trigger(model, action);
+                }
+            }
             _ => {}
         },
     }
-    Flow::Continue
+    Vec::new()
+}
+
+/// An action's key on the selected branch: refused with the reason, or
+/// asking what it needs, or started.
+fn trigger(model: &mut Model, action: &'static Action) -> Vec<Cmd> {
+    let Some(info) = model.selected_info() else {
+        model.toast(Tone::Warn, "no branch selected");
+        return Vec::new();
+    };
+    if let Some(why) = actions::refusal(action, info, model.remote) {
+        model.toast(Tone::Warn, why);
+        return Vec::new();
+    }
+    let branch = info.name.clone();
+    // A toggle's off form, on the branch being tried.
+    let off = matches!(action.run, Run::Toggle { .. })
+        && model.trying.as_deref() == Some(branch.as_str());
+    match action.ask {
+        Ask::Nothing => start(model, action, &branch, "", off),
+        Ask::Text { .. } => {
+            model.mode = Mode::Input(Input {
+                action: Some(action.id),
+                branch,
+                ..Input::default()
+            });
+            Vec::new()
+        }
+        Ask::Checkpoint { .. } => {
+            model.mode = Mode::Input(Input {
+                action: Some(action.id),
+                branch: branch.clone(),
+                ..Input::default()
+            });
+            vec![Cmd::Load {
+                kind: PaneKind::Checkpoints,
+                branch,
+            }]
+        }
+        Ask::Confirm { .. } => {
+            model.mode = Mode::Confirm(Pending {
+                action: action.id,
+                branch,
+                text: String::new(),
+                off,
+            });
+            Vec::new()
+        }
+    }
+}
+
+/// The command that carries out `action` on `branch`, with `text` from its
+/// input box.
+fn start(model: &mut Model, action: &Action, branch: &str, text: &str, off: bool) -> Vec<Cmd> {
+    match action.run {
+        Run::Background(_) | Run::Wait(_) | Run::Toggle { .. } => {
+            let argv = actions::command(action, branch, text, off).unwrap_or_default();
+            let shown: Vec<String> = argv
+                .iter()
+                .filter(|a| *a != "--")
+                .map(|a| render::truncate(&crate::args::shell_quote(a), 40))
+                .collect();
+            model.toast(Tone::Accent, format!("running: by {}", shown.join(" ")));
+            vec![Cmd::Run(Invocation {
+                action: action.id,
+                branch: branch.to_owned(),
+                argv,
+                background: matches!(action.run, Run::Background(_)),
+            })]
+        }
+        Run::Pane(kind) => {
+            model.mode = Mode::Pane(Pane::loading(kind, branch));
+            vec![Cmd::Load {
+                kind,
+                branch: branch.to_owned(),
+            }]
+        }
+        Run::Copy(what) => {
+            let Some(info) = model.info(branch) else {
+                return Vec::new();
+            };
+            let (text, what) = match what {
+                CopyWhat::Name => (info.name.clone(), "name"),
+                CopyWhat::Path => (info.worktree.display().to_string(), "worktree path"),
+            };
+            model.toast(
+                Tone::Good,
+                format!("copied {branch}'s {what} (if the terminal allows OSC 52): {text}"),
+            );
+            vec![Cmd::Copy(text)]
+        }
+        Run::Open => {
+            model.toast(Tone::Accent, format!("opening {branch}'s worktree"));
+            vec![Cmd::Open(branch.to_owned())]
+        }
+    }
+}
+
+/// A command's result: the status line, and for a merge (whose check
+/// output matters) or a failure with more to say, a pane with the output.
+fn finished(model: &mut Model, action: &Action, branch: &str, ok: bool, output: &str) {
+    let last = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(match ok {
+            true => "done",
+            false => "failed",
+        });
+    let last = last.strip_prefix("by: ").unwrap_or(last);
+    let background = matches!(action.run, Run::Background(_));
+    let text = match (ok, background) {
+        (true, true) => format!("{} {branch}: finished; {last}", action.name),
+        (true, false) => format!("{} {branch}: {last}", action.name),
+        (false, _) => format!("{} {branch} failed: {last}", action.name),
+    };
+    model.toast(if ok { Tone::Good } else { Tone::Bad }, text);
+    let lines: Vec<&str> = output.lines().collect();
+    // A merge's and a pull request's check output, and a rewind's note on
+    // how the conversation continues, are worth reading whole.
+    let show = matches!(action.id, ActionId::Merge | ActionId::Pr | ActionId::Rewind)
+        || (!ok && lines.len() > 1);
+    if show && model.mode == Mode::Browse {
+        let mut pane = Pane::loading(
+            PaneKind::Output,
+            &format!(
+                "{} {branch}: {}",
+                action.name,
+                if ok { "done" } else { "failed" }
+            ),
+        );
+        pane.branch = branch.to_owned();
+        let keep = lines.len().saturating_sub(OUTPUT_LINES);
+        let mut shown: Vec<String> = lines[keep..].iter().map(|l| (*l).to_owned()).collect();
+        if shown.is_empty() {
+            shown.push(last.to_owned());
+        }
+        pane.lines = Some(Ok(shown));
+        model.mode = Mode::Pane(pane);
+    }
 }
 
 fn tone_of(activity: &Activity) -> Tone {
@@ -545,17 +1062,18 @@ pub fn guides(depths: &[usize]) -> Vec<String> {
         .collect()
 }
 
+/// The navigation keys; the action keys come from [`actions::ACTIONS`].
 const HELP: &[(&str, &str)] = &[
     ("j / ↓, k / ↑", "move"),
     ("PgDn, PgUp", "move ten rows"),
     ("g / Home, G / End", "first, last"),
-    (
-        "Enter / l / →",
-        "focus the branch's subtree (again to leave)",
-    ),
+    ("Enter / →", "focus the branch's subtree (again to leave)"),
     ("Backspace / h / ←", "focus the parent's subtree"),
     ("/", "filter by name, harness, status or prompt"),
-    ("Esc", "clear the filter, then unfocus, then quit"),
+    (
+        "Esc",
+        "clear the status line, the filter, the focus, then quit",
+    ),
     ("?", "this sheet"),
     ("q, Ctrl-C", "quit"),
 ];
@@ -599,8 +1117,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
     if let Some(area) = detail {
         draw_detail(model, selected, frame, area);
     }
-    if model.mode == Mode::Help {
-        draw_help(frame, area);
+    match &model.mode {
+        Mode::Help => draw_help(model, frame, area),
+        Mode::Input(input) => draw_input(input, frame, body),
+        Mode::Confirm(pending) => draw_confirm(model, pending, frame, body),
+        Mode::Pane(pane) => draw_pane(pane, frame, body),
+        Mode::Browse | Mode::Filter => {}
     }
 }
 
@@ -663,7 +1185,7 @@ fn header_line(model: &Model) -> Line<'static> {
 fn footer_line(model: &Model) -> Line<'static> {
     let key = |k: &str| Span::styled(k.to_owned(), Style::new().fg(Color::Black).bg(Color::Gray));
     let text = |t: &str| Span::styled(format!(" {t}  "), Style::new().fg(Color::DarkGray));
-    match model.mode {
+    match &model.mode {
         Mode::Filter => Line::from(vec![
             Span::styled("/", Style::new().fg(Color::Yellow)),
             Span::raw(model.filter.clone()),
@@ -674,7 +1196,35 @@ fn footer_line(model: &Model) -> Line<'static> {
             key("Esc"),
             text("clear"),
         ]),
-        _ => {
+        Mode::Input(input) => Line::from(vec![
+            key("Enter"),
+            text(match input.action.map(|id| actions::by_id(id).ask) {
+                Some(Ask::Checkpoint { .. }) => "choose",
+                _ => "send",
+            }),
+            key("Esc"),
+            text("cancel"),
+            key("←/→"),
+            text("move"),
+        ]),
+        Mode::Confirm(_) => Line::from(vec![key("y"), text("yes"), key("n"), text("no")]),
+        Mode::Pane(_) => Line::from(vec![
+            key("j/k"),
+            text("scroll"),
+            key("PgDn/PgUp"),
+            text("page"),
+            key("g/G"),
+            text("top, end"),
+            key("q"),
+            text("close"),
+        ]),
+        Mode::Browse | Mode::Help => {
+            if let Some(toast) = &model.toast {
+                return Line::from(Span::styled(
+                    toast.text.replace('\n', " "),
+                    tone_style(toast.tone),
+                ));
+            }
             let mut spans = vec![
                 key("j/k"),
                 text("move"),
@@ -686,11 +1236,18 @@ fn footer_line(model: &Model) -> Line<'static> {
                 }),
                 key("/"),
                 text("filter"),
-                key("?"),
-                text("help"),
-                key("q"),
-                text("quit"),
             ];
+            // The actions that apply to the selected branch, from the
+            // registry.
+            if let Some(info) = model.selected_info() {
+                for action in actions::ACTIONS {
+                    if actions::refusal(action, info, model.remote).is_none() {
+                        spans.push(key(&action.key.to_string()));
+                        spans.push(text(action.name));
+                    }
+                }
+            }
+            spans.extend([key("?"), text("keys"), key("q"), text("quit")]);
             if let Some(focus) = &model.focus {
                 spans.push(Span::styled(
                     format!("focus: {focus}  "),
@@ -908,6 +1465,43 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
         }
     }
     lines.push(Line::from(vec![label("cost"), Span::raw(cost)]));
+    if let Some(detail) = detail.filter(|d| d.last_checkpoint > 0 || d.checkpoint.is_some()) {
+        let at = match detail.checkpoint {
+            Some(0) => "at the base (0)".to_owned(),
+            Some(turn) => format!("at {turn}"),
+            None => "not at a recorded one".to_owned(),
+        };
+        lines.push(Line::from(vec![
+            label("checkpt"),
+            Span::raw(format!("{at} of {} · r rewinds", detail.last_checkpoint)),
+        ]));
+    }
+    if let Some(readiness) = detail
+        .filter(|d| !d.pull_request.is_empty())
+        .and_then(|d| crate::pr::readiness(info, &crate::pr::state(info, &d.pull_request)))
+    {
+        let look = match readiness.verdict {
+            "ready" | "merged" => Style::new().fg(Color::Green),
+            "closed" => Style::new().fg(Color::DarkGray),
+            _ => Style::new().fg(Color::Yellow),
+        };
+        lines.push(Line::from(vec![
+            label("merge"),
+            Span::styled(
+                crate::pr::readiness_text(&readiness, model.now_ms, render::Style { color: false }),
+                look,
+            ),
+        ]));
+    }
+    if model.trying.as_deref() == Some(info.name.as_str()) {
+        lines.push(Line::from(vec![
+            label("try"),
+            Span::styled(
+                "applied to this checkout (t restores it)",
+                Style::new().fg(Color::Magenta),
+            ),
+        ]));
+    }
     let unread = detail.map_or(0, |d| d.unread.len());
     lines.push(Line::from(vec![
         label("inbox"),
@@ -990,45 +1584,348 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
     );
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let width = 76.min(area.width);
-    let height = (HELP.len() as u16 + 6).min(area.height);
-    let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
-    let mut lines: Vec<Line> = HELP
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![
-                Span::styled(format!("{keys:>19}  "), Style::new().fg(Color::Cyan)),
-                Span::raw(*what),
-            ])
-        })
-        .collect();
+/// The `?` sheet's lines: navigation, then every action in the registry
+/// with what stops it here.
+pub fn help_lines(remote: bool) -> Vec<Line<'static>> {
+    let row = |keys: String, what: String, note: Option<String>| {
+        let mut spans = vec![
+            Span::styled(format!("{keys:>19}  "), Style::new().fg(Color::Cyan)),
+            Span::raw(what),
+        ];
+        if let Some(note) = note {
+            spans.push(Span::styled(
+                format!("  ({note})"),
+                Style::new().fg(Color::DarkGray),
+            ));
+        }
+        Line::from(spans)
+    };
+    let heading = |text: &str| {
+        Line::from(Span::styled(
+            text.to_owned(),
+            Style::new().add_modifier(Modifier::BOLD),
+        ))
+    };
+    let mut lines = vec![heading("navigate")];
+    lines.extend(
+        HELP.iter()
+            .map(|(keys, what)| row((*keys).to_owned(), (*what).to_owned(), None)),
+    );
+    lines.push(Line::from(""));
+    lines.push(heading("on the selected branch"));
+    for action in actions::ACTIONS {
+        let note = match action.remote {
+            actions::Remote::No(_) if remote => Some("local only".to_owned()),
+            _ => None,
+        };
+        let asks = match action.ask {
+            Ask::Confirm { .. } | Ask::Checkpoint { .. } => ", after a yes",
+            _ => "",
+        };
+        lines.push(row(
+            action.key.to_string(),
+            format!("{}{asks}", action.help),
+            note,
+        ));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("⚠ INTERRUPTED", status_style(&BranchStatus::Interrupted).1),
-        Span::raw(" stopped mid-turn; ✉ counts unread inbox messages"),
+        Span::raw(" stopped mid-turn (R resumes it); ✉ counts unread inbox messages"),
     ]));
     lines.push(Line::from(Span::styled(
         "any key closes this sheet",
         Style::new().fg(Color::DarkGray),
     )));
+    lines
+}
+
+fn draw_help(model: &Model, frame: &mut Frame, area: Rect) {
+    let lines = help_lines(model.remote);
+    let width = 104.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered().title(" by watch keys ")),
+        Paragraph::new(lines).block(Block::bordered().title(" by watch keys ")),
         popup,
     );
 }
 
-/// Run the dashboard until the viewer quits. `refresh` fetches a snapshot;
-/// its error ends the dashboard (after the terminal is restored) and is
-/// returned.
-pub fn run<E>(
+/// A box of `height` rows across most of `area`, a third of the way down.
+fn popup(area: Rect, height: u16) -> Rect {
+    let width = (area.width * 4 / 5).clamp(20.min(area.width), 100);
+    let height = height.min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 3;
+    Rect::new(x, y, width, height)
+}
+
+fn draw_input(input: &Input, frame: &mut Frame, area: Rect) {
+    let (title, bottom) = match input.action.map(|id| actions::by_id(id).ask) {
+        Some(Ask::Text { title }) => (actions::fill(title, &input.branch), "Enter sends"),
+        Some(Ask::Checkpoint { title, .. }) => {
+            (actions::fill(title, &input.branch), "Enter chooses")
+        }
+        _ => (input.branch.clone(), "Enter sends"),
+    };
+    let area = match input.action.map(|id| actions::by_id(id).ask) {
+        Some(Ask::Checkpoint { .. }) => draw_choices(input, frame, area),
+        _ => area,
+    };
+    let area = popup(area, 3);
+    let block = Block::bordered()
+        .title(format!(" {title} "))
+        .title_bottom(format!(" {bottom} · Esc cancels "))
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = block.inner(area);
+    // Keep the cursor in view: scroll the text left as it grows.
+    let before: String = input.text.chars().take(input.cursor).collect();
+    let used = render::width(&before);
+    let room = usize::from(inner.width.saturating_sub(1));
+    let skip = used.saturating_sub(room);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(input.text.clone())
+            .scroll((0, skip as u16))
+            .block(block),
+        area,
+    );
+    frame.set_cursor_position((inner.x + (used - skip) as u16, inner.y));
+}
+
+/// The list an input box chooses from, drawn in the upper part of `area`;
+/// returns the part left for the box.
+fn draw_choices(input: &Input, frame: &mut Frame, area: Rect) -> Rect {
+    let lines: Vec<Line> = match &input.list {
+        None => vec![Line::from(Span::styled(
+            "loading…",
+            Style::new().fg(Color::DarkGray),
+        ))],
+        Some(Err(error)) => vec![Line::from(Span::styled(
+            error.clone(),
+            Style::new().fg(Color::Red),
+        ))],
+        Some(Ok(lines)) => lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| Line::from(l.clone()))
+            .collect(),
+    };
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(5).max(3));
+    let list = popup(area, height);
+    frame.render_widget(Clear, list);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(format!(
+                    " checkpoints of {} (* is where it is) ",
+                    input.branch
+                ))
+                .border_style(Style::new().fg(Color::DarkGray)),
+        ),
+        list,
+    );
+    let below = list.y + list.height;
+    Rect::new(
+        area.x,
+        below,
+        area.width,
+        (area.y + area.height).saturating_sub(below),
+    )
+}
+
+fn draw_confirm(model: &Model, pending: &Pending, frame: &mut Frame, area: Rect) {
+    let action = actions::by_id(pending.action);
+    let question = match (action.ask, action.run) {
+        (_, Run::Toggle { off_question, .. }) if pending.off => {
+            actions::fill(off_question, &pending.branch)
+        }
+        (Ask::Confirm { question } | Ask::Checkpoint { question, .. }, _) => {
+            actions::fill(question, &pending.branch).replace("{text}", &pending.text)
+        }
+        _ => format!("{} {}?", action.name, pending.branch),
+    };
+    let mut lines = vec![Line::from(question), Line::from("")];
+    if let Some(info) = model.info(&pending.branch) {
+        if let Some(candidate) = &info.candidate {
+            lines.push(Line::from(vec![
+                Span::styled("candidate ", Style::new().fg(Color::DarkGray)),
+                Span::raw(format!(
+                    "{} · {} file{}, +{} -{}",
+                    candidate.commit.get(..10).unwrap_or(&candidate.commit),
+                    candidate.files_changed,
+                    if candidate.files_changed == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    candidate.insertions,
+                    candidate.deletions
+                )),
+            ]));
+        }
+        let (glyph, status, look) = status_look(info);
+        lines.push(Line::from(vec![
+            Span::styled("status    ", Style::new().fg(Color::DarkGray)),
+            Span::styled(format!("{glyph} {status}"), look),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" y ", Style::new().fg(Color::Black).bg(Color::Green)),
+        Span::raw(format!(" {}   ", action.name)),
+        Span::styled(" n ", Style::new().fg(Color::Black).bg(Color::Gray)),
+        Span::raw(" not now"),
+    ]));
+    let area = popup(area, lines.len() as u16 + 4);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::bordered()
+                .title(format!(" {} {} ", action.name, pending.branch))
+                .border_style(Style::new().fg(Color::Yellow)),
+        ),
+        area,
+    );
+}
+
+/// A diff line's color, as `git diff` colors it.
+fn diff_style(line: &str) -> Style {
+    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ") {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else if line.starts_with('+') {
+        Style::new().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::new().fg(Color::Red)
+    } else if line.starts_with("@@") {
+        Style::new().fg(Color::Cyan)
+    } else {
+        Style::new()
+    }
+}
+
+fn draw_pane(pane: &Pane, frame: &mut Frame, area: Rect) {
+    let total = pane.len();
+    let height = usize::from(area.height.saturating_sub(2)).max(1);
+    // The last page ends at the last line rather than past it.
+    let top = pane.scroll.min(total.saturating_sub(height));
+    let position = match &pane.lines {
+        Some(Ok(lines)) if !lines.is_empty() => format!(
+            " {}-{} of {} ",
+            top + 1,
+            (top + height).min(lines.len()),
+            lines.len()
+        ),
+        _ => String::new(),
+    };
+    let block = Block::bordered()
+        .title(format!(" {} ", pane.title))
+        .title_bottom(Line::from(position).right_aligned())
+        .border_style(Style::new().fg(Color::Cyan));
+    let lines: Vec<Line> = match &pane.lines {
+        None => vec![Line::from(Span::styled(
+            "loading…",
+            Style::new().fg(Color::DarkGray),
+        ))],
+        Some(Err(error)) => vec![Line::from(Span::styled(
+            error.clone(),
+            Style::new().fg(Color::Red),
+        ))],
+        Some(Ok(lines)) => lines
+            .iter()
+            .skip(top)
+            .take(height)
+            .map(|line| {
+                let style = match pane.kind {
+                    PaneKind::Diff => diff_style(line),
+                    _ => Style::new(),
+                };
+                Line::from(Span::styled(line.replace('\t', "    "), style))
+            })
+            .collect(),
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// What [`run`] needs from outside the terminal: the data, and a way to
+/// carry out commands. Results come back as messages on `done`, so slow
+/// work (a merge's check, a turn) never holds up drawing.
+pub trait Effects {
+    type Error;
+    /// The branches and the events recorded since the last call.
+    fn refresh(&mut self) -> Result<Snapshot, Self::Error>;
+    /// Carry out `cmd` (never [`Cmd::Quit`] or [`Cmd::Open`]).
+    fn perform(&mut self, cmd: Cmd, done: &mpsc::Sender<Msg>);
+    /// How `by open` would start an editor on `branch`'s worktree, or why
+    /// it cannot.
+    fn editor(&mut self, branch: &str) -> Result<crate::open::Plan, String>;
+}
+
+/// `by open` from the dashboard: a terminal editor gets the screen (raw
+/// mode off, the main screen back) until it exits, and the dashboard is
+/// redrawn from scratch; a graphical one starts on another thread. The
+/// result comes back as [`Msg::Done`].
+fn open_editor(
+    terminal: &mut ratatui::DefaultTerminal,
+    plan: Result<crate::open::Plan, String>,
+    branch: String,
+    done: &mpsc::Sender<Msg>,
+) -> std::io::Result<()> {
+    use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+    use ratatui::crossterm::execute;
+    use ratatui::crossterm::terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    };
+    let finished = move |result: crate::commands::Outcome, argv: &[String]| Msg::Done {
+        action: ActionId::Open,
+        branch,
+        ok: result.is_ok(),
+        output: match result {
+            Ok(()) => format!("opened with {}", argv.join(" ")),
+            Err(error) => error.to_string(),
+        },
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            let _ = done.send(finished(Err(crate::commands::Failure::Message(error)), &[]));
+            return Ok(());
+        }
+    };
+    if !plan.terminal {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let result = crate::open::launch(&plan);
+            let _ = done.send(finished(result, &plan.argv));
+        });
+        return Ok(());
+    }
+    let mut stdout = std::io::stdout();
+    execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    let result = crate::open::launch(&plan);
+    enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    terminal.clear()?;
+    let _ = done.send(finished(result, &plan.argv));
+    Ok(())
+}
+
+/// How long [`run`] waits for a key before looking for results.
+const TICK: Duration = Duration::from_millis(100);
+
+/// Run the dashboard until the viewer quits. A refresh error ends the
+/// dashboard (after the terminal is restored) and is returned.
+pub fn run<F: Effects>(
     label: String,
+    remote: bool,
     interval: Duration,
-    mut refresh: impl FnMut() -> Result<Snapshot, E>,
-) -> Result<Result<(), E>, std::io::Error> {
+    mut effects: F,
+) -> Result<Result<(), F::Error>, std::io::Error> {
+    use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+    use ratatui::crossterm::execute;
     // Raw mode, the alternate screen, and a panic hook that restores both
     // before the panic is reported. `Restore` restores them on every other
     // way out.
@@ -1036,40 +1933,57 @@ pub fn run<E>(
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
+            let _ = execute!(std::io::stdout(), DisableBracketedPaste);
             ratatui::restore();
         }
     }
     let _restore = Restore;
+    // A paste then arrives whole, so a newline in it does not send early.
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    let (tx, rx) = mpsc::channel();
     let mut model = Model::new(label);
+    model.remote = remote;
+    let size = terminal.size()?;
+    update(&mut model, Msg::Resize(size.width, size.height));
     terminal.draw(|frame| view(&model, frame))?;
     let mut next_refresh = Instant::now();
     loop {
+        let mut msgs = Vec::new();
         if Instant::now() >= next_refresh {
-            match refresh() {
-                Ok(snapshot) => {
-                    update(&mut model, Msg::Refreshed(snapshot));
-                }
+            match effects.refresh() {
+                Ok(snapshot) => msgs.push(Msg::Refreshed(snapshot)),
                 Err(error) => return Ok(Err(error)),
             }
             next_refresh = Instant::now() + interval;
-            terminal.draw(|frame| view(&model, frame))?;
         }
-        let wait = next_refresh.saturating_duration_since(Instant::now());
+        msgs.extend(rx.try_iter());
+        let wait = next_refresh
+            .saturating_duration_since(Instant::now())
+            .min(TICK);
         if event::poll(wait)? {
             match event::read()? {
-                event::Event::Key(key) => {
-                    if let Some(key) = Key::from_crossterm(key) {
-                        if update(&mut model, Msg::Key(key)) == Flow::Quit {
-                            return Ok(Ok(()));
-                        }
-                    }
-                }
-                // Drawing autoresizes to the new size.
-                event::Event::Resize(..) => {}
-                _ => continue,
+                event::Event::Key(key) => msgs.extend(Key::from_crossterm(key).map(Msg::Key)),
+                event::Event::Paste(text) => msgs.push(Msg::Paste(text)),
+                event::Event::Resize(width, height) => msgs.push(Msg::Resize(width, height)),
+                _ => {}
             }
-            terminal.draw(|frame| view(&model, frame))?;
         }
+        if msgs.is_empty() {
+            continue;
+        }
+        for msg in msgs {
+            for cmd in update(&mut model, msg) {
+                match cmd {
+                    Cmd::Quit => return Ok(Ok(())),
+                    Cmd::Open(branch) => {
+                        let plan = effects.editor(&branch);
+                        open_editor(&mut terminal, plan, branch, &tx)?;
+                    }
+                    cmd => effects.perform(cmd, &tx),
+                }
+            }
+        }
+        terminal.draw(|frame| view(&model, frame))?;
     }
 }
 
@@ -1141,6 +2055,7 @@ mod tests {
                 })
                 .collect(),
             now_ms: 1_130_000,
+            trying: None,
         }
     }
 
@@ -1150,12 +2065,35 @@ mod tests {
         model
     }
 
-    fn keys(model: &mut Model, keys: &[Key]) -> Flow {
-        let mut flow = Flow::Continue;
-        for key in keys {
-            flow = update(model, Msg::Key(*key));
+    /// Whether the loop goes on, from what [`update`] returned.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Flow {
+        Continue,
+        Quit,
+    }
+
+    fn flow(cmds: &[Cmd]) -> Flow {
+        match cmds.contains(&Cmd::Quit) {
+            true => Flow::Quit,
+            false => Flow::Continue,
         }
-        flow
+    }
+
+    fn keys(model: &mut Model, keys: &[Key]) -> Flow {
+        let mut last = Flow::Continue;
+        for key in keys {
+            last = flow(&update(model, Msg::Key(*key)));
+        }
+        last
+    }
+
+    /// The commands the last of `keys` returned.
+    fn press(model: &mut Model, keys: &[Key]) -> Vec<Cmd> {
+        let mut cmds = Vec::new();
+        for key in keys {
+            cmds = update(model, Msg::Key(*key));
+        }
+        cmds
     }
 
     fn draw(model: &Model, width: u16, height: u16) -> Buffer {
@@ -1262,7 +2200,7 @@ mod tests {
         assert_eq!(keys(&mut m, &[Key::Char('q')]), Flow::Continue);
         assert_eq!(m.filter, "bloq");
         keys(&mut m, &[Key::Backspace, Key::Enter]);
-        assert_eq!((m.mode, m.filter.as_str()), (Mode::Browse, "blo"));
+        assert_eq!((m.mode.clone(), m.filter.as_str()), (Mode::Browse, "blo"));
         // Esc clears the filter first, then quits.
         assert_eq!(keys(&mut m, &[Key::Esc]), Flow::Continue);
         assert!(m.filter.is_empty());
@@ -1388,7 +2326,10 @@ mod tests {
             screen[0]
         );
         assert!(
-            screen[23].starts_with("j/k move  Enter focus  / filter  ? help  q quit"),
+            screen[23].starts_with(
+                "j/k move  Enter focus  / filter  S steer  x cancel  f fork  l log  y copy name  \
+                 Y copy path  o open  c compare  ? keys  q quit"
+            ),
             "{}",
             screen[23]
         );
@@ -1480,6 +2421,676 @@ mod tests {
         update(&mut m, Msg::Refreshed(snapshot(Vec::new(), Vec::new())));
         let buffer = draw(&m, 100, 24);
         assert!(find(&buffer, "no branches yet").is_some());
+    }
+
+    fn select(model: &mut Model, name: &str) {
+        model.selected = Some(name.to_owned());
+    }
+
+    fn typed(model: &mut Model, text: &str) {
+        for c in text.chars() {
+            update(model, Msg::Key(Key::Char(c)));
+        }
+    }
+
+    fn ready_yard() -> Vec<BranchInfo> {
+        let mut infos = yard();
+        let mut done = info("done", None, BranchStatus::Ready);
+        done.candidate = Some(branchyard::CandidateInfo {
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            files_changed: 3,
+            insertions: 10,
+            deletions: 2,
+        });
+        infos.push(done);
+        infos
+    }
+
+    fn run_of(cmds: &[Cmd]) -> &Invocation {
+        match cmds {
+            [Cmd::Run(invocation)] => invocation,
+            other => panic!("expected one run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_is_one_key_on_an_interrupted_branch() {
+        let mut m = model();
+        select(&mut m, "impl");
+        let cmds = press(&mut m, &[Key::Char('R')]);
+        let run = run_of(&cmds);
+        assert_eq!(run.action, ActionId::Resume);
+        assert_eq!(run.argv, ["send", "--", "impl", actions::RESUME_PROMPT]);
+        assert!(run.background);
+        assert_eq!(m.mode, Mode::Browse);
+        assert!(m
+            .toast
+            .as_ref()
+            .unwrap()
+            .text
+            .starts_with("running: by send impl"));
+        // Anywhere else it is refused, with the reason, and runs nothing.
+        select(&mut m, "lead");
+        assert!(press(&mut m, &[Key::Char('R')]).is_empty());
+        let toast = m.toast.clone().unwrap();
+        assert_eq!(toast.tone, Tone::Warn);
+        assert!(
+            toast.text.contains("only an interrupted branch resumes"),
+            "{toast:?}"
+        );
+    }
+
+    #[test]
+    fn send_and_steer_read_a_line_of_text_first() {
+        let mut m = model();
+        select(&mut m, "docs");
+        assert!(press(&mut m, &[Key::Char('s')]).is_empty());
+        assert!(matches!(&m.mode, Mode::Input(i) if i.branch == "docs"));
+        // Keys are text now: q does not quit, s does not nest.
+        typed(&mut m, "fix it q");
+        update(&mut m, Msg::Paste("s\nand more\n".into()));
+        press(&mut m, &[Key::Left, Key::Backspace]);
+        let Mode::Input(input) = &m.mode else {
+            panic!()
+        };
+        assert_eq!(input.text, "fix it qs and moe");
+        let cmds = press(&mut m, &[Key::Char('r'), Key::Enter]);
+        let run = run_of(&cmds);
+        assert_eq!(run.argv, ["send", "--", "docs", "fix it qs and more"]);
+        assert!(run.background);
+        assert_eq!(m.mode, Mode::Browse);
+
+        // Esc cancels; an empty line is not sent.
+        press(&mut m, &[Key::Char('s')]);
+        assert!(press(&mut m, &[Key::Char(' '), Key::Enter]).is_empty());
+        assert!(matches!(m.mode, Mode::Input(_)));
+        press(&mut m, &[Key::Esc]);
+        assert_eq!(m.mode, Mode::Browse);
+
+        // Steering is for the running turn, and waits for delivery.
+        select(&mut m, "lead");
+        press(&mut m, &[Key::Char('S')]);
+        typed(&mut m, "also add tests");
+        let run = run_of(&press(&mut m, &[Key::Enter])).clone();
+        assert_eq!(
+            run.argv,
+            ["send", "--steer", "--", "lead", "also add tests"]
+        );
+        assert!(!run.background);
+        // A turn is running, so s is refused and says what to use.
+        press(&mut m, &[Key::Char('s')]);
+        assert_eq!(m.mode, Mode::Browse);
+        assert!(m.toast.as_ref().unwrap().text.contains("S steers it"));
+    }
+
+    #[test]
+    fn merge_and_cancel_ask_first_and_merge_shows_the_check_result() {
+        let mut m = Model::new("/repo");
+        update(&mut m, Msg::Refreshed(snapshot(ready_yard(), Vec::new())));
+        select(&mut m, "done");
+        assert!(press(&mut m, &[Key::Char('m')]).is_empty());
+        assert!(matches!(&m.mode, Mode::Confirm(p) if p.action == ActionId::Merge));
+        let buffer = draw(&m, 120, 30);
+        assert!(find(&buffer, "Merge done into the checked-out branch?").is_some());
+        assert!(find(&buffer, "0123456789 · 3 files, +10 -2").is_some());
+        // No: nothing runs.
+        assert!(press(&mut m, &[Key::Char('n')]).is_empty());
+        assert_eq!(m.mode, Mode::Browse);
+        // Yes: the merge runs and is waited for.
+        let cmds = press(&mut m, &[Key::Char('m'), Key::Char('y')]);
+        let run = run_of(&cmds);
+        assert_eq!(run.argv, ["merge", "--", "done"]);
+        assert!(!run.background);
+        // A failed check: the status line, and the output in a pane.
+        update(
+            &mut m,
+            Msg::Done {
+                action: ActionId::Merge,
+                branch: "done".into(),
+                ok: false,
+                output: "by: check failed:\ntest parser ... FAILED\n1 failed\n".into(),
+            },
+        );
+        let toast = m.toast.clone().unwrap();
+        assert_eq!(
+            (toast.tone, toast.text.as_str()),
+            (Tone::Bad, "merge done failed: 1 failed")
+        );
+        let Mode::Pane(pane) = &m.mode else {
+            panic!("{:?}", m.mode)
+        };
+        assert_eq!(pane.kind, PaneKind::Output);
+        assert_eq!(pane.title, "merge done: failed");
+        let buffer = draw(&m, 120, 30);
+        assert!(find(&buffer, "test parser ... FAILED").is_some());
+        press(&mut m, &[Key::Char('q')]);
+        // A passing merge shows its result too.
+        update(
+            &mut m,
+            Msg::Done {
+                action: ActionId::Merge,
+                branch: "done".into(),
+                ok: true,
+                output: "merged done into main (0123456789..abcdef0123)\n".into(),
+            },
+        );
+        assert!(matches!(&m.mode, Mode::Pane(p) if p.title == "merge done: done"));
+        assert_eq!(m.toast.as_ref().unwrap().tone, Tone::Good);
+
+        // Cancel asks too.
+        let mut m = model();
+        let cmds = press(&mut m, &[Key::Char('x'), Key::Char('y')]);
+        assert_eq!(run_of(&cmds).argv, ["cancel", "--", "lead"]);
+        press(&mut m, &[Key::Char('x')]);
+        assert!(press(&mut m, &[Key::Esc]).is_empty());
+        assert!(m.toast.as_ref().unwrap().text.contains("cancel: not done"));
+    }
+
+    #[test]
+    fn background_results_reach_the_status_line() {
+        let mut m = model();
+        update(
+            &mut m,
+            Msg::Started {
+                action: ActionId::Send,
+                branch: "docs".into(),
+                log: "/r/.branchyard/watch/docs-send-1.log".into(),
+            },
+        );
+        assert!(m.toast.as_ref().unwrap().text.contains("docs-send-1.log"));
+        update(
+            &mut m,
+            Msg::Done {
+                action: ActionId::Send,
+                branch: "docs".into(),
+                ok: true,
+                output: "…\n✔ docs ready".into(),
+            },
+        );
+        assert_eq!(
+            m.toast.as_ref().unwrap().text,
+            "send docs: finished; ✔ docs ready"
+        );
+        assert_eq!(m.mode, Mode::Browse, "a success needs no pane");
+        let buffer = draw(&m, 140, 24);
+        let (x, y) = find(&buffer, "send docs: finished").unwrap();
+        assert_eq!((y, buffer[(x, y)].fg), (23, Color::Green));
+        // It fades after a while of refreshes, and Esc clears it first.
+        let mut later = snapshot(yard(), Vec::new());
+        later.now_ms += TOAST_MS + 1;
+        update(&mut m, Msg::Refreshed(later));
+        assert_eq!(m.toast, None);
+        m.toast_text("x");
+        assert_eq!(keys(&mut m, &[Key::Esc]), Flow::Continue);
+        assert_eq!(m.toast, None);
+    }
+
+    impl Model {
+        /// A test's shortcut for a plain status line.
+        fn toast_text(&mut self, text: &str) {
+            self.toast(Tone::Plain, text);
+        }
+    }
+
+    #[test]
+    fn diff_and_log_open_scrollable_panes() {
+        let mut m = Model::new("/repo");
+        update(&mut m, Msg::Refreshed(snapshot(ready_yard(), Vec::new())));
+        update(&mut m, Msg::Resize(100, 14));
+        select(&mut m, "done");
+        let cmds = press(&mut m, &[Key::Char('d')]);
+        assert_eq!(
+            cmds,
+            [Cmd::Load {
+                kind: PaneKind::Diff,
+                branch: "done".into()
+            }]
+        );
+        assert!(find(&draw(&m, 100, 14), "loading…").is_some());
+        let diff: String = std::iter::once("diff --git a/x b/x\n+added\n-removed\n".to_owned())
+            .chain((0..40).map(|i| format!(" context {i}\n")))
+            .collect();
+        // A load for another pane is ignored.
+        update(
+            &mut m,
+            Msg::Loaded {
+                kind: PaneKind::Log,
+                branch: "done".into(),
+                result: Ok("x".into()),
+            },
+        );
+        update(
+            &mut m,
+            Msg::Loaded {
+                kind: PaneKind::Diff,
+                branch: "done".into(),
+                result: Ok(diff),
+            },
+        );
+        let buffer = draw(&m, 100, 14);
+        let (x, y) = find(&buffer, "+added").unwrap();
+        assert_eq!(buffer[(x, y)].fg, Color::Green);
+        assert!(
+            find(&buffer, " 1-10 of 43 ").is_some(),
+            "{:#?}",
+            lines(&buffer)
+        );
+        press(&mut m, &[Key::Char('j'), Key::PageDown]);
+        let Mode::Pane(pane) = &m.mode else { panic!() };
+        assert_eq!(pane.scroll, 11);
+        press(&mut m, &[Key::Char('G')]);
+        let buffer = draw(&m, 100, 14);
+        assert!(find(&buffer, "context 39").is_some());
+        assert!(
+            find(&buffer, " 34-43 of 43 ").is_some(),
+            "{:#?}",
+            lines(&buffer)
+        );
+        assert_eq!(keys(&mut m, &[Key::Char('q')]), Flow::Continue);
+        assert_eq!(m.mode, Mode::Browse);
+
+        // The log pane follows new events for its branch.
+        let cmds = press(&mut m, &[Key::Char('l')]);
+        assert_eq!(
+            cmds,
+            [Cmd::Load {
+                kind: PaneKind::Log,
+                branch: "done".into()
+            }]
+        );
+        update(
+            &mut m,
+            Msg::Loaded {
+                kind: PaneKind::Log,
+                branch: "done".into(),
+                result: Ok("one\ntwo\n".into()),
+            },
+        );
+        let refresh = |m: &mut Model, branch: &str| {
+            update(
+                m,
+                Msg::Refreshed(snapshot(
+                    ready_yard(),
+                    vec![(branch, Activity::Prompt("p".into()))],
+                )),
+            )
+        };
+        assert!(refresh(&mut m, "lead").is_empty());
+        assert_eq!(
+            refresh(&mut m, "done"),
+            [Cmd::Load {
+                kind: PaneKind::Log,
+                branch: "done".into()
+            }]
+        );
+        // Scrolled up, it stops following.
+        press(&mut m, &[Key::Up]);
+        assert!(refresh(&mut m, "done").is_empty());
+        // A failure to load says why.
+        press(&mut m, &[Key::Esc]);
+        select(&mut m, "done");
+        press(&mut m, &[Key::Char('d')]);
+        update(
+            &mut m,
+            Msg::Loaded {
+                kind: PaneKind::Diff,
+                branch: "done".into(),
+                result: Err("no such branch".into()),
+            },
+        );
+        assert!(find(&draw(&m, 100, 14), "no such branch").is_some());
+    }
+
+    #[test]
+    fn copy_keys_and_remote_mode() {
+        let mut m = model();
+        select(&mut m, "impl");
+        assert_eq!(press(&mut m, &[Key::Char('y')]), [Cmd::Copy("impl".into())]);
+        assert_eq!(press(&mut m, &[Key::Char('Y')]), [Cmd::Copy("/w".into())]);
+        m.remote = true;
+        assert!(press(&mut m, &[Key::Char('Y')]).is_empty());
+        assert!(m
+            .toast
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("the worktree is on the server"));
+        // What works remotely still does.
+        assert_eq!(
+            run_of(&press(&mut m, &[Key::Char('R')])).action,
+            ActionId::Resume
+        );
+        // No branch, no action.
+        let mut empty = Model::new("/repo");
+        update(&mut empty, Msg::Refreshed(snapshot(Vec::new(), Vec::new())));
+        assert!(press(&mut empty, &[Key::Char('s')]).is_empty());
+        assert_eq!(empty.toast.unwrap().text, "no branch selected");
+    }
+
+    fn yes(model: &mut Model, key: char) -> Invocation {
+        assert!(
+            press(model, &[Key::Char(key)]).is_empty(),
+            "{key} asks first"
+        );
+        assert!(matches!(model.mode, Mode::Confirm(_)), "{:?}", model.mode);
+        run_of(&press(model, &[Key::Char('y')])).clone()
+    }
+
+    #[test]
+    fn pr_open_compare_and_try_run_their_commands() {
+        let mut m = Model::new("/repo");
+        update(&mut m, Msg::Refreshed(snapshot(ready_yard(), Vec::new())));
+        select(&mut m, "done");
+        // p: by pr, after a yes, waited for, with its output in a pane.
+        press(&mut m, &[Key::Char('p')]);
+        let buffer = draw(&m, 120, 30);
+        assert!(find(&buffer, "Push done's candidate and open or update").is_some());
+        press(&mut m, &[Key::Esc]);
+        let pr = yes(&mut m, 'p');
+        assert_eq!(pr.argv, ["pr", "--", "done"]);
+        assert!(!pr.background);
+        update(
+            &mut m,
+            Msg::Done {
+                action: ActionId::Pr,
+                branch: "done".into(),
+                ok: true,
+                output: "check passed\nopened https://github.com/o/r/pull/7\n".into(),
+            },
+        );
+        assert!(matches!(&m.mode, Mode::Pane(p) if p.title == "pr done: done"));
+        press(&mut m, &[Key::Char('q')]);
+        // P: by pr --watch, in the background.
+        let watch = yes(&mut m, 'P');
+        assert_eq!(watch.argv, ["pr", "--watch", "--", "done"]);
+        assert!(watch.background);
+        // o: the dashboard opens the editor itself.
+        assert_eq!(press(&mut m, &[Key::Char('o')]), [Cmd::Open("done".into())]);
+        update(
+            &mut m,
+            Msg::Done {
+                action: ActionId::Open,
+                branch: "done".into(),
+                ok: false,
+                output: "no editor: set $VISUAL or $EDITOR".into(),
+            },
+        );
+        assert!(m.toast.as_ref().unwrap().text.contains("no editor"));
+        // c: the comparison, in a pane.
+        let cmds = press(&mut m, &[Key::Char('c')]);
+        assert_eq!(
+            cmds,
+            [Cmd::Load {
+                kind: PaneKind::Compare,
+                branch: "done".into()
+            }]
+        );
+        assert!(matches!(&m.mode, Mode::Pane(p) if p.kind == PaneKind::Compare));
+        update(
+            &mut m,
+            Msg::Loaded {
+                kind: PaneKind::Compare,
+                branch: "done".into(),
+                result: Ok("BRANCH  STATUS\ndone    ready\n".into()),
+            },
+        );
+        assert!(find(&draw(&m, 100, 24), "done    ready").is_some());
+        press(&mut m, &[Key::Char('q')]);
+        // t: try, then t again on the tried branch turns it off.
+        let on = yes(&mut m, 't');
+        assert_eq!(on.argv, ["try", "--", "done"]);
+        let mut tried = snapshot(ready_yard(), Vec::new());
+        tried.trying = Some("done".into());
+        update(&mut m, Msg::Refreshed(tried));
+        assert!(find(&draw(&m, 120, 30), "applied to this checkout").is_some());
+        press(&mut m, &[Key::Char('t')]);
+        assert!(find(&draw(&m, 120, 30), "Turn off the try of done").is_some());
+        let off = run_of(&press(&mut m, &[Key::Char('y')])).clone();
+        assert_eq!(off.argv, ["try", "--off"]);
+        // Not on a running branch, and not against a server.
+        select(&mut m, "lead");
+        for key in ['p', 'P', 'r'] {
+            assert!(press(&mut m, &[Key::Char(key)]).is_empty());
+            assert!(m
+                .toast
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("has a turn running"));
+        }
+        select(&mut m, "done");
+        m.remote = true;
+        for key in ['p', 'P', 'o', 'r', 't'] {
+            assert!(press(&mut m, &[Key::Char(key)]).is_empty(), "{key}");
+            assert!(m.toast.as_ref().unwrap().text.contains("is local only"));
+        }
+        assert_eq!(
+            press(&mut m, &[Key::Char('c')]),
+            [Cmd::Load {
+                kind: PaneKind::Compare,
+                branch: "done".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn rewind_chooses_a_checkpoint_from_the_list_then_asks() {
+        let mut m = Model::new("/repo");
+        update(&mut m, Msg::Refreshed(snapshot(ready_yard(), Vec::new())));
+        select(&mut m, "done");
+        let cmds = press(&mut m, &[Key::Char('r')]);
+        assert_eq!(
+            cmds,
+            [Cmd::Load {
+                kind: PaneKind::Checkpoints,
+                branch: "done".into()
+            }]
+        );
+        assert!(matches!(&m.mode, Mode::Input(i) if i.list.is_none()));
+        update(
+            &mut m,
+            Msg::Loaded {
+                kind: PaneKind::Checkpoints,
+                branch: "done".into(),
+                result: Ok("    0  0123456789  base\n  * 1  abcdef0123  2 file(s) +3 -1\n".into()),
+            },
+        );
+        let buffer = draw(&m, 100, 24);
+        assert!(find(&buffer, "* 1  abcdef0123").is_some());
+        assert!(find(&buffer, " rewind done to checkpoint ").is_some());
+        assert!(lines(&buffer)[23].starts_with("Enter choose"));
+        // Not a number: said, and the box stays.
+        typed(&mut m, "one");
+        assert!(press(&mut m, &[Key::Enter]).is_empty());
+        assert!(m
+            .toast
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("is not a checkpoint"));
+        assert!(matches!(m.mode, Mode::Input(_)));
+        press(&mut m, &[Key::Backspace, Key::Backspace, Key::Backspace]);
+        typed(&mut m, "0");
+        assert!(press(&mut m, &[Key::Enter]).is_empty());
+        assert!(matches!(&m.mode, Mode::Confirm(p) if p.text == "0"));
+        let buffer = draw(&m, 120, 30);
+        assert!(find(&buffer, "Reset done and its worktree to checkpoint 0?").is_some());
+        let run = run_of(&press(&mut m, &[Key::Char('y')])).clone();
+        assert_eq!(run.argv, ["rewind", "--yes", "--to", "0", "--", "done"]);
+        assert!(!run.background);
+        // Esc at the box sends nothing.
+        press(&mut m, &[Key::Char('r')]);
+        assert!(press(&mut m, &[Key::Esc]).is_empty());
+        assert_eq!(m.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn the_detail_shows_the_checkpoint_and_merge_readiness() {
+        use branchyard::{CheckRun, Checkpoint, PullRequestActivity, PullRequestRef};
+        let checkpoint = |turn: u32| {
+            Activity::Checkpoint(Checkpoint {
+                turn,
+                commit: "c".repeat(40),
+                git_ref: format!("refs/branchyard/done/1/turn-{turn}"),
+                after: Some(turn - 1),
+                session: None,
+                files_changed: 1,
+                insertions: 1,
+                deletions: 0,
+                sandbox: None,
+            })
+        };
+        let pr = |activity: PullRequestActivity| Activity::PullRequest(Box::new(activity));
+        let mut m = Model::new("/repo");
+        update(
+            &mut m,
+            Msg::Refreshed(snapshot(
+                ready_yard(),
+                vec![
+                    ("done", checkpoint(1)),
+                    ("done", checkpoint(2)),
+                    (
+                        "done",
+                        Activity::Rewound {
+                            from: Some(2),
+                            to: 1,
+                            commit: "c".repeat(40),
+                            session: branchyard::SessionContinuity::Fresh {
+                                reason: "test".into(),
+                            },
+                        },
+                    ),
+                    (
+                        "done",
+                        pr(PullRequestActivity::Checked(CheckRun {
+                            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                            argv: vec!["true".into()],
+                            passed: true,
+                            timed_out: false,
+                            output_tail: String::new(),
+                        })),
+                    ),
+                    (
+                        "done",
+                        pr(PullRequestActivity::Opened(PullRequestRef {
+                            number: 7,
+                            url: "https://github.com/o/r/pull/7".into(),
+                            head: "by/done".into(),
+                            base: None,
+                            draft: false,
+                        })),
+                    ),
+                ],
+            )),
+        );
+        select(&mut m, "done");
+        let buffer = draw(&m, 160, 40);
+        assert!(find(&buffer, "at 1 of 2 · r rewinds").is_some());
+        assert!(find(
+            &buffer,
+            "unknown (by show --refresh asks GitHub) · check passed"
+        )
+        .is_some());
+        assert!(find(&buffer, "PR #7 not observed yet").is_some());
+        // A branch without either shows neither.
+        select(&mut m, "docs");
+        let buffer = draw(&m, 160, 40);
+        assert!(find(&buffer, "r rewinds").is_none());
+        assert!(find(&buffer, "PR #").is_none());
+    }
+
+    #[test]
+    fn the_help_sheet_lists_every_action_from_the_registry() {
+        let mut m = model();
+        keys(&mut m, &[Key::Char('?')]);
+        let buffer = draw(&m, 120, 40);
+        for action in actions::ACTIONS {
+            assert!(find(&buffer, action.help).is_some(), "{}", action.help);
+        }
+        assert!(find(&buffer, "coming with").is_none());
+        assert!(find(&buffer, "local only").is_none());
+        m.remote = true;
+        let buffer = draw(&m, 120, 40);
+        assert!(find(&buffer, "(local only)").is_some());
+        // The input box shows its title and the text.
+        let mut m = model();
+        select(&mut m, "docs");
+        press(&mut m, &[Key::Char('f')]);
+        typed(&mut m, "try another way");
+        let buffer = draw(&m, 100, 24);
+        assert!(find(&buffer, " fork docs with the prompt ").is_some());
+        assert!(find(&buffer, "try another way").is_some());
+        assert!(lines(&buffer)[23].starts_with("Enter send"));
+    }
+
+    #[test]
+    fn new_events_that_need_you_notify_once_and_history_does_not() {
+        let asks = |key: &str| {
+            Activity::Harness(Event::PermissionRequested {
+                turn: Some(1),
+                request: branchyard::PermissionRequest {
+                    key: branchyard::PermissionKey(key.into()),
+                    tool: "Bash".into(),
+                    input: serde_json::Value::Null,
+                },
+            })
+        };
+        // The first refresh is history: nothing notifies.
+        let mut m = Model::new("/repo");
+        let first = update(
+            &mut m,
+            Msg::Refreshed(snapshot(
+                yard(),
+                vec![
+                    ("impl", Activity::Status(BranchStatus::Interrupted)),
+                    ("lead", asks("old")),
+                ],
+            )),
+        );
+        assert!(first.is_empty(), "{first:?}");
+        let notices = |cmds: Vec<Cmd>| -> Vec<String> {
+            cmds.into_iter()
+                .filter_map(|cmd| match cmd {
+                    Cmd::Notify(notice) => Some(notice.text),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Later ones do, once each; activity that needs no one does not.
+        let later = update(
+            &mut m,
+            Msg::Refreshed(snapshot(
+                yard(),
+                vec![
+                    ("lead", asks("old")),
+                    ("lead", asks("new")),
+                    ("lead", Activity::Prompt("x".into())),
+                    ("impl", Activity::Status(BranchStatus::Interrupted)),
+                    (
+                        "docs",
+                        Activity::Status(BranchStatus::Failed {
+                            reason: "exit 2".into(),
+                        }),
+                    ),
+                    ("review", Activity::Stalled { since_ms: 1 }),
+                ],
+            )),
+        );
+        assert_eq!(
+            notices(later),
+            [
+                "lead asks to use Bash",
+                "docs failed: exit 2",
+                "review has stalled: no activity from its harness"
+            ]
+        );
+        // An old event arriving late (a server's replay) is not news.
+        let mut stale = snapshot(
+            yard(),
+            vec![("tests", Activity::Status(BranchStatus::Ready))],
+        );
+        stale.now_ms += notify::FRESH_MS + 60_000;
+        assert!(notices(update(&mut m, Msg::Refreshed(stale))).is_empty());
     }
 
     #[test]

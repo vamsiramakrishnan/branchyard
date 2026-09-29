@@ -31,6 +31,18 @@ pub struct Integrated {
     pub stale_checkouts: Vec<PathBuf>,
 }
 
+/// What a check said about one commit; see [`Repository::verify`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    pub commit: Commit,
+    pub passed: bool,
+    /// The check ran past its timeout and was killed; `passed` is false.
+    pub timed_out: bool,
+    /// The last [`OUTPUT_TAIL_BYTES`](crate::OUTPUT_TAIL_BYTES) bytes of its
+    /// combined output.
+    pub output_tail: String,
+}
+
 /// Why a candidate was not promoted. In every case the target ref is
 /// unchanged by this call.
 #[derive(Debug)]
@@ -252,6 +264,34 @@ impl Repository {
         })
     }
 
+    /// Runs `check` on exactly `commit`, checked out detached in a new
+    /// temporary worktree under the scratch directory (removed on every
+    /// return path), without merging it anywhere. A check that exits
+    /// unsuccessfully or times out is a [`Verified`] with `passed` false,
+    /// not an error; one that cannot start is
+    /// [`IntegrationError::CheckNotStarted`].
+    pub fn verify(&self, commit: &Commit, check: &Check) -> Result<Verified, IntegrationError> {
+        let commit = self.resolve(commit.as_str())?;
+        let scratch = TempWorktree::create(self, &commit)?;
+        let verified = match check::run(check, &scratch.path) {
+            Err(e) => return Err(IntegrationError::CheckNotStarted(e)),
+            Ok((CheckOutcome::Exited(status), output_tail)) => Verified {
+                commit,
+                passed: status.success(),
+                timed_out: false,
+                output_tail,
+            },
+            Ok((CheckOutcome::TimedOut, output_tail)) => Verified {
+                commit,
+                passed: false,
+                timed_out: true,
+                output_tail,
+            },
+        };
+        drop(scratch);
+        Ok(verified)
+    }
+
     fn target_ref(&self, target: &str) -> Result<String, GitError> {
         let target_ref = format!("refs/heads/{target}");
         if target.is_empty()
@@ -393,6 +433,30 @@ fn blocks_update(worktree: &Path, from: &Commit, to: Option<&Commit>) -> Result<
 }
 
 /// A detached worktree that is removed when dropped.
+/// What [`Repository::check_commit`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckResult {
+    Passed { output_tail: String },
+    Failed { output_tail: String },
+    TimedOut { output_tail: String },
+}
+
+impl Repository {
+    /// Run `check` on `commit` exactly, in a private temporary worktree
+    /// that is removed on every return path; nothing else is changed.
+    /// Fails if the worktree cannot be created or the check cannot start.
+    pub fn check_commit(&self, commit: &Commit, check: &Check) -> Result<CheckResult, GitError> {
+        let scratch = TempWorktree::create(self, commit)?;
+        match check::run(check, &scratch.path)? {
+            (CheckOutcome::Exited(status), output_tail) if status.success() => {
+                Ok(CheckResult::Passed { output_tail })
+            }
+            (CheckOutcome::Exited(_), output_tail) => Ok(CheckResult::Failed { output_tail }),
+            (CheckOutcome::TimedOut, output_tail) => Ok(CheckResult::TimedOut { output_tail }),
+        }
+    }
+}
+
 struct TempWorktree {
     root: PathBuf,
     path: PathBuf,

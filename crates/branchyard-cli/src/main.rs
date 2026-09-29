@@ -4,18 +4,24 @@
 //! mode (`--remote URL`).
 
 mod args;
+mod attempts;
 mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod gh;
 mod init;
 mod json;
+mod notify;
+mod open;
+mod pr;
 mod remote;
 mod render;
 mod rig;
 mod setup_io;
 mod watch;
 mod wizard;
+mod workspace_cmd;
 
 use std::ffi::OsString;
 use std::io;
@@ -53,7 +59,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run(&Env::detect(), &globals, command) {
+    let mut env_now = Env::detect();
+    env_now.notify = notify::Settings::resolve(globals.no_notify, &globals.notify, &env);
+    match run(&env_now, &globals, command) {
         Ok(()) => ExitCode::SUCCESS,
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
@@ -161,23 +169,82 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             branch,
             prompt,
             fresh_session,
+            at: None,
             task,
         } => commands::fork(env, target, &branch, &prompt, fresh_session, &task),
+        Command::Fork {
+            branch,
+            prompt,
+            at: Some(turn),
+            task,
+            ..
+        } => commands::fork_at(env, target, &branch, turn, &prompt, &task),
+        Command::Rewind {
+            branch,
+            to,
+            yes,
+            json,
+        } => attempts::rewind(env, target, &branch, to, yes, json),
+        Command::Try {
+            branch,
+            off,
+            status,
+            force,
+            json,
+        } => attempts::try_branch(env, target, branch.as_deref(), off, status, force, json),
+        Command::Compare {
+            branches,
+            fan,
+            check,
+            diff,
+            pick,
+            into,
+            discard_others,
+            yes,
+            json,
+        } => attempts::compare(
+            env,
+            target,
+            &attempts::CompareArgs {
+                branches,
+                fan,
+                check,
+                diff,
+                pick,
+                into,
+                discard_others,
+                yes,
+                json,
+            },
+        ),
         Command::Reincarnate { branch, task } => commands::reincarnate(env, target, &branch, &task),
         Command::Ls { json } => commands::ls(env, target, json),
-        Command::Show { branch, json } => commands::show(env, target, &branch, json),
+        Command::Show {
+            branch,
+            json,
+            refresh,
+        } => commands::show(env, target, &branch, json, refresh),
         Command::Diff { branch } => commands::diff(env, target, &branch),
         Command::Log {
             branch,
             json,
             follow,
         } => commands::log(env, target, &branch, json, follow),
-        Command::Merge { branch, into } => commands::merge(target, &branch, into.as_deref()),
+        Command::Merge { branch, into, rm } => {
+            commands::merge(target, &branch, into.as_deref(), rm)
+        }
+        Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
         Command::Rm {
             branch,
             keep_credentials,
         } => commands::rm(target, &branch, keep_credentials),
         Command::Harnesses { json } => commands::harnesses(env, target, json),
+        Command::Pr { branch, pr } => pr::main(env, target, &branch, &pr),
+        Command::Open {
+            branch,
+            editor,
+            print,
+        } => open::main(target, &branch, editor.as_deref(), print),
         Command::Watch { interval, once } => watch::run(env, target, interval, once),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
         Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),

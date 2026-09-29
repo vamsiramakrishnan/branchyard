@@ -7,8 +7,8 @@ publish.workspace = true
 description = "A Branchyard sandbox provider on the Microsandbox microVM runtime"
 
 [features]
-# The Microsandbox SDK. Off by default: microsandbox 0.7.3 needs Rust 1.94
-# (through sea-orm 2 and sqlx 0.9) and the workspace pins 1.90. See
+# The Microsandbox SDK. Off by default: it compiles several hundred more
+# crates and links against libcap-ng (the workspace's Rust 1.94 builds it). See
 # docs/providers.md.
 microsandbox = ["dep:microsandbox", "dep:tokio"]
 

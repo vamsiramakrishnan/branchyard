@@ -159,10 +159,13 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
     let mut cursor: Option<u64> = None;
     let mut snapshot = true;
     let mut failures = 0u32;
+    // 250 ms, doubling, at most 5 s; started afresh after an entry arrives.
+    let mut delays = branchyard_client::reconnect_backoff();
     loop {
         if failures > 0 {
-            let backoff = 250u64 << (failures - 1).min(5);
-            thread::sleep(Duration::from_millis(backoff.min(5_000)));
+            if let Some(delay) = delays.next() {
+                thread::sleep(delay);
+            }
         }
         // Each drop comes back here, so this thread chooses the backoff
         // and says what it resumes from.
@@ -201,6 +204,7 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
             match item {
                 Ok(entry) => {
                     failures = 0;
+                    delays = branchyard_client::reconnect_backoff();
                     cursor = Some(entry.seq);
                     if tx.send(Feed::Entry(entry)).is_err() {
                         return;

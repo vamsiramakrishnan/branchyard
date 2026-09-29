@@ -41,14 +41,17 @@ All three solve the same pain, which reviewers of Conductor call its main fricti
 | Superset | `.superset/config.json` | `setup`, `teardown`, `run` (arrays of commands) | `SUPERSET_WORKSPACE_NAME`, `SUPERSET_ROOT_PATH` | `~/.superset/projects/<mirrored path>/config.json` ([setup and teardown](https://docs.superset.sh/setup-teardown-scripts)) |
 | Conductor | `.conductor/settings.toml` (was `conductor.json`) | `setup`, `archive`, several named `run` scripts (`[scripts.run.web]`, `[scripts.run.worker]`) with `available_in = ["local", "cloud"]` and a concurrent or sequential run mode | `CONDUCTOR_PORT` (an allocated port), `CONDUCTOR_WORKSPACE_PATH`, `CONDUCTOR_WORKSPACE_NAME`, `CONDUCTOR_ROOT_PATH` | ([scripts](https://www.conductor.build/docs/reference/scripts)) |
 
-**Branchyard:** absent. A branch is a bare worktree, and `--check` runs only at merge time. Nothing copies untracked files, runs an install, allocates a port or tears anything down. This is the largest devex gap. **Take:**
-- A `[workspace]` section in the new `branchyard.toml`:
-  - `copy` (globs of untracked files to carry across);
-  - `setup`, `run` (named, like Conductor's) and `teardown`.
-- Branchyard-given variables `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and an allocated `BRANCHYARD_PORT`.
-- A per-user override, as all three have.
-- Setup is journaled like any other step, so a crash mid-install is recovered rather than repeated blindly.
-- Superset's security advisory about lifecycle scripts (fixed in [PR #7830](https://github.com/superset-sh/superset/pull/7830)) is the warning that comes with this: a cloned repository's scripts must not run without a trust decision. Branchyard should ask once per repository and remember the answer, and servers should run only scripts their operator allowed.
+**Branchyard: done** ([workspace](workspace.md)). `[workspace]` in `branchyard.toml` has:
+- `copy`: globs of untracked files carried from the repository root into each new worktree, never outside it, never a symbolic link, never tracked files, and never committed from the branch;
+- `setup` (one command or a list), named `[workspace.run.NAME]` scripts for `by workspace run` (a `default`), and `teardown` on `by rm` and `by merge --rm`.
+
+Scripts and the harness get `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and `BRANCHYARD_PORT`, a port reserved per branch in the store (SQLite or PostgreSQL), stable across turns and restarts, and released with the branch. The user file's `[projects."<root>".workspace]` replaces a repository's section, as Superset's mirrored path does. Setup is a journaled step: a crash mid-install kills what it started, ends the branch `interrupted`, and its next turn runs setup again from the start. A repository's scripts never run until you trust them: a per-user record keyed by repository root and the section's digest, asked once on a terminal or given with `by workspace trust`, and asked again when the scripts change; a server runs them only for repositories its operator lists in `allow_workspace_scripts`, never because a request asks. `by init project` suggests the section from lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, a Compose file and `.env` files.
+
+**Still open:**
+- Conductor's concurrent run mode (several run scripts at once) and `available_in`; `by workspace run` runs one script, in the foreground or `--detach`ed, and `by watch` does not yet show or stop running scripts.
+- An emdash-style `shellSetup` (for example `nvm use`) applied to the harness's own shell.
+- Setup inside a sandbox: scripts run on the host, as you, even for isolated or sandboxed branches, and the Substrate provider's bundle does not carry files setup creates that git ignores.
+- Tested hermetically only: no real package manager, Docker stack or harness, and not on macOS.
 
 ### 3. The same prompt to several agents, compared side by side
 
@@ -60,6 +63,8 @@ Superset: press ⌘N again with the same prompt and a different agent, and you g
 - Task graphs order dependent work.
 
 **Take:** the review step after a fan-out. A `by compare` (or a view in `by watch`) should put the attempts side by side (diff stats, check results, cost, turns) and merge the chosen one with one keystroke.
+
+**Done** ([checkpoints](checkpoints.md#compare-attempts)): `by compare <branch>...` or `--fan <name>` shows status, turns, cost, tokens, time, check, diff stats and the files only each attempt changed (`--json` too); `--check` runs each check on its exact candidate; `--diff A B`; `--pick` merges through the validated merge, and `--discard-others` removes the rest after confirmation. Works with `by --remote` except `--check` and `--diff`. In `by watch`, `c` shows the selected branch beside its siblings (the rest of its fan-out, or its parent's other children) in a pane, locally and remotely. **Remains:** picking from that pane with one keystroke; `by compare --pick` does it from the shell.
 
 ### 4. Work survives closing the app
 
@@ -74,6 +79,8 @@ emdash autosaves terminal state and resumes agents where they left off ([tasks](
 - `by watch` should show interrupted branches prominently, with a one-key resume (a `by send` to the branch, which resumes its native session).
 - With a server running (`by serve` or `by worker`), local turns should outlive the terminal that started them. This is the daemon behaviour Superset has.
 
+**Status:** the first is done. `by watch` draws an interrupted branch in black on yellow, counts them in its header, and `R` resumes the selected one with one key (`by send` with a "continue where you left off" prompt, which resumes the harness's native session). A turn started from `by watch` runs in its own process group, detached from the dashboard, so it outlives `by watch` and the terminal. What remains is the second: `by run` in a terminal still ties its turn to that terminal unless it goes through a server.
+
 ### 5. Review, PR and CI without leaving the tool
 
 - **emdash:**
@@ -86,10 +93,12 @@ emdash autosaves terminal state and resumes agents where they left off ([tasks](
   - A Checks tab that combines git status, PR state, CI, review threads and todos into one merge-readiness gate.
   - GitHub review comments appear inline, and resolving them updates the gate ([checks](https://www.conductor.build/docs/reference/checks), [diff viewer](https://www.conductor.build/docs/reference/diff-viewer)).
 
-**Branchyard:** `by diff` and `by merge` with a validated `--check`, all local; nothing reaches a pull request. **Take:**
-- `by pr <branch>`: push the branch, then open or update a pull request through `gh`, with a body built from the branch's task, turns and check results.
-- `by pr <branch> --watch`: follow CI, and on failure or a review comment, `by send` the failure or comment back to the same branch. Branchyard's steering and inbox already deliver that message into a running turn.
-- A merge-readiness line in `by show` and `by watch` (checks, CI, unresolved comments).
+**Branchyard (done, [pull requests](pull-requests.md)):**
+- `by pr <branch>` runs the branch's check on its candidate, pushes it (`--git-remote`, default `origin`), and opens or updates its pull request through `gh`, with a body built from the task, linked issue, turns, cost, check result and diffstat. Running it again updates the same pull request.
+- `by pr <branch> --watch` follows the pull request with backoff. A failed CI check (with a bounded `gh run view --log-failed` tail), a review, a comment or an unresolved review comment is sent back into the branch once, by steering its running turn or with `by send`'s path, and the next candidate is pushed. Every step is an event in `by log`, and what was delivered is kept there, so a restarted watch repeats nothing.
+- `by show` (and `--json`) has a merge-readiness line: local check, pull-request state, CI summary, unresolved threads, mergeability and review decision, from the last observation; `--refresh` asks GitHub first.
+
+In `by watch`, `p` runs `by pr` after a yes and shows its output, `P` starts `by pr --watch` in the background, and the detail pane has the readiness line. **What remains:** replying to and resolving review threads; GitHub only, local mode only; nothing tested against GitHub itself.
 
 ### 6. Undo one step, not the whole branch
 
@@ -100,6 +109,8 @@ Conductor snapshots each agent turn. Hovering a message and choosing revert disc
 - `by rewind <branch> --to N` (or `by fork <branch> --at N` for a non-destructive version).
 - Rewinding a harness's native session is not always possible, so where resume cannot follow, the rewound branch starts a fresh session with a summary, and says so.
 
+**Done** ([checkpoints](checkpoints.md)): every turn records `refs/branchyard/<branch>/<incarnation>/turn-N` as a journaled step and a `Checkpoint` event, listed by `by show` and `by log` and removed with the branch. `by fork <branch> --at N` branches from any checkpoint; `by rewind <branch> --to N` resets the branch, journaled so recovery finishes one cut short, and keeps later checkpoints so it can be undone by rewinding forward. The harness's own session continues only when it ended at that checkpoint; otherwise a fresh session starts with a summary of the turns before, and the `Rewound` or `ForkedAt` event and the output say which. In `by watch`, `r` lists the checkpoints, takes a number and asks before rewinding, and the detail pane shows the checkpoint the branch is at. **Remains:** rewind and `fork --at` through the server API.
+
 ### 7. Try the agent's branch in the app already running
 
 Conductor's Spotlight commits a workspace's tracked changes as a checkpoint and checks them out at the repository root, where the user's dev server and Docker stack are already running with hot reload. It syncs one way and restores the root when turned off ([spotlight testing](https://www.conductor.build/docs/reference/scripts/spotlight-testing)).
@@ -108,6 +119,8 @@ Conductor's Spotlight commits a workspace's tracked changes as a checkpoint and 
 - It applies the branch's diff to the main checkout only when that checkout is clean.
 - Branchyard records what it changed, so `--off` restores the checkout exactly.
 - It refuses when the user has uncommitted work.
+
+**Done** ([checkpoints](checkpoints.md#try-a-branch-in-this-checkout)): `by try <branch>` applies the candidate's diff with `git apply` (all or nothing) to a clean checkout only, saving each touched path's prior entry and permission bits in `.branchyard/try/state.json` first; `by try --off` restores them byte for byte, refusing when a tried file changed since unless `--force`; `by try <other>` swaps; `--status` reports; a try cut short is rolled back by the next call. Local mode only. **Done too:** `t` in `by watch` tries the selected branch after a yes, and on the tried branch restores the checkout.
 
 ### 8. One MCP definition, written into every agent's own config
 
@@ -119,8 +132,10 @@ emdash's Library holds a catalog of 54 MCP servers. Adding one writes it into ea
 
 All three create a workspace straight from a GitHub issue, a Linear issue or a pull request (emdash also Jira, GitLab, Asana and others; Superset also from a Slack message). emdash's automations turn a cron schedule into ordinary tasks, with a history of runs.
 
-**Branchyard:** absent. **Take:**
-- `by run --issue <url|#n>`, which fetches the issue through `gh`, names the branch after it, uses the issue text as the prompt, and links the eventual pull request back to it.
+**Branchyard (done, [pull requests](pull-requests.md#starting-from-an-issue)):** `by run --issue <url|#n|n> ["more instructions"]` (and `by fan`, `by spawn`) fetch the issue through `gh`, name the branch `issue-<n>-<slug>`, use the issue under a header as the prompt, and record the link, so the pull request `by pr` opens says `Closes #n`.
+
+**What remains:**
+- Linear, Jira and other trackers; starting from a pull request.
 - Scheduling belongs to the server (a webhook-triggered or scheduled operation) rather than a desktop app.
 
 ### 10. Notice when an agent needs you
@@ -134,9 +149,13 @@ All three create a workspace straight from a GitHub issue, a Linear issue or a p
 - Shows statuses in `by watch`.
 - Tells no one on the desktop. **Take:** an opt-in desktop notification (and terminal bell) from `by watch` and from a waiting `by run` when a branch asks, stalls, fails or finishes.
 
+**Status:** done. `by watch` and a waiting `by run`, `by fan`, `by send` or `by fork` ring the terminal bell and write an OSC 9 or OSC 777 desktop-notification escape (chosen from the terminal, passed through tmux) when a tool waits for permission, a branch asks or escalates, a turn stalls, or a branch fails, is blocked, is interrupted or finishes; each event once, and never for the history `by watch` reads at start. `[notify] desktop = true` adds `notify-send` or `osascript`; `--no-notify` or `[notify] enabled = false` turns it off. On by default, since an escape a terminal does not know is ignored. Not done: a sound of its own, or a badge.
+
 ### 11. Leave for a real editor in one click
 
-Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a terminal (⌘O in emdash). **Take:** `by open <branch> [--editor code|cursor|zed|…]`, using `$VISUAL` by default, and an `o` key in `by watch`.
+Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a terminal (⌘O in emdash).
+
+**Branchyard (done, [pull requests](pull-requests.md#by-open)):** `by open <branch> [--editor code|cursor|zed|…] [--print]`, using `$VISUAL`, then `$EDITOR`, and refusing with the known names when none is set. `o` in `by watch` opens the selected branch's worktree the same way, leaving the dashboard's screen for a terminal editor (vim, nvim, emacs, hx, …) until it exits.
 
 ### 12. Keyboard-first
 
@@ -149,13 +168,15 @@ Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a
 - `/` to filter;
 - keys to send, steer, merge, open, fork and resume without leaving the view.
 
+**Status:** done. `by watch` has the `?` sheet and `/` filter, and keys on the selected branch: `s` send (an input box), `S` steer, `R` resume, `x` cancel and `m` merge (each after a yes; the merge's check result is shown), `f` fork, `d` diff and `l` log in scrollable panes, `y`/`Y` copy the name or worktree path, `p`/`P` `by pr` (and `--watch`), `o` `by open`, `r` `by rewind` (from the checkpoint list), `c` `by compare` and `t` `by try` (a toggle). Each runs the existing `by` command. The keys live in one table (`crates/branchyard-cli/src/watch/actions.rs`) that drives the handling, the footer and the `?` sheet. Not done: a command palette and remappable keys.
+
 ## What they struggle with, and Branchyard already handles
 
 | Their weak spot | Evidence | Branchyard |
 |---|---|---|
 | No limit on spend; running N agents costs N times as much, untracked | Conductor review ([madewithlove](https://madewithlove.com/blog/conductor-running-multiple-ai-coding-agents-in-parallel/)); no cost page found in emdash's docs | Budgets per task, per fan-out and per delegation envelope; `cost_usd` on each branch; per-tenant `max_cost_usd` |
 | Agents run with the user's full permissions ("how do you stop them going rogue?" went unanswered) | emdash Show HN ([47140322](https://news.ycombinator.com/item?id=47140322)) | Per-invocation permission policies, sandbox providers (Substrate, Microsandbox), secrets provisioned without appearing in prompts |
-| Lifecycle scripts executed without a trust decision | Superset advisory, fixed in [PR #7830](https://github.com/superset-sh/superset/pull/7830) | Not applicable yet; design item 2 above with a trust step |
+| Lifecycle scripts executed without a trust decision | Superset advisory, fixed in [PR #7830](https://github.com/superset-sh/superset/pull/7830) | A repository's `[workspace]` scripts run only once trusted per repository and content; servers run only what their operator allows ([workspace](workspace.md#trust)) |
 | Slows down at scale ("78 tasks and the UI is crawling") | emdash Show HN ([47140322](https://news.ycombinator.com/item?id=47140322)) | A store and server built for many branches; several servers on PostgreSQL |
 | Closing a tab kills the agent | Superset [#3240](https://github.com/superset-sh/superset/issues/3240) | Turns are durable and recoverable |
 | Tied to one machine or one operating system | Conductor macOS only; Superset without Windows | CLI and server on Linux and macOS; remote mode; a server others can share |
@@ -170,19 +191,23 @@ In order of what a user would feel first:
 1. **Guided setup:**
    - `by init` and the `setup` skill (under way), which detect first and show files and commands before acting (§1).
    - `branchyard.toml` holding defaults, MCP servers (§8) and the workspace lifecycle below.
-2. **Workspace lifecycle** (§2):
+2. **Workspace lifecycle** (§2), **done** ([workspace](workspace.md)):
    - `copy`, `setup`, named `run` and `teardown`;
    - Branchyard-given variables with an allocated port;
    - a per-repository trust decision;
    - setup journaled and recovered.
-3. **From branch to merged PR** (§5, §9):
+
+   Left: concurrent run scripts and running scripts in `by watch`, a `shellSetup` for the harness, setup inside a sandbox.
+3. **From branch to merged PR** (§5, §9), done ([pull requests](pull-requests.md)):
    - `by run --issue`;
    - `by pr` and `by pr --watch`, which routes CI failures and review comments back into the branch;
-   - a merge-readiness line.
+   - a merge-readiness line in `by show`; `by open` (§11) came with it.
 4. **`by watch` as the cockpit** (§4, §10, §11, §12):
-   - interrupted branches with one-key resume;
-   - notifications;
-   - `by open`;
-   - a keyboard sheet and actions.
-5. **Compare and choose** after a fan-out (§3).
-6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7).
+   - interrupted branches with one-key resume (done);
+   - notifications (done);
+   - `by open` (done, the `o` key);
+   - a keyboard sheet and actions (done), with `p`/`P` for pull requests, `r` rewind, `c` compare and `t` try bound after the three branches were integrated, and checkpoint and merge readiness in the detail pane.
+5. **Compare and choose** after a fan-out (§3). Done: `by compare` ([checkpoints](checkpoints.md#compare-attempts)), and `c` in `by watch` compares the selected branch with its siblings.
+6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7). Done in local mode ([checkpoints](checkpoints.md)), with `r` and `t` in `by watch`; remote rewind and `fork --at` remain.
+
+**Where the plan stands** after the checkpoints, pull-request and cockpit branches were integrated: items 3 to 6 are done in local mode, and `by watch` binds every command they added. Item 1 has `by init`, the `setup` skill and `branchyard.toml` with `[mcp]` servers ([setup](setup.md)). Item 2, the workspace lifecycle, is the one left, in its own branch, to be integrated after these. What remains inside the done items is listed under each section above: remote rewind and `fork --at`, picking from the compare pane, replying to review threads, and trackers other than GitHub.

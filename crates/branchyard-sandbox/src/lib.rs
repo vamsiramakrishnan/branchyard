@@ -5,8 +5,14 @@
 //! substituting a weaker operation. That is the capability half of the
 //! `SandboxProvider` contract in `docs/design.md` §10. The lifecycle half is
 //! the [`SandboxProvider`] trait: create, exec, stop and destroy, with
-//! optional checkpoint, restore, branch and share. [`conformance`] holds the
-//! checks every provider must pass. See `docs/providers.md`.
+//! optional checkpoint, restore, branch and share, and the optional
+//! sandbox-level branching operations: pause and resume of a live sandbox,
+//! live branching of a running or paused sandbox into children, and releasing
+//! a checkpoint. [`Feature`] names the ones a caller chooses by
+//! ([`Capabilities::has`]). [`conformance`] holds the checks every provider
+//! must pass, and [`fake`] an in-process provider that models the optional
+//! operations for tests. See `docs/providers.md` and
+//! `docs/sandbox-snapshots.md`.
 //!
 //! Declarations describe what an adapter claims. They are not qualification
 //! evidence: a provider profile ships only after it passes the runtime gates in
@@ -15,6 +21,7 @@
 use std::fmt;
 
 pub mod conformance;
+pub mod fake;
 mod provider;
 
 pub use provider::{
@@ -85,6 +92,15 @@ pub enum Operation {
     Branch,
     /// Attach state that another sandbox can also observe.
     Share,
+    /// Freeze a running sandbox in place, keeping its memory and processes.
+    Pause,
+    /// Continue a paused sandbox, or one a checkpoint left stopped.
+    Resume,
+    /// Create new sandboxes from a running or paused one, keeping its
+    /// processes and memory in each child, without a durable snapshot.
+    LiveBranch,
+    /// Release a checkpoint the provider holds.
+    Release,
 }
 
 impl fmt::Display for Operation {
@@ -96,6 +112,10 @@ impl fmt::Display for Operation {
             Operation::Restore => "restore",
             Operation::Branch => "branch",
             Operation::Share => "share",
+            Operation::Pause => "pause",
+            Operation::Resume => "resume",
+            Operation::LiveBranch => "live branch",
+            Operation::Release => "release a checkpoint",
         })
     }
 }
@@ -109,6 +129,62 @@ pub struct Capabilities {
     pub restore: Vec<SnapshotGuarantee>,
     pub branch: Vec<SnapshotGuarantee>,
     pub share: bool,
+    /// [`SandboxProvider::pause`] and [`SandboxProvider::resume`]: a
+    /// sandbox can be frozen in place and continued later, by this process
+    /// or another.
+    pub pause: bool,
+    /// [`SandboxProvider::branch_live`]: a running or paused sandbox can be
+    /// branched into new sandboxes that keep its memory and processes, with
+    /// their own mounts, while the source keeps its state.
+    pub live_branch: bool,
+}
+
+/// An optional sandbox-level operation, as the engine chooses by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Feature {
+    /// [`Capabilities::live_branch`].
+    LiveBranch,
+    /// [`Capabilities::pause`].
+    Pause,
+    /// A checkpoint with [`SnapshotScope::Full`]: memory and processes, not
+    /// only the disk.
+    FullSnapshot,
+}
+
+/// [`Feature::LiveBranch`].
+pub const LIVE_BRANCH: Feature = Feature::LiveBranch;
+/// [`Feature::Pause`].
+pub const PAUSE: Feature = Feature::Pause;
+/// [`Feature::FullSnapshot`].
+pub const FULL_SNAPSHOT: Feature = Feature::FullSnapshot;
+
+impl fmt::Display for Feature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Feature::LiveBranch => "live branch",
+            Feature::Pause => "pause",
+            Feature::FullSnapshot => "full snapshot",
+        })
+    }
+}
+
+impl Capabilities {
+    /// Whether the provider declares `feature`.
+    pub fn has(&self, feature: Feature) -> bool {
+        match feature {
+            Feature::LiveBranch => self.live_branch,
+            Feature::Pause => self.pause,
+            Feature::FullSnapshot => self.full_snapshot().is_some(),
+        }
+    }
+
+    /// The first full-scope checkpoint guarantee declared, if any.
+    pub fn full_snapshot(&self) -> Option<SnapshotGuarantee> {
+        self.checkpoint
+            .iter()
+            .find(|g| g.scope == SnapshotScope::Full)
+            .copied()
+    }
 }
 
 /// What a task needs from its sandbox. Unset fields are not required.
@@ -120,6 +196,8 @@ pub struct Requirements {
     pub restore: Option<SnapshotGuarantee>,
     pub branch: Option<SnapshotGuarantee>,
     pub share: bool,
+    pub pause: bool,
+    pub live_branch: bool,
 }
 
 /// One requirement a provider cannot meet.
@@ -157,6 +235,12 @@ pub fn admit(required: &Requirements, offered: &Capabilities) -> Result<(), Vec<
         (Operation::Exec, required.exec, offered.exec),
         (Operation::Ingress, required.ingress, offered.ingress),
         (Operation::Share, required.share, offered.share),
+        (Operation::Pause, required.pause, offered.pause),
+        (
+            Operation::LiveBranch,
+            required.live_branch,
+            offered.live_branch,
+        ),
     ] {
         if needed && !available {
             missing.push(Unsupported {
@@ -200,6 +284,9 @@ pub fn admit(required: &Requirements, offered: &Capabilities) -> Result<(), Vec<
 pub enum SandboxState {
     Starting,
     Running,
+    /// Frozen in place by [`SandboxProvider::pause`]: memory and processes
+    /// are kept, nothing runs, and [`SandboxProvider::resume`] continues it.
+    Paused,
     Stopping,
     /// Not running; its state is retained and it can be started again.
     Stopped,
@@ -278,6 +365,43 @@ mod tests {
             ]
         );
         assert_eq!(missing[0].to_string(), "provider does not support exec");
+    }
+
+    #[test]
+    fn features_are_named_by_capability_not_by_provider() {
+        let full = guarantee(SnapshotScope::Full, Consistency::Crash, Locality::SameHost);
+        let disk = guarantee(SnapshotScope::Disk, Consistency::Crash, Locality::SameHost);
+        let plain = Capabilities {
+            exec: true,
+            checkpoint: vec![disk],
+            ..Capabilities::default()
+        };
+        for feature in [LIVE_BRANCH, PAUSE, FULL_SNAPSHOT] {
+            assert!(!plain.has(feature), "{feature}");
+        }
+        let live = Capabilities {
+            pause: true,
+            live_branch: true,
+            checkpoint: vec![disk, full],
+            ..plain.clone()
+        };
+        for feature in [LIVE_BRANCH, PAUSE, FULL_SNAPSHOT] {
+            assert!(live.has(feature), "{feature}");
+        }
+        assert_eq!(live.full_snapshot(), Some(full));
+        let required = Requirements {
+            pause: true,
+            live_branch: true,
+            ..Requirements::default()
+        };
+        assert_eq!(admit(&required, &live), Ok(()));
+        let missing = admit(&required, &plain).unwrap_err();
+        assert_eq!(missing.len(), 2);
+        assert_eq!(missing[0].to_string(), "provider does not support pause");
+        assert_eq!(
+            missing[1].to_string(),
+            "provider does not support live branch"
+        );
     }
 
     #[test]

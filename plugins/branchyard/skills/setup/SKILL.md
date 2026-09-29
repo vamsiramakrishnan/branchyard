@@ -13,7 +13,7 @@ write these files by hand, and never invent answers the user did not give.
 
 | Topic | Writes |
 |---|---|
-| `project` | `branchyard.toml` (or the user's `~/.config/branchyard/config.toml`): default harness, model, limits, permissions, isolation, check, secrets by name, a server to use |
+| `project` | `branchyard.toml` (or the user's `~/.config/branchyard/config.toml`): default harness, model, limits, permissions, isolation, check, secrets by name, a server to use, and a `[workspace]` (files to copy, setup, run and teardown scripts) |
 | `server` | A server configuration with hashed credentials, 0600 token files, tenants and quotas |
 | `rig` | A rig TOML: a lead seat and the seats it delegates to |
 | `deploy` | `compose.yaml`, its server configuration and generated secret files |

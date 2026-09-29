@@ -31,7 +31,9 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | `events` | `id` (autoincrement), unique `(incarnation, seq)` | Branch name, `seq` from 1 per incarnation, `at_ms`, the activity as JSON |
 | `meta` | `key` | Schema version (1) and when earlier state was imported |
 | `graph_edges` | `(dependent, prerequisite)`, indexed by `prerequisite` and `parent` | A dependency between two children of `parent`, and `after` (`settled` or `integrated`); see [task graphs](graph.md) |
+| `ports` | `port`, `branch` unique | A branch's reserved `BRANCHYARD_PORT` and when it was reserved, deleted with the branch; on PostgreSQL unique across every repository in the database ([workspace](workspace.md#the-port)) |
 | `graph_revisions` | `parent` | A parent's graph revision, bumped by each committed proposal and spawn |
+| `sandboxes` | `branch`, `kind`, `name` | A branch's kept (paused) sandbox and its provider snapshots: `incarnation`, `provider` (which provider and where), `turn`, `detail` (method, guarantee, commit) and `used_ms` for least-recently-used eviction; taken by deleting the row, so exactly one engine acts on it; deleted with the branch ([sandbox snapshots](sandbox-snapshots.md)) |
 | `messages` | `id` (autoincrement) | Harness-to-harness messages: `from`, `to`, `kind`, `text`, `in_reply_to`, `at_ms`, `delivered_ms` (`NULL` until acknowledged), `steer_id` (the steered input carrying it into a running turn), `delivered_steer` (the steered input that delivered it) and `awaiting_until_ms` (an `ask --wait` waiter's deadline); see [delegation](delegation.md#delivery) |
 
 `id` is the feed position. SQLite serializes writers, so positions are assigned in commit order: a reader that sees position *N* already sees every position before it.
@@ -41,13 +43,18 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | Step | Turn | Intent | Outcome | On recovery |
 |---|---|---|---|---|
 | `create` | the first turn | base, worktree path | worktree, or the error | Not repeated; a branch without a worktree ends `failed` at the snapshot |
-| `sandbox` | each, Substrate or Microsandbox | the actor's name and atespace, or the Microsandbox sandbox's name, before it is created | the actor's UID, or whether the sandbox was created | A live actor's work is brought back, then the actor is deleted; the sandbox is destroyed |
+| `setup` | the first, or the next after one that did not complete | copy globs, setup commands, the reserved port, and the spawn marker and host its commands run with | whether copy and setup succeeded, the files copied, the exit code | Its commands' process group and marked processes are killed; the branch ends `interrupted` and its next turn runs copy and setup again from the start ([workspace](workspace.md#durability)) |
+| `sandbox` | each, Substrate or Microsandbox | the actor's name and atespace, or the Microsandbox sandbox's name, before it is created, resumed or branched | the actor's UID, or whether the sandbox was created | A live actor's work is brought back, then the actor is deleted; the sandbox is destroyed; a kept record naming it is removed. Not when the turn had parked it (below) |
+| `sandbox_park` | each that keeps its sandbox | the sandbox to pause and record | whether it was kept | A kept sandbox stays, for the next turn ([sandbox snapshots](sandbox-snapshots.md#durability)) |
+| `sandbox_snapshot` | each checkpoint of a branch with a kept sandbox | the snapshot to take | its handle, or the error | A pending one's child sandbox is destroyed |
 | `start` | each | command, sandboxed or not, and for a local harness the host and the spawn marker it is started with | pid, process group and start time, or the error | The recorded group is killed if it still matches; on Linux, processes carrying the marker are killed |
 | `submit` | each | the prompt | the harness's turn number | Recorded intent means the prompt may have reached the harness: never submitted again |
 | `turn_end` | each | whether a prompt was submitted | how the turn ended | Finished as the engine would have |
 | `snapshot` | each | the commit message | the candidate, or the error | A recorded snapshot is used, not taken again |
+| `checkpoint` | each that submitted its prompt, after `snapshot` | the turn's number | the checkpoint (turn, commit, ref), or why none was written | A recorded checkpoint is used; a pending one is written again (the ref update is idempotent). See [checkpoints](checkpoints.md) |
+| `rewind` | the rewind's own lease | target checkpoint and commit, the head before, the session decision and summary | the commit | Finished from the intent: the reset is repeated and the record settled, with `Recovered` and `Rewound` |
 | `merge <target> <candidate>` | 0 | target, candidate, expected target revision | the merge | A pending merge whose candidate is already in the target is recorded as done instead of repeated |
-| `remove` | 0 | none | none (the branch is deleted) | A removal cut short can be repeated |
+| `remove` | 0 | none | none (the branch is deleted) | A removal cut short can be repeated; the workspace teardown runs again then |
 
 The check a merge runs is part of the `merge` step. The final record, the final status event and the lease release commit in one transaction; that transaction is the turn's conclusion.
 

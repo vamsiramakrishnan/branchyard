@@ -561,13 +561,13 @@ fn start(yard: &Yard, mut record: Record, options: &TaskOptions) -> Result<Optio
     let profile = profiles::by_id(&record.info.profile)
         .ok_or_else(|| Error::UnknownHarness(record.info.profile.clone()))?;
     let command = harness::command(profile, record.command.as_deref());
+    let parent = record.info.parent.clone().unwrap_or_default();
+    let parent_record = store.backend().read(&parent)?;
     let base = match record.start_base.take() {
         Some(base) => base,
         None => {
-            let parent = record.info.parent.clone().unwrap_or_default();
-            let head = store
-                .backend()
-                .read(&parent)?
+            let head = parent_record
+                .as_ref()
                 .map(|p| git::local_branch(&yard.root, &p.info.git_branch))
                 .transpose()?
                 .flatten();
@@ -581,6 +581,13 @@ fn start(yard: &Yard, mut record: Record, options: &TaskOptions) -> Result<Optio
             }
         }
     };
+    // A delegated child, rig seat or dependent on its parent's provider
+    // starts from the parent's provider snapshot at its base, when there
+    // is one; see `crate::snapshots`.
+    record.sandbox_seed = parent_record
+        .as_ref()
+        .filter(|p| p.provider == record.provider)
+        .and_then(|p| crate::snapshots::seed(p, None, &base));
     record.info.base = base;
     record.info.status = BranchStatus::Running;
     let Some(fence) = store.graph().claim(&record, store.owner(), LEASE_TTL)? else {
