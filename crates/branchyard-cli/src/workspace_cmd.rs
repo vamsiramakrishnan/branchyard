@@ -567,18 +567,21 @@ fn run(env: &Env, args: &[String], detach: bool, json: bool) -> Outcome {
         .iter()
         .find(|(name, _)| name == branchyard::ENV_PORT)
         .and_then(|(_, v)| v.parse::<u16>().ok());
-    let script = commands.join(" && ");
     let mut report = WorkspaceReport::new(WorkspacePhase::Run, port);
-    report.commands = commands.clone();
-    let mut command = Command::new("sh");
-    command
-        .arg("-c")
-        .arg(&script)
-        .current_dir(&info.worktree)
-        .envs(vars.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-    for name in [branchyard::ENV_TOKEN, branchyard::ENV_BY] {
-        command.env_remove(name);
-    }
+    // Each entry is its own `sh -c`, in order, stopping at the first that
+    // fails, as setup runs its list: joining them into one script would
+    // change what they mean (a `#` comment, a trailing `&`).
+    let sh = |args: &[&str]| {
+        let mut command = Command::new("sh");
+        command
+            .args(args)
+            .current_dir(&info.worktree)
+            .envs(vars.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        for name in [branchyard::ENV_TOKEN, branchyard::ENV_BY] {
+            command.env_remove(name);
+        }
+        command
+    };
     if detach {
         use std::os::unix::process::CommandExt;
         let logs = yard.root().join(".branchyard/logs");
@@ -588,13 +591,22 @@ fn run(env: &Env, args: &[String], detach: bool, json: bool) -> Outcome {
             .create(true)
             .append(true)
             .open(&log)?;
-        let child = command
+        // The same sequence, detached: the entries are passed as
+        // arguments, each run with `sh -c "$command"`, never concatenated.
+        let mut args = vec![
+            "-c",
+            "for command do sh -c \"$command\" || exit; done",
+            "by-workspace-run",
+        ];
+        args.extend(commands.iter().map(String::as_str));
+        let child = sh(&args)
             .stdin(Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out)
             .process_group(0)
             .spawn()
             .map_err(|e| Failure::Message(format!("could not start sh: {e}")))?;
+        report.commands = commands.clone();
         report.output = format!("pid {}, output in {}", child.id(), log.display());
         yard.record_workspace(&branch, report)?;
         if json {
@@ -609,28 +621,38 @@ fn run(env: &Env, args: &[String], detach: bool, json: bool) -> Outcome {
             log.display()
         ));
     }
-    eprintln!(
-        "by: running {name} in {} (port {}): {script}",
-        info.worktree.display(),
-        port.map(|p| p.to_string()).unwrap_or_default()
-    );
     let started = Instant::now();
-    let status = command
-        .status()
-        .map_err(|e| Failure::Message(format!("could not start sh: {e}")))?;
+    let mut status = None;
+    for command in &commands {
+        eprintln!(
+            "by: running {name} in {} (port {}): {command}",
+            info.worktree.display(),
+            port.map(|p| p.to_string()).unwrap_or_default()
+        );
+        report.commands.push(command.clone());
+        let ran = sh(&["-c", command])
+            .status()
+            .map_err(|e| Failure::Message(format!("could not start sh: {e}")))?;
+        status = Some(ran);
+        if !ran.success() {
+            break;
+        }
+    }
     report.duration_ms = started.elapsed().as_millis() as u64;
-    report.exit_code = status.code();
-    report.ok = status.success();
-    if status.code().is_none() {
+    let code = status.and_then(|s| s.code());
+    let success = status.is_none_or(|s| s.success());
+    report.exit_code = code;
+    report.ok = success;
+    if status.is_some_and(|s| s.code().is_none()) {
         report.error = Some("was killed by a signal".into());
     }
     yard.record_workspace(&branch, report)?;
     if json {
         print(&to_json(&json!({
-            "branch": branch, "script": name, "exit_code": status.code(), "ok": status.success(),
+            "branch": branch, "script": name, "exit_code": code, "ok": success,
         })))?;
     }
-    match status.success() {
+    match success {
         true => Ok(()),
         false => Err(Failure::Reported),
     }

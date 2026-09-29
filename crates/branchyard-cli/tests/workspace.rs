@@ -12,7 +12,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -396,6 +396,71 @@ fn run_scripts_teardown_on_rm_and_merge_rm() {
     );
     assert_eq!(repo.branches(), 0);
     assert!(repo.root.join("y.txt").is_file());
+}
+
+/// A run script's list runs entry by entry, each with its own `sh -c`, in
+/// the foreground and detached alike: a `#` comment or a trailing `&` in
+/// one entry means what it would alone, and the first failure stops it.
+#[test]
+fn run_script_entries_each_run_on_their_own() {
+    let repo = Repo::new(
+        r#"
+[workspace]
+setup = "true"
+
+[workspace.run.commented]
+command = ["echo ready # note", "echo second"]
+
+[workspace.run.background]
+command = ["sleep 0 &", "echo after-background"]
+
+[workspace.run.stops]
+command = ["echo one", "exit 3", "echo never"]
+"#,
+    );
+    assert!(repo.by(&["workspace", "trust"]).status.success());
+    let out = repo.by_agent(&["run", "WRITE x.txt=1", "--name", "listed"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = repo.by(&["workspace", "run", "listed", "commented"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "ready\nsecond\n");
+    let out = repo.by(&["workspace", "run", "listed", "background"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "after-background\n");
+    let out = repo.by(&["workspace", "run", "listed", "stops"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "one\n");
+
+    let events = repo.json(&["log", "listed", "--json"]);
+    let runs: Vec<&Value> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["activity"] == "workspace" && e["phase"] == "run")
+        .collect();
+    assert_eq!(runs.len(), 3);
+    assert_eq!(
+        runs[0]["commands"],
+        json!(["echo ready # note", "echo second"])
+    );
+    assert_eq!(runs[2]["commands"], json!(["echo one", "exit 3"]));
+    assert_eq!(runs[2]["exit_code"], 3);
+
+    for (name, last, expected) in [
+        ("commented", "second", "ready\nsecond\n"),
+        ("background", "after-background", "after-background\n"),
+    ] {
+        let detached = repo.json(&["workspace", "run", "listed", name, "--detach", "--json"]);
+        let log = PathBuf::from(detached["log"].as_str().unwrap());
+        for _ in 0..250 {
+            if fs::read_to_string(&log).is_ok_and(|t| t.contains(last)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(fs::read_to_string(&log).unwrap(), expected, "{name}");
+    }
 }
 
 /// On a terminal, `by run` asks once and remembers a yes.
