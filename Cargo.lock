@@ -642,6 +642,7 @@ dependencies = [
  "branchyard-sandbox",
  "branchyard-substrate",
  "branchyard-workspace",
+ "glob",
  "postgres",
  "rcgen",
  "rusqlite",
@@ -808,6 +809,7 @@ dependencies = [
  "blake3",
  "branchyard",
  "branchyard-client",
+ "branchyard-setup",
  "clap",
  "futures-util",
  "hex",
@@ -838,6 +840,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-provision",
+ "glob",
  "hex",
  "schemars 1.2.2",
  "serde",

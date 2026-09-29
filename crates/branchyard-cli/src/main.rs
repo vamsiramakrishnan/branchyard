@@ -21,6 +21,7 @@ mod rig;
 mod setup_io;
 mod watch;
 mod wizard;
+mod workspace_cmd;
 
 use std::ffi::OsString;
 use std::io;
@@ -229,7 +230,10 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             json,
             follow,
         } => commands::log(env, target, &branch, json, follow),
-        Command::Merge { branch, into } => commands::merge(target, &branch, into.as_deref()),
+        Command::Merge { branch, into, rm } => {
+            commands::merge(target, &branch, into.as_deref(), rm)
+        }
+        Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
         Command::Rm {
             branch,
             keep_credentials,

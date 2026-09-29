@@ -35,8 +35,8 @@ use serde_json::Value;
 
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, ProcessRow, Record,
-    ReservationRow, SteerRow, StepRow,
+    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PortBackend,
+    ProcessRow, Record, ReservationRow, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
@@ -231,6 +231,13 @@ CREATE TABLE IF NOT EXISTS by_graph_edges (
 );
 CREATE INDEX IF NOT EXISTS by_graph_edges_prerequisite ON by_graph_edges (repo, prerequisite);
 CREATE INDEX IF NOT EXISTS by_graph_edges_parent ON by_graph_edges (repo, parent);
+CREATE TABLE IF NOT EXISTS by_ports (
+    port INTEGER PRIMARY KEY,
+    repo TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    reserved_ms BIGINT NOT NULL,
+    UNIQUE (repo, branch)
+);
 ";
 
 fn steer_row(r: &Row) -> SteerRow {
@@ -936,6 +943,7 @@ impl Backend for Postgres {
             for sql in [
                 "DELETE FROM by_graph_edges WHERE repo = $1 AND dependent = $2",
                 "DELETE FROM by_graph_revisions WHERE repo = $1 AND parent = $2",
+                "DELETE FROM by_ports WHERE repo = $1 AND branch = $2",
             ] {
                 tx.execute(sql, &[&self.repo, &name])
                     .map_err(db("delete"))?;
@@ -1871,6 +1879,57 @@ impl Postgres {
             }
             None => Ok(false),
         }
+    }
+}
+
+impl PortBackend for Postgres {
+    fn reserve_port(
+        &self,
+        branch: &str,
+        start: u16,
+        usable: &(dyn Fn(u16) -> bool + Sync),
+    ) -> Result<u16, Error> {
+        self.tx(true, |tx| {
+            let held = tx
+                .query_opt(
+                    "SELECT port FROM by_ports WHERE repo = $1 AND branch = $2",
+                    &[&self.repo, &branch],
+                )
+                .map_err(db("port"))?;
+            if let Some(row) = held {
+                return Ok(row.get::<_, i32>(0) as u16);
+            }
+            // Ports are unique across the database, whichever repository
+            // holds them: its repositories may share a host.
+            let taken = tx
+                .query("SELECT port FROM by_ports", &[])
+                .map_err(db("port"))?
+                .iter()
+                .map(|r| r.get::<_, i32>(0) as u16)
+                .collect();
+            let port = pick_port(start, &taken, usable)?;
+            tx.execute(
+                "INSERT INTO by_ports (port, repo, branch, reserved_ms) VALUES ($1, $2, $3, $4)",
+                &[&i32::from(port), &self.repo, &branch, &int(now_ms())],
+            )
+            .map_err(|error| match error.code() {
+                // Another reservation took it first: try again from the
+                // start, which sees that one.
+                Some(code) if *code == SqlState::UNIQUE_VIOLATION => Fail::Retry(error),
+                _ => db("port")(error),
+            })?;
+            Ok(port)
+        })
+    }
+
+    fn port(&self, branch: &str) -> Result<Option<u16>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+                "SELECT port FROM by_ports WHERE repo = $1 AND branch = $2",
+                &[&self.repo, &branch],
+            )
+        })?;
+        Ok(row.map(|r| r.get::<_, i32>(0) as u16))
     }
 }
 

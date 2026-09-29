@@ -38,6 +38,115 @@ pub const CHECK_MARKERS: &[(&str, &str)] = &[
     ("Makefile", "make test"),
 ];
 
+/// Untracked files at a repository root that `[workspace] copy` suggests
+/// carrying into each worktree, when present.
+pub const ENV_FILES: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.development.local",
+    ".env.test",
+    ".env.test.local",
+];
+
+/// Docker Compose files, in the order `docker compose` looks for them.
+pub const COMPOSE_FILES: &[&str] = &[
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+];
+
+/// The Compose project a branch's services run under: one per branch, so
+/// two branches' stacks never collide (a project name takes no `.`).
+const COMPOSE_PROJECT: &str = "\"by-$(printf %s \"$BRANCHYARD_BRANCH\" | tr . -)\"";
+
+/// What the files at a repository root suggest for `[workspace]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceFacts {
+    /// The files that suggested it, such as `pnpm-lock.yaml`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub found: Vec<String>,
+    /// Untracked-looking files to copy: those of [`ENV_FILES`] present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy: Vec<String>,
+    /// Install commands, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup: Vec<String>,
+    /// A development server on the branch's port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teardown: Vec<String>,
+}
+
+impl WorkspaceFacts {
+    pub fn detect(probe: &dyn Probe) -> WorkspaceFacts {
+        let mut facts = WorkspaceFacts::default();
+        let mut found = |file: &str| {
+            let here = probe.exists(file);
+            if here {
+                facts.found.push(file.to_owned());
+            }
+            here
+        };
+        // JavaScript: the lockfile names the package manager.
+        let node = [
+            (
+                "pnpm-lock.yaml",
+                "pnpm install --frozen-lockfile",
+                "pnpm dev",
+            ),
+            ("yarn.lock", "yarn install --frozen-lockfile", "yarn dev"),
+            ("bun.lock", "bun install --frozen-lockfile", "bun run dev"),
+            ("bun.lockb", "bun install --frozen-lockfile", "bun run dev"),
+            ("package-lock.json", "npm ci", "npm run dev"),
+        ]
+        .into_iter()
+        .find(|(lock, _, _)| found(lock))
+        .map(|(_, install, dev)| (install, dev));
+        let mut setup = Vec::new();
+        let mut run = None;
+        if found("package.json") {
+            let (install, dev) = node.unwrap_or(("npm install", "npm run dev"));
+            setup.push(install.to_owned());
+            run = Some(format!("PORT=$BRANCHYARD_PORT {dev}"));
+        }
+        if found("Cargo.toml") {
+            setup.push("cargo fetch".to_owned());
+        }
+        if found("uv.lock") {
+            setup.push("uv sync".to_owned());
+        } else if found("poetry.lock") {
+            setup.push("poetry install".to_owned());
+        } else if found("pyproject.toml") {
+            setup.push("python3 -m venv .venv && .venv/bin/pip install -e .".to_owned());
+        }
+        if found("go.mod") {
+            setup.push("go mod download".to_owned());
+        }
+        let mut teardown = Vec::new();
+        if COMPOSE_FILES.iter().any(|file| found(file)) {
+            setup.push(format!("docker compose -p {COMPOSE_PROJECT} up -d"));
+            teardown.push(format!("docker compose -p {COMPOSE_PROJECT} down"));
+        }
+        let copy = ENV_FILES
+            .iter()
+            .filter(|file| probe.exists(file))
+            .map(|file| (*file).to_owned())
+            .collect();
+        facts.copy = copy;
+        facts.setup = setup;
+        facts.run = run;
+        facts.teardown = teardown;
+        facts
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.copy.is_empty() && self.setup.is_empty() && self.run.is_none()
+    }
+}
+
 /// The Claude Code plugin manifest in a Branchyard checkout.
 pub const PLUGIN_MANIFEST: &str = "plugins/branchyard/.claude-plugin/plugin.json";
 
@@ -126,6 +235,9 @@ pub struct Facts {
     /// The plugin's directory in this checkout, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_dir: Option<String>,
+    /// What the root's files suggest for `[workspace]`.
+    #[serde(default, skip_serializing_if = "WorkspaceFacts::is_empty")]
+    pub workspace: WorkspaceFacts,
     /// The existing project and user files' text, for defaults.
     #[serde(skip)]
     #[schemars(skip)]
@@ -166,6 +278,7 @@ impl Facts {
             plugin_dir: probe
                 .exists(PLUGIN_MANIFEST)
                 .then(|| format!("{}/plugins/branchyard", probe.root())),
+            workspace: WorkspaceFacts::detect(probe),
             project_text: probe.read(crate::config::PROJECT_FILE),
             user_text: probe.read(&user_config_path),
             user_config_path,
@@ -296,6 +409,24 @@ impl Facts {
         );
         if let Some(check) = &self.suggested_check {
             push("check", "Suggested check", check.clone());
+        }
+        let w = &self.workspace;
+        if !w.is_empty() {
+            let mut parts = Vec::new();
+            if !w.copy.is_empty() {
+                parts.push(format!("copy {}", w.copy.join(", ")));
+            }
+            if !w.setup.is_empty() {
+                parts.push(format!("setup {}", w.setup.join(" && ")));
+            }
+            if let Some(run) = &w.run {
+                parts.push(format!("run {run}"));
+            }
+            push(
+                "workspace",
+                "Suggested workspace",
+                format!("{} (from {})", parts.join("; "), w.found.join(", ")),
+            );
         }
         push(
             "config",

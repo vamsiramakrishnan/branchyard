@@ -667,7 +667,14 @@ mod tests {
                 ) => {
                     assert_eq!(branch, "impl")
                 }
-                (ActionId::Merge, Command::Merge { branch, into: None }) => {
+                (
+                    ActionId::Merge,
+                    Command::Merge {
+                        branch,
+                        into: None,
+                        rm: false,
+                    },
+                ) => {
                     assert_eq!(branch, "impl")
                 }
                 (ActionId::Fork, Command::Fork { branch, prompt, .. }) => {

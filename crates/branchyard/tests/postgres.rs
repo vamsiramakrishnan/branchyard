@@ -436,3 +436,63 @@ fn concurrent_resume_graph_on_one_database_starts_a_dependent_once() {
     }
     assert_eq!(prompts(&pg.yard, "second"), 1);
 }
+
+#[test]
+fn a_workspace_port_is_reserved_in_postgres_stable_and_released_on_removal() {
+    let Some(pg) = Pg::new() else { return };
+    let spec = branchyard::WorkspaceSpec {
+        setup: vec!["echo $BRANCHYARD_PORT > port.txt".into()],
+        teardown: vec!["echo $BRANCHYARD_PORT > $BRANCHYARD_ROOT/torn.txt".into()],
+        ..Default::default()
+    };
+    let options = branchyard::TaskOptions {
+        workspace: Some(spec),
+        ..pg.f.options()
+    };
+    let one = pg
+        .yard
+        .task("ENV BRANCHYARD_PORT")
+        .options(options.clone())
+        .name("ws-one")
+        .run()
+        .unwrap();
+    let two = pg
+        .yard
+        .task("ENV BRANCHYARD_PORT")
+        .options(options)
+        .name("ws-two")
+        .run()
+        .unwrap();
+    let port = pg.yard.workspace("ws-one").unwrap().port.unwrap();
+    assert_ne!(Some(port), pg.yard.workspace("ws-two").unwrap().port);
+    assert_eq!(
+        std::fs::read_to_string(one.info().worktree.join("port.txt"))
+            .unwrap()
+            .trim(),
+        port.to_string()
+    );
+    // Another engine on the database: the same port on the next turn.
+    let again = pg
+        .open()
+        .branch("ws-one")
+        .unwrap()
+        .send("ENV BRANCHYARD_PORT", pg.f.options())
+        .unwrap();
+    let said = text(&again.events().unwrap());
+    assert_eq!(said.matches(&format!("BRANCHYARD_PORT={port}")).count(), 2);
+    let report = pg
+        .yard
+        .remove_reporting("ws-one", &Default::default())
+        .unwrap()
+        .unwrap();
+    assert!(report.ok, "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(pg.f.root.join("torn.txt"))
+            .unwrap()
+            .trim(),
+        port.to_string()
+    );
+    assert!(pg.yard.workspace("ws-one").is_err());
+    assert!(pg.yard.workspace("ws-two").unwrap().ready);
+    drop(two);
+}

@@ -315,6 +315,11 @@ fn open_state(config: &Config) -> Result<Opened, String> {
     for (name, path) in &config.repos {
         let yard = open_yard(config, name, path)
             .map_err(|e| format!("repository {name} at {}: {e}", path.display()))?;
+        // Only an operator's configuration lets a repository's scripts run;
+        // see docs/workspace.md.
+        if !config.allow_workspace_scripts.allows(name) {
+            yard.deny_workspace_scripts();
+        }
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(

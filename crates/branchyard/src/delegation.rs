@@ -1705,6 +1705,7 @@ impl Local {
                 grant: Some(child_grant),
                 depth: caller.info.depth + 1,
                 provision,
+                workspace: caller.workspace.as_ref().map(|w| w.spec.clone()),
             },
         )?;
         record.info.status = BranchStatus::Waiting;
@@ -1874,6 +1875,7 @@ impl Local {
                 ))
             })?;
         workspace
+            .excluding(crate::workspace::excluded(caller))
             .snapshot(&format!("{}: {why}", caller.info.git_branch))
             .map_err(git::error)?;
         git::local_branch(&self.yard.root, &caller.info.git_branch)?
@@ -2639,6 +2641,7 @@ mod tests {
             start_base: None,
             checkpoint: None,
             context: None,
+            workspace: None,
         }
     }
 

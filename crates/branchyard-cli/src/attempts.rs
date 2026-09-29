@@ -385,7 +385,7 @@ pub fn compare(env: &Env, target: &Target, args: &CompareArgs) -> Outcome {
     };
     // The existing validated merge: the pick's check runs on the exact
     // merge result, and the target moves only by compare-and-swap.
-    commands::merge(target, pick, args.into.as_deref())?;
+    commands::merge(target, pick, args.into.as_deref(), false)?;
     let others: Vec<&str> = attempts
         .iter()
         .map(|a| a.branch.as_str())

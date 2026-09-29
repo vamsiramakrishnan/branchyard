@@ -283,6 +283,7 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
         }
         qs.push(q);
     }
+    workspace_questions(facts, &current, &mut qs);
     let remote = current.remote.url.clone();
     qs.push(
         Question::new(
@@ -389,6 +390,120 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
     qs
 }
 
+/// `[workspace]`, for the project file only: detected install commands,
+/// `.env` files, a dev server on the branch's port, and a Compose stack's
+/// teardown, each a default the person confirms.
+fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Question>) {
+    let detected = &facts.workspace;
+    let existing = current.workspace.as_ref();
+    let project = Condition::equals("scope", "project");
+    let enabled = Condition::All(vec![project.clone(), Condition::truthy("workspace")]);
+    let joined = |commands: Vec<String>| match commands.is_empty() {
+        true => None,
+        false => Some(commands.join(" && ")),
+    };
+    let setup = existing
+        .map(|w| joined(w.setup.commands()))
+        .unwrap_or_else(|| joined(detected.setup.clone()));
+    let teardown = existing
+        .map(|w| joined(w.teardown.commands()))
+        .unwrap_or_else(|| joined(detected.teardown.clone()));
+    let run = match existing {
+        Some(w) => w.run_script(None).ok().and_then(|(_, c)| joined(c)),
+        None => detected.run.clone(),
+    };
+    let copy: Vec<String> = existing
+        .map(|w| w.copy.clone())
+        .unwrap_or_else(|| detected.copy.clone());
+    qs.push(
+        Question::new(
+            "workspace",
+            Kind::Confirm,
+            "Workspace",
+            "Should each new branch's worktree be made ready before its first turn?",
+            "[workspace] copies untracked files such as .env into the worktree, runs setup (an install) and gives it BRANCHYARD_PORT; its scripts run only after `by workspace trust`.",
+        )
+        .default(existing.is_some() || !detected.is_empty())
+        .choices(vec![
+            Choice::new(true, "Yes", "copy files and run setup in each new worktree"),
+            Choice::new(false, "No", "a bare worktree, as now"),
+        ])
+        .when(project),
+    );
+    let mut copy_choices: Vec<Choice> = copy
+        .iter()
+        .chain(detected.copy.iter())
+        .fold(Vec::new(), |mut seen: Vec<&String>, file| {
+            if !seen.contains(&file) {
+                seen.push(file);
+            }
+            seen
+        })
+        .into_iter()
+        .take(3)
+        .map(|file| Choice::new(file.as_str(), file.as_str(), "found at the repository root"))
+        .collect();
+    copy_choices.push(Choice::new(".env*", ".env*", "every .env file at the root"));
+    qs.push(
+        Question::new(
+            "workspace.copy",
+            Kind::Multiselect,
+            "Copy",
+            "Which untracked files should each new worktree get a copy of?",
+            "Globs relative to the repository root; never outside it, never a symbolic link, and never committed from the branch.",
+        )
+        .optional()
+        .default(Value::Array(copy.into_iter().map(Value::from).collect()))
+        .choices(copy_choices)
+        .allow_other(true)
+        .rule(Rule::CopyGlob)
+        .when(enabled.clone()),
+    );
+    let command =
+        |id: &str, header: &str, prompt: &str, why: &str, value: Option<String>, none: &str| {
+            let mut choices = Vec::new();
+            if let Some(value) = &value {
+                choices.push(Choice::new(
+                    value.as_str(),
+                    value.as_str(),
+                    "detected from the repository's files",
+                ));
+            }
+            choices.push(Choice::new(Value::Null, none, "nothing runs"));
+            Question::new(id, Kind::Text, header, prompt, why)
+                .optional()
+                .default(value.map(Value::from).unwrap_or(Value::Null))
+                .choices(choices)
+                .allow_other(true)
+                .rule(Rule::CommandLine)
+                .when(enabled.clone())
+        };
+    qs.push(command(
+        "workspace.setup",
+        "Setup",
+        "What should run in each new worktree before its first turn?",
+        "Runs with sh -c in the worktree; a failure fails the branch with its output in by log. It must be safe to run twice.",
+        setup,
+        "No setup",
+    ));
+    qs.push(command(
+        "workspace.run",
+        "Run",
+        "Which command starts a development server in a branch?",
+        "`by workspace run BRANCH` runs it in the branch's worktree, with its own port in $BRANCHYARD_PORT.",
+        run,
+        "No run script",
+    ));
+    qs.push(command(
+        "workspace.teardown",
+        "Teardown",
+        "What should run when a branch is removed?",
+        "Runs in the worktree on by rm and by merge --rm, best-effort, such as stopping the branch's containers.",
+        teardown,
+        "No teardown",
+    ));
+}
+
 pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
     let (path, existing) = target(facts, answers);
     let mut flat = existing.clone().unwrap_or_default().flatten();
@@ -455,6 +570,48 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
             }
         }
     }
+    let workspace =
+        text(answers, "scope").as_deref() != Some("user") && answers.contains_key("workspace");
+    if workspace {
+        let before = existing.as_ref().and_then(|c| c.workspace.clone());
+        flat.retain(|key, _| key != "workspace" && !key.starts_with("workspace."));
+        if flag(answers, "workspace") {
+            flat.insert("workspace".into(), json!({}));
+            let copy = list(answers, "workspace.copy");
+            if !copy.is_empty() {
+                flat.insert("workspace.copy".into(), json!(copy));
+            }
+            set!("workspace.setup", get("workspace.setup"));
+            set!("workspace.teardown", get("workspace.teardown"));
+            // Other run scripts are kept; the asked one is the default.
+            let mut runs = before.map(|w| w.run).unwrap_or_default();
+            let name = runs
+                .iter()
+                .find(|(_, r)| r.default)
+                .map(|(name, _)| name.clone())
+                .unwrap_or_else(|| "dev".into());
+            match text(answers, "workspace.run") {
+                Some(command) => {
+                    runs.insert(
+                        name,
+                        config::RunScript {
+                            command: config::Script::One(command),
+                            default: true,
+                        },
+                    );
+                }
+                None => {
+                    runs.remove(&name);
+                }
+            }
+            if !runs.is_empty() {
+                flat.insert(
+                    "workspace.run".into(),
+                    serde_json::to_value(&runs).unwrap_or_default(),
+                );
+            }
+        }
+    }
     let mut plan = Plan::new(Topic::Project);
     let body = match ProjectConfig::unflatten(&flat) {
         Ok(config) => {
@@ -508,6 +665,17 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
         "by config validate",
         "Check the merged configuration with the loader by uses.",
     );
+    if workspace && flag(answers, "workspace") {
+        plan.notes.push(
+            "[workspace] scripts run only once you trust them: review them, then run \
+             `by workspace trust`. A change to them asks again."
+                .into(),
+        );
+        plan.command(
+            "by workspace trust",
+            "Let [workspace]'s setup, run and teardown scripts run for this repository.",
+        );
+    }
     plan.command(
         "by config show",
         "See every effective value and where it came from.",
@@ -540,6 +708,71 @@ mod tests {
             "effort only applies to codex"
         );
         assert_eq!(state.answers["remote.url"], Value::Null);
+    }
+
+    #[test]
+    fn a_workspace_is_suggested_from_the_repositorys_files() {
+        let mut probe = FakeProbe::typical();
+        for file in [
+            "package.json",
+            "pnpm-lock.yaml",
+            ".env",
+            ".env.local",
+            "compose.yaml",
+        ] {
+            probe.files.insert(file.into(), String::new());
+        }
+        let facts = Facts::gather(&probe);
+        assert_eq!(facts.workspace.copy, [".env", ".env.local"]);
+        assert_eq!(
+            facts.workspace.setup[..2],
+            [
+                "pnpm install --frozen-lockfile".to_owned(),
+                "cargo fetch".to_owned()
+            ]
+        );
+        assert!(facts.workspace.setup[2].starts_with("docker compose -p"));
+        assert_eq!(
+            facts.workspace.run.as_deref(),
+            Some("PORT=$BRANCHYARD_PORT pnpm dev")
+        );
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert!(state.done(), "{state:?}");
+        assert_eq!(state.answers["workspace"], json!(true));
+        assert_eq!(
+            state.answers["workspace.copy"],
+            json!([".env", ".env.local"])
+        );
+        let plan = plan(&facts, &state.answers, &probe);
+        let body = plan.files[0].content.clone().unwrap();
+        let parsed = config::parse(&body).unwrap();
+        let workspace = parsed.workspace.unwrap();
+        assert_eq!(workspace.copy, [".env", ".env.local"]);
+        assert!(workspace.setup.commands()[0]
+            .starts_with("pnpm install --frozen-lockfile && cargo fetch && docker compose"));
+        assert_eq!(workspace.run_script(None).unwrap().0, "dev");
+        assert!(workspace.teardown.commands()[0].ends_with(" down"));
+        assert!(plan
+            .commands
+            .iter()
+            .any(|c| c.command == "by workspace trust"));
+
+        // Declining writes none, and the user scope never asks.
+        let mut declined = state.answers.clone();
+        declined.insert("workspace".into(), json!(false));
+        let body = plan_body(&facts, &declined, &probe);
+        assert!(config::parse(&body).unwrap().workspace.is_none(), "{body}");
+        let user: BTreeMap<String, Value> =
+            serde_json::from_value(json!({"scope": "user"})).unwrap();
+        let state = resolve(&|a| questions(&facts, a), &user, true);
+        assert!(!state.answers.contains_key("workspace") || state.answers["workspace"].is_null());
+    }
+
+    fn plan_body(facts: &Facts, answers: &Answers, probe: &FakeProbe) -> String {
+        plan(facts, answers, probe).files[0]
+            .content
+            .clone()
+            .unwrap()
     }
 
     #[test]

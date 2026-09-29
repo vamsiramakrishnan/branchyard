@@ -97,6 +97,9 @@ pub(crate) struct Hub {
     /// this process gave its children, by parent: a dependent started
     /// here later runs under them (see `crate::graph`).
     pub graph_options: Mutex<HashMap<String, crate::TaskOptions>>,
+    /// Set by [`crate::Yard::deny_workspace_scripts`]: workspace setup and
+    /// teardown commands never run on this yard.
+    scripts_denied: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Hub {
@@ -111,6 +114,7 @@ impl Default for Hub {
             spawning: Default::default(),
             delivery_hook: Mutex::new(Some(Arc::new(crate::inbox::SteerDelivery::default()))),
             graph_options: Default::default(),
+            scripts_denied: Default::default(),
         }
     }
 }
@@ -129,6 +133,18 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Hub {
+    /// Refuse workspace scripts from now on; see
+    /// [`crate::Yard::deny_workspace_scripts`].
+    pub fn deny_scripts(&self) {
+        self.scripts_denied
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn scripts_denied(&self) -> bool {
+        self.scripts_denied
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Record `name`'s running turn, starting the broker if needed, and
     /// return the broker's socket.
     fn register(&self, yard: &Yard, name: &str, context: Context) -> Result<PathBuf, Error> {

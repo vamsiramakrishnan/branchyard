@@ -164,6 +164,16 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Interrupted;
         } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
             record.info.status = BranchStatus::BudgetExceeded { limit };
+        } else if let Err(reason) =
+            crate::workspace::prepare(turn.yard, &mut record, &fence, &mut recorder, &|| {
+                lease.lost()
+            })?
+        {
+            // Setup that did not complete runs again on the next turn.
+            record.info.status = match store.backend().cancel_requested(&fence)? {
+                Some(_) => BranchStatus::Interrupted,
+                None => BranchStatus::Failed { reason },
+            };
         } else if let Err(reason) = graph::bind(turn.yard, &record) {
             record.info.status = BranchStatus::Failed { reason };
         } else {
@@ -359,6 +369,13 @@ fn run(
     if !placement.is_sandbox() {
         placement.set_env(ENV_ROOT, &turn.yard.root.display().to_string());
         placement.set_env(ENV_BRANCH, &record.info.name);
+        placement.set_env(
+            crate::workspace::ENV_WORKTREE,
+            &record.info.worktree.display().to_string(),
+        );
+        if let Some(port) = store.ports().port(&record.info.name)? {
+            placement.set_env(crate::workspace::ENV_PORT, &port.to_string());
+        }
         // A local process runs directly on the host filesystem, so every
         // scratch area this branch may reach is simply its host directory;
         // see `docs/storage.md`. Microsandbox gets these as mounts instead
@@ -1085,6 +1102,7 @@ pub(crate) fn conclude(
     driven: Driven,
 ) -> Result<(), Error> {
     let store = yard.store();
+    let excluded = crate::workspace::excluded(record);
     let info = &mut record.info;
     if driven.submitted {
         info.turns += 1;
@@ -1113,7 +1131,10 @@ pub(crate) fn conclude(
                 let _lock = git::lock();
                 let branch = names::validate(&info.name)?;
                 match yard.repo.workspace(&branch) {
-                    Ok(Some(workspace)) => workspace.snapshot(&message).map_err(|e| e.to_string()),
+                    Ok(Some(workspace)) => workspace
+                        .excluding(excluded)
+                        .snapshot(&message)
+                        .map_err(|e| e.to_string()),
                     Ok(None) => Err(format!("no worktree has {} checked out", info.git_branch)),
                     Err(error) => Err(error.to_string()),
                 }

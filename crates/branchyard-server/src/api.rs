@@ -593,6 +593,48 @@ impl App {
     }
 }
 
+impl App {
+    /// The `[workspace]` of `repo`'s branchyard.toml for a new branch, when
+    /// this server's operator allows that repository's scripts
+    /// (`allow_workspace_scripts`); otherwise none. Never from a request.
+    pub(crate) fn workspace(
+        &self,
+        repo: &RepoState,
+    ) -> Result<Option<branchyard::WorkspaceSpec>, ApiError> {
+        if !self.config.allow_workspace_scripts.allows(&repo.name) {
+            return Ok(None);
+        }
+        let path = repo
+            .yard
+            .root()
+            .join(branchyard_setup::config::PROJECT_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(ApiError::bad_request(format!(
+                    "{}'s branchyard.toml could not be read: {e}",
+                    repo.name
+                )))
+            }
+        };
+        let parsed = branchyard_setup::config::parse(&text)
+            .and_then(|c| {
+                c.check_layer(branchyard_setup::config::Layer::Project)?;
+                Ok(c)
+            })
+            .map_err(|e| {
+                ApiError::bad_request(format!("{}'s branchyard.toml is invalid: {e}", repo.name))
+            })?;
+        Ok(parsed.workspace.map(|w| branchyard::WorkspaceSpec {
+            copy: w.copy.clone(),
+            setup: w.setup.commands(),
+            teardown: w.teardown.commands(),
+            digest: Some(w.digest()),
+        }))
+    }
+}
+
 pub(crate) fn delegation_not_allowed(message: &str) -> ApiError {
     ApiError::new(StatusCode::FORBIDDEN, "delegation_not_allowed", message)
 }

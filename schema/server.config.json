@@ -124,6 +124,17 @@
       "type": "boolean",
       "default": false
     },
+    "allow_workspace_scripts": {
+      "description": "Run served repositories' `[workspace]` scripts (branchyard.toml)\nfor new branches: `true` for every repository, or a list of\nrepository names. Off by default; see docs/workspace.md.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileWorkspaceScripts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "secrets": {
       "type": "object",
       "additionalProperties": {
@@ -299,6 +310,20 @@
       "required": [
         "cert",
         "key"
+      ]
+    },
+    "FileWorkspaceScripts": {
+      "description": "`allow_workspace_scripts` as written: `true`, `false`, or repository\nnames.",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       ]
     },
     "FileWebhook": {

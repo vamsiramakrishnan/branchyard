@@ -41,14 +41,17 @@ All three solve the same pain, which reviewers of Conductor call its main fricti
 | Superset | `.superset/config.json` | `setup`, `teardown`, `run` (arrays of commands) | `SUPERSET_WORKSPACE_NAME`, `SUPERSET_ROOT_PATH` | `~/.superset/projects/<mirrored path>/config.json` ([setup and teardown](https://docs.superset.sh/setup-teardown-scripts)) |
 | Conductor | `.conductor/settings.toml` (was `conductor.json`) | `setup`, `archive`, several named `run` scripts (`[scripts.run.web]`, `[scripts.run.worker]`) with `available_in = ["local", "cloud"]` and a concurrent or sequential run mode | `CONDUCTOR_PORT` (an allocated port), `CONDUCTOR_WORKSPACE_PATH`, `CONDUCTOR_WORKSPACE_NAME`, `CONDUCTOR_ROOT_PATH` | ([scripts](https://www.conductor.build/docs/reference/scripts)) |
 
-**Branchyard:** absent. A branch is a bare worktree, and `--check` runs only at merge time. Nothing copies untracked files, runs an install, allocates a port or tears anything down. This is the largest devex gap. **Take:**
-- A `[workspace]` section in the new `branchyard.toml`:
-  - `copy` (globs of untracked files to carry across);
-  - `setup`, `run` (named, like Conductor's) and `teardown`.
-- Branchyard-given variables `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and an allocated `BRANCHYARD_PORT`.
-- A per-user override, as all three have.
-- Setup is journaled like any other step, so a crash mid-install is recovered rather than repeated blindly.
-- Superset's security advisory about lifecycle scripts (fixed in [PR #7830](https://github.com/superset-sh/superset/pull/7830)) is the warning that comes with this: a cloned repository's scripts must not run without a trust decision. Branchyard should ask once per repository and remember the answer, and servers should run only scripts their operator allowed.
+**Branchyard: done** ([workspace](workspace.md)). `[workspace]` in `branchyard.toml` has:
+- `copy`: globs of untracked files carried from the repository root into each new worktree, never outside it, never a symbolic link, never tracked files, and never committed from the branch;
+- `setup` (one command or a list), named `[workspace.run.NAME]` scripts for `by workspace run` (a `default`), and `teardown` on `by rm` and `by merge --rm`.
+
+Scripts and the harness get `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and `BRANCHYARD_PORT`, a port reserved per branch in the store (SQLite or PostgreSQL), stable across turns and restarts, and released with the branch. The user file's `[projects."<root>".workspace]` replaces a repository's section, as Superset's mirrored path does. Setup is a journaled step: a crash mid-install kills what it started, ends the branch `interrupted`, and its next turn runs setup again from the start. A repository's scripts never run until you trust them: a per-user record keyed by repository root and the section's digest, asked once on a terminal or given with `by workspace trust`, and asked again when the scripts change; a server runs them only for repositories its operator lists in `allow_workspace_scripts`, never because a request asks. `by init project` suggests the section from lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, a Compose file and `.env` files.
+
+**Still open:**
+- Conductor's concurrent run mode (several run scripts at once) and `available_in`; `by workspace run` runs one script, in the foreground or `--detach`ed, and `by watch` does not yet show or stop running scripts.
+- An emdash-style `shellSetup` (for example `nvm use`) applied to the harness's own shell.
+- Setup inside a sandbox: scripts run on the host, as you, even for isolated or sandboxed branches, and the Substrate provider's bundle does not carry files setup creates that git ignores.
+- Tested hermetically only: no real package manager, Docker stack or harness, and not on macOS.
 
 ### 3. The same prompt to several agents, compared side by side
 
@@ -173,7 +176,7 @@ Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a
 |---|---|---|
 | No limit on spend; running N agents costs N times as much, untracked | Conductor review ([madewithlove](https://madewithlove.com/blog/conductor-running-multiple-ai-coding-agents-in-parallel/)); no cost page found in emdash's docs | Budgets per task, per fan-out and per delegation envelope; `cost_usd` on each branch; per-tenant `max_cost_usd` |
 | Agents run with the user's full permissions ("how do you stop them going rogue?" went unanswered) | emdash Show HN ([47140322](https://news.ycombinator.com/item?id=47140322)) | Per-invocation permission policies, sandbox providers (Substrate, Microsandbox), secrets provisioned without appearing in prompts |
-| Lifecycle scripts executed without a trust decision | Superset advisory, fixed in [PR #7830](https://github.com/superset-sh/superset/pull/7830) | Not applicable yet; design item 2 above with a trust step |
+| Lifecycle scripts executed without a trust decision | Superset advisory, fixed in [PR #7830](https://github.com/superset-sh/superset/pull/7830) | A repository's `[workspace]` scripts run only once trusted per repository and content; servers run only what their operator allows ([workspace](workspace.md#trust)) |
 | Slows down at scale ("78 tasks and the UI is crawling") | emdash Show HN ([47140322](https://news.ycombinator.com/item?id=47140322)) | A store and server built for many branches; several servers on PostgreSQL |
 | Closing a tab kills the agent | Superset [#3240](https://github.com/superset-sh/superset/issues/3240) | Turns are durable and recoverable |
 | Tied to one machine or one operating system | Conductor macOS only; Superset without Windows | CLI and server on Linux and macOS; remote mode; a server others can share |
@@ -188,11 +191,13 @@ In order of what a user would feel first:
 1. **Guided setup:**
    - `by init` and the `setup` skill (under way), which detect first and show files and commands before acting (§1).
    - `branchyard.toml` holding defaults, MCP servers (§8) and the workspace lifecycle below.
-2. **Workspace lifecycle** (§2):
+2. **Workspace lifecycle** (§2), **done** ([workspace](workspace.md)):
    - `copy`, `setup`, named `run` and `teardown`;
    - Branchyard-given variables with an allocated port;
    - a per-repository trust decision;
    - setup journaled and recovered.
+
+   Left: concurrent run scripts and running scripts in `by watch`, a `shellSetup` for the harness, setup inside a sandbox.
 3. **From branch to merged PR** (§5, §9), done ([pull requests](pull-requests.md)):
    - `by run --issue`;
    - `by pr` and `by pr --watch`, which routes CI failures and review comments back into the branch;

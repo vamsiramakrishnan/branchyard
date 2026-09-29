@@ -269,13 +269,23 @@ fn integration_error(error: IntegrationError, target: &str) -> Error {
     }
 }
 
-pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result<(), Error> {
+pub(crate) fn remove(
+    yard: &Yard,
+    name: &str,
+    options: &RemoveOptions,
+) -> Result<Option<crate::WorkspaceReport>, Error> {
     let store = yard.store();
     let (record, lease) = hold(yard, name)?;
     // Journaled so a removal cut short says so; repeating it finishes it.
     store
         .backend()
         .begin_step(lease.fence(), 0, "remove", &json!({}))?;
+    // Best-effort: what it did goes in the log, and the removal goes on.
+    let teardown = crate::workspace::teardown(yard, &record, Some(lease.fence()))?;
+    if let Some(report) = &teardown {
+        let mut recorder = Recorder::fenced(&store, lease.fence(), None);
+        recorder.record(Activity::Workspace(report.clone()))?;
+    }
     let merged = matches!(record.info.status, BranchStatus::Merged { .. });
     let branch = names::validate(name)?;
     {
@@ -299,7 +309,7 @@ pub(crate) fn remove(yard: &Yard, name: &str, options: &RemoveOptions) -> Result
         remove_credentials(&store, &record)?;
     }
     remove_home(&store, &record)?;
-    Ok(())
+    Ok(teardown)
 }
 
 /// Remove the credentials provisioning wrote in the branch's private home,

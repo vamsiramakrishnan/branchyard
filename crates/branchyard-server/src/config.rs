@@ -17,6 +17,7 @@
 //!   "allow_delegation": false,
 //!   "by_path": "/usr/local/bin/by",
 //!   "allow_unapproved_tools": false,
+//!   "allow_workspace_scripts": ["app"],
 //!   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
 //!   "database": "postgres://branchyard@db/branchyard"
 //! }
@@ -38,6 +39,39 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8421";
+
+/// Which repositories' workspace scripts a server runs: its operator's
+/// decision, from `allow_workspace_scripts` in the configuration file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceScripts {
+    /// None (the default): a repository's `[workspace]` is ignored.
+    #[default]
+    Denied,
+    /// Every served repository's (`true`).
+    All,
+    /// These served repositories' (a list of names).
+    Repos(BTreeSet<String>),
+}
+
+impl WorkspaceScripts {
+    pub fn allows(&self, repo: &str) -> bool {
+        match self {
+            WorkspaceScripts::Denied => false,
+            WorkspaceScripts::All => true,
+            WorkspaceScripts::Repos(repos) => repos.contains(repo),
+        }
+    }
+}
+
+/// `allow_workspace_scripts` as written: `true`, `false`, or repository
+/// names.
+#[derive(Deserialize)]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum FileWorkspaceScripts {
+    All(bool),
+    Repos(Vec<String>),
+}
 
 /// The default tenant a bearer token belongs to when nothing says
 /// otherwise: single-token deployments from before tenants existed, and a
@@ -328,6 +362,10 @@ pub struct Config {
     /// Accept `unapproved_tools`, which runs profiles whose tools bypass
     /// the request's policy. Off by default.
     pub allow_unapproved_tools: bool,
+    /// Which served repositories' `[workspace]` scripts (branchyard.toml)
+    /// this server runs for new branches. None by default; a request can
+    /// never ask for them. See `docs/workspace.md`.
+    pub allow_workspace_scripts: WorkspaceScripts,
     /// Secrets a request may name, and where this server reads each: a
     /// variable of its own environment or a file. A request names secrets
     /// only; it never chooses a source. Empty by default.
@@ -376,6 +414,7 @@ impl Config {
             allow_delegation: false,
             by_path: None,
             allow_unapproved_tools: false,
+            allow_workspace_scripts: WorkspaceScripts::Denied,
             secrets: BTreeMap::new(),
             database: None,
             poll_interval: Duration::from_millis(500),
@@ -431,6 +470,15 @@ impl Config {
         }
         for (name, _) in &self.repos {
             check_repo_name(name)?;
+        }
+        if let WorkspaceScripts::Repos(allowed) = &self.allow_workspace_scripts {
+            for name in allowed {
+                if !self.repos.iter().any(|(repo, _)| repo == name) {
+                    return Err(format!(
+                        "allow_workspace_scripts names {name}, which this server does not serve"
+                    ));
+                }
+            }
         }
         let mut names: Vec<&str> = self.repos.iter().map(|(n, _)| n.as_str()).collect();
         names.sort_unstable();
@@ -645,6 +693,10 @@ pub(crate) struct FileConfig {
     by_path: Option<PathBuf>,
     #[serde(default)]
     allow_unapproved_tools: bool,
+    /// Run served repositories' `[workspace]` scripts (branchyard.toml)
+    /// for new branches: `true` for every repository, or a list of
+    /// repository names. Off by default; see docs/workspace.md.
+    allow_workspace_scripts: Option<FileWorkspaceScripts>,
     #[serde(default)]
     secrets: BTreeMap<String, String>,
     database: Option<String>,
@@ -757,6 +809,7 @@ pub struct Partial {
     pub allow_delegation: bool,
     pub by_path: Option<PathBuf>,
     pub allow_unapproved_tools: bool,
+    pub allow_workspace_scripts: WorkspaceScripts,
     pub secrets: BTreeMap<String, branchyard::SecretSource>,
     pub database: Option<String>,
     pub webhooks: Vec<WebhookConfig>,
@@ -918,6 +971,13 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         allow_delegation: file.allow_delegation,
         by_path: file.by_path.map(resolve),
         allow_unapproved_tools: file.allow_unapproved_tools,
+        allow_workspace_scripts: match file.allow_workspace_scripts {
+            None | Some(FileWorkspaceScripts::All(false)) => WorkspaceScripts::Denied,
+            Some(FileWorkspaceScripts::All(true)) => WorkspaceScripts::All,
+            Some(FileWorkspaceScripts::Repos(repos)) => {
+                WorkspaceScripts::Repos(repos.into_iter().collect())
+            }
+        },
         secrets: file
             .secrets
             .into_iter()

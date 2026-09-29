@@ -315,3 +315,32 @@ fn first_batches_match_the_golden_files() {
     .unwrap();
     golden("server-second.json", &step(Topic::Server, &probe, &answers));
 }
+
+/// The batch that asks about `[workspace]`, in a repository whose files
+/// suggest one: its defaults come from what was detected.
+#[test]
+fn the_workspace_batch_matches_its_golden_file() {
+    let mut probe = FakeProbe::typical();
+    for file in [
+        "package.json",
+        "pnpm-lock.yaml",
+        ".env",
+        ".env.local",
+        "compose.yaml",
+    ] {
+        probe.files.insert(file.into(), String::new());
+    }
+    let mut answers = BTreeMap::new();
+    for _ in 0..20 {
+        let response = step(Topic::Project, &probe, &answers);
+        if response.questions.iter().any(|q| q.id == "workspace.copy") {
+            golden("project-workspace.json", &response);
+            return;
+        }
+        assert!(!response.done, "the workspace was never asked about");
+        for q in &response.questions {
+            answers.insert(q.id.clone(), q.default.clone());
+        }
+    }
+    panic!("the workspace was never asked about");
+}

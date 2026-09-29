@@ -101,6 +101,11 @@ pub(crate) struct Record {
     /// Cleared once a turn submits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// The branch's workspace lifecycle: what prepares its worktree and
+    /// cleans up after it, and whether its setup completed. See
+    /// `crate::workspace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::workspace::WorkspaceState>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current
@@ -505,6 +510,47 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn awaiting_answer(&self, from: &str, now_ms: u64) -> Result<bool, Error>;
 }
 
+/// Ports reserved for branches (`BRANCHYARD_PORT`), one per branch name,
+/// none shared: each is unique across the store (across every repository
+/// in a PostgreSQL database). A branch's reservation is deleted with the
+/// branch by [`Backend::delete`]. See `crate::workspace`.
+pub(crate) trait PortBackend: Send + Sync + fmt::Debug {
+    /// `branch`'s port. When it has none, reserve the first port from
+    /// `start` on, wrapping within [`crate::workspace::PORT_RANGE`], that no
+    /// branch holds and for which `usable` is true, in one transaction.
+    fn reserve_port(
+        &self,
+        branch: &str,
+        start: u16,
+        usable: &(dyn Fn(u16) -> bool + Sync),
+    ) -> Result<u16, Error>;
+    /// `branch`'s reserved port, if it has one.
+    fn port(&self, branch: &str) -> Result<Option<u16>, Error>;
+}
+
+/// The port a reservation takes: from `start`, the first not in `taken`
+/// for which `usable` holds.
+pub(crate) fn pick_port(
+    start: u16,
+    taken: &std::collections::BTreeSet<u16>,
+    usable: &(dyn Fn(u16) -> bool + Sync),
+) -> Result<u16, Error> {
+    let (low, high) = crate::workspace::PORT_RANGE;
+    let start = start.clamp(low, high);
+    let mut port = start;
+    loop {
+        if !taken.contains(&port) && usable(port) {
+            return Ok(port);
+        }
+        port = crate::workspace::next_port(port);
+        if port == start {
+            return Err(Error::State(format!(
+                "no free port between {low} and {high} for a branch"
+            )));
+        }
+    }
+}
+
 /// Wakes readers in this process when events are appended to a store.
 #[derive(Debug, Default)]
 struct Signal {
@@ -534,6 +580,8 @@ pub(crate) struct Store {
     /// Dependencies and graph revisions: the same backend again, as for
     /// `storage`. See [`crate::graph`].
     graph: Arc<dyn GraphBackend>,
+    /// Branch ports: the same backend again. See [`PortBackend`].
+    ports: Arc<dyn PortBackend>,
     owner: Arc<Owner>,
     signal: Arc<Signal>,
 }
@@ -559,7 +607,8 @@ impl Store {
             dir,
             backend: backend.clone(),
             storage: backend.clone(),
-            graph: backend,
+            graph: backend.clone(),
+            ports: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -580,7 +629,8 @@ impl Store {
             dir,
             backend: backend.clone(),
             storage: backend.clone(),
-            graph: backend,
+            graph: backend.clone(),
+            ports: backend,
             owner: Arc::new(Owner::new()),
             signal,
         })
@@ -607,6 +657,11 @@ impl Store {
     /// Dependencies and graph revisions; see [`crate::graph`].
     pub fn graph(&self) -> &dyn GraphBackend {
         self.graph.as_ref()
+    }
+
+    /// Branch ports; see [`PortBackend`].
+    pub fn ports(&self) -> &dyn PortBackend {
+        self.ports.as_ref()
     }
 
     pub fn worktree(&self, name: &str) -> PathBuf {

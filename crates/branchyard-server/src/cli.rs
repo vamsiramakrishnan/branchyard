@@ -590,6 +590,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.allow_delegation = partial.allow_delegation || flags.allow_delegation;
     config.by_path = flags.by_path.or(partial.by_path);
     config.allow_unapproved_tools = partial.allow_unapproved_tools || flags.allow_unapproved_tools;
+    config.allow_workspace_scripts = partial.allow_workspace_scripts;
     config.secrets = partial.secrets;
     config
         .secrets
