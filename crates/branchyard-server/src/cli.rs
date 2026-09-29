@@ -662,25 +662,41 @@ fn check_flags(flags: Flags) -> Result<Vec<String>, String> {
     Ok(warnings)
 }
 
-/// Wait for SIGINT or SIGTERM.
-async fn signal() {
+/// SIGINT and SIGTERM, which both shut the server down the same way.
+/// Registered before the server starts, so one that arrives during startup
+/// is kept rather than lost (a container's PID 1 ignores a signal it has no
+/// handler for, and `docker stop` then waits for its timeout) and stops the
+/// server as soon as it is serving.
+struct Signals {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
+    streams: Option<(tokio::signal::unix::Signal, tokio::signal::unix::Signal)>,
+}
+
+impl Signals {
+    /// Needs a Tokio runtime.
+    fn new() -> Signals {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let streams = signal(SignalKind::interrupt())
+                .and_then(|interrupt| Ok((interrupt, signal(SignalKind::terminate())?)))
+                .ok();
+            Signals { streams }
         }
+        #[cfg(not(unix))]
+        Signals {}
     }
-    #[cfg(not(unix))]
-    {
+
+    /// The next SIGINT or SIGTERM (Ctrl-C where there are no signals).
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        if let Some((interrupt, terminate)) = &mut self.streams {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
         let _ = tokio::signal::ctrl_c().await;
     }
 }
@@ -751,6 +767,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     };
     let repos: Vec<String> = config.repos.iter().map(|(n, _)| n.clone()).collect();
     let code = runtime.block_on(async move {
+        let mut signals = Signals::new();
         let running = match serve::start(config).await {
             Ok(running) => running,
             Err(error) => {
@@ -777,12 +794,12 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
         }
         let handle = running.handle();
         tokio::spawn(async move {
-            signal().await;
+            signals.recv().await;
             tracing::info!(
                 "shutting down; running operations may finish (signal again to stop waiting)"
             );
             handle.shutdown();
-            signal().await;
+            signals.recv().await;
             handle.force();
         });
         let stopped = running.wait().await;

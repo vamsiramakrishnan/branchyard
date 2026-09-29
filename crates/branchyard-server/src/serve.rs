@@ -24,8 +24,11 @@ use crate::ops::{Options, Registry};
 use crate::store::{OperationStore, SqliteStore};
 use crate::webhook;
 
-/// How long open connections get to finish after shutdown begins.
+/// How long open connections get to finish after shutdown begins, at
+/// most; [`Running::wait`] also bounds it by the grace period.
 const DRAIN: Duration = Duration::from_secs(10);
+/// The least time connections get to drain, even with no grace period.
+const MIN_DRAIN: Duration = Duration::from_secs(1);
 const TLS_HANDSHAKE: Duration = Duration::from_secs(10);
 
 /// A server that is accepting connections.
@@ -89,11 +92,16 @@ impl Running {
         }
     }
 
-    /// Wait for shutdown to finish: connections drained, then running
-    /// operations given the grace period. Operations still running after
-    /// it are recorded as interrupted; their threads end with the process.
+    /// Wait for shutdown to begin and finish. From the moment it begins,
+    /// open connections drain and running operations get the grace period
+    /// at the same time, so the whole takes at most the grace period (and
+    /// at least [`MIN_DRAIN`] for requests in flight), which is what a
+    /// supervisor's stop timeout, such as `docker stop`'s, must exceed.
+    /// Operations still running after it are recorded as interrupted;
+    /// their threads end with the process.
     pub async fn wait(self) -> Stopped {
-        let _ = self.accept.await;
+        let mut begun = self.shutdown.subscribe();
+        let _ = begun.wait_for(|stop| *stop).await;
         for poller in self.pollers {
             poller.abort();
         }
@@ -103,8 +111,11 @@ impl Running {
         let registry = self.registry.clone();
         let grace = self.grace;
         let idle = tokio::task::spawn_blocking(move || registry.wait_running(grace));
+        // A connection that has not finished its request by then (a
+        // client that sent half its headers) is dropped with the process.
+        let drained = tokio::time::timeout(grace.max(MIN_DRAIN), self.accept);
         tokio::select! {
-            _ = idle => {}
+            _ = async { tokio::join!(idle, drained) } => {}
             _ = self.force.notified() => {}
         }
         let registry = self.registry.clone();

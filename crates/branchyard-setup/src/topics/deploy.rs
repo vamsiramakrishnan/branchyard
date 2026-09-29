@@ -137,6 +137,9 @@ pub fn plan(
          \x20   depends_on:\n\
          \x20     database:\n\
          \x20       condition: service_healthy\n\
+         \x20   # SIGTERM gives running operations shutdown_grace_seconds (60); docker\n\
+         \x20   # stop must wait longer than that before it kills the server.\n\
+         \x20   stop_grace_period: 75s\n\
          \x20   healthcheck:\n\
          \x20     test: [\"CMD\", \"curl\", \"-fsS\", \"http://127.0.0.1:8421/healthz\"]\n\
          \x20     interval: 10s\n\
