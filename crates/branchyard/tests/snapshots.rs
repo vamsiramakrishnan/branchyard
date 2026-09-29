@@ -606,6 +606,43 @@ fn a_fan_runs_setup_once_and_branches_every_sandbox_from_it() {
 }
 
 #[test]
+fn a_sandboxed_teardown_gets_the_branchs_port() {
+    let f = Fixture::new();
+    let fake = fake(&f, true);
+    let marker = f.dir.join("torn-down");
+    let options = TaskOptions {
+        workspace: Some(WorkspaceSpec {
+            setup: vec!["true".into()],
+            teardown: vec![format!(
+                "printf \"$BRANCHYARD_BRANCH $BRANCHYARD_PORT\" > {}",
+                marker.display()
+            )],
+            ..WorkspaceSpec::default()
+        }),
+        ..kept(&f)
+    };
+    f.yard
+        .task("SH true")
+        .options(options)
+        .name("torn")
+        .run()
+        .unwrap();
+    let port = f.yard.workspace("torn").unwrap().port.unwrap();
+    let report = f
+        .yard
+        .remove_reporting("torn", &Default::default())
+        .unwrap()
+        .expect("a teardown ran");
+    assert!(report.ok, "{report:?}");
+    assert_eq!(report.ran_in, Some(branchyard::RanIn::Sandbox));
+    assert!(fake
+        .ops()
+        .iter()
+        .any(|op| matches!(op, FakeOp::Exec { argv, .. } if argv.get(2).is_some_and(|c| c.contains("torn-down")))));
+    assert_eq!(fs::read_to_string(&marker).unwrap(), format!("torn {port}"));
+}
+
+#[test]
 fn a_fan_on_a_provider_that_cannot_live_branch_runs_setup_in_each_branch() {
     let f = Fixture::new();
     let fake = fake(&f, false);

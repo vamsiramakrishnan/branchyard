@@ -634,10 +634,15 @@ pub(crate) fn teardown(
             Ok(mut placement) => {
                 if let Some((provider, name)) = placement.sandbox() {
                     let cwd = placement.cwd();
-                    let env = vec![
+                    // As for setup: the worktree where the sandbox sees it,
+                    // the port, and not this host's root.
+                    let mut env = vec![
                         (crate::ENV_BRANCH.to_owned(), record.info.name.clone()),
                         (ENV_WORKTREE.to_owned(), cwd.clone()),
                     ];
+                    if let Some(port) = port {
+                        env.push((ENV_PORT.to_owned(), port.to_string()));
+                    }
                     run_in_sandbox(
                         &mut report,
                         &state.spec.teardown,
