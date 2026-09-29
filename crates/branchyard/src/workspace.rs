@@ -39,7 +39,7 @@
 //! does ([`crate::TaskOptions::workspace`]), after its own trust decision.
 //! [`crate::Yard::deny_workspace_scripts`] makes a yard refuse to run any.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::net::TcpListener;
@@ -122,8 +122,9 @@ pub(crate) struct WorkspaceState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copied: Vec<String>,
     /// What setup left in the worktree that git does not track (a created
-    /// directory once), relative to it: what a branch that inherits this
-    /// setup from a sandbox snapshot gets copied into its own worktree.
+    /// directory once), and each copied file it changed, relative to it:
+    /// what a branch that inherits this setup from a sandbox snapshot gets
+    /// copied into its own worktree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced: Vec<String>,
 }
@@ -350,7 +351,7 @@ pub(crate) struct Inherit {
     /// `None` when the worktree is not mounted (the outputs are already in
     /// the branched sandbox).
     pub worktree: Option<PathBuf>,
-    /// What its setup produced, relative to its worktree.
+    /// What its setup produced or changed, relative to its worktree.
     pub produced: Vec<String>,
 }
 
@@ -425,7 +426,7 @@ pub(crate) fn prepare(
         report.inherited_from = Some(inherit.from.clone());
         report.ran_in = Some(RanIn::Sandbox);
         if let Some(from) = &inherit.worktree {
-            if let Err(error) = replicate(from, &worktree, &inherit.produced) {
+            if let Err(error) = replicate(from, &worktree, &inherit.produced, &copied_paths) {
                 report.ok = false;
                 report.error = Some(format!(
                     "could not copy what {}'s setup produced: {error}",
@@ -466,7 +467,8 @@ pub(crate) fn prepare(
             };
             // What setup leaves in the worktree, when it can be seen here.
             let seen = !matches!(runner, Runner::Sandbox { mounted: false, .. });
-            let before = seen.then(|| untracked(&worktree));
+            let before =
+                seen.then(|| (untracked(&worktree), fingerprints(&worktree, &copied_paths)));
             match runner {
                 Runner::Host => {
                     report.ran_in = Some(RanIn::Host);
@@ -509,12 +511,22 @@ pub(crate) fn prepare(
                     );
                 }
             }
-            if let Some(before) = before {
+            if let Some((before, copies)) = before {
                 let copied: BTreeSet<&String> = copied_paths.iter().collect();
-                produced = untracked(&worktree)
+                let mut paths: BTreeSet<String> = untracked(&worktree)
                     .into_iter()
                     .filter(|p| !before.contains(p) && !copied.contains(p))
                     .collect();
+                // A copied file setup changed (a `.env` it appended to):
+                // an inheritor must get setup's version, not the copy.
+                let after = fingerprints(&worktree, &copied_paths);
+                paths.extend(
+                    copies
+                        .into_iter()
+                        .filter(|(path, print)| after.get(path).is_some_and(|now| now != print))
+                        .map(|(path, _)| path),
+                );
+                produced = paths.into_iter().collect();
             }
         }
         outcome = json!({
@@ -563,17 +575,78 @@ pub(crate) fn untracked(worktree: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+/// A fingerprint of each file and symbolic link at or under `paths`
+/// (relative to `worktree`), by path: a file named itself is hashed with
+/// its mode, a link by its target, and a file under a named directory
+/// (a copied `node_modules`, say) by its length, mode and modification
+/// time, so as not to read it all twice.
+fn fingerprints(worktree: &Path, paths: &[String]) -> BTreeMap<String, u64> {
+    use std::hash::{Hash, Hasher};
+    fn walk(worktree: &Path, rel: &str, top: bool, out: &mut BTreeMap<String, u64>) {
+        let full = worktree.join(rel);
+        let Ok(meta) = fs::symlink_metadata(&full) else {
+            return;
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if meta.is_dir() {
+            let Ok(entries) = fs::read_dir(&full) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                walk(worktree, &format!("{rel}/{name}"), false, out);
+            }
+            return;
+        } else if meta.file_type().is_symlink() {
+            fs::read_link(&full).ok().hash(&mut hasher);
+        } else {
+            #[cfg(unix)]
+            std::os::unix::fs::PermissionsExt::mode(&meta.permissions()).hash(&mut hasher);
+            meta.len().hash(&mut hasher);
+            if top {
+                fs::read(&full).ok().hash(&mut hasher);
+            } else {
+                meta.modified().ok().hash(&mut hasher);
+            }
+        }
+        out.insert(rel.to_owned(), hasher.finish());
+    }
+    let mut out = BTreeMap::new();
+    for rel in paths {
+        if check_relative(rel) {
+            walk(worktree, rel, true, &mut out);
+        }
+    }
+    out
+}
+
 /// Copy each of `paths` (relative) from `from` into `to`, keeping modes and
-/// symbolic links, where `to` does not have it yet.
-pub(crate) fn replicate(from: &Path, to: &Path, paths: &[String]) -> Result<(), String> {
+/// symbolic links, where `to` does not have it yet or has it only because
+/// it is (or is under) one of `placed`, the paths copy just put there:
+/// those get the source's version, which its setup may have changed.
+pub(crate) fn replicate(
+    from: &Path,
+    to: &Path,
+    paths: &[String],
+    placed: &[String],
+) -> Result<(), String> {
     for rel in paths {
         if !check_relative(rel) {
             return Err(format!("{rel:?} is not a path inside the worktree"));
         }
         let source = from.join(rel);
         let target = to.join(rel);
-        if target.symlink_metadata().is_ok() || source.symlink_metadata().is_err() {
+        if source.symlink_metadata().is_err() {
             continue;
+        }
+        if let Ok(meta) = target.symlink_metadata() {
+            let was_placed = placed
+                .iter()
+                .any(|p| rel == p || rel.starts_with(&format!("{p}/")));
+            if !was_placed || meta.is_dir() {
+                continue;
+            }
+            fs::remove_file(&target).map_err(|e| format!("{}: {e}", target.display()))?;
         }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;

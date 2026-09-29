@@ -606,6 +606,63 @@ fn a_fan_runs_setup_once_and_branches_every_sandbox_from_it() {
 }
 
 #[test]
+fn a_fan_member_inherits_a_copied_file_as_setup_changed_it() {
+    let f = Fixture::new();
+    fs::write(f.root.join(".gitignore"), ".env\n").unwrap();
+    f.git(&["add", "."]);
+    f.git(&["commit", "-q", "-m", "ignore .env"]);
+    fs::write(f.root.join(".env"), "COPIED=1\n").unwrap();
+    let fake = fake(&f, true);
+    let setup = "printf 'SETUP=1\\n' >> .env";
+    let options = TaskOptions {
+        workspace: Some(WorkspaceSpec {
+            copy: vec![".env".into()],
+            setup: vec![setup.into()],
+            ..WorkspaceSpec::default()
+        }),
+        name: Some("envfan".into()),
+        ..sandboxed(&f, SandboxKeep::Destroy, None)
+    };
+    let branches = f
+        .yard
+        .task("SH cat .env")
+        .options(options)
+        .run_on(&["gemini-cli", "qwen-code"])
+        .unwrap();
+    let setups = fake
+        .ops()
+        .into_iter()
+        .filter(|op| matches!(op, FakeOp::Exec { argv, .. } if argv.get(2).map(String::as_str) == Some(setup)))
+        .count();
+    assert_eq!(setups, 1, "{:?}", fake.ops());
+    let first = branches[0].info().name.clone();
+    assert!(branches[1]
+        .events()
+        .unwrap()
+        .iter()
+        .any(|e| matches!(&e.activity,
+        Activity::Workspace(r) if r.inherited_from.as_deref() == Some(first.as_str()))));
+    for branch in &branches {
+        assert_eq!(
+            fs::read_to_string(branch.info().worktree.join(".env")).unwrap(),
+            "COPIED=1\nSETUP=1\n",
+            "{}",
+            branch.info().name
+        );
+        assert!(
+            last_text(branch).contains("SETUP=1"),
+            "{}",
+            last_text(branch)
+        );
+    }
+    // The repository's own copy is untouched.
+    assert_eq!(
+        fs::read_to_string(f.root.join(".env")).unwrap(),
+        "COPIED=1\n"
+    );
+}
+
+#[test]
 fn a_sandboxed_teardown_gets_the_branchs_port() {
     let f = Fixture::new();
     let fake = fake(&f, true);
