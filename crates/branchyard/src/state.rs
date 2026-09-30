@@ -112,6 +112,12 @@ pub(crate) struct Record {
     /// `crate::snapshots`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_seed: Option<crate::snapshots::SandboxSeed>,
+    /// Who the branch acts for at the connector gateway (its token's `sub`
+    /// and `by_tenant`): a server's principal, recorded when the branch is
+    /// created and inherited by its forks and children. `None`: the yard's
+    /// gateway default. See `crate::connectors`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<crate::connectors::Actor>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current

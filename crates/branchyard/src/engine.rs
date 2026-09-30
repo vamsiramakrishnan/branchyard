@@ -349,6 +349,23 @@ fn run(
         }
         Err(_) => None,
     };
+    // The branch's connectors: packages, index and this turn's gateway
+    // token in its home, before the sandbox exists. The token file is
+    // removed, and the gateway's audit log read a last time, when this
+    // function returns.
+    let deadline_ms = deadline.map(|at| {
+        now_ms().saturating_add(at.saturating_duration_since(Instant::now()).as_millis() as u64)
+    });
+    let connectors = match crate::connectors::prepare(turn.yard, record, deadline_ms) {
+        Ok(connectors) => connectors,
+        Err(reason) => {
+            driven.end = End::failed(format!("could not provide connectors: {reason}"));
+            return Ok(driven);
+        }
+    };
+    let _audit = connectors
+        .as_ref()
+        .map(|_| crate::connectors::AuditTail::start(turn.yard));
     // The one path for MCP servers and instructions, the task's and the
     // delegation tools', and for everything else the home needs. Applied
     // before a sandbox exists, so its mount or home transfer carries it.
@@ -356,6 +373,7 @@ fn run(
         record,
         turn.profile,
         projection.as_ref(),
+        connectors.as_ref(),
         store.dir(),
     ) {
         Ok(provisioned) => provisioned,

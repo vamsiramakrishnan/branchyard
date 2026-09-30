@@ -178,6 +178,16 @@ pub(crate) fn check(spec: Option<&Provisioning>, private_home: bool) -> Result<(
     if let Some(telemetry) = &spec.telemetry {
         telemetry.check().or_else(refuse)?;
     }
+    for entry in &spec.connectors {
+        entry.check().or_else(refuse)?;
+    }
+    if !spec.connectors.is_empty() && !private_home {
+        return refuse(
+            "connectors are placed only into a home private to the branch; run it --isolated \
+             (TaskOptions::isolated) or with a sandbox provider"
+                .into(),
+        );
+    }
     if !spec.secrets.is_empty() && !private_home {
         return refuse(
             "secrets are provisioned only into a home private to the branch; run it \
@@ -239,12 +249,27 @@ fn instructions(own: Option<&str>, delegation: Option<&Instructions>) -> Option<
     }
 }
 
+/// The task's own instructions with the connectors' line after them.
+fn own_instructions(
+    own: Option<&str>,
+    connectors: Option<&crate::connectors::Prepared>,
+) -> Option<String> {
+    let own = own.filter(|t| !t.trim().is_empty());
+    match (own, connectors) {
+        (None, None) => None,
+        (Some(text), None) => Some(text.to_owned()),
+        (None, Some(c)) => Some(c.instruction.clone()),
+        (Some(text), Some(c)) => Some(format!("{text}\n\n{}", c.instruction)),
+    }
+}
+
 /// Plan and apply the turn's provisioning. A failure is the turn's failure
 /// reason.
 pub(crate) fn prepare(
     record: &Record,
     profile: &branchyard_harness::profiles::Profile,
     projection: Option<&Projection>,
+    connectors: Option<&crate::connectors::Prepared>,
     state: &Path,
 ) -> Result<Provisioned, String> {
     let spec = record.provision.clone().unwrap_or_default();
@@ -279,7 +304,7 @@ pub(crate) fn prepare(
         remote_mcp_servers,
         mcp_secrets,
         instructions: instructions(
-            spec.instructions.as_deref(),
+            own_instructions(spec.instructions.as_deref(), connectors).as_deref(),
             projection.map(|p| &p.instructions),
         ),
         model: spec.model.clone(),
@@ -305,8 +330,14 @@ pub(crate) fn prepare(
             (None, _) => return Err("its MCP configuration has nowhere to go".into()),
         },
     };
-    let files: Vec<String> = applied.written.into_iter().chain(applied.removed).collect();
-    let env: Vec<String> = plan.env.iter().map(|e| e.name.clone()).collect();
+    let mut files: Vec<String> = applied.written.into_iter().chain(applied.removed).collect();
+    let mut plan_env = plan.env;
+    if let Some(connectors) = connectors {
+        files.extend(connectors.files.iter().cloned());
+        plan_env.extend(connectors.env.iter().cloned());
+    }
+    let env: Vec<String> = plan_env.iter().map(|e| e.name.clone()).collect();
+    let granted = connectors.map(|c| c.connectors.clone()).unwrap_or_default();
     let activity = (plan.auth.is_some()
         || !files.is_empty()
         || !env.is_empty()
@@ -317,6 +348,7 @@ pub(crate) fn prepare(
         env,
         secrets: plan.secrets.clone(),
         unused_secrets: plan.unused_secrets.clone(),
+        connectors: granted,
     });
     let scrub = spec
         .secrets
@@ -328,7 +360,7 @@ pub(crate) fn prepare(
         })
         .collect();
     Ok(Provisioned {
-        env: plan.env,
+        env: plan_env,
         session: plan.session,
         mcp_config_file,
         turn_file,

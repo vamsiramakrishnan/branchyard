@@ -103,6 +103,8 @@ pub(crate) struct Hub {
     /// Set by [`crate::Yard::use_sandbox_provider`]: the provider every
     /// Microsandbox-provider branch runs through instead of the SDK.
     pub sandbox_provider: Mutex<Option<Arc<dyn branchyard_sandbox::SandboxProvider>>>,
+    /// Set by [`crate::Yard::use_connectors`].
+    pub connectors: Mutex<Option<Arc<crate::connectors::Gateway>>>,
 }
 
 impl Default for Hub {
@@ -119,6 +121,7 @@ impl Default for Hub {
             graph_options: Default::default(),
             scripts_denied: Default::default(),
             sandbox_provider: Default::default(),
+            connectors: Default::default(),
         }
     }
 }

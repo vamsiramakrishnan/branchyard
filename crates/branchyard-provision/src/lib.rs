@@ -47,6 +47,7 @@
 
 pub mod apply;
 pub mod auth;
+pub mod connectors;
 pub mod edit;
 pub mod instructions;
 pub mod toml;
@@ -106,6 +107,12 @@ pub struct Provisioning {
     pub effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<Telemetry>,
+    /// Connectors the harness may call through the connector gateway, and
+    /// what it may do with each (`--connector`); see `docs/connectors.md`.
+    /// Needs a private home, like secrets. A delegated child's is narrowed
+    /// to its parent's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connectors: Vec<connectors::GrantEntry>,
 }
 
 impl Provisioning {

@@ -185,6 +185,10 @@ pub struct SpawnSpec {
     pub after: After,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    /// The child's connector grant, narrowed to its parent's; unset
+    /// inherits the parent's (or its seat's). See `docs/connectors.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connectors: Option<Vec<crate::connectors::GrantEntry>>,
 }
 
 impl SpawnSpec {
@@ -204,6 +208,7 @@ impl SpawnSpec {
             depends_on: self.depends_on.clone(),
             after: self.after,
             bindings: self.bindings.clone(),
+            connectors: self.connectors.clone(),
         })
     }
 
@@ -224,6 +229,7 @@ impl SpawnSpec {
             depends_on: spawn.depends_on.clone(),
             after: spawn.after,
             bindings: spawn.bindings.clone(),
+            connectors: spawn.connectors.clone(),
         }
     }
 }

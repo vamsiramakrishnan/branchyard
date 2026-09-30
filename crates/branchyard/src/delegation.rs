@@ -246,6 +246,11 @@ pub struct Spawn {
     pub after: After,
     /// Scratch areas the child is bound to for every turn.
     pub bindings: Vec<Binding>,
+    /// The child's connector grant (`--connector`). It is always narrowed
+    /// to the parent's grant, an entry the parent allows nothing of being
+    /// refused. Unset: its seat's, else its parent's. See
+    /// `docs/connectors.md`.
+    pub connectors: Option<Vec<crate::connectors::GrantEntry>>,
 }
 
 impl Spawn {
@@ -1665,10 +1670,33 @@ impl Local {
         let seat = seated.as_ref().map(|(_, seat, _)| seat);
         let isolated =
             caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
-        let provision = match seat.and_then(|s| s.provision.clone()) {
+        let mut provision = match seat.and_then(|s| s.provision.clone()) {
             Some(own) => Some(own),
             None => caller.provision.clone(),
         };
+        // Connectors: what the request asks for, else its seat's, else the
+        // parent's; always within the parent's grant.
+        let parent_grant = caller
+            .provision
+            .as_ref()
+            .map(|p| p.connectors.clone())
+            .unwrap_or_default();
+        let asked = request.connectors.clone().or_else(|| {
+            seat.and_then(|s| s.provision.as_ref())
+                .map(|p| p.connectors.clone())
+        });
+        let granted = branchyard_provision::connectors::narrow(asked.as_deref(), &parent_grant)
+            .map_err(|why| Error::Denied(format!("{} may not grant that: {why}", self.branch)))?;
+        match (&mut provision, granted.is_empty()) {
+            (Some(spec), _) => spec.connectors = granted,
+            (None, true) => {}
+            (None, false) => {
+                provision = Some(crate::Provisioning {
+                    connectors: granted,
+                    ..Default::default()
+                })
+            }
+        }
         crate::provisioning::check(
             provision.as_ref(),
             isolated || crate::placement::sandboxed(caller.provider.as_ref()),
@@ -1710,6 +1738,7 @@ impl Local {
                 // Resolved when it starts, from its parent as it is then
                 // (`crate::graph`).
                 seed: None,
+                actor: caller.actor.clone(),
             },
         )?;
         record.info.status = BranchStatus::Waiting;
@@ -2312,6 +2341,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         depends_on: request.depends_on.clone(),
         after: request.after,
         bindings,
+        connectors: request.connectors.clone(),
     })
 }
 
@@ -2647,6 +2677,7 @@ mod tests {
             context: None,
             workspace: None,
             sandbox_seed: None,
+            actor: None,
         }
     }
 
