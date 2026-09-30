@@ -1,0 +1,22 @@
+{
+  "upstream": "https://github.com/stablyai/orca",
+  "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+  "vendor": "vendor/orca",
+  "license": "MIT",
+  "note": "Translations from TypeScript to Rust, so no line patch: each derived file lists the vendored sources it follows and their Git blob IDs at review. tools/verify_derivatives.py fails when a source changes; review the upstream change, port what applies, and record the new blob.",
+  "derivatives": [
+    {
+      "path": "crates/branchyard-workspace/src/include.rs",
+      "from": {
+        "src/main/git/worktree-include-file.ts": "edded1a1ba23e7daee93572cb11320f0e799f12d"
+      }
+    },
+    {
+      "path": "crates/branchyard-workspace/src/materialize.rs",
+      "from": {
+        "src/main/ipc/worktree-symlinks.ts": "e1ac1b4b2b029e4889bcb55bfa4af6dddab80dbc",
+        "src/main/ipc/worktree-apfs-clone.ts": "841aa323fb49950203a3ee07dc6379e5323224b9"
+      }
+    }
+  ]
+}

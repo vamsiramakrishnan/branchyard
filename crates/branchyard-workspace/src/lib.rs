@@ -32,7 +32,9 @@
 mod branch;
 mod check;
 pub mod git;
+pub mod include;
 mod integrate;
+pub mod materialize;
 mod repo;
 
 pub use branch::{BranchName, InvalidBranchName, BRANCH_PREFIX};

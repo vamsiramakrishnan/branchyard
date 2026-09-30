@@ -8,7 +8,8 @@ reviewable; patches/scion-provision.json instead records, for each derived
 file, the vendored upstream files it follows and their Git blob IDs. This
 fails when a derived file's header does not name its origin, revision,
 sources, license and modification, or when a vendored source changed since
-the translation was reviewed.
+the translation was reviewed. Orca's worktree helpers (MIT) are translated
+from TypeScript and recorded the same way, in patches/orca-worktree.json.
 """
 import difflib
 import json
@@ -86,9 +87,41 @@ def verify_scion():
           f"vendored sources at {commit[:7]}, and {rewritten} rewritten file(s)' attribution.")
 
 
+def verify_orca():
+    manifest = json.loads((ROOT / "patches/orca-worktree.json").read_text())
+    commit, prefix = manifest["commit"], manifest["vendor"]
+    lock = {e["path"]: e for e in json.loads((ROOT / "vendor.lock.json").read_text())["files"]}
+    problems = []
+    license_pin = lock.get(f"{prefix}/LICENSE")
+    if license_pin is None or license_pin["commit"] != commit or license_pin["license"] != "MIT":
+        problems.append(f"{prefix}/LICENSE is not vendored as MIT at {commit}")
+    for derived in manifest["derivatives"]:
+        path = ROOT / derived["path"]
+        header = _header(path)
+        for needed in ("stablyai/orca", commit, "MIT License", "Copyright (c) 2026 Lovecast Inc.",
+                       "vendor/orca/LICENSE", "Modified for Branchyard"):
+            if needed not in header:
+                problems.append(f"{derived['path']}: its header does not name {needed!r}")
+        for source, recorded in derived["from"].items():
+            if source not in header:
+                problems.append(f"{derived['path']}: its header does not name {source}")
+            entry = lock.get(f"{prefix}/{source}")
+            if entry is None or entry["commit"] != commit:
+                problems.append(f"{source} is not vendored at {commit}")
+            elif entry["git_blob"] != recorded:
+                problems.append(f"{source} changed upstream since {derived['path']} was "
+                                "translated: review the change, port it, and record the new blob")
+    if problems:
+        raise SystemExit("Orca derivatives out of date:\n  " + "\n  ".join(problems))
+    count = sum(len(d["from"]) for d in manifest["derivatives"])
+    print(f"Verified {len(manifest['derivatives'])} Orca derivatives against {count} "
+          f"vendored sources at {commit[:7]}.")
+
+
 def main():
     verify_herdr()
     verify_scion()
+    verify_orca()
 
 
 if __name__ == "__main__":

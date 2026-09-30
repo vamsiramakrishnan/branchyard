@@ -947,6 +947,50 @@
       "license": "Apache-2.0",
       "use": "upstream-api-contract",
       "modified": false
+    },
+    {
+      "path": "vendor/orca/LICENSE",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "LICENSE",
+      "git_blob": "fbf46fc17dacb1f65e03e2b6290eb53ba94b149d",
+      "sha256": "ff1b611f80580d49f4b97e93a97b24eb050b0671b26b8afe16341fab699112f3",
+      "license": "MIT",
+      "use": "upstream-control-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/main/git/worktree-include-file.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/main/git/worktree-include-file.ts",
+      "git_blob": "edded1a1ba23e7daee93572cb11320f0e799f12d",
+      "sha256": "d920608a6bf617bee3f2f1d7b30668ceaa43ae99b3e3b016165d40799e1462b6",
+      "license": "MIT",
+      "use": "upstream-control-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/main/ipc/worktree-apfs-clone.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/main/ipc/worktree-apfs-clone.ts",
+      "git_blob": "841aa323fb49950203a3ee07dc6379e5323224b9",
+      "sha256": "bcd7fb0f9bdae43a04c45cc3a443e05bb04bb845fa0866ba6fe299b6ed07fdf4",
+      "license": "MIT",
+      "use": "upstream-control-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/main/ipc/worktree-symlinks.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/main/ipc/worktree-symlinks.ts",
+      "git_blob": "e1ac1b4b2b029e4889bcb55bfa4af6dddab80dbc",
+      "sha256": "d4ae0d64c572b5bfcd6e4d36c7c8c955a3b5d2a314e9cb0903adef3f751f22c7",
+      "license": "MIT",
+      "use": "upstream-control-source",
+      "modified": false
     }
   ]
 }
