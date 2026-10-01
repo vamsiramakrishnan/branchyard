@@ -1029,3 +1029,115 @@ fn worker_labels_conform_on_postgres() {
     let store = PostgresStore::open(&url).unwrap();
     branchyard_server::store::check_labels(&store, "pg");
 }
+
+/// A queue as it was before the `requires` column and the workers table,
+/// with one operation queued.
+fn old_queue(url: &str) {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(
+            "CREATE TABLE by_operations (id TEXT PRIMARY KEY, \
+                 seq BIGINT GENERATED ALWAYS AS IDENTITY, body TEXT NOT NULL); \
+             CREATE TABLE by_operation_queue (id TEXT PRIMARY KEY REFERENCES by_operations (id), \
+                 seq BIGINT GENERATED ALWAYS AS IDENTITY, repo TEXT NOT NULL, work TEXT NOT NULL, \
+                 attempt BIGINT NOT NULL DEFAULT 0, worker TEXT, host TEXT, pid BIGINT, \
+                 start TEXT, lease_until TIMESTAMPTZ); \
+             INSERT INTO by_operations (id, body) VALUES ('op-old', '{}'); \
+             INSERT INTO by_operation_queue (id, repo, work) VALUES ('op-old', 'app', '{}')",
+        )
+        .unwrap();
+}
+
+/// Open the registry from several threads at once.
+fn open_together(url: &str, n: usize) {
+    let barrier = std::sync::Barrier::new(n);
+    std::thread::scope(|scope| {
+        let opens: Vec<_> = (0..n)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    PostgresStore::open(url).map(drop)
+                })
+            })
+            .collect();
+        for open in opens {
+            open.join().unwrap().unwrap();
+        }
+    });
+}
+
+/// The old queue's row, migrated: it requires nothing.
+fn requires_of_old(url: &str) -> Vec<String> {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    client
+        .query_one(
+            "SELECT requires FROM by_operation_queue WHERE id = 'op-old'",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+}
+
+/// Servers and workers starting together on one database, on a fresh one
+/// and on one whose queue needs the migration, all open the registry.
+#[test]
+fn registries_opened_at_once_make_and_migrate_the_schema_once() {
+    let Some(url) = database() else { return };
+    open_together(&url, 8);
+    open_together(&url, 8);
+    let store = PostgresStore::open(&url).unwrap();
+    assert!(store.load().unwrap().is_empty());
+
+    let Some(url) = database() else { return };
+    old_queue(&url);
+    open_together(&url, 8);
+    assert!(requires_of_old(&url).is_empty());
+}
+
+/// A registry opened while another server is between the two writes of
+/// its `start` or `finish` (the queue row, then the operation) neither
+/// deadlocks with it nor fails it. Opening used to run the whole schema
+/// in one transaction: `CREATE UNIQUE INDEX IF NOT EXISTS` held a `SHARE`
+/// lock on `by_operations` while `CREATE INDEX IF NOT EXISTS` waited for
+/// one on the queue, held by the other server, which waited for the first
+/// lock to write the operation.
+#[test]
+fn a_registry_opened_beside_a_working_server_does_not_deadlock_with_it() {
+    for old in [false, true] {
+        let Some(url) = database() else { return };
+        if old {
+            old_queue(&url);
+        } else {
+            PostgresStore::open(&url).unwrap();
+            let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+            client
+                .batch_execute(
+                    "INSERT INTO by_operations (id, body) VALUES ('op-old', '{}'); \
+                     INSERT INTO by_operation_queue (id, repo, work) VALUES ('op-old', 'app', '{}')",
+                )
+                .unwrap();
+        }
+        let mut working = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        let mut tx = working.transaction().unwrap();
+        tx.execute(
+            "UPDATE by_operation_queue SET attempt = attempt + 1 WHERE id = 'op-old'",
+            &[],
+        )
+        .unwrap();
+        std::thread::scope(|scope| {
+            let opening = scope.spawn(|| PostgresStore::open(&url).map(drop));
+            // Long enough for the open to reach the queue.
+            std::thread::sleep(Duration::from_millis(500));
+            tx.execute(
+                "UPDATE by_operations SET body = '{\"done\":true}' WHERE id = 'op-old'",
+                &[],
+            )
+            .expect("the working server's write");
+            tx.commit().expect("the working server's commit");
+            opening.join().unwrap().expect("the registry opens");
+        });
+        if old {
+            assert!(requires_of_old(&url).is_empty());
+        }
+    }
+}

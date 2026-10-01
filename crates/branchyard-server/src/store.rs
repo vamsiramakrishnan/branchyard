@@ -584,6 +584,24 @@ fn sqlite_migrate(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Switch to write-ahead logging. A file still in rollback mode that
+/// another connection is switching too answers busy at once, without
+/// waiting on the busy timeout, so it is asked again for as long.
+fn sqlite_wal(conn: &rusqlite::Connection) -> rusqlite::Result<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0)) {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            mode => return mode,
+        }
+    }
+}
+
 fn sqlite_now() -> i64 {
     crate::ops::now_ms() as i64
 }
@@ -621,11 +639,9 @@ impl SqliteStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let conn = rusqlite::Connection::open(&path).map_err(sql)?;
+        let mut conn = rusqlite::Connection::open(&path).map_err(sql)?;
         conn.busy_timeout(Duration::from_secs(30)).map_err(sql)?;
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
-            .map_err(sql)?;
+        let mode = sqlite_wal(&conn).map_err(sql)?;
         if !mode.eq_ignore_ascii_case("wal") {
             return Err(io::Error::other(format!(
                 "{} could not use write-ahead logging (journal mode {mode})",
@@ -634,8 +650,14 @@ impl SqliteStore {
         }
         conn.execute_batch("PRAGMA synchronous = FULL;")
             .map_err(sql)?;
-        conn.execute_batch(SQLITE_SCHEMA).map_err(sql)?;
-        sqlite_migrate(&conn).map_err(sql)?;
+        // Servers opening one file at once take turns: the migration
+        // reads a column's absence, then adds it.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(sql)?;
+        tx.execute_batch(SQLITE_SCHEMA).map_err(sql)?;
+        sqlite_migrate(&tx).map_err(sql)?;
+        tx.commit().map_err(sql)?;
         let store = SqliteStore {
             path,
             conn: Mutex::new(conn),
@@ -1175,52 +1197,113 @@ pub struct PostgresStore {
     conn: Mutex<Option<postgres::Client>>,
 }
 
+/// The registry's schema, one object per step: its name (a relation, or
+/// `table.column` for a column added since the table was first created)
+/// and the statement that makes it.
+///
+/// [`PostgresStore::open`] runs only the steps whose object is missing,
+/// each in a transaction of its own. A statement here locks its table even
+/// when the object exists already (`CREATE INDEX IF NOT EXISTS` takes a
+/// `SHARE` lock, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` an `ACCESS
+/// EXCLUSIVE` one), and a server opening the registry while another works
+/// on it must not hold one table's lock while it waits for another's: the
+/// other's `start` and `finish` write the queue, then the operation, and
+/// the two would wait for each other.
 #[cfg(feature = "postgres")]
-const PG_SCHEMA: &str = "
-    CREATE TABLE IF NOT EXISTS by_operations (
-        id TEXT PRIMARY KEY,
-        seq BIGINT GENERATED ALWAYS AS IDENTITY,
-        body TEXT NOT NULL
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS by_operations_idempotency ON by_operations (
-        ((body::jsonb) #>> '{idempotency,caller}'),
-        ((body::jsonb) #>> '{idempotency,key}')
-    );
-    CREATE TABLE IF NOT EXISTS by_operation_queue (
-        id TEXT PRIMARY KEY REFERENCES by_operations (id),
-        seq BIGINT GENERATED ALWAYS AS IDENTITY,
-        repo TEXT NOT NULL,
-        work TEXT NOT NULL,
-        attempt BIGINT NOT NULL DEFAULT 0,
-        worker TEXT,
-        host TEXT,
-        pid BIGINT,
-        start TEXT,
-        lease_until TIMESTAMPTZ
-    );
-    CREATE INDEX IF NOT EXISTS by_operation_queue_seq ON by_operation_queue (seq);
-    CREATE TABLE IF NOT EXISTS by_branch_locks (
-        repo TEXT NOT NULL,
-        branch TEXT NOT NULL,
-        holder TEXT NOT NULL,
-        token TEXT NOT NULL,
-        expires_at TIMESTAMPTZ,
-        PRIMARY KEY (repo, branch)
-    );
-    CREATE INDEX IF NOT EXISTS by_branch_locks_token ON by_branch_locks (token);
-    CREATE TABLE IF NOT EXISTS by_webhook_cursors (
-        id TEXT PRIMARY KEY,
-        cursor BIGINT NOT NULL
-    );
-    ALTER TABLE by_operation_queue ADD COLUMN IF NOT EXISTS requires TEXT[] NOT NULL DEFAULT '{}';
-    CREATE TABLE IF NOT EXISTS by_workers (
-        id TEXT PRIMARY KEY,
-        host TEXT NOT NULL,
-        pid BIGINT NOT NULL,
-        labels TEXT[] NOT NULL,
-        repos TEXT[] NOT NULL,
-        seen TIMESTAMPTZ NOT NULL
-    )";
+const PG_SCHEMA: &[(&str, &str)] = &[
+    (
+        "by_operations",
+        "CREATE TABLE IF NOT EXISTS by_operations (
+            id TEXT PRIMARY KEY,
+            seq BIGINT GENERATED ALWAYS AS IDENTITY,
+            body TEXT NOT NULL
+        )",
+    ),
+    (
+        "by_operations_idempotency",
+        "CREATE UNIQUE INDEX IF NOT EXISTS by_operations_idempotency ON by_operations (
+            ((body::jsonb) #>> '{idempotency,caller}'),
+            ((body::jsonb) #>> '{idempotency,key}')
+        )",
+    ),
+    (
+        "by_operation_queue",
+        "CREATE TABLE IF NOT EXISTS by_operation_queue (
+            id TEXT PRIMARY KEY REFERENCES by_operations (id),
+            seq BIGINT GENERATED ALWAYS AS IDENTITY,
+            repo TEXT NOT NULL,
+            work TEXT NOT NULL,
+            attempt BIGINT NOT NULL DEFAULT 0,
+            worker TEXT,
+            host TEXT,
+            pid BIGINT,
+            start TEXT,
+            lease_until TIMESTAMPTZ
+        )",
+    ),
+    (
+        "by_operation_queue_seq",
+        "CREATE INDEX IF NOT EXISTS by_operation_queue_seq ON by_operation_queue (seq)",
+    ),
+    (
+        "by_branch_locks",
+        "CREATE TABLE IF NOT EXISTS by_branch_locks (
+            repo TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            holder TEXT NOT NULL,
+            token TEXT NOT NULL,
+            expires_at TIMESTAMPTZ,
+            PRIMARY KEY (repo, branch)
+        )",
+    ),
+    (
+        "by_branch_locks_token",
+        "CREATE INDEX IF NOT EXISTS by_branch_locks_token ON by_branch_locks (token)",
+    ),
+    (
+        "by_webhook_cursors",
+        "CREATE TABLE IF NOT EXISTS by_webhook_cursors (
+            id TEXT PRIMARY KEY,
+            cursor BIGINT NOT NULL
+        )",
+    ),
+    (
+        "by_operation_queue.requires",
+        "ALTER TABLE by_operation_queue \
+         ADD COLUMN IF NOT EXISTS requires TEXT[] NOT NULL DEFAULT '{}'",
+    ),
+    (
+        "by_workers",
+        "CREATE TABLE IF NOT EXISTS by_workers (
+            id TEXT PRIMARY KEY,
+            host TEXT NOT NULL,
+            pid BIGINT NOT NULL,
+            labels TEXT[] NOT NULL,
+            repos TEXT[] NOT NULL,
+            seen TIMESTAMPTZ NOT NULL
+        )",
+    ),
+];
+
+/// Which of `names` (see [`PG_SCHEMA`]) are missing, read from the
+/// catalogs on the connection's search path without locking any table.
+#[cfg(feature = "postgres")]
+fn pg_missing(
+    c: &mut impl postgres::GenericClient,
+    names: &[&str],
+) -> Result<Vec<String>, postgres::Error> {
+    let names: Vec<String> = names.iter().map(|n| (*n).to_owned()).collect();
+    let rows = c.query(
+        "SELECT n FROM unnest($1::text[]) WITH ORDINALITY AS t (n, i) \
+         WHERE CASE WHEN strpos(n, '.') = 0 THEN to_regclass(n) IS NULL \
+             ELSE NOT EXISTS (SELECT 1 FROM pg_attribute \
+                 WHERE attrelid = to_regclass(split_part(n, '.', 1)) \
+                   AND attname = split_part(n, '.', 2) AND NOT attisdropped) END \
+         ORDER BY i",
+        &[&names],
+    )?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
 
 #[cfg(feature = "postgres")]
 const PG_BY_KEY: &str = "SELECT id, body FROM by_operations \
@@ -1275,10 +1358,25 @@ impl PostgresStore {
             conn: Mutex::new(None),
         };
         store.with(|client| {
-            let mut tx = client.transaction()?;
-            tx.execute("SELECT pg_advisory_xact_lock(7390184326)", &[])?;
-            tx.batch_execute(PG_SCHEMA)?;
-            tx.commit()
+            let names: Vec<&str> = PG_SCHEMA.iter().map(|(name, _)| *name).collect();
+            // A schema already made, the usual case, is left alone: no
+            // statement that would lock a table another server is using.
+            let missing = pg_missing(client, &names)?;
+            for (name, statement) in PG_SCHEMA {
+                if !missing.iter().any(|m| m == name) {
+                    continue;
+                }
+                // One opener at a time makes or migrates the schema; each
+                // step locks at most one existing table, so it only ever
+                // waits behind another server's transaction, never with it.
+                let mut tx = client.transaction()?;
+                tx.execute("SELECT pg_advisory_xact_lock(7390184326)", &[])?;
+                if !pg_missing(&mut tx, &[name])?.is_empty() {
+                    tx.batch_execute(statement)?;
+                }
+                tx.commit()?;
+            }
+            Ok(())
         })?;
         Ok(store)
     }
@@ -2262,6 +2360,52 @@ mod tests {
             .query_row("SELECT requires FROM operation_queue", [], |r| r.get(0))
             .unwrap();
         assert_eq!(requires, "[]");
+    }
+
+    #[test]
+    fn stores_opened_at_once_on_an_older_file_migrate_it_once() {
+        let temp = temp("open-together");
+        for (n, old) in [false, true].into_iter().enumerate() {
+            let path = temp.path().join(format!("state-{n}.db"));
+            if old {
+                rusqlite::Connection::open(&path)
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TABLE operation_queue (id TEXT PRIMARY KEY, \
+                         seq INTEGER NOT NULL, repo TEXT NOT NULL, work TEXT NOT NULL, \
+                         attempt INTEGER NOT NULL DEFAULT 0, worker TEXT, host TEXT, \
+                         pid INTEGER, start TEXT, lease_until INTEGER); \
+                         INSERT INTO operation_queue (id, seq, repo, work) \
+                         VALUES ('x', 1, 'r', '{}');",
+                    )
+                    .unwrap();
+            }
+            let barrier = std::sync::Barrier::new(8);
+            std::thread::scope(|scope| {
+                let opens: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            SqliteStore::open(&path, None).map(drop)
+                        })
+                    })
+                    .collect();
+                for open in opens {
+                    open.join()
+                        .unwrap()
+                        .map_err(|e| format!("old={old}: {e}"))
+                        .unwrap();
+                }
+            });
+            let store = SqliteStore::open(&path, None).unwrap();
+            if old {
+                let requires: String = store
+                    .conn()
+                    .query_row("SELECT requires FROM operation_queue", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(requires, "[]");
+            }
+        }
     }
 
     #[test]
