@@ -705,6 +705,7 @@ mod tests {
             labels: vec![],
             repos: vec!["r".into()],
             seen_ms_ago: 1_500,
+            inventory: None,
         }];
         queue_gauges(&mut snapshot, &queue, &workers, 11_000);
         let text = encode(&snapshot);

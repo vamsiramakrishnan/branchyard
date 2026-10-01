@@ -745,13 +745,22 @@ ready and its check must pass on its candidate; --allow-not-ready and
 
 const HARNESSES_EXAMPLES: &str = "\
 Examples:
-  by harnesses
-  by harnesses --all
+  by harnesses                                  # installed here: version, login, quota
+  by harnesses --on ssh://me@build.example      # on another machine
+  by harnesses --remote https://by.internal     # on a server's live workers
+  by harnesses install codex                    # the catalog's command, under [harnesses] install
+  by harnesses update codex --version 0.200.0 --yes
+  by harnesses login codex                      # its own login flow, once
+  printf %s \"$KEY\" | by harnesses login claude-code --api-key
+  by harnesses --profiles                       # the profiles Branchyard drives
   by harnesses --all --json | jq '.[] | select(.id == \"codex\") | .install'
 
---all reads catalog/harnesses.toml, generated from emdash's and Orca's agent
-registries: knowledge about a CLI, not support for it. A harness Branchyard
-drives has a profile; see docs/compatibility.md.";
+Detection never reads a secret: a login is verified only by the harness's own
+status command, otherwise it is likely from credential files and key variables
+by name. Installs run only as [harnesses] install allows (ask on a terminal,
+never elsewhere, unless your user file says otherwise) and are logged. --all
+reads catalog/harnesses.toml, generated from emdash's and Orca's agent
+registries. See docs/harness-lifecycle.md.";
 
 const USAGE_EXAMPLES: &str = "\
 Examples:
@@ -1198,17 +1207,29 @@ pub enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// List harness profiles and whether they are installed; --all lists every harness CLI
-    /// Branchyard knows of
+    /// Which harnesses are installed here or elsewhere, with version, login and quota; install,
+    /// update or log in to one
     #[command(display_order = 205, after_help = HARNESSES_EXAMPLES)]
     Harnesses {
         /// Print JSON
-        #[arg(long)]
+        #[arg(long, global = true)]
         json: bool,
         /// Every harness CLI in catalog/harnesses.toml, with install and login commands, API-key
         /// variables and models where known, marking the ones Branchyard can drive
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["profiles", "on"])]
         all: bool,
+        /// The harness profiles Branchyard drives, and whether each is on PATH
+        #[arg(long, conflicts_with = "on")]
+        profiles: bool,
+        /// Detect again rather than use what was detected in the last minute
+        #[arg(long)]
+        refresh: bool,
+        /// Another machine: ssh://[user@]host[:port], or recipe:NAME (a fresh machine from the
+        /// repository's recipe)
+        #[arg(long, value_name = "TARGET", global = true)]
+        on: Option<String>,
+        #[command(subcommand)]
+        action: Option<HarnessesAction>,
     },
     /// Each local Claude Code and Codex login's 5-hour and weekly usage, and when it resets
     #[command(display_order = 208, after_help = USAGE_EXAMPLES)]
@@ -1558,6 +1579,41 @@ pub enum GatewayAction {
     },
     /// Print the public keys the gateway verifies tokens against (JWKS)
     Jwks,
+}
+
+/// `by harnesses ACTION`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum HarnessesAction {
+    /// Install a harness with the catalog's command, when [harnesses] install allows, then
+    /// check it is there
+    Install(HarnessChange),
+    /// Install a harness again at a newer or pinned version, then check it
+    Update(HarnessChange),
+    /// Log in to a harness once, through its own flow, or store its API key
+    Login {
+        /// The harness's ID, as `by harnesses --all` lists it
+        id: String,
+        /// Store an API key, read from standard input, for the harness's key variable instead
+        /// (in a 0600 file beside your user configuration, named in its [secrets])
+        #[arg(long)]
+        api_key: bool,
+    },
+    /// Every install, update and login recorded on this machine
+    Log,
+}
+
+/// What `by harnesses install|update` takes.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct HarnessChange {
+    /// The harness's ID, as `by harnesses --all` lists it
+    pub id: String,
+    /// The version to install (default: the version its profile was checked against, where
+    /// the install command can take one)
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+    /// Answer yes to installing ([harnesses] install = "ask")
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// `by connectors ...`.
@@ -4585,20 +4641,52 @@ mod tests {
                 follow: true
             }
         );
+        let harnesses = |json, all| Command::Harnesses {
+            json,
+            all,
+            profiles: false,
+            refresh: false,
+            on: None,
+            action: None,
+        };
         assert_eq!(
             parse_str("harnesses --json").unwrap(),
-            Command::Harnesses {
-                json: true,
-                all: false
-            }
+            harnesses(true, false)
         );
         assert_eq!(
             parse_str("harnesses --all").unwrap(),
+            harnesses(false, true)
+        );
+        assert_eq!(
+            parse_str("harnesses install codex --on ssh://h --version 1.2 --yes --json").unwrap(),
             Command::Harnesses {
-                json: false,
-                all: true
+                json: true,
+                all: false,
+                profiles: false,
+                refresh: false,
+                on: Some("ssh://h".into()),
+                action: Some(HarnessesAction::Install(HarnessChange {
+                    id: "codex".into(),
+                    version: Some("1.2".into()),
+                    yes: true,
+                })),
             }
         );
+        assert_eq!(
+            parse_str("harnesses login codex --api-key").unwrap(),
+            Command::Harnesses {
+                json: false,
+                all: false,
+                profiles: false,
+                refresh: false,
+                on: None,
+                action: Some(HarnessesAction::Login {
+                    id: "codex".into(),
+                    api_key: true,
+                }),
+            }
+        );
+        assert!(parse_str("harnesses --all --on ssh://h").is_err());
         assert_eq!(
             parse_str("connectors --json catalog").unwrap(),
             Command::Connectors {

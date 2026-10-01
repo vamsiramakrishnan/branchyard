@@ -16,6 +16,7 @@ mod env_cmd;
 mod fleet_cmd;
 mod gateway_cmd;
 mod gh;
+mod harness_cmd;
 mod init;
 mod json;
 mod knowledge_cmd;
@@ -122,6 +123,11 @@ fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A worker here advertises its harnesses with the usage meters `by
+    // usage` reads (docs/harness-lifecycle.md).
+    branchyard_server::ops::set_inventory_source(branchyard_server::ops::InventorySource(
+        std::sync::Arc::new(harness_cmd::worker_inventory),
+    ));
     branchyard_server::cli::main(&args, call.program)
 }
 
@@ -358,8 +364,23 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             branch,
             keep_credentials,
         } => commands::rm(target, &branch, keep_credentials),
-        Command::Harnesses { json, all: false } => commands::harnesses(env, target, json),
-        Command::Harnesses { json, all: true } => catalog_cmd::harnesses(env, target, json),
+        Command::Harnesses {
+            json,
+            all,
+            profiles,
+            refresh,
+            on,
+            action,
+        } => harness_cmd::main(
+            env,
+            target,
+            json,
+            all,
+            profiles,
+            refresh,
+            on.as_deref(),
+            action.as_ref(),
+        ),
         Command::Pr { branch, pr } => pr::main(env, target, &branch, &pr),
         Command::Open {
             branch,

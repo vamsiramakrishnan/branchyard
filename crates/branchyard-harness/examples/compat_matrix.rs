@@ -250,7 +250,13 @@ pub fn render() -> String {
          vendored Herdr, Scion, emdash and Orca registries, with no profile to drive them: {}. `by harnesses \
          --all` lists every one with its install and login commands, API-key variables and \
          models where upstream records them ([`catalog/harnesses.toml`](../catalog/harnesses.toml), \
-         generated from the pinned sources); knowing a CLI is not support for it.\n",
+         generated from the pinned sources); knowing a CLI is not support for it.\n\
+         \n## On your machines\n\n\
+         This page says what Branchyard can drive. Whether a machine can run a harness is that \
+         machine's inventory: `by harnesses` shows which are installed there, at which version, \
+         whether each is logged in and how much of its quota is used; `by harnesses install`, \
+         `update` and `login` act on one under `[harnesses]` policy; workers advertise theirs, \
+         and the router uses it. See [harness lifecycle](harness-lifecycle.md).\n",
         catalog.len(),
         known.len(),
         known.join(", ")

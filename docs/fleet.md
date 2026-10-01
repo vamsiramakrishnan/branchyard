@@ -75,7 +75,7 @@ by:   not gemini-cli: gemini-cli is unavailable: gemini was not found on PATH
 
 The router (`branchyard::fleet::plan`) works per kind and candidate (harness, model, effort):
 
-1. **Eligible** candidates are those whose profile exists and is allowed (`--allow-unapproved-tools` for profiles without tool approvals), whose executable is found (the check `by harnesses` makes, with the candidate's or the task's `command`; skipped in a sandbox), and whose **mean recorded cost** for the kind is not over the entry's `budget_usd`, and whose login has not used more than `[usage] skip_over` of its 5-hour or weekly window ([usage](usage.md#the-guard-and-the-router); also `near_percent` with `guard = "refuse"`). None eligible is an error listing each reason, and nothing is created.
+1. **Eligible** candidates are those whose profile exists and is allowed (`--allow-unapproved-tools` for profiles without tool approvals), whose executable is found (with the candidate's or the task's `command`; skipped in a sandbox), whose harness, run by name, this machine's inventory says can run (installed, on `PATH`, not logged out, not at a usage limit; [harness lifecycle](harness-lifecycle.md#the-router)), and whose **mean recorded cost** for the kind is not over the entry's `budget_usd`, and whose login has not used more than `[usage] skip_over` of its 5-hour or weekly window ([usage](usage.md#the-guard-and-the-router); also `near_percent` with `guard = "refuse"`). None eligible is an error listing each reason, and nothing is created. With `[harnesses] install = "auto"`, a candidate that is only missing is installed first, verified and logged; `by fleet route` only says it would be.
 2. With probability `exploration`, one eligible candidate is picked uniformly at random.
 3. Otherwise it is **Thompson sampling**: each candidate's success rate is drawn from Beta(1 + successes, 1 + failures) of its recorded outcomes (see [credit](#outcomes)), and the highest draw wins; an equal draw goes to the earlier candidate. A candidate with no history draws from Beta(1, 1).
 4. A fan of N attempts picks without replacement; more attempts than eligible candidates start another round, so a candidate can run twice (best of N on one harness).
@@ -166,9 +166,11 @@ A judge's pick (and a merge) also proposes [repository knowledge](knowledge.md) 
 | Fail over after a turn | `Yard::failover` | after `send` on a routed branch | no |
 | Judge | `Yard::judge`, `Judge`, `HarnessJudge`, `parse_verdict`, `deterministic_scores` | `judge`, `fan --judge` | no: refused |
 | Outcomes | `Yard::outcomes`, `fleet_stats` | `fleet stats` | no: refused |
+| What can run here | `RouteOptions::harnesses` (`inventory::HarnessGate`, `LocalGate`) | consulted by `run --auto`, `fan --auto`, `fleet route` | no |
 
 ## Not done yet
 
+- **Inventory beyond routed runs.** A delegated child or rig seat that names its harness is not checked against the inventory; failover moves only among candidates the router found eligible.
 - **Remote.** The server has no routing, judging or outcome endpoints; `by --remote` refuses them. The outcome table is in the PostgreSQL store already.
 - **No real outcomes.** The router starts from uniform priors; with a few outcomes per candidate it explores by design.
 - **Costs** come from harnesses that report them; a candidate without cost reports is never excluded for cost.

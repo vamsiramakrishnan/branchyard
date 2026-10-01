@@ -361,6 +361,13 @@ pub struct Config {
     /// only operations whose `require_labels` are all among them. See
     /// `docs/server.md#worker-labels`.
     pub labels: Vec<String>,
+    /// Detect the harnesses on this machine and advertise them with the
+    /// worker's beats, adding a `harness:<id>` label for each that can run
+    /// (docs/harness-lifecycle.md). On by default.
+    pub inventory: bool,
+    /// How to detect it; `None` uses the process's source
+    /// (`crate::ops::inventory_source`). For embedding and tests.
+    pub inventory_source: Option<crate::ops::InventorySource>,
     /// How long an operation may wait queued before it says why no live
     /// worker can claim it.
     pub unclaimable_after: Duration,
@@ -563,6 +570,8 @@ impl Config {
             operation_lease: crate::ops::DEFAULT_LEASE,
             worker_only: false,
             labels: Vec::new(),
+            inventory: true,
+            inventory_source: None,
             unclaimable_after: crate::ops::DEFAULT_UNCLAIMABLE_AFTER,
             shutdown_grace: Duration::from_secs(60),
             harness_commands: BTreeMap::new(),
@@ -998,6 +1007,10 @@ pub(crate) struct FileConfig {
     /// docs/server.md#worker-labels.
     #[serde(default)]
     labels: Vec<String>,
+    /// Detect the harnesses installed on this machine and advertise them,
+    /// with a `harness:<id>` label for each that can run. Default true. See
+    /// docs/harness-lifecycle.md.
+    inventory: Option<bool>,
     /// How long an operation may wait queued before it says why no live
     /// worker can claim it. Default 60.
     unclaimable_after_seconds: Option<f64>,
@@ -1221,6 +1234,7 @@ pub struct Partial {
     pub secrets: BTreeMap<String, branchyard::SecretSource>,
     pub database: Option<String>,
     pub labels: Vec<String>,
+    pub inventory: Option<bool>,
     pub unclaimable_after: Option<Duration>,
     pub webhooks: Vec<WebhookConfig>,
     pub webhook_insecure: bool,
@@ -1450,6 +1464,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             .collect::<Result<_, String>>()?,
         database: file.database,
         labels: file.labels,
+        inventory: file.inventory,
         unclaimable_after,
         webhooks: file
             .webhooks

@@ -335,7 +335,7 @@ pub struct Queued {
 }
 
 /// A worker as its last [`OperationStore::beat`] recorded it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LiveWorker {
     pub id: String,
     pub host: String,
@@ -343,6 +343,100 @@ pub struct LiveWorker {
     pub repos: Vec<String>,
     /// Milliseconds since its last beat.
     pub seen_ms_ago: u64,
+    /// The harnesses its machine has, as it last advertised them
+    /// (docs/harness-lifecycle.md); `None` from a worker that advertises
+    /// none.
+    pub inventory: Option<branchyard::inventory::Inventory>,
+}
+
+/// An inventory as a worker row stores it.
+fn inventory_text(
+    inventory: Option<&branchyard::inventory::Inventory>,
+) -> io::Result<Option<String>> {
+    inventory
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(io::Error::from)
+}
+
+/// A stored inventory; one that no longer parses reads as none.
+fn inventory_of(text: Option<String>) -> Option<branchyard::inventory::Inventory> {
+    text.and_then(|t| serde_json::from_str(&t).ok())
+}
+
+/// The labels to add to an operation that runs `harnesses` (catalog IDs)
+/// by name on `repo`: `harness:<id>` for each, when some live worker
+/// serving the repository advertises an inventory in which all of them
+/// can run. Otherwise none: work is steered toward a worker that has its
+/// harnesses, never held back because no worker advertises them.
+pub fn harness_requirement(
+    harnesses: &[String],
+    repo: &str,
+    workers: &[LiveWorker],
+) -> Vec<String> {
+    if harnesses.is_empty() {
+        return Vec::new();
+    }
+    let capable = workers
+        .iter()
+        .filter(|w| w.repos.iter().any(|r| r == repo))
+        .filter_map(|w| w.inventory.as_ref())
+        .any(|inventory| harnesses.iter().all(|h| inventory.ready(h).is_ok()));
+    match capable {
+        true => harnesses
+            .iter()
+            .map(|h| format!("{}{h}", branchyard::inventory::LABEL_PREFIX))
+            .collect(),
+        false => Vec::new(),
+    }
+}
+
+/// The router's view of the live workers serving one repository
+/// (docs/harness-lifecycle.md): a harness can run when a worker that
+/// advertises an inventory says so, or when none advertises one. Workers
+/// never install on demand.
+#[derive(Debug)]
+pub struct WorkersGate {
+    repo: String,
+    workers: Vec<LiveWorker>,
+}
+
+impl WorkersGate {
+    pub fn new(repo: &str, workers: Vec<LiveWorker>) -> WorkersGate {
+        let workers = workers
+            .into_iter()
+            .filter(|w| w.repos.iter().any(|r| r == repo) && w.inventory.is_some())
+            .collect();
+        WorkersGate {
+            repo: repo.to_owned(),
+            workers,
+        }
+    }
+
+    pub fn into_arc(self) -> std::sync::Arc<dyn branchyard::inventory::HarnessGate> {
+        std::sync::Arc::new(self)
+    }
+}
+
+impl branchyard::inventory::HarnessGate for WorkersGate {
+    fn check(&self, harness: &str) -> Result<(), String> {
+        if self.workers.is_empty() {
+            return Ok(());
+        }
+        let mut why = Vec::new();
+        for worker in &self.workers {
+            let inventory = worker.inventory.as_ref().expect("filtered");
+            match inventory.ready(harness) {
+                Ok(_) => return Ok(()),
+                Err(reason) => why.push(format!("{}: {reason}", worker.id)),
+            }
+        }
+        Err(format!(
+            "no live worker serving {} can run it ({})",
+            self.repo,
+            why.join("; ")
+        ))
+    }
 }
 
 /// Why a queued operation requiring `requires` of `repo` cannot be claimed
@@ -380,14 +474,15 @@ pub fn unclaimable(requires: &[String], repo: &str, workers: &[LiveWorker]) -> O
 }
 
 /// Whether `label` may name a worker label: 1 to 63 of lowercase letters,
-/// digits, `.`, `_` and `-`, starting with a letter or digit.
+/// digits, `.`, `_`, `-` and `:` (as in `harness:codex`), starting with a
+/// letter or digit.
 pub fn valid_label(label: &str) -> bool {
     !label.is_empty()
         && label.len() <= 63
         && label.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && label
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+        && label.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | ':')
+        })
 }
 
 /// What [`OperationStore::admit`] did.
@@ -474,8 +569,15 @@ pub trait OperationStore: Send + Sync {
     /// The priority of the latest operation of `repo` that worked on
     /// `branch`, if any: what a child spawned from it inherits.
     fn branch_priority(&self, repo: &str, branch: &str) -> io::Result<Option<i32>>;
-    /// Record that `worker`, carrying `labels`, serves `repos` now.
-    fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()>;
+    /// Record that `worker`, carrying `labels`, serves `repos` now, with
+    /// the harness inventory of its machine when it has one.
+    fn beat(
+        &self,
+        worker: &Worker,
+        labels: &[String],
+        repos: &[String],
+        inventory: Option<&branchyard::inventory::Inventory>,
+    ) -> io::Result<()>;
     /// Workers that beat within `within`.
     fn workers(&self, within: Duration) -> io::Result<Vec<LiveWorker>>;
     /// Forget `worker`, which is stopping.
@@ -744,18 +846,29 @@ const SQLITE_QUEUE_COLUMNS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Columns added since the table was first created. Run inside the
+/// Columns added to the workers table since it was first created: a
+/// worker that advertises no harness inventory (docs/harness-lifecycle.md)
+/// has none.
+const SQLITE_WORKER_COLUMNS: &[(&str, &str)] =
+    &[("inventory", "ALTER TABLE workers ADD COLUMN inventory TEXT")];
+
+/// Columns added since the tables were first created. Run inside the
 /// opener's `BEGIN IMMEDIATE`, so openers take turns reading a column's
 /// absence and adding it.
 fn sqlite_migrate(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    for (column, statement) in SQLITE_QUEUE_COLUMNS {
-        let has: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('operation_queue') WHERE name = ?1",
-            [column],
-            |r| r.get(0),
-        )?;
-        if has == 0 {
-            conn.execute_batch(statement)?;
+    for (table, columns) in [
+        ("operation_queue", SQLITE_QUEUE_COLUMNS),
+        ("workers", SQLITE_WORKER_COLUMNS),
+    ] {
+        for (column, statement) in columns {
+            let has: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                [table, column],
+                |r| r.get(0),
+            )?;
+            if has == 0 {
+                conn.execute_batch(statement)?;
+            }
         }
     }
     Ok(())
@@ -1307,19 +1420,27 @@ impl OperationStore for SqliteStore {
         Ok(found.map(|p| p.unwrap_or(0) as i32))
     }
 
-    fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()> {
+    fn beat(
+        &self,
+        worker: &Worker,
+        labels: &[String],
+        repos: &[String],
+        inventory: Option<&branchyard::inventory::Inventory>,
+    ) -> io::Result<()> {
         self.conn()
             .execute(
-                "INSERT INTO workers (id, host, pid, labels, repos, seen) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (id) DO UPDATE SET \
-                 labels = excluded.labels, repos = excluded.repos, seen = excluded.seen",
+                "INSERT INTO workers (id, host, pid, labels, repos, seen, inventory) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (id) DO UPDATE SET \
+                 labels = excluded.labels, repos = excluded.repos, seen = excluded.seen, \
+                 inventory = excluded.inventory",
                 rusqlite::params![
                     worker.id,
                     worker.host,
                     worker.pid,
                     serde_json::to_string(labels)?,
                     serde_json::to_string(repos)?,
-                    sqlite_now()
+                    sqlite_now(),
+                    inventory_text(inventory)?
                 ],
             )
             .map_err(sql)?;
@@ -1331,7 +1452,8 @@ impl OperationStore for SqliteStore {
         let conn = self.conn();
         let mut statement = conn
             .prepare(
-                "SELECT id, host, labels, repos, seen FROM workers WHERE seen > ?1 ORDER BY id",
+                "SELECT id, host, labels, repos, seen, inventory FROM workers \
+                 WHERE seen > ?1 ORDER BY id",
             )
             .map_err(sql)?;
         let rows = statement
@@ -1342,18 +1464,20 @@ impl OperationStore for SqliteStore {
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             })
             .map_err(sql)?;
         let mut live = Vec::new();
         for row in rows {
-            let (id, host, labels, repos, seen) = row.map_err(sql)?;
+            let (id, host, labels, repos, seen, inventory) = row.map_err(sql)?;
             live.push(LiveWorker {
                 id,
                 host,
                 labels: serde_json::from_str(&labels)?,
                 repos: serde_json::from_str(&repos)?,
                 seen_ms_ago: (now - seen).max(0) as u64,
+                inventory: inventory_of(inventory),
             });
         }
         Ok(live)
@@ -1679,6 +1803,12 @@ const PG_SCHEMA: &[(&str, &str)] = &[
             used DOUBLE PRECISION NOT NULL,
             at_ms BIGINT NOT NULL
         )",
+    ),
+    // A worker's harness inventory (docs/harness-lifecycle.md), as JSON;
+    // a row from before it, or a worker that advertises none, has NULL.
+    (
+        "by_workers.inventory",
+        "ALTER TABLE by_workers ADD COLUMN IF NOT EXISTS inventory TEXT",
     ),
 ];
 
@@ -2177,20 +2307,29 @@ impl OperationStore for PostgresStore {
         Ok(rows.first().map(|row| row.get(0)))
     }
 
-    fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()> {
+    fn beat(
+        &self,
+        worker: &Worker,
+        labels: &[String],
+        repos: &[String],
+        inventory: Option<&branchyard::inventory::Inventory>,
+    ) -> io::Result<()> {
         let worker = worker.clone();
         let (labels, repos) = (labels.to_vec(), repos.to_vec());
+        let inventory = inventory_text(inventory)?;
         self.with(move |c| {
             c.execute(
-                "INSERT INTO by_workers (id, host, pid, labels, repos, seen) \
-                 VALUES ($1, $2, $3, $4, $5, clock_timestamp()) ON CONFLICT (id) DO UPDATE SET \
-                 labels = EXCLUDED.labels, repos = EXCLUDED.repos, seen = EXCLUDED.seen",
+                "INSERT INTO by_workers (id, host, pid, labels, repos, seen, inventory) \
+                 VALUES ($1, $2, $3, $4, $5, clock_timestamp(), $6) ON CONFLICT (id) DO UPDATE \
+                 SET labels = EXCLUDED.labels, repos = EXCLUDED.repos, seen = EXCLUDED.seen, \
+                 inventory = EXCLUDED.inventory",
                 &[
                     &worker.id,
                     &worker.host,
                     &i64::from(worker.pid),
                     &labels,
                     &repos,
+                    &inventory,
                 ],
             )
         })?;
@@ -2202,7 +2341,7 @@ impl OperationStore for PostgresStore {
         let rows = self.with(move |c| {
             c.query(
                 "SELECT id, host, labels, repos, \
-                     (EXTRACT(EPOCH FROM clock_timestamp() - seen) * 1000)::float8 \
+                     (EXTRACT(EPOCH FROM clock_timestamp() - seen) * 1000)::float8, inventory \
                  FROM by_workers \
                  WHERE seen > clock_timestamp() - $1::float8 * interval '1 millisecond' \
                  ORDER BY id",
@@ -2217,6 +2356,7 @@ impl OperationStore for PostgresStore {
                 labels: row.get(2),
                 repos: row.get(3),
                 seen_ms_ago: row.get::<_, f64>(4).max(0.0) as u64,
+                inventory: inventory_of(row.get(5)),
             })
             .collect())
     }
@@ -2555,8 +2695,8 @@ pub fn check_labels(store: &dyn OperationStore, repo: &str) {
     assert_eq!(won, expected, "each operation claimed exactly once");
 
     // Beats.
-    store.beat(&gpu, &labels(&["gpu"]), &repos).unwrap();
-    store.beat(&plain, &[], &repos).unwrap();
+    store.beat(&gpu, &labels(&["gpu"]), &repos, None).unwrap();
+    store.beat(&plain, &[], &repos, None).unwrap();
     let live = store.workers(Duration::from_secs(60)).unwrap();
     let mine: Vec<&LiveWorker> = live.iter().filter(|w| w.id.starts_with(repo)).collect();
     assert_eq!(mine.len(), 2, "{live:?}");
@@ -2574,6 +2714,76 @@ pub fn check_labels(store: &dyn OperationStore, repo: &str) {
     let live = store.workers(Duration::from_secs(60)).unwrap();
     assert!(!live.iter().any(|w| w.id == gpu.id));
     assert!(unclaimable(&labels(&["gpu"]), repo, &live).is_some());
+
+    // A beat carries the worker's harness inventory, and the next beat
+    // replaces it (docs/harness-lifecycle.md).
+    let mut inventory = test_inventory("codex");
+    let derived = inventory.labels();
+    assert_eq!(derived, ["harness:codex"]);
+    store
+        .beat(&plain, &derived, &repos, Some(&inventory))
+        .unwrap();
+    let live = store.workers(Duration::from_secs(60)).unwrap();
+    let seen = live.iter().find(|w| w.id == plain.id).unwrap();
+    assert_eq!(seen.inventory.as_ref(), Some(&inventory));
+    assert_eq!(seen.labels, ["harness:codex"]);
+    assert_eq!(
+        harness_requirement(&labels(&["codex"]), repo, &live),
+        ["harness:codex"]
+    );
+    // Steered only toward a worker that can run every harness named; never
+    // held back when none advertises them.
+    assert!(harness_requirement(&labels(&["codex", "goose"]), repo, &live).is_empty());
+    assert!(harness_requirement(&labels(&["codex"]), "elsewhere", &live).is_empty());
+    let gate = WorkersGate::new(repo, live.clone());
+    use branchyard::inventory::HarnessGate;
+    assert_eq!(gate.check("codex"), Ok(()));
+    let why = gate.check("goose").unwrap_err();
+    assert!(
+        why.contains("not installed") && why.contains(&plain.id),
+        "{why}"
+    );
+    assert_eq!(WorkersGate::new("elsewhere", live).check("goose"), Ok(()));
+    inventory.harnesses[0].login.state = branchyard::inventory::LoginState::LoggedOut;
+    store
+        .beat(&plain, &inventory.labels(), &repos, Some(&inventory))
+        .unwrap();
+    let live = store.workers(Duration::from_secs(60)).unwrap();
+    let seen = live.iter().find(|w| w.id == plain.id).unwrap();
+    assert!(seen.labels.is_empty());
+    assert!(harness_requirement(&labels(&["codex"]), repo, &live).is_empty());
+    store.beat(&plain, &[], &repos, None).unwrap();
+    let live = store.workers(Duration::from_secs(60)).unwrap();
+    assert_eq!(
+        live.iter().find(|w| w.id == plain.id).unwrap().inventory,
+        None
+    );
+    store.leave(&plain).unwrap();
+}
+
+/// An inventory in which `id` is installed, on PATH and logged in.
+pub fn test_inventory(id: &str) -> branchyard::inventory::Inventory {
+    use branchyard::inventory::{Evidence, HarnessState, Inventory, Login, LoginState};
+    Inventory {
+        host: "box".into(),
+        os: "Linux".into(),
+        detected_at_ms: 1,
+        checked: vec![id.to_owned(), "goose".into()],
+        harnesses: vec![HarnessState {
+            id: id.to_owned(),
+            path: format!("/usr/bin/{id}"),
+            on_path: true,
+            version: Some("1.2.3".into()),
+            version_note: None,
+            login: Login {
+                state: LoginState::LoggedIn,
+                evidence: Evidence::Verified,
+                detail: "logged in".into(),
+            },
+            quota: None,
+        }],
+        tools: Default::default(),
+    }
 }
 
 /// A small deterministic generator for the scheduling property check
@@ -2986,7 +3196,8 @@ impl OperationStore for MemoryStore {
             scheduling: &Scheduling) -> io::Result<Option<Claim>>;
         queue() -> io::Result<Vec<Queued>>;
         branch_priority(repo: &str, branch: &str) -> io::Result<Option<i32>>;
-        beat(worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()>;
+        beat(worker: &Worker, labels: &[String], repos: &[String],
+            inventory: Option<&branchyard::inventory::Inventory>) -> io::Result<()>;
         workers(within: Duration) -> io::Result<Vec<LiveWorker>>;
         leave(worker: &Worker) -> io::Result<()>;
         renew(worker: &Worker, id: &str, fence: i64, lease: Duration) -> io::Result<bool>;
@@ -3322,6 +3533,35 @@ mod tests {
             .query_row("SELECT requires FROM operation_queue", [], |r| r.get(0))
             .unwrap();
         assert_eq!(requires, "[]");
+        // An older workers table gains the inventory column; its rows
+        // advertise none.
+        let workers = temp.path().join("old-workers.db");
+        let conn = rusqlite::Connection::open(&workers).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workers (id TEXT PRIMARY KEY, host TEXT NOT NULL, \
+             pid INTEGER NOT NULL, labels TEXT NOT NULL, repos TEXT NOT NULL, \
+             seen INTEGER NOT NULL); \
+             INSERT INTO workers VALUES ('w_old', 'h', 1, '[]', '[\"r\"]', 9999999999999);",
+        )
+        .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&workers, None).unwrap();
+        let live = store.workers(Duration::from_secs(60)).unwrap();
+        assert_eq!(live[0].id, "w_old");
+        assert_eq!(live[0].inventory, None);
+        let worker = Worker {
+            id: "w_new".into(),
+            host: "h".into(),
+            pid: 2,
+            start: "s".into(),
+        };
+        let inventory = test_inventory("codex");
+        store
+            .beat(&worker, &[], &["r".into()], Some(&inventory))
+            .unwrap();
+        let live = store.workers(Duration::from_secs(60)).unwrap();
+        let new = live.iter().find(|w| w.id == "w_new").unwrap();
+        assert_eq!(new.inventory.as_ref(), Some(&inventory));
     }
 
     #[test]
@@ -3381,10 +3621,17 @@ mod tests {
 
     #[test]
     fn labels_are_checked_and_unclaimable_work_says_why() {
-        for good in ["gpu", "linux", "x86_64", "a.b-c", "9"] {
+        for good in [
+            "gpu",
+            "linux",
+            "x86_64",
+            "a.b-c",
+            "9",
+            "harness:claude-code",
+        ] {
             assert!(valid_label(good), "{good}");
         }
-        for bad in ["", "GPU", "-x", "a b", "a,b", &"x".repeat(64)] {
+        for bad in ["", "GPU", "-x", ":x", "a b", "a,b", &"x".repeat(64)] {
             assert!(!valid_label(bad), "{bad}");
         }
         assert_eq!(unclaimable(&[], "r", &[]), None);

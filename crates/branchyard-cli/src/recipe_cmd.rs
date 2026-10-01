@@ -251,6 +251,17 @@ fn require_trust(env: &Env, r: &Resolved) -> Result<(), Failure> {
     )))
 }
 
+/// Recipe `name` of the repository here, once its commands may run: not
+/// inside a harness, and trusted (asking on a terminal). For other
+/// commands that make a machine from a recipe, such as `by harnesses --on
+/// recipe:NAME`.
+pub(crate) fn trusted(env: &Env, name: &str) -> Result<Recipe, Failure> {
+    in_harness()?;
+    let r = resolve(&root()?, name)?;
+    require_trust(env, &r)?;
+    Ok(r.recipe())
+}
+
 /// `by recipe ACTION`.
 pub fn main(env: &Env, target: &Target, action: &RecipeAction, json: bool) -> Outcome {
     if let Target::Remote(_) = target {

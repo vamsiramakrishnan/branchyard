@@ -127,6 +127,36 @@ pub struct Options {
     /// Where claims, renewals and finished operations are counted and
     /// traced.
     pub observability: Observability,
+    /// What this worker's machine has of each harness
+    /// (docs/harness-lifecycle.md), detected now and every
+    /// [`INVENTORY_EVERY`] on a thread of its own, advertised with each
+    /// beat; its `harness:<id>` labels are added to [`Options::labels`].
+    /// `None` advertises nothing.
+    pub inventory: Option<InventorySource>,
+}
+
+/// Detects this machine's harness inventory; `None` when it cannot.
+#[derive(Clone)]
+pub struct InventorySource(
+    pub Arc<dyn Fn() -> Option<branchyard::inventory::Inventory> + Send + Sync>,
+);
+
+impl std::fmt::Debug for InventorySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InventorySource")
+    }
+}
+
+impl InventorySource {
+    /// Detection on this machine with `/bin/sh` and the default options
+    /// (`BRANCHYARD_HARNESS_DIRS` read), without usage meters.
+    pub fn local() -> InventorySource {
+        InventorySource(Arc::new(|| {
+            branchyard::inventory::detect_local(&branchyard::inventory::DetectOptions::from_env())
+                .map_err(|e| tracing::warn!(error = %e, "could not detect the harnesses here"))
+                .ok()
+        }))
+    }
 }
 
 impl Options {
@@ -141,9 +171,31 @@ impl Options {
             unclaimable_after: DEFAULT_UNCLAIMABLE_AFTER,
             scheduling: Scheduling::default(),
             observability: Observability::default(),
+            inventory: None,
         }
     }
 }
+
+static INVENTORY_SOURCE: std::sync::OnceLock<InventorySource> = std::sync::OnceLock::new();
+
+/// Detect inventories with `source` in every registry this process opens
+/// from a configuration: how `by serve` and `by worker` add the usage
+/// meters `by usage` reads. Only the first call counts.
+pub fn set_inventory_source(source: InventorySource) {
+    let _ = INVENTORY_SOURCE.set(source);
+}
+
+/// The inventory source set with [`set_inventory_source`], else
+/// [`InventorySource::local`].
+pub fn inventory_source() -> InventorySource {
+    INVENTORY_SOURCE
+        .get()
+        .cloned()
+        .unwrap_or_else(InventorySource::local)
+}
+
+/// How often a worker detects its harnesses again.
+pub const INVENTORY_EVERY: Duration = Duration::from_secs(300);
 
 /// How long an operation waits before an unclaimable one says why.
 pub const DEFAULT_UNCLAIMABLE_AFTER: Duration = Duration::from_secs(60);
@@ -164,6 +216,8 @@ pub struct Registry {
     worker: Worker,
     state: Mutex<State>,
     changed: Condvar,
+    /// This worker's harness inventory, once detected.
+    inventory: Mutex<Option<branchyard::inventory::Inventory>>,
 }
 
 struct State {
@@ -221,6 +275,7 @@ impl Registry {
                 admitted: false,
             }),
             changed: Condvar::new(),
+            inventory: Mutex::new(None),
         }))
     }
 
@@ -248,6 +303,68 @@ impl Registry {
         self.store.workers(BEAT * 3)
     }
 
+    /// This worker's harness inventory, once detected.
+    pub fn inventory(&self) -> Option<branchyard::inventory::Inventory> {
+        self.inventory
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// The labels this worker claims with: its configured ones and those
+    /// its inventory derives (`harness:<id>`).
+    pub fn labels(&self) -> Vec<String> {
+        let mut labels = self.options.labels.clone();
+        if let Some(inventory) = self.inventory() {
+            labels.extend(inventory.labels());
+        }
+        labels.sort();
+        labels.dedup();
+        labels
+    }
+
+    /// The labels an operation running `harnesses` by name on `repo` should
+    /// require, from the inventories live workers advertise; see
+    /// [`crate::store::harness_requirement`].
+    pub fn harness_requirement(&self, repo: &str, harnesses: &[String]) -> Vec<String> {
+        match self.store.workers(BEAT * 3) {
+            Ok(workers) => crate::store::harness_requirement(harnesses, repo, &workers),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the live workers");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Detect the inventory now and every [`INVENTORY_EVERY`] until the
+    /// registry stops accepting work.
+    fn detect_inventory(self: Arc<Self>, source: InventorySource) {
+        loop {
+            let found = (source.0)();
+            if found.is_some() {
+                *self.inventory.lock().unwrap_or_else(|p| p.into_inner()) = found;
+                // Beat with it now rather than at the next beat.
+                self.changed.notify_all();
+            }
+            let deadline = Instant::now() + INVENTORY_EVERY;
+            let mut state = self.lock();
+            loop {
+                if state.closed || !state.accepting {
+                    return;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                state = self
+                    .changed
+                    .wait_timeout(state, left)
+                    .unwrap_or_else(|p| p.into_inner())
+                    .0;
+            }
+        }
+    }
+
     /// The priority a spawn from `branch` of `repo` inherits: that of the
     /// latest operation that worked on it, else 0.
     pub fn branch_priority(&self, repo: &str, branch: &str) -> Result<i32, ApiError> {
@@ -261,6 +378,12 @@ impl Registry {
     /// `executor`.
     pub fn start(self: &Arc<Self>, executor: Arc<dyn Executor>) -> io::Result<()> {
         self.lock().executor = Some(executor);
+        if let Some(source) = self.options.inventory.clone() {
+            let registry = self.clone();
+            std::thread::Builder::new()
+                .name("branchyard-inventory".into())
+                .spawn(move || registry.detect_inventory(source))?;
+        }
         let registry = self.clone();
         std::thread::Builder::new()
             .name("branchyard-dispatch".into())
@@ -435,15 +558,21 @@ impl Registry {
         let mut renewed = Instant::now();
         let renew_every = self.options.lease / 3;
         let mut beaten: Option<Instant> = None;
+        let mut advertised: Option<u64> = None;
         loop {
-            if beaten.is_none_or(|at| at.elapsed() >= BEAT) {
-                if let Err(e) =
-                    self.store
-                        .beat(&self.worker, &self.options.labels, &self.options.repos)
-                {
+            let inventory = self.inventory();
+            let detected = inventory.as_ref().map(|i| i.detected_at_ms);
+            if beaten.is_none_or(|at| at.elapsed() >= BEAT) || detected != advertised {
+                if let Err(e) = self.store.beat(
+                    &self.worker,
+                    &self.labels(),
+                    &self.options.repos,
+                    inventory.as_ref(),
+                ) {
                     tracing::warn!(error = %e, "could not record this worker as alive");
                 }
                 beaten = Some(Instant::now());
+                advertised = detected;
             }
             let (free, executor) = {
                 let mut state = self.lock();
@@ -465,7 +594,7 @@ impl Registry {
                 match self.store.claim_next(
                     &self.worker,
                     &self.options.repos,
-                    &self.options.labels,
+                    &self.labels(),
                     self.options.lease,
                     &self.options.scheduling,
                 ) {

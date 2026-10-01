@@ -331,6 +331,10 @@ struct Flags {
     /// require_labels are all among its labels (replaces the configuration's labels)
     #[arg(long = "label", value_name = "LABEL", help_heading = "Operations")]
     labels: Vec<String>,
+    /// Do not detect and advertise the harnesses installed here, nor derive harness:ID labels
+    /// from them (see docs/harness-lifecycle.md)
+    #[arg(long, help_heading = "Operations")]
+    no_inventory: bool,
     /// Say why a queued operation no live worker can claim waits, after this long
     /// (default: 60)
     #[arg(long, value_name = "SECS", value_parser = grace, help_heading = "Operations")]
@@ -734,6 +738,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     };
     config.labels.sort();
     config.labels.dedup();
+    config.inventory = !flags.no_inventory && partial.inventory.unwrap_or(true);
     config.unclaimable_after = flags
         .unclaimable_after
         .or(partial.unclaimable_after)

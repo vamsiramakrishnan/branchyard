@@ -116,6 +116,45 @@ pub struct ProjectConfig {
     /// distilled into proposals, and by which distiller.
     #[serde(default, skip_serializing_if = "KnowledgeConfig::is_empty")]
     pub knowledge: KnowledgeConfig,
+    /// Installing and updating harness CLIs (docs/harness-lifecycle.md):
+    /// whether `by harnesses install`, `update` and the router may run a
+    /// harness's install command, and for which harnesses. A repository's
+    /// file may only say `install = "never"`; the rest belongs in your user
+    /// file, since it runs software on your machine.
+    #[serde(default, skip_serializing_if = "HarnessesConfig::is_empty")]
+    pub harnesses: HarnessesConfig,
+}
+
+/// `[harnesses]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessesConfig {
+    /// `never`, `ask` (on a terminal, or with `--yes`) or `auto` (also
+    /// installs on demand when the router needs a harness). Unset: `ask` on
+    /// a terminal and `never` elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<HarnessInstall>,
+    /// When not empty, only these harness IDs may be installed or updated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+}
+
+impl HarnessesConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &HarnessesConfig::default()
+    }
+}
+
+/// `install` in `[harnesses]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessInstall {
+    /// Never install or update.
+    Never,
+    /// Ask on a terminal first.
+    Ask,
+    /// Install without asking, also on demand for the router.
+    Auto,
 }
 
 /// Orca's rule for a recipe's name: 1 to 64 lowercase letters, digits,
@@ -1615,6 +1654,17 @@ impl ProjectConfig {
                 }
             }
         }
+        if let Some(bad) = self.harnesses.allow.iter().find(|id| {
+            id.is_empty()
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        }) {
+            return fail(
+                "harnesses.allow",
+                format!("{bad:?} is not a harness ID; see `by harnesses --all`"),
+            );
+        }
         if let Some(sandbox) = &self.microsandbox {
             if sandbox.image.trim().is_empty() {
                 return fail("microsandbox.image", "must not be empty".into());
@@ -1654,6 +1704,22 @@ impl ProjectConfig {
                  (~/.config/branchyard/config.toml), not in a repository"
                     .into(),
             )),
+            // A repository's file is code you have not read: it may forbid
+            // installing harnesses, never allow it.
+            Layer::Project
+                if !self.harnesses.allow.is_empty()
+                    || matches!(
+                        self.harnesses.install,
+                        Some(HarnessInstall::Ask | HarnessInstall::Auto)
+                    ) =>
+            {
+                Err(ConfigError(
+                    "harnesses: a repository's branchyard.toml may only set [harnesses] install \
+                     = \"never\"; allowing installs (install = \"ask\" or \"auto\", allow) belongs \
+                     in your user configuration (~/.config/branchyard/config.toml)"
+                        .into(),
+                ))
+            }
             _ => Ok(()),
         }
     }

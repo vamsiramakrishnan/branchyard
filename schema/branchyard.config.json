@@ -103,6 +103,10 @@
     "knowledge": {
       "$ref": "#/$defs/KnowledgeConfig",
       "description": "Repository knowledge (docs/knowledge.md): whether adopted entries\nare given to harnesses and within what budget, when branches are\ndistilled into proposals, and by which distiller."
+    },
+    "harnesses": {
+      "$ref": "#/$defs/HarnessesConfig",
+      "description": "Installing and updating harness CLIs (docs/harness-lifecycle.md):\nwhether `by harnesses install`, `update` and the router may run a\nharness's install command, and for which harnesses. A repository's\nfile may only say `install = \"never\"`; the rest belongs in your user\nfile, since it runs software on your machine."
     }
   },
   "title": "Branchyard configuration",
@@ -1178,6 +1182,51 @@
         "harness"
       ],
       "description": "`distiller = { harness = \"claude-code\", model = \"small\" }`."
+    },
+    "HarnessesConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "install": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HarnessInstall"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`never`, `ask` (on a terminal, or with `--yes`) or `auto` (also\ninstalls on demand when the router needs a harness). Unset: `ask` on\na terminal and `never` elsewhere."
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "When not empty, only these harness IDs may be installed or updated."
+        }
+      },
+      "description": "`[harnesses]`."
+    },
+    "HarnessInstall": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "never",
+          "description": "Never install or update."
+        },
+        {
+          "type": "string",
+          "const": "ask",
+          "description": "Ask on a terminal first."
+        },
+        {
+          "type": "string",
+          "const": "auto",
+          "description": "Install without asking, also on demand for the router."
+        }
+      ],
+      "description": "`install` in `[harnesses]`."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

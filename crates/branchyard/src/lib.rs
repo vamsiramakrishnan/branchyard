@@ -112,6 +112,7 @@ mod goal;
 mod graph;
 mod harness;
 mod inbox;
+pub mod inventory;
 mod json_schema;
 mod judge;
 mod knowledge;

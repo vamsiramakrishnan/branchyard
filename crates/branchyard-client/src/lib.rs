@@ -72,8 +72,9 @@ use serde::Serialize;
 use api::{
     AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, Diff,
     ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest,
-    MapList, MapRequest, MapResumeRequest, MergeRequest, Operation, ReincarnateRequest, Removed,
-    RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest, TaskRequest, TextRequest,
+    InventoryReport, MapList, MapRequest, MapResumeRequest, MergeRequest, Operation,
+    ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest,
+    TaskRequest, TextRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -243,6 +244,12 @@ impl Client {
     pub fn harnesses(&self) -> Result<Vec<HarnessInfo>, Error> {
         let list: HarnessList = self.get("/v1/harnesses")?;
         Ok(list.harnesses)
+    }
+
+    /// The live workers serving this caller's repositories and the
+    /// harnesses each one's machine has: `GET /v1/inventory`.
+    pub fn inventory(&self) -> Result<InventoryReport, Error> {
+        self.get("/v1/inventory")
     }
 
     pub fn operation(&self, id: &str) -> Result<Operation, Error> {

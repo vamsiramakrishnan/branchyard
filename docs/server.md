@@ -47,6 +47,7 @@ Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped
 | `--database URL` | Keep branch state, operations, their queue and branch locks in PostgreSQL (`postgres://user@host/db`) instead of SQLite; several servers may share it. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
 | `--worker` | Only run operations queued in `--database`: no listener, no webhooks. `by worker` is `by serve --worker`; see [several servers](#several-servers-on-one-database) |
 | `--label LABEL` | A label this process's worker carries (repeatable; replaces the configuration's `labels`): it claims only operations whose `require_labels` are all among its labels. See [worker labels](#worker-labels) |
+| `--no-inventory` | Do not detect and advertise the harnesses installed here, nor derive `harness:<id>` labels from them (the configuration's `"inventory": false`). See [worker inventory](#worker-inventory) |
 | `--public-url URL` | This server's URL as webhook senders reach it: the base of each event [trigger](triggers.md)'s webhook URL. Default `http(s)://<listen>` |
 | `--allow-trigger-prechecks` | Let every served repository's triggers run a [precheck](triggers.md#prechecks) command before firing. Default: none |
 | `--app` | Serve the [web companion](companion.md) at `/app/`, accept paired tokens, and send Web Push. Off by default |
@@ -98,6 +99,7 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
   "database": "postgres://branchyard@db.internal/branchyard",
   "labels": ["linux", "gpu"],
+  "inventory": true,
   "unclaimable_after_seconds": 60,
   "aging_seconds": 60,
   "fair_share_window_seconds": 300,
@@ -200,6 +202,7 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `GET /.well-known/jwks.json` | The connector gateway's verification keys, no token; `404` without `connectors` | a JSON Web Key Set |
 | `GET /v1/repos` | Served repositories | `{"repos": [{"name", "root"}]}` |
 | `GET /v1/harnesses` | Harness profiles, as found on the server's `PATH` | `{"harnesses": [{"harness", "profile", "default", "available", "qualification"}]}` |
+| `GET /v1/inventory` | Live workers serving repositories the caller can see, this server first, with the harnesses each one's machine has ([worker inventory](#worker-inventory)); `read` scope | `{"workers": [{"id", "host", "labels", "repos", "seen_ms_ago", "this", "inventory"}]}` |
 | `POST /v1/repos/{repo}/tasks` | Run a task on one branch, or one branch per harness | `202` operation |
 | `GET /v1/repos/{repo}/branches` | Every branch, oldest first | `{"branches": [BranchInfo]}` |
 | `GET /v1/repos/{repo}/branches/{b}` | One branch | `BranchInfo` |
@@ -544,12 +547,18 @@ by worker --database "$DB" --repo app=/srv/app --label gpu --label linux
 by run --remote https://by.internal "train the model" --require-label gpu
 ```
 
-- **Where labels come from.** `--label` (repeatable) on `by serve`, `by worker` or `branchyard-server`, or `labels` in the configuration file; the flags replace the file's. A server without labels claims only operations that require none. A label is 1 to 63 of `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or digit.
+- **Where labels come from.** `--label` (repeatable) on `by serve`, `by worker` or `branchyard-server`, or `labels` in the configuration file; the flags replace the file's. A server without labels claims only operations that require none. A label is 1 to 63 of `a-z`, `0-9`, `.`, `_`, `-` and `:`, starting with a letter or digit. A worker also carries the `harness:<id>` labels its [inventory](#worker-inventory) derives.
 - **Where requirements come from.** `require_labels` in a task (one branch or a fan), send, fork, reincarnate or spawn request, and `--require-label` on `by run`, `fan`, `send`, `fork` and `reincarnate` with `--remote` (in local mode the flag is refused: there are no workers to choose among). Admission checks them (`400 invalid_request` for a malformed one) and records them on the operation and its queue row. A merge or integration requires none.
 - **Claims.** The claim's query takes the first claimable row in [scheduling](#scheduling) order among those whose required labels are a subset of the worker's: on SQLite every element of the row's JSON array must be among the worker's; on PostgreSQL `requires <@ $labels` inside the same `FOR UPDATE SKIP LOCKED` subquery, so two workers racing still never claim one row. Queue rows from before the column existed require nothing.
 - **Liveness and why it waits.** Each dispatcher records its worker (id, host, pid, labels, repositories) every 5 seconds in a `workers` table (`by_workers` on PostgreSQL) and deletes its row at shutdown; a worker unseen for 15 seconds is not counted. An operation that requires labels and has waited longer than `unclaimable_after` (default 60 s) is reported, on every read (`GET /v1/operations/{id}`, `?idempotency_key=`, `GET /v1/repos/{repo}/operations`), with `waiting`: `no live worker carries the labels it requires (gpu, linux); live workers serving app: w_… on host [linux]`. Nothing is written: as soon as a worker with the labels beats, the reason goes away, and that worker claims it. A waiting `by run --remote` prints it once on standard error; `by show BRANCH --remote` for a branch that does not exist yet shows the queued operation that will create it, with `requires` and `waiting`.
 - **Warm pools.** A repository's `[workspace.pool]` may name labels too: only a `by serve` or `by worker` carrying all of them keeps that pool filled ([warm pools](pools.md)).
 - **Not yet.** A rig seat or a fleet entry cannot carry labels of its own: a seat's spawn through the API takes the spawn request's `require_labels`, and a fleet routes through whatever request it makes. Labels route among workers; they are not an authorization boundary (any principal may require any label), and they do not reserve capacity.
+
+### Worker inventory
+
+Each dispatcher (`by serve`, `by worker`, `branchyard-server`) detects the harnesses on its machine when it starts and every five minutes, on a thread of its own, and records the inventory with its beat: the `inventory` column of `workers` (`by_workers` on PostgreSQL), JSON, added by the migrations (a SQLite file inside its `BEGIN IMMEDIATE`, PostgreSQL as one more catalog-checked step). From it the worker derives `harness:<id>` for every harness that can run there (installed, on `PATH`, not logged out, not at a usage limit), adds them to its labels and claims with them. `by serve` and `by worker` also advertise each Claude Code and Codex login's quota, as `by usage` reads it.
+
+A task (one branch or a fan) that runs its harnesses by name (no request `command`, no `harness_commands` entry, the local provider) gets `harness:<id>` added to its `requires` at admission when a live worker serving the repository advertises an inventory in which all of them can run; otherwise nothing is added, so work is never held back because no worker advertises. A trigger's routed task consults the same inventories. `GET /v1/inventory` and `by harnesses --remote URL` show them; `"inventory": false` or `--no-inventory` turns it off. Workers never install anything. See [harness lifecycle](harness-lifecycle.md#workers).
 
 What it is not yet:
 
