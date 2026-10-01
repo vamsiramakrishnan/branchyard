@@ -70,7 +70,7 @@ fn verify(secret: &str, parts: &[&[u8]], hex_signature: &str) -> bool {
 }
 
 /// `application/x-www-form-urlencoded` value bytes, decoded.
-fn form_decode(value: &[u8]) -> Vec<u8> {
+pub fn form_decode(value: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(value.len());
     let mut i = 0;
     while i < value.len() {
@@ -167,6 +167,12 @@ pub fn receive(
                 return Err(bad_signature());
             }
         }
+        EventSource::Postmark | EventSource::Mailgun | EventSource::Sendgrid => {
+            return Err(refused(
+                "invalid_request",
+                "an email delivery is received by triggers::email::receive",
+            ))
+        }
     }
     let payload: Value = match serde_json::from_slice(body) {
         Ok(payload) => payload,
@@ -193,7 +199,7 @@ pub fn receive(
         EventSource::Github => header("x-github-delivery"),
         EventSource::Linear => header("linear-delivery"),
         EventSource::Generic => header("x-branchyard-event-id"),
-        EventSource::Slack => None,
+        _ => None,
     };
     let kind = match source {
         EventSource::Github => header("x-github-event"),
@@ -217,12 +223,18 @@ pub fn read(
     if !payload.is_object() {
         return Err("the body is not a JSON object".into());
     }
+    if source.is_email() {
+        return super::email::read_value(source, payload);
+    }
     let id = body_hash(body);
     let read = match source {
         EventSource::Github => github(kind, id, payload),
         EventSource::Slack => slack(payload, id),
         EventSource::Linear => linear(payload, id),
         EventSource::Generic => Ok(generic(payload, id)),
+        EventSource::Postmark | EventSource::Mailgun | EventSource::Sendgrid => {
+            unreachable!("read by triggers::email above")
+        }
     };
     read.map(|delivered| match delivered {
         Delivery::Event(mut e) => {
@@ -434,6 +446,9 @@ pub fn known_kind(source: EventSource, kind: &str) -> bool {
         EventSource::Github => &["issues.", "issue_comment.", "pull_request.", "check_suite."],
         EventSource::Slack => &["app_mention"],
         EventSource::Linear => &["issue."],
+        EventSource::Postmark | EventSource::Mailgun | EventSource::Sendgrid => {
+            &[super::email::KIND]
+        }
         EventSource::Generic => return !kind.is_empty(),
     };
     families

@@ -22467,6 +22467,21 @@
               "type": "string",
               "const": "generic",
               "description": "`X-Branchyard-Signature: sha256=<hex>` over any JSON object."
+            },
+            {
+              "type": "string",
+              "const": "postmark",
+              "description": "Postmark's inbound webhook (JSON): HTTP Basic authentication with\nthe trigger's secret as the password, or the secret as the URL's\nlast segment; Postmark signs nothing."
+            },
+            {
+              "type": "string",
+              "const": "mailgun",
+              "description": "Mailgun's route forwarding (a form, or JSON to a URL ending in\n`json`): HMAC-SHA256 with the webhook signing key over the\ntimestamp and token (form) or the timestamp and body (JSON)."
+            },
+            {
+              "type": "string",
+              "const": "sendgrid",
+              "description": "SendGrid's Inbound Parse (multipart form): HTTP Basic\nauthentication or the secret as the URL's last segment, as for\nPostmark."
             }
           ],
           "description": "Who sends a trigger's webhooks, which decides how a delivery is\nverified and read."
@@ -22494,6 +22509,21 @@
           "type": "string",
           "const": "generic",
           "description": "`X-Branchyard-Signature: sha256=<hex>` over any JSON object."
+        },
+        {
+          "type": "string",
+          "const": "postmark",
+          "description": "Postmark's inbound webhook (JSON): HTTP Basic authentication with\nthe trigger's secret as the password, or the secret as the URL's\nlast segment; Postmark signs nothing."
+        },
+        {
+          "type": "string",
+          "const": "mailgun",
+          "description": "Mailgun's route forwarding (a form, or JSON to a URL ending in\n`json`): HMAC-SHA256 with the webhook signing key over the\ntimestamp and token (form) or the timestamp and body (JSON)."
+        },
+        {
+          "type": "string",
+          "const": "sendgrid",
+          "description": "SendGrid's Inbound Parse (multipart form): HTTP Basic\nauthentication or the secret as the URL's last segment, as for\nPostmark."
         }
       ],
       "description": "Who sends a trigger's webhooks, which decides how a delivery is\nverified and read.",
@@ -22545,6 +22575,27 @@
             "type": "string"
           },
           "description": "Text the event's title or body contains, ignoring case, such as a\nmention."
+        },
+        "sender": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Email only, and required there: the senders allowed, each an exact\naddress (`alice@example.com`) or a domain (`@example.com`), ignoring\ncase. A delivery from anyone else is refused, and recorded nowhere."
+        },
+        "recipient": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Email only: one of the message's recipients (To, Cc or the\nenvelope's), as an address or a `@domain`."
+        },
+        "subject_contains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Email only: text the subject contains, ignoring case."
         }
       },
       "description": "Field matchers on the normalized event, checked when the trigger is\ncreated. Every non-empty field must match (any one of its values);\nempty matches anything.",
@@ -22776,6 +22827,21 @@
               "type": "string",
               "const": "generic",
               "description": "`X-Branchyard-Signature: sha256=<hex>` over any JSON object."
+            },
+            {
+              "type": "string",
+              "const": "postmark",
+              "description": "Postmark's inbound webhook (JSON): HTTP Basic authentication with\nthe trigger's secret as the password, or the secret as the URL's\nlast segment; Postmark signs nothing."
+            },
+            {
+              "type": "string",
+              "const": "mailgun",
+              "description": "Mailgun's route forwarding (a form, or JSON to a URL ending in\n`json`): HMAC-SHA256 with the webhook signing key over the\ntimestamp and token (form) or the timestamp and body (JSON)."
+            },
+            {
+              "type": "string",
+              "const": "sendgrid",
+              "description": "SendGrid's Inbound Parse (multipart form): HTTP Basic\nauthentication or the secret as the URL's last segment, as for\nPostmark."
             }
           ],
           "description": "Who sends a trigger's webhooks, which decides how a delivery is\nverified and read."
@@ -22825,6 +22891,27 @@
                 "type": "string"
               },
               "description": "Text the event's title or body contains, ignoring case, such as a\nmention."
+            },
+            "sender": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only, and required there: the senders allowed, each an exact\naddress (`alice@example.com`) or a domain (`@example.com`), ignoring\ncase. A delivery from anyone else is refused, and recorded nowhere."
+            },
+            "recipient": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only: one of the message's recipients (To, Cc or the\nenvelope's), as an address or a `@domain`."
+            },
+            "subject_contains": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only: text the subject contains, ignoring case."
             }
           },
           "description": "Field matchers on the normalized event, checked when the trigger is\ncreated. Every non-empty field must match (any one of its values);\nempty matches anything."
@@ -24214,6 +24301,21 @@
               "type": "string",
               "const": "generic",
               "description": "`X-Branchyard-Signature: sha256=<hex>` over any JSON object."
+            },
+            {
+              "type": "string",
+              "const": "postmark",
+              "description": "Postmark's inbound webhook (JSON): HTTP Basic authentication with\nthe trigger's secret as the password, or the secret as the URL's\nlast segment; Postmark signs nothing."
+            },
+            {
+              "type": "string",
+              "const": "mailgun",
+              "description": "Mailgun's route forwarding (a form, or JSON to a URL ending in\n`json`): HMAC-SHA256 with the webhook signing key over the\ntimestamp and token (form) or the timestamp and body (JSON)."
+            },
+            {
+              "type": "string",
+              "const": "sendgrid",
+              "description": "SendGrid's Inbound Parse (multipart form): HTTP Basic\nauthentication or the secret as the URL's last segment, as for\nPostmark."
             }
           ],
           "description": "Who sends a trigger's webhooks, which decides how a delivery is\nverified and read."
@@ -24263,6 +24365,27 @@
                 "type": "string"
               },
               "description": "Text the event's title or body contains, ignoring case, such as a\nmention."
+            },
+            "sender": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only, and required there: the senders allowed, each an exact\naddress (`alice@example.com`) or a domain (`@example.com`), ignoring\ncase. A delivery from anyone else is refused, and recorded nowhere."
+            },
+            "recipient": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only: one of the message's recipients (To, Cc or the\nenvelope's), as an address or a `@domain`."
+            },
+            "subject_contains": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only: text the subject contains, ignoring case."
             }
           },
           "description": "Field matchers on the normalized event, checked when the trigger is\ncreated. Every non-empty field must match (any one of its values);\nempty matches anything."
@@ -25671,6 +25794,21 @@
               "type": "string",
               "const": "generic",
               "description": "`X-Branchyard-Signature: sha256=<hex>` over any JSON object."
+            },
+            {
+              "type": "string",
+              "const": "postmark",
+              "description": "Postmark's inbound webhook (JSON): HTTP Basic authentication with\nthe trigger's secret as the password, or the secret as the URL's\nlast segment; Postmark signs nothing."
+            },
+            {
+              "type": "string",
+              "const": "mailgun",
+              "description": "Mailgun's route forwarding (a form, or JSON to a URL ending in\n`json`): HMAC-SHA256 with the webhook signing key over the\ntimestamp and token (form) or the timestamp and body (JSON)."
+            },
+            {
+              "type": "string",
+              "const": "sendgrid",
+              "description": "SendGrid's Inbound Parse (multipart form): HTTP Basic\nauthentication or the secret as the URL's last segment, as for\nPostmark."
             }
           ],
           "description": "Who sends a trigger's webhooks, which decides how a delivery is\nverified and read."
@@ -25720,6 +25858,27 @@
                 "type": "string"
               },
               "description": "Text the event's title or body contains, ignoring case, such as a\nmention."
+            },
+            "sender": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only, and required there: the senders allowed, each an exact\naddress (`alice@example.com`) or a domain (`@example.com`), ignoring\ncase. A delivery from anyone else is refused, and recorded nowhere."
+            },
+            "recipient": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only: one of the message's recipients (To, Cc or the\nenvelope's), as an address or a `@domain`."
+            },
+            "subject_contains": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only: text the subject contains, ignoring case."
             }
           },
           "description": "Field matchers on the normalized event, checked when the trigger is\ncreated. Every non-empty field must match (any one of its values);\nempty matches anything."
@@ -27124,6 +27283,21 @@
               "type": "string",
               "const": "generic",
               "description": "`X-Branchyard-Signature: sha256=<hex>` over any JSON object."
+            },
+            {
+              "type": "string",
+              "const": "postmark",
+              "description": "Postmark's inbound webhook (JSON): HTTP Basic authentication with\nthe trigger's secret as the password, or the secret as the URL's\nlast segment; Postmark signs nothing."
+            },
+            {
+              "type": "string",
+              "const": "mailgun",
+              "description": "Mailgun's route forwarding (a form, or JSON to a URL ending in\n`json`): HMAC-SHA256 with the webhook signing key over the\ntimestamp and token (form) or the timestamp and body (JSON)."
+            },
+            {
+              "type": "string",
+              "const": "sendgrid",
+              "description": "SendGrid's Inbound Parse (multipart form): HTTP Basic\nauthentication or the secret as the URL's last segment, as for\nPostmark."
             }
           ],
           "description": "Who sends a trigger's webhooks, which decides how a delivery is\nverified and read."
@@ -27173,6 +27347,27 @@
                 "type": "string"
               },
               "description": "Text the event's title or body contains, ignoring case, such as a\nmention."
+            },
+            "sender": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only, and required there: the senders allowed, each an exact\naddress (`alice@example.com`) or a domain (`@example.com`), ignoring\ncase. A delivery from anyone else is refused, and recorded nowhere."
+            },
+            "recipient": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only: one of the message's recipients (To, Cc or the\nenvelope's), as an address or a `@domain`."
+            },
+            "subject_contains": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Email only: text the subject contains, ignoring case."
             }
           },
           "description": "Field matchers on the normalized event, checked when the trigger is\ncreated. Every non-empty field must match (any one of its values);\nempty matches anything."
@@ -28427,15 +28622,15 @@
       "properties": {
         "source": {
           "type": "string",
-          "description": "`github`, `slack`, `linear` or `generic`."
+          "description": "`github`, `slack`, `linear`, `generic`, `postmark`, `mailgun` or\n`sendgrid`."
         },
         "kind": {
           "type": "string",
-          "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`."
+          "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`, `email.received`."
         },
         "id": {
           "type": "string",
-          "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, else a hash of the body. With the trigger's,\nthe key that keeps a redelivery from firing twice."
+          "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, an email's `Message-ID`, else a hash of the\nbody. With the trigger's,\nthe key that keeps a redelivery from firing twice."
         },
         "delivery": {
           "type": [
@@ -28498,8 +28693,19 @@
             "null"
           ]
         },
+        "email": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmailMessage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "An email's message, read from the provider's delivery."
+        },
         "payload": {
-          "description": "The delivery's body as sent.",
+          "description": "The delivery's body as sent; for an email, the [`EmailMessage`]\nwith its text instead (never attachments' contents or HTML).",
           "default": null
         }
       },
@@ -28510,7 +28716,123 @@
       ],
       "description": "An event from any source, in one shape.",
       "title": "TriggerEvent",
-      "$schema": "https://json-schema.org/draft/2020-12/schema"
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "EmailMessage": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "description": "The From address, lowercased."
+            },
+            "from_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "To addresses, lowercased."
+            },
+            "cc": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "envelope_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Where the provider delivered it (the envelope's recipients), when it\nsays."
+            },
+            "subject": {
+              "type": "string",
+              "default": ""
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The `Message-ID` header, without its angle brackets."
+            },
+            "date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string",
+              "description": "The plain text body, or the HTML body with its markup removed; at\nmost 64 KiB.",
+              "default": ""
+            },
+            "text_truncated": {
+              "type": "boolean",
+              "description": "Whether `text` was cut."
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EmailAttachment"
+              },
+              "description": "What the attachments are; never their contents."
+            },
+            "spf": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's SPF verdict (`pass`, `fail`, `softfail`, ...), when\nit gives one."
+            },
+            "dkim": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's DKIM verdict, when it gives one."
+            },
+            "spam": {
+              "type": "boolean",
+              "description": "The provider flagged it as spam."
+            }
+          },
+          "required": [
+            "from"
+          ],
+          "description": "An inbound email, as an email trigger reads it."
+        },
+        "EmailAttachment": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "In bytes, when the provider says or it can be measured."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "description": "One attachment's metadata."
+        }
+      }
     },
     "PrecheckResult": {
       "type": "object",
@@ -28644,15 +28966,15 @@
           "properties": {
             "source": {
               "type": "string",
-              "description": "`github`, `slack`, `linear` or `generic`."
+              "description": "`github`, `slack`, `linear`, `generic`, `postmark`, `mailgun` or\n`sendgrid`."
             },
             "kind": {
               "type": "string",
-              "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`."
+              "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`, `email.received`."
             },
             "id": {
               "type": "string",
-              "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, else a hash of the body. With the trigger's,\nthe key that keeps a redelivery from firing twice."
+              "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, an email's `Message-ID`, else a hash of the\nbody. With the trigger's,\nthe key that keeps a redelivery from firing twice."
             },
             "delivery": {
               "type": [
@@ -28715,8 +29037,19 @@
                 "null"
               ]
             },
+            "email": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EmailMessage"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An email's message, read from the provider's delivery."
+            },
             "payload": {
-              "description": "The delivery's body as sent.",
+              "description": "The delivery's body as sent; for an email, the [`EmailMessage`]\nwith its text instead (never attachments' contents or HTML).",
               "default": null
             }
           },
@@ -28726,6 +29059,120 @@
             "id"
           ],
           "description": "An event from any source, in one shape."
+        },
+        "EmailMessage": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "description": "The From address, lowercased."
+            },
+            "from_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "To addresses, lowercased."
+            },
+            "cc": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "envelope_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Where the provider delivered it (the envelope's recipients), when it\nsays."
+            },
+            "subject": {
+              "type": "string",
+              "default": ""
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The `Message-ID` header, without its angle brackets."
+            },
+            "date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string",
+              "description": "The plain text body, or the HTML body with its markup removed; at\nmost 64 KiB.",
+              "default": ""
+            },
+            "text_truncated": {
+              "type": "boolean",
+              "description": "Whether `text` was cut."
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EmailAttachment"
+              },
+              "description": "What the attachments are; never their contents."
+            },
+            "spf": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's SPF verdict (`pass`, `fail`, `softfail`, ...), when\nit gives one."
+            },
+            "dkim": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's DKIM verdict, when it gives one."
+            },
+            "spam": {
+              "type": "boolean",
+              "description": "The provider flagged it as spam."
+            }
+          },
+          "required": [
+            "from"
+          ],
+          "description": "An inbound email, as an email trigger reads it."
+        },
+        "EmailAttachment": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "In bytes, when the provider says or it can be measured."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "description": "One attachment's metadata."
         },
         "PrecheckResult": {
           "type": "object",
@@ -30145,15 +30592,15 @@
           "properties": {
             "source": {
               "type": "string",
-              "description": "`github`, `slack`, `linear` or `generic`."
+              "description": "`github`, `slack`, `linear`, `generic`, `postmark`, `mailgun` or\n`sendgrid`."
             },
             "kind": {
               "type": "string",
-              "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`."
+              "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`, `email.received`."
             },
             "id": {
               "type": "string",
-              "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, else a hash of the body. With the trigger's,\nthe key that keeps a redelivery from firing twice."
+              "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, an email's `Message-ID`, else a hash of the\nbody. With the trigger's,\nthe key that keeps a redelivery from firing twice."
             },
             "delivery": {
               "type": [
@@ -30216,8 +30663,19 @@
                 "null"
               ]
             },
+            "email": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EmailMessage"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An email's message, read from the provider's delivery."
+            },
             "payload": {
-              "description": "The delivery's body as sent.",
+              "description": "The delivery's body as sent; for an email, the [`EmailMessage`]\nwith its text instead (never attachments' contents or HTML).",
               "default": null
             }
           },
@@ -30227,6 +30685,120 @@
             "id"
           ],
           "description": "An event from any source, in one shape."
+        },
+        "EmailMessage": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "description": "The From address, lowercased."
+            },
+            "from_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "To addresses, lowercased."
+            },
+            "cc": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "envelope_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Where the provider delivered it (the envelope's recipients), when it\nsays."
+            },
+            "subject": {
+              "type": "string",
+              "default": ""
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The `Message-ID` header, without its angle brackets."
+            },
+            "date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string",
+              "description": "The plain text body, or the HTML body with its markup removed; at\nmost 64 KiB.",
+              "default": ""
+            },
+            "text_truncated": {
+              "type": "boolean",
+              "description": "Whether `text` was cut."
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EmailAttachment"
+              },
+              "description": "What the attachments are; never their contents."
+            },
+            "spf": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's SPF verdict (`pass`, `fail`, `softfail`, ...), when\nit gives one."
+            },
+            "dkim": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's DKIM verdict, when it gives one."
+            },
+            "spam": {
+              "type": "boolean",
+              "description": "The provider flagged it as spam."
+            }
+          },
+          "required": [
+            "from"
+          ],
+          "description": "An inbound email, as an email trigger reads it."
+        },
+        "EmailAttachment": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "In bytes, when the provider says or it can be measured."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "description": "One attachment's metadata."
         },
         "PrecheckResult": {
           "type": "object",
@@ -30475,15 +31047,15 @@
           "properties": {
             "source": {
               "type": "string",
-              "description": "`github`, `slack`, `linear` or `generic`."
+              "description": "`github`, `slack`, `linear`, `generic`, `postmark`, `mailgun` or\n`sendgrid`."
             },
             "kind": {
               "type": "string",
-              "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`."
+              "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`, `email.received`."
             },
             "id": {
               "type": "string",
-              "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, else a hash of the body. With the trigger's,\nthe key that keeps a redelivery from firing twice."
+              "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, an email's `Message-ID`, else a hash of the\nbody. With the trigger's,\nthe key that keeps a redelivery from firing twice."
             },
             "delivery": {
               "type": [
@@ -30546,8 +31118,19 @@
                 "null"
               ]
             },
+            "email": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EmailMessage"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An email's message, read from the provider's delivery."
+            },
             "payload": {
-              "description": "The delivery's body as sent.",
+              "description": "The delivery's body as sent; for an email, the [`EmailMessage`]\nwith its text instead (never attachments' contents or HTML).",
               "default": null
             }
           },
@@ -30557,6 +31140,120 @@
             "id"
           ],
           "description": "An event from any source, in one shape."
+        },
+        "EmailMessage": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "description": "The From address, lowercased."
+            },
+            "from_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "To addresses, lowercased."
+            },
+            "cc": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "envelope_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Where the provider delivered it (the envelope's recipients), when it\nsays."
+            },
+            "subject": {
+              "type": "string",
+              "default": ""
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The `Message-ID` header, without its angle brackets."
+            },
+            "date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string",
+              "description": "The plain text body, or the HTML body with its markup removed; at\nmost 64 KiB.",
+              "default": ""
+            },
+            "text_truncated": {
+              "type": "boolean",
+              "description": "Whether `text` was cut."
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EmailAttachment"
+              },
+              "description": "What the attachments are; never their contents."
+            },
+            "spf": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's SPF verdict (`pass`, `fail`, `softfail`, ...), when\nit gives one."
+            },
+            "dkim": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's DKIM verdict, when it gives one."
+            },
+            "spam": {
+              "type": "boolean",
+              "description": "The provider flagged it as spam."
+            }
+          },
+          "required": [
+            "from"
+          ],
+          "description": "An inbound email, as an email trigger reads it."
+        },
+        "EmailAttachment": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "In bytes, when the provider says or it can be measured."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "description": "One attachment's metadata."
         },
         "PrecheckResult": {
           "type": "object",
@@ -30818,15 +31515,15 @@
           "properties": {
             "source": {
               "type": "string",
-              "description": "`github`, `slack`, `linear` or `generic`."
+              "description": "`github`, `slack`, `linear`, `generic`, `postmark`, `mailgun` or\n`sendgrid`."
             },
             "kind": {
               "type": "string",
-              "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`."
+              "description": "Such as `issues.opened`, `issue_comment.created`,\n`pull_request.synchronize`, `check_suite.failure`, `app_mention`,\n`issue.create`, `email.received`."
             },
             "id": {
               "type": "string",
-              "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, else a hash of the body. With the trigger's,\nthe key that keeps a redelivery from firing twice."
+              "description": "The event's ID, from the signed bytes only: Slack's `event_id`, a\ngeneric body's `id`, an email's `Message-ID`, else a hash of the\nbody. With the trigger's,\nthe key that keeps a redelivery from firing twice."
             },
             "delivery": {
               "type": [
@@ -30889,8 +31586,19 @@
                 "null"
               ]
             },
+            "email": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EmailMessage"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An email's message, read from the provider's delivery."
+            },
             "payload": {
-              "description": "The delivery's body as sent.",
+              "description": "The delivery's body as sent; for an email, the [`EmailMessage`]\nwith its text instead (never attachments' contents or HTML).",
               "default": null
             }
           },
@@ -30900,6 +31608,120 @@
             "id"
           ],
           "description": "An event from any source, in one shape."
+        },
+        "EmailMessage": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "description": "The From address, lowercased."
+            },
+            "from_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "To addresses, lowercased."
+            },
+            "cc": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "envelope_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Where the provider delivered it (the envelope's recipients), when it\nsays."
+            },
+            "subject": {
+              "type": "string",
+              "default": ""
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The `Message-ID` header, without its angle brackets."
+            },
+            "date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string",
+              "description": "The plain text body, or the HTML body with its markup removed; at\nmost 64 KiB.",
+              "default": ""
+            },
+            "text_truncated": {
+              "type": "boolean",
+              "description": "Whether `text` was cut."
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EmailAttachment"
+              },
+              "description": "What the attachments are; never their contents."
+            },
+            "spf": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's SPF verdict (`pass`, `fail`, `softfail`, ...), when\nit gives one."
+            },
+            "dkim": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The provider's DKIM verdict, when it gives one."
+            },
+            "spam": {
+              "type": "boolean",
+              "description": "The provider flagged it as spam."
+            }
+          },
+          "required": [
+            "from"
+          ],
+          "description": "An inbound email, as an email trigger reads it."
+        },
+        "EmailAttachment": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "In bytes, when the provider says or it can be measured."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "description": "One attachment's metadata."
         },
         "PrecheckResult": {
           "type": "object",

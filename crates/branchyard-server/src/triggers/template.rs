@@ -4,6 +4,7 @@
 //! |---|---|
 //! | `{{event.source}}`, `kind`, `id`, `repo`, `author`, `title`, `text`, `url`, `number`, `branch`, `channel` | The normalized event's field; empty when it has none |
 //! | `{{event.labels}}` | Its labels, comma-separated |
+//! | `{{event.from}}`, `to`, `cc`, `subject`, `message_id`, `attachments` | An email's sender, recipients (comma-separated), subject, `Message-ID`, and its attachments as `name (type, N bytes)`, comma-separated; empty for other events |
 //! | `{{event.payload.a.b.0.c}}` | Any value of the delivery body, by path (a number indexes an array); a string as is, anything else as JSON |
 //! | `{{trigger.name}}`, `{{trigger.id}}`, `{{trigger.repo}}` | The trigger's |
 //! | `{{scheduled_at}}` | The run's scheduled time (or arrival time, for an event), RFC 3339 in UTC |
@@ -17,8 +18,24 @@ use branchyard_client::triggers::TriggerEvent;
 use serde_json::Value;
 
 const EVENT_FIELDS: &[&str] = &[
-    "source", "kind", "id", "repo", "author", "title", "text", "url", "number", "branch",
-    "channel", "labels",
+    "source",
+    "kind",
+    "id",
+    "repo",
+    "author",
+    "title",
+    "text",
+    "url",
+    "number",
+    "branch",
+    "channel",
+    "labels",
+    "from",
+    "to",
+    "cc",
+    "subject",
+    "message_id",
+    "attachments",
 ];
 
 /// The values a template is rendered with.
@@ -117,6 +134,35 @@ fn event_value(e: &TriggerEvent, field: &str) -> String {
         "branch" => some(&e.branch),
         "channel" => some(&e.channel),
         "labels" => e.labels.join(", "),
+        "from" | "to" | "cc" | "subject" | "message_id" | "attachments" => e
+            .email
+            .as_ref()
+            .map(|m| match field {
+                "from" => m.from.clone(),
+                "to" => m.to.join(", "),
+                "cc" => m.cc.join(", "),
+                "subject" => m.subject.clone(),
+                "message_id" => m.message_id.clone().unwrap_or_default(),
+                _ => m
+                    .attachments
+                    .iter()
+                    .map(|a| {
+                        let mut about = Vec::new();
+                        if !a.content_type.is_empty() {
+                            about.push(a.content_type.clone());
+                        }
+                        if let Some(size) = a.size {
+                            about.push(format!("{size} bytes"));
+                        }
+                        match about.is_empty() {
+                            true => a.name.clone(),
+                            false => format!("{} ({})", a.name, about.join(", ")),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+            .unwrap_or_default(),
         _ => field
             .strip_prefix("payload.")
             .map(|p| payload_value(&e.payload, p))
@@ -241,6 +287,42 @@ mod tests {
         assert!(err.contains("not a placeholder"), "{err}");
         let err = check("hello {{event.title", true, "prompt").unwrap_err();
         assert!(err.contains("never closed"), "{err}");
+    }
+
+    #[test]
+    fn email_fields_render_and_are_empty_for_other_events() {
+        use branchyard_client::triggers::{EmailAttachment, EmailMessage};
+        let mut e = event();
+        assert_eq!(render("[{{event.from}}]", &cx(Some(&e))).unwrap(), "[]");
+        e.email = Some(EmailMessage {
+            from: "alice@example.com".into(),
+            to: vec!["ops@by.example".into(), "b@by.example".into()],
+            subject: "Deploy failed".into(),
+            message_id: Some("m1@example.com".into()),
+            attachments: vec![
+                EmailAttachment {
+                    name: "log.txt".into(),
+                    content_type: "text/plain".into(),
+                    size: Some(12),
+                },
+                EmailAttachment {
+                    name: "x".into(),
+                    ..EmailAttachment::default()
+                },
+            ],
+            ..EmailMessage::default()
+        });
+        assert!(check("{{event.from}} {{event.attachments}}", true, "prompt").is_ok());
+        assert_eq!(
+            render(
+                "{{event.from}} -> {{event.to}}: {{event.subject}} <{{event.message_id}}> \
+                 [{{event.attachments}}]",
+                &cx(Some(&e))
+            )
+            .unwrap(),
+            "alice@example.com -> ops@by.example, b@by.example: Deploy failed <m1@example.com> \
+             [log.txt (text/plain, 12 bytes), x]"
+        );
     }
 
     #[test]

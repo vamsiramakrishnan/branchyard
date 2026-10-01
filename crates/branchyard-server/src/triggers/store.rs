@@ -15,6 +15,9 @@
 //!   fence holds.
 //! - A run's key (`event:<id>`, `schedule:<ms>`) is unique per trigger,
 //!   so a redelivered webhook finds the run its first delivery recorded.
+//! - [`TriggerStore::claim_nonce`] spends a delivery's one-time token
+//!   (Mailgun's form `token`) for the run key it came with, so the same
+//!   token cannot carry another body within its replay window.
 //!
 //! Counting failures toward auto-pause happens in the transaction that
 //! records a run's failure or its task's outcome.
@@ -117,6 +120,18 @@ pub trait TriggerStore: Send + Sync {
         -> io::Result<Accounted>;
     /// A trigger's runs, newest first.
     fn runs(&self, trigger_id: &str, limit: usize) -> io::Result<Vec<TriggerRun>>;
+    /// Spend `nonce` for `key` until `expires_ms`, forgetting the
+    /// trigger's nonces expired by `now_ms` first. Returns the key it was
+    /// first spent for: `key` itself when new (or for a redelivery of the
+    /// same event), another when it carried a different event.
+    fn claim_nonce(
+        &self,
+        trigger_id: &str,
+        nonce: &str,
+        key: &str,
+        now_ms: u64,
+        expires_ms: u64,
+    ) -> io::Result<String>;
 }
 
 fn parse<T: serde::de::DeserializeOwned>(what: &str, id: &str, body: &str) -> io::Result<T> {
@@ -232,6 +247,13 @@ const SQLITE_SCHEMA: &str = "
     );
     CREATE UNIQUE INDEX IF NOT EXISTS trigger_runs_key ON trigger_runs (trigger_id, key);
     CREATE INDEX IF NOT EXISTS trigger_runs_state ON trigger_runs (state, settled);
+    CREATE TABLE IF NOT EXISTS trigger_nonces (
+        trigger_id TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        key TEXT NOT NULL,
+        expires_ms INTEGER NOT NULL,
+        PRIMARY KEY (trigger_id, nonce)
+    );
 ";
 
 fn sql(error: rusqlite::Error) -> io::Error {
@@ -526,6 +548,8 @@ impl TriggerStore for SqliteTriggers {
         self.immediate(|tx| {
             tx.execute("DELETE FROM trigger_runs WHERE trigger_id = ?1", [id])
                 .map_err(sql)?;
+            tx.execute("DELETE FROM trigger_nonces WHERE trigger_id = ?1", [id])
+                .map_err(sql)?;
             let rows = tx
                 .execute("DELETE FROM triggers WHERE id = ?1", [id])
                 .map_err(sql)?;
@@ -764,6 +788,37 @@ impl TriggerStore for SqliteTriggers {
             &[&trigger_id, &limit],
         )
     }
+
+    fn claim_nonce(
+        &self,
+        trigger_id: &str,
+        nonce: &str,
+        key: &str,
+        now_ms: u64,
+        expires_ms: u64,
+    ) -> io::Result<String> {
+        self.immediate(|tx| {
+            tx.execute(
+                "DELETE FROM trigger_nonces WHERE trigger_id = ?1 AND expires_ms < ?2",
+                rusqlite::params![trigger_id, i(now_ms)],
+            )
+            .map_err(sql)?;
+            tx.execute(
+                "INSERT INTO trigger_nonces (trigger_id, nonce, key, expires_ms) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+                rusqlite::params![trigger_id, nonce, key, i(expires_ms)],
+            )
+            .map_err(sql)?;
+            let first: String = tx
+                .query_row(
+                    "SELECT key FROM trigger_nonces WHERE trigger_id = ?1 AND nonce = ?2",
+                    [trigger_id, nonce],
+                    |r| r.get(0),
+                )
+                .map_err(sql)?;
+            Ok((first, true))
+        })
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -827,6 +882,16 @@ const PG_SCHEMA: &[(&str, &str)] = &[
     (
         "by_trigger_runs_state",
         "CREATE INDEX IF NOT EXISTS by_trigger_runs_state ON by_trigger_runs (state, settled)",
+    ),
+    (
+        "by_trigger_nonces",
+        "CREATE TABLE IF NOT EXISTS by_trigger_nonces (
+            trigger_id TEXT NOT NULL,
+            nonce TEXT NOT NULL,
+            key TEXT NOT NULL,
+            expires_ms BIGINT NOT NULL,
+            PRIMARY KEY (trigger_id, nonce)
+        )",
     ),
 ];
 
@@ -1114,6 +1179,10 @@ impl TriggerStore for PostgresTriggers {
         self.with(move |c| {
             let mut tx = c.transaction()?;
             tx.execute("DELETE FROM by_trigger_runs WHERE trigger_id = $1", &[&id])?;
+            tx.execute(
+                "DELETE FROM by_trigger_nonces WHERE trigger_id = $1",
+                &[&id],
+            )?;
             let rows = tx.execute("DELETE FROM by_triggers WHERE id = $1", &[&id])?;
             tx.commit()?;
             Ok(rows == 1)
@@ -1341,6 +1410,35 @@ impl TriggerStore for PostgresTriggers {
         })?;
         pg_runs(&rows)
     }
+
+    fn claim_nonce(
+        &self,
+        trigger_id: &str,
+        nonce: &str,
+        key: &str,
+        now_ms: u64,
+        expires_ms: u64,
+    ) -> io::Result<String> {
+        let (id, nonce, key) = (trigger_id.to_owned(), nonce.to_owned(), key.to_owned());
+        self.with(move |c| {
+            let mut tx = c.transaction()?;
+            tx.execute(
+                "DELETE FROM by_trigger_nonces WHERE trigger_id = $1 AND expires_ms < $2",
+                &[&id, &i(now_ms)],
+            )?;
+            tx.execute(
+                "INSERT INTO by_trigger_nonces (trigger_id, nonce, key, expires_ms) \
+                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                &[&id, &nonce, &key, &i(expires_ms)],
+            )?;
+            let row = tx.query_one(
+                "SELECT key FROM by_trigger_nonces WHERE trigger_id = $1 AND nonce = $2",
+                &[&id, &nonce],
+            )?;
+            tx.commit()?;
+            Ok(row.get(0))
+        })
+    }
 }
 
 /// The store's contract, run against each backend: by this module's
@@ -1422,6 +1520,41 @@ pub mod conformance {
         schedules_are_claimed_once(store);
         runs_are_recorded_once_and_claimed_by_fence(store);
         failures_pause_and_successes_reset(store);
+        nonces_are_spent_once(store);
+    }
+
+    /// A one-time token is spent for the first key it came with: the
+    /// same key again is a redelivery, another key a replay; expired
+    /// tokens are forgotten, and a removed trigger's go with it.
+    pub fn nonces_are_spent_once(store: &dyn TriggerStore) {
+        let t = trigger("acme", "mail", false);
+        assert!(store.create(&t).unwrap());
+        let claim = |nonce: &str, key: &str, now: u64| {
+            store
+                .claim_nonce(&t.id, nonce, key, now, now + 600_000)
+                .unwrap()
+        };
+        assert_eq!(claim("tok-1", "event:a", 1_000), "event:a");
+        assert_eq!(claim("tok-1", "event:a", 2_000), "event:a");
+        assert_eq!(claim("tok-1", "event:b", 3_000), "event:a");
+        assert_eq!(claim("tok-2", "event:b", 3_000), "event:b");
+        // Past its expiry the token is forgotten, and may be spent again
+        // (the replay window refuses so old a delivery before this).
+        assert_eq!(claim("tok-1", "event:c", 700_000), "event:c");
+        // Another trigger's token of the same value is its own.
+        let other = trigger("acme", "mail-2", false);
+        assert!(store.create(&other).unwrap());
+        assert_eq!(
+            store
+                .claim_nonce(&other.id, "tok-2", "event:z", 3_000, 603_000)
+                .unwrap(),
+            "event:z"
+        );
+        assert!(store.remove(&t.id).unwrap());
+        assert!(store.create(&t).unwrap());
+        assert_eq!(claim("tok-2", "event:y", 4_000), "event:y");
+        assert!(store.remove(&t.id).unwrap());
+        assert!(store.remove(&other.id).unwrap());
     }
 
     pub fn crud_and_tenants(store: &dyn TriggerStore) {

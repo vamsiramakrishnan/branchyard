@@ -11,11 +11,12 @@
 //!   scheduled time, so nothing fires twice.
 //! - [`routes`]: the HTTP API, and the unauthenticated, signed webhook
 //!   endpoint `POST /v1/triggers/{id}/fire`.
-//! - [`events`], [`cron`], [`template`], [`precheck`], [`target`]: the
-//!   parts, each testable alone.
+//! - [`events`], [`email`], [`cron`], [`template`], [`precheck`],
+//!   [`target`]: the parts, each testable alone.
 
 pub mod cron;
 pub mod dispatch;
+pub mod email;
 pub mod engine;
 pub mod events;
 pub mod precheck;
@@ -226,6 +227,16 @@ pub fn validate(mut spec: TriggerSpec) -> Result<TriggerSpec, String> {
     if spec.repo.trim().is_empty() {
         return Err("repo is empty".into());
     }
+    if let When::Event { source } = &spec.when {
+        if source.is_email() && spec.conditions.sender.is_empty() {
+            return Err(format!(
+                "an email trigger needs a sender allowlist: conditions.sender (--if \
+                 sender=alice@example.com or --if sender=@example.com); without one, anyone \
+                 who can send {} mail could start a task",
+                source.as_str()
+            ));
+        }
+    }
     let event = match &spec.when {
         When::Cron { .. } => {
             Schedule::of(&spec.when)?;
@@ -303,6 +314,9 @@ fn check_conditions(conditions: &Conditions, when: &When) -> Result<(), String> 
         ("author", &conditions.author),
         ("branch", &conditions.branch),
         ("text_contains", &conditions.text_contains),
+        ("sender", &conditions.sender),
+        ("recipient", &conditions.recipient),
+        ("subject_contains", &conditions.subject_contains),
     ];
     for (field, values) in fields {
         if let Some(blank) = values.iter().find(|v| v.trim().is_empty()) {
@@ -321,7 +335,52 @@ fn check_conditions(conditions: &Conditions, when: &When) -> Result<(), String> 
     if *source == EventSource::Slack && !conditions.branch.is_empty() {
         return Err("conditions.branch: Slack events have no branch".into());
     }
+    let email_only = [
+        ("sender", &conditions.sender),
+        ("recipient", &conditions.recipient),
+        ("subject_contains", &conditions.subject_contains),
+    ];
+    match source.is_email() {
+        false => {
+            if let Some((field, _)) = email_only.iter().find(|(_, v)| !v.is_empty()) {
+                return Err(format!(
+                    "conditions.{field} matches emails; {} sends none",
+                    source.as_str()
+                ));
+            }
+        }
+        true => {
+            for (field, values) in [
+                ("sender", &conditions.sender),
+                ("recipient", &conditions.recipient),
+            ] {
+                if let Some(bad) = values.iter().find(|v| !email::valid_entry(v)) {
+                    return Err(format!(
+                        "conditions.{field}: {bad:?} is neither an address nor a @domain"
+                    ));
+                }
+            }
+            if !conditions.branch.is_empty() {
+                return Err("conditions.branch: an email has no branch".into());
+            }
+        }
+    }
     Ok(())
+}
+
+/// The sender allowlist of an email trigger, checked before a delivery is
+/// recorded: `Ok` for any other source.
+pub fn sender_allowed(conditions: &Conditions, event: &TriggerEvent) -> Result<(), String> {
+    let Some(message) = &event.email else {
+        return Ok(());
+    };
+    match email::allowed(&conditions.sender, &message.from) {
+        true => Ok(()),
+        false => Err(format!(
+            "sender {} is not on this trigger's allowlist",
+            message.from
+        )),
+    }
 }
 
 /// `Ok` when `event` matches every condition, else which one it missed.
@@ -377,6 +436,42 @@ pub fn matches(conditions: &Conditions, event: &TriggerEvent) -> Result<(), Stri
                 false => event.labels.join(", "),
             }
         ));
+    }
+    if event.email.is_some() || !conditions.sender.is_empty() {
+        sender_allowed(conditions, event)?;
+        if !conditions.sender.is_empty() && event.email.is_none() {
+            return Err("the event is not an email".into());
+        }
+    }
+    if !conditions.recipient.is_empty() {
+        let to = event
+            .email
+            .as_ref()
+            .map(email::recipients)
+            .unwrap_or_default();
+        if !to.iter().any(|a| email::allowed(&conditions.recipient, a)) {
+            return Err(format!(
+                "no recipient {} (it went to {})",
+                conditions.recipient.join(" or "),
+                match to.is_empty() {
+                    true => "nobody it names".to_owned(),
+                    false => to.join(", "),
+                }
+            ));
+        }
+    }
+    if !conditions.subject_contains.is_empty() {
+        let subject = lower(event.title.as_deref().unwrap_or(""));
+        if !conditions
+            .subject_contains
+            .iter()
+            .any(|w| subject.contains(&lower(w)))
+        {
+            return Err(format!(
+                "its subject does not contain {}",
+                conditions.subject_contains.join(" or ")
+            ));
+        }
     }
     if !conditions.text_contains.is_empty() {
         let haystack = lower(&format!(
@@ -487,6 +582,71 @@ mod tests {
                 timeout_seconds: 1
             })
         );
+    }
+
+    #[test]
+    fn email_triggers_need_a_sender_allowlist_and_email_fields_need_email() {
+        let postmark = When::Event {
+            source: EventSource::Postmark,
+        };
+        let err = validate(spec(postmark.clone())).unwrap_err();
+        assert!(err.contains("sender allowlist"), "{err}");
+        let mut s = spec(postmark.clone());
+        s.conditions.sender = vec!["alice@example.com".into(), "@corp.example".into()];
+        s.conditions.recipient = vec!["@by.example".into()];
+        s.conditions.subject_contains = vec!["deploy".into()];
+        s.conditions.kind = vec!["email.received".into()];
+        assert!(validate(s.clone()).is_ok());
+        s.conditions.sender.push("not an address".into());
+        assert!(validate(s)
+            .unwrap_err()
+            .contains("neither an address nor a @domain"));
+        let mut s = spec(postmark);
+        s.conditions.sender = vec!["@corp.example".into()];
+        s.conditions.kind = vec!["issues.opened".into()];
+        assert!(validate(s).unwrap_err().contains("conditions.kind"));
+        let mut s = spec(github());
+        s.conditions.sender = vec!["@corp.example".into()];
+        assert!(validate(s).unwrap_err().contains("matches emails"));
+    }
+
+    #[test]
+    fn email_conditions_match_sender_recipient_and_subject() {
+        use branchyard_client::triggers::EmailMessage;
+        let e = TriggerEvent {
+            source: "mailgun".into(),
+            kind: "email.received".into(),
+            id: "m1".into(),
+            author: Some("bob@corp.example".into()),
+            title: Some("Deploy FAILED".into()),
+            email: Some(EmailMessage {
+                from: "bob@corp.example".into(),
+                to: vec!["ops@by.example".into()],
+                envelope_to: vec!["agent@by.example".into()],
+                subject: "Deploy FAILED".into(),
+                ..EmailMessage::default()
+            }),
+            ..TriggerEvent::default()
+        };
+        let mut c = Conditions {
+            sender: vec!["@corp.example".into()],
+            recipient: vec!["agent@by.example".into()],
+            subject_contains: vec!["failed".into()],
+            ..Conditions::default()
+        };
+        assert_eq!(matches(&c, &e), Ok(()));
+        assert_eq!(sender_allowed(&c, &e), Ok(()));
+        c.recipient = vec!["@elsewhere.example".into()];
+        assert!(matches(&c, &e).unwrap_err().contains("no recipient"));
+        c.recipient.clear();
+        c.subject_contains = vec!["succeeded".into()];
+        assert!(matches(&c, &e).unwrap_err().contains("subject"));
+        c.subject_contains.clear();
+        c.sender = vec!["alice@corp.example".into()];
+        assert!(sender_allowed(&c, &e)
+            .unwrap_err()
+            .contains("not on this trigger's allowlist"));
+        assert!(matches(&c, &e).is_err());
     }
 
     #[test]

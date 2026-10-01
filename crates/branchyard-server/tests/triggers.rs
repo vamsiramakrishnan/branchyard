@@ -2,9 +2,11 @@
 //! a manual clock: schedules fire once when the clock reaches them, signed
 //! webhooks from GitHub, Slack and generic senders become runs once per
 //! event, failures pause a trigger, prechecks skip runs, and a run recorded
-//! by a server that stopped fires after the restart. With the `postgres`
-//! feature and `BY_TEST_POSTGRES_URL`, the store's conformance suite and
-//! two servers on one database firing a schedule time once.
+//! by a server that stopped fires after the restart; inbound email from
+//! Mailgun and Postmark is authenticated, allowlisted and fired once. With
+//! the `postgres` feature and `BY_TEST_POSTGRES_URL`, the store's
+//! conformance suite, the email deliveries on PostgreSQL, and two servers
+//! on one database firing a schedule time once.
 
 mod common;
 
@@ -12,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use branchyard_client::api::{OperationState, PolicySpec, TaskRequest};
 use branchyard_client::new_key;
 use branchyard_client::triggers::{
@@ -595,6 +598,298 @@ fn a_run_recorded_before_a_restart_fires_after_it() {
     );
 }
 
+/// A delivery to `path` with its own content type.
+fn deliver_mail(
+    server: &Server,
+    path: &str,
+    content_type: &str,
+    extra: &str,
+    body: &str,
+) -> (u16, serde_json::Value) {
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{extra}\
+         Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let (status, _, text) = raw(server.addr, &request);
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// A form value, URL-encoded.
+fn encoded(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' | b'_' => (b as char).to_string(),
+            b' ' => "+".into(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// Mailgun's form for one message, signed with `key` at `timestamp`
+/// (seconds) with `token`.
+fn mailgun_form(key: &str, timestamp: u64, token: &str, from: &str, message_id: &str) -> String {
+    let headers = serde_json::json!([
+        ["From", from],
+        ["To", "agent@by.example"],
+        ["Subject", "Nightly broke"],
+        ["Message-Id", format!("<{message_id}>")]
+    ])
+    .to_string();
+    let signature = sign(key, &[timestamp.to_string().as_bytes(), token.as_bytes()]);
+    [
+        ("recipient", "agent@by.example".to_owned()),
+        ("from", from.to_owned()),
+        ("subject", "Nightly broke".to_owned()),
+        ("body-plain", "The nightly job failed at step 3.".to_owned()),
+        ("message-headers", headers),
+        ("timestamp", timestamp.to_string()),
+        ("token", token.to_owned()),
+        ("signature", signature),
+    ]
+    .iter()
+    .map(|(name, value)| format!("{name}={}", encoded(value)))
+    .collect::<Vec<_>>()
+    .join("&")
+}
+
+/// Email triggers through the server: a Mailgun delivery fires a task
+/// once however it is redelivered, a token replayed with another message
+/// is refused, unsigned deliveries and senders off the allowlist record
+/// nothing; a Postmark delivery is authenticated by its URL's token or a
+/// Basic password. On the store `config` names.
+fn email_deliveries_fire_once(config: Config) {
+    let mut config = config;
+    let clock = with_clock(&mut config);
+    let server = Server::start(config);
+    let client = server.client();
+    let form = "application/x-www-form-urlencoded";
+
+    let mut s = spec(
+        "mail",
+        event(EventSource::Mailgun),
+        "WRITE mail.txt={{event.from}}",
+    );
+    s.secret = Some("mg-key".into());
+    s.conditions = Conditions {
+        sender: vec!["@partner.example".into()],
+        recipient: vec!["agent@by.example".into()],
+        ..Conditions::default()
+    };
+    s.task.name = Some("mail-reply".into());
+    let id = client.create_trigger(&s, &new_key()).unwrap().trigger.id;
+    let path = format!("/v1/triggers/{id}/fire");
+    let now = T0 / 1000;
+
+    let body = mailgun_form(
+        "mg-key",
+        now,
+        "tok-1",
+        "Bob <bob@partner.example>",
+        "m1@partner.example",
+    );
+    let (status, ack) = deliver_mail(&server, &path, form, "", &body);
+    assert_eq!(status, 202, "{ack}");
+    assert_eq!(ack["run"]["key"], "event:m1@partner.example");
+    let runs = runs_when(&client, "mail", "the email to fire", |runs| {
+        runs.iter().any(|r| r.state == RunState::Fired)
+    });
+    let fired = runs[0].clone();
+    assert_eq!(fired.branches, ["mail-reply"]);
+    let email = fired.event.as_ref().unwrap().email.as_ref().unwrap();
+    assert_eq!(email.from, "bob@partner.example");
+    let op = wait(&client, fired.operation.as_ref().unwrap());
+    assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
+    let diff = client.repo("app").diff("mail-reply").unwrap();
+    assert!(diff.contains("+bob@partner.example"), "{diff}");
+
+    // The same delivery again, and Mailgun's retry of the message with a
+    // fresh token and timestamp: the run the first recorded.
+    clock.store(T0 + 60_000, Ordering::SeqCst);
+    let retry = mailgun_form(
+        "mg-key",
+        now + 60,
+        "tok-2",
+        "Bob <bob@partner.example>",
+        "m1@partner.example",
+    );
+    for again in [&body, &retry] {
+        let (status, ack) = deliver_mail(&server, &path, form, "", again);
+        assert_eq!(status, 200, "{ack}");
+        assert_eq!(ack["duplicate"], true);
+        assert_eq!(ack["run"]["id"], serde_json::json!(fired.id));
+    }
+    // A captured token with another message: Mailgun signs only the
+    // timestamp and token, so the signature holds, but the token is spent.
+    let forged = mailgun_form(
+        "mg-key",
+        now,
+        "tok-1",
+        "Bob <bob@partner.example>",
+        "m2@partner.example",
+    );
+    let (status, ack) = deliver_mail(&server, &path, form, "", &forged);
+    assert_eq!(
+        (status, ack["error"]["code"].as_str()),
+        (401, Some("stale_delivery")),
+        "{ack}"
+    );
+    // Too old, unsigned, or signed with another key: refused.
+    let old = mailgun_form(
+        "mg-key",
+        now - 3600,
+        "tok-3",
+        "Bob <bob@partner.example>",
+        "m3@partner.example",
+    );
+    let (status, ack) = deliver_mail(&server, &path, form, "", &old);
+    assert_eq!(
+        (status, ack["error"]["code"].as_str()),
+        (401, Some("stale_delivery"))
+    );
+    let unsigned = "from=bob%40partner.example&subject=x&body-plain=y";
+    let (status, ack) = deliver_mail(&server, &path, form, "", unsigned);
+    assert_eq!(
+        (status, ack["error"]["code"].as_str()),
+        (401, Some("invalid_signature"))
+    );
+    let other_key = mailgun_form(
+        "not-it",
+        now + 60,
+        "tok-4",
+        "Bob <bob@partner.example>",
+        "m4@partner.example",
+    );
+    let (status, _) = deliver_mail(&server, &path, form, "", &other_key);
+    assert_eq!(status, 401);
+    // A signed message from a sender off the allowlist: answered, recorded
+    // nowhere, so the provider does not retry it.
+    let stranger = mailgun_form(
+        "mg-key",
+        now + 60,
+        "tok-5",
+        "Eve <eve@evil.example>",
+        "m5@evil.example",
+    );
+    let (status, ack) = deliver_mail(&server, &path, form, "", &stranger);
+    assert_eq!(status, 200, "{ack}");
+    assert!(
+        ack["ignored"]
+            .as_str()
+            .unwrap()
+            .contains("eve@evil.example is not on this trigger's allowlist"),
+        "{ack}"
+    );
+    let runs = client.trigger_runs("mail", 50).unwrap();
+    assert_eq!(runs.len(), 1, "one run in all of that: {runs:?}");
+
+    // Postmark signs nothing: the secret in the URL, or as a password.
+    let mut p = spec(
+        "postmark",
+        event(EventSource::Postmark),
+        "WRITE pm.txt={{event.message_id}}",
+    );
+    p.conditions.sender = vec!["carol@example.com".into()];
+    p.conditions.subject_contains = vec!["[agent]".into()];
+    let created = client.create_trigger(&p, &new_key()).unwrap();
+    let secret = created.secret.clone().expect("a generated secret");
+    let pid = created.trigger.id;
+    let message = |subject: &str, message_id: &str| {
+        serde_json::json!({
+            "From": "carol@example.com",
+            "FromFull": {"Email": "carol@example.com", "Name": "Carol"},
+            "To": "agent@by.example",
+            "Subject": subject,
+            "MessageID": "pm-1",
+            "TextBody": "please rename the flag",
+            "Headers": [{"Name": "Message-ID", "Value": format!("<{message_id}>")}]
+        })
+        .to_string()
+    };
+    let body = message("[agent] rename", "p1@example.com");
+    let json = "application/json";
+    let (status, _) = deliver_mail(
+        &server,
+        &format!("/v1/triggers/{pid}/fire/wrong"),
+        json,
+        "",
+        &body,
+    );
+    assert_eq!(status, 401);
+    let (status, _) = deliver_mail(
+        &server,
+        &format!("/v1/triggers/{pid}/fire"),
+        json,
+        "",
+        &body,
+    );
+    assert_eq!(status, 401, "no password");
+    let (status, ack) = deliver_mail(
+        &server,
+        &format!("/v1/triggers/{pid}/fire/{secret}"),
+        json,
+        "",
+        &body,
+    );
+    assert_eq!(status, 202, "{ack}");
+    let basic = format!(
+        "Authorization: Basic {}\r\n",
+        base64::engine::general_purpose::STANDARD.encode(format!("branchyard:{secret}"))
+    );
+    let (status, ack) = deliver_mail(
+        &server,
+        &format!("/v1/triggers/{pid}/fire"),
+        json,
+        &basic,
+        &body,
+    );
+    assert_eq!(
+        (status, &ack["duplicate"]),
+        (200, &serde_json::json!(true)),
+        "{ack}"
+    );
+    // Another subject: recorded as skipped by condition.
+    let other = message("hello", "p2@example.com");
+    let (status, ack) = deliver_mail(
+        &server,
+        &format!("/v1/triggers/{pid}/fire"),
+        json,
+        &basic,
+        &other,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(ack["run"]["state"], "skipped_condition");
+    // A trigger of another source has no URL with a token.
+    let mut g = spec("generic", event(EventSource::Generic), "x");
+    g.secret = Some(secret.clone());
+    let gid = client.create_trigger(&g, &new_key()).unwrap().trigger.id;
+    let (status, _) = deliver_mail(
+        &server,
+        &format!("/v1/triggers/{gid}/fire/{secret}"),
+        json,
+        "",
+        &body,
+    );
+    assert_eq!(status, 404);
+    let runs = runs_when(&client, "postmark", "the email to fire", |runs| {
+        runs.iter().any(|r| r.state == RunState::Fired)
+    });
+    let fired = runs.iter().find(|r| r.state == RunState::Fired).unwrap();
+    let op = wait(&client, fired.operation.as_ref().unwrap());
+    assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
+    assert_eq!(runs.len(), 2, "{runs:?}");
+}
+
+#[test]
+fn email_deliveries_are_verified_allowlisted_and_fire_once() {
+    let f = Fixture::new();
+    email_deliveries_fire_once(f.config());
+}
+
 #[cfg(feature = "postgres")]
 mod postgres {
     use super::*;
@@ -623,6 +918,15 @@ mod postgres {
             .unwrap();
         let separator = if base.contains('?') { '&' } else { '?' };
         Some(format!("{base}{separator}options=-csearch_path%3D{schema}"))
+    }
+
+    #[test]
+    fn email_deliveries_on_postgres_fire_once() {
+        let Some(url) = database() else { return };
+        let f = Fixture::new();
+        let mut config = f.config();
+        config.database = Some(url);
+        email_deliveries_fire_once(config);
     }
 
     #[test]
