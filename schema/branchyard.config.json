@@ -88,6 +88,13 @@
     "trackers": {
       "$ref": "#/$defs/Trackers",
       "description": "Issue trackers for `--issue` besides GitHub (docs/pull-requests.md):\neach one's API address and, instead of a token in the environment,\na connector gateway tool to fetch issues through."
+    },
+    "recipes": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RecipeConfig"
+      },
+      "description": "Environment recipes (docs/recipes.md): `[recipes.NAME]`, scripts\nthat create, suspend, resume and destroy a machine and print how to\nreach it. A repository's recipes run only once you trust them (`by\nrecipe trust NAME`); the user file's need no trust, and replace a\nrepository's recipe of the same name."
     }
   },
   "title": "Branchyard configuration",
@@ -236,7 +243,7 @@
             "string",
             "null"
           ],
-          "description": "The server's URL, as `--remote`."
+          "description": "The server's URL, as `--remote`: `http(s)://host:port`,\n`unix:/path/to/socket`, or `ssh://[user@]host[:port]/path/to/repo`\nfor a server `by` starts there (docs/remote-ssh.md)."
         },
         "token_file": {
           "type": [
@@ -889,6 +896,64 @@
         }
       },
       "description": "One tracker in `[trackers]`. Never a credential: tokens come from the\nenvironment (docs/pull-requests.md) or the connector gateway."
+    },
+    "RecipeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For people: what the machine is."
+        },
+        "create": {
+          "type": "string",
+          "description": "Creates a machine and prints its result (docs/recipes.md)."
+        },
+        "suspend": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Freezes the machine; with `resume`, the provider's pause."
+        },
+        "resume": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Continues a suspended machine and prints its result again."
+        },
+        "destroy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Releases the machine; `\"none\"` when it is cleaned up elsewhere."
+        },
+        "doctor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Checks this host can run the recipe (its CLI, credentials); exit 0\nis healthy. `by recipe check` runs it."
+        },
+        "timeout_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1,
+          "description": "How long one script may run, in seconds (default 900)."
+        }
+      },
+      "required": [
+        "create"
+      ],
+      "description": "One `[recipes.NAME]`, after Orca's `environmentRecipes` entries: shell\ncommands run in the repository root. `create` and `resume` print one\nJSON object saying how to reach the machine; `suspend`, `resume` and\n`destroy` get the machine's record on stdin."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

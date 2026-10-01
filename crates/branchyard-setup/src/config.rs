@@ -99,6 +99,98 @@ pub struct ProjectConfig {
     /// a connector gateway tool to fetch issues through.
     #[serde(default, skip_serializing_if = "Trackers::is_empty")]
     pub trackers: Trackers,
+    /// Environment recipes (docs/recipes.md): `[recipes.NAME]`, scripts
+    /// that create, suspend, resume and destroy a machine and print how to
+    /// reach it. A repository's recipes run only once you trust them (`by
+    /// recipe trust NAME`); the user file's need no trust, and replace a
+    /// repository's recipe of the same name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub recipes: BTreeMap<String, RecipeConfig>,
+}
+
+/// One `[recipes.NAME]`, after Orca's `environmentRecipes` entries: shell
+/// commands run in the repository root. `create` and `resume` print one
+/// JSON object saying how to reach the machine; `suspend`, `resume` and
+/// `destroy` get the machine's record on stdin.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeConfig {
+    /// For people: what the machine is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Creates a machine and prints its result (docs/recipes.md).
+    pub create: String,
+    /// Freezes the machine; with `resume`, the provider's pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend: Option<String>,
+    /// Continues a suspended machine and prints its result again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+    /// Releases the machine; `"none"` when it is cleaned up elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destroy: Option<String>,
+    /// Checks this host can run the recipe (its CLI, credentials); exit 0
+    /// is healthy. `by recipe check` runs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doctor: Option<String>,
+    /// How long one script may run, in seconds (default 900).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout_seconds: Option<u64>,
+}
+
+impl RecipeConfig {
+    /// What the trust decision is about: SHA-256, in hex, of every command
+    /// (and the timeout) in canonical form. Any change changes it.
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical = serde_json::json!({
+            "create": self.create,
+            "suspend": self.suspend,
+            "resume": self.resume,
+            "destroy": self.destroy,
+            "doctor": self.doctor,
+            "timeout_seconds": self.timeout_seconds,
+        });
+        hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
+    }
+
+    /// Orca's rules for a recipe: a name of 1 to 64 lowercase letters,
+    /// digits, dots, underscores or hyphens, starting with a letter or
+    /// digit, and a `create` command.
+    pub fn check(&self, name: &str) -> Result<(), ConfigError> {
+        let key = format!("recipes.{name}");
+        let named = name.len() <= 64
+            && name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && name.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+            });
+        if !named {
+            return Err(ConfigError(format!(
+                "{key}: use 1-64 lowercase letters, numbers, dots, underscores or hyphens, \
+                 starting with a letter or number"
+            )));
+        }
+        if self.create.trim().is_empty() {
+            return Err(ConfigError(format!("{key}.create: needs a command")));
+        }
+        for (field, value) in [
+            ("suspend", &self.suspend),
+            ("resume", &self.resume),
+            ("destroy", &self.destroy),
+            ("doctor", &self.doctor),
+        ] {
+            if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+                return Err(ConfigError(format!("{key}.{field}: must not be empty")));
+            }
+        }
+        if self.timeout_seconds == Some(0) {
+            return Err(ConfigError(format!(
+                "{key}.timeout_seconds: must be at least 1"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// `[usage]`.
@@ -893,7 +985,9 @@ pub enum ProviderKind {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Remote {
-    /// The server's URL, as `--remote`.
+    /// The server's URL, as `--remote`: `http(s)://host:port`,
+    /// `unix:/path/to/socket`, or `ssh://[user@]host[:port]/path/to/repo`
+    /// for a server `by` starts there (docs/remote-ssh.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// A file holding the bearer token, as `--token-file`.
@@ -1113,10 +1207,13 @@ impl ProjectConfig {
                 .map_err(|e| ConfigError(format!("mcp.{name}: {e}")))?;
         }
         if let Some(url) = &self.remote.url {
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
+            if !["http://", "https://", "ssh://", "unix:/"]
+                .iter()
+                .any(|scheme| url.starts_with(scheme))
+            {
                 return fail(
                     "remote.url",
-                    format!("must be an http:// or https:// URL, not {url:?}"),
+                    format!("must be an http://, https://, ssh:// or unix:/ URL, not {url:?}"),
                 );
             }
         }
@@ -1139,6 +1236,9 @@ impl ProjectConfig {
         }
         if let Some(workspace) = &self.workspace {
             workspace.check("workspace")?;
+        }
+        for (name, recipe) in &self.recipes {
+            recipe.check(name)?;
         }
         for (root, project) in &self.projects {
             if !(root.starts_with('/') || root.starts_with("~/")) {

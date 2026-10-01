@@ -174,7 +174,8 @@ impl fmt::Debug for Client {
 }
 
 impl Client {
-    /// A client for `url` (`http://` or `https://`) presenting `token`.
+    /// A client for `url` (`http://`, `https://` or `unix:/path/to/socket`)
+    /// presenting `token`.
     pub fn new(url: &str, token: impl Into<String>) -> Result<Client, Error> {
         let endpoint = Endpoint::parse(url).map_err(Error::Config)?;
         let token = token.into();

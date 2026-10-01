@@ -50,6 +50,12 @@ schemars = { version = "1", optional = true }
 # 0.30 needs Rust 1.88.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 unicode-width = "0.2.2"
+# `by --remote ssh://`: names each remote's private directories. Already in
+# Cargo.lock.
+sha2 = "0.11"
+# `by recipe`: environment recipes and their sandbox provider.
+branchyard-recipe = { path = "../branchyard-recipe" }
+branchyard-sandbox = { path = "../branchyard-sandbox" }
 
 [dev-dependencies]
 branchyard-bridge = { path = "../branchyard-bridge" }

@@ -680,6 +680,8 @@ dependencies = [
  "branchyard-controls",
  "branchyard-harness",
  "branchyard-mcp",
+ "branchyard-recipe",
+ "branchyard-sandbox",
  "branchyard-server",
  "branchyard-setup",
  "branchyard-substrate",
@@ -693,6 +695,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "shlex",
  "tempfile",
  "toml_edit",
@@ -792,6 +795,17 @@ dependencies = [
  "branchyard-runtime",
  "clap",
  "serde_json",
+]
+
+[[package]]
+name = "branchyard-recipe"
+version = "0.0.1"
+dependencies = [
+ "branchyard-sandbox",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

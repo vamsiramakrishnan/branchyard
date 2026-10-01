@@ -191,6 +191,30 @@
           "src/main/automations/run-target-resolution.ts": "0fbe694bf26b93118d95c974e43c6b4b04205b54"
         }
       }
+    },
+    {
+      "path": "crates/branchyard-recipe/src/lib.rs",
+      "from": {
+        "orca": {
+          "src/shared/ephemeral-vm-recipes.ts": "108bd6ca4ffd75f33cd86d854d3b9e437f1dc1cb",
+          "src/shared/ephemeral-vm-recipe-runner.ts": "9968d10601875644e216ac8f0bd357cbc5226774",
+          "src/shared/ephemeral-vm-recipe-process.ts": "e943567095c08191dacc8b580f5c10e4421a8d52",
+          "src/shared/ephemeral-vm-recipe-lifecycle-payload.ts": "4cee67602c25aca31d49c0470b96b2ac9fac44b3",
+          "src/shared/ephemeral-vm-recipe-destroy-result.ts": "5a569a240cc5590bd40413e3073d4830984ea8af",
+          "src/shared/ephemeral-vm-recipe-doctor.ts": "35e279c18550a5d4c1a188250e343bd8d4de56a3",
+          "src/shared/orca-yaml.ts": "24d77b442aafb1737ed001bf1cc047115d774b44",
+          "src/shared/orca-yaml-hook-types.ts": "782c9739311edde7f78209812d766aa4c4edcd57"
+        }
+      }
+    },
+    {
+      "path": "crates/branchyard-cli/src/ssh_remote.rs",
+      "from": {
+        "emdash": {
+          "apps/emdash-desktop/src/core/services/hosts/node/workspace-server/layout.ts": "c3ea1d69edab54e862bcaf70d33849f8182fe7f6",
+          "apps/emdash-desktop/src/core/services/hosts/node/workspace-server/provision/daemon-control.ts": "5362d49d29c3b25843fb3d52a2e0e597d26074aa"
+        }
+      }
     }
   ]
 }

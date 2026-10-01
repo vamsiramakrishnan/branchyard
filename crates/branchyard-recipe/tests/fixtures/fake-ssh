@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""A stand-in for OpenSSH's `ssh` client, for hermetic tests: it runs the
+"remote" command on this machine instead of connecting anywhere.
+
+What it models, as Branchyard uses ssh:
+- A remote command (the words after the destination, joined with spaces as
+  ssh joins them) runs under `sh -c` in a new session, as sshd starts it,
+  with stdin, stdout and stderr passed through; the exit status is the
+  command's, or 255 when it is killed by a signal. Killing this client does
+  not kill the "remote" command, as with a real connection.
+- `-M -N -f`: a control master, a background process recorded in a JSON
+  file at the control path (`-S` or `-o ControlPath=`), which exits after
+  `ControlPersist` seconds (default 600) or on `-O exit`.
+- `-O check`, `-O forward -L LOCAL:REMOTE` (Unix socket paths: a background
+  proxy accepts on LOCAL, replacing a stale file as StreamLocalBindUnlink
+  does, and connects each client to REMOTE while the master lives),
+  `-O cancel` and `-O exit`.
+
+Variables: FAKE_SSH_LOG appends one JSON line per invocation (its argv);
+FAKE_SSH_HOME is the remote HOME; FAKE_SSH_HOSTS, a comma-separated list,
+refuses any other destination as an unknown host.
+"""
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+VALUE_OPTIONS = set("bcDEeFIiJLlmOoPpQRSWw")
+FLAG_OPTIONS = set("46AaCfGgKkMNnqsTtVvXxYy")
+
+
+def parse(argv):
+    opts = {"o": [], "L": [], "flags": set()}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            i += 1
+            break
+        if not arg.startswith("-") or arg == "-":
+            break
+        letters = arg[1:]
+        j = 0
+        while j < len(letters):
+            letter = letters[j]
+            if letter in VALUE_OPTIONS:
+                value = letters[j + 1:] or argv[i + 1]
+                if not letters[j + 1:]:
+                    i += 1
+                if letter in ("o", "L"):
+                    opts[letter].append(value)
+                else:
+                    opts[letter] = value
+                break
+            if letter in FLAG_OPTIONS:
+                opts["flags"].add(letter)
+                j += 1
+                continue
+            sys.stderr.write(f"fake-ssh: unknown option -{letter}\n")
+            sys.exit(255)
+        i += 1
+    rest = argv[i:]
+    if not rest:
+        sys.stderr.write("fake-ssh: no destination\n")
+        sys.exit(255)
+    return opts, rest[0], rest[1:]
+
+
+def option(opts, name):
+    for entry in opts["o"]:
+        key, _, value = entry.partition("=")
+        if key.lower() == name.lower():
+            return value
+    return None
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+def read_state(control):
+    try:
+        with open(control) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_state(control, state):
+    tmp = f"{control}.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, control)
+
+
+def detach(args):
+    return subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__)] + args,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True, close_fds=True,
+    )
+
+
+def master_main(control, persist):
+    deadline = time.time() + persist
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    started = time.time()
+    while not stop.is_set() and time.time() < deadline:
+        state = read_state(control)
+        # The client records this master just after starting it.
+        if state is None and time.time() - started < 10:
+            time.sleep(0.05)
+            continue
+        if state is None or state.get("pid") != os.getpid():
+            break
+        time.sleep(0.2)
+    state = read_state(control)
+    if state and state.get("pid") == os.getpid():
+        for forward in state.get("forwards", {}).values():
+            try:
+                os.kill(forward["pid"], signal.SIGTERM)
+            except OSError:
+                pass
+        try:
+            os.unlink(control)
+        except OSError:
+            pass
+
+
+def pump(source, sink):
+    try:
+        while True:
+            data = source.recv(65536)
+            if not data:
+                break
+            sink.sendall(data)
+    except OSError:
+        pass
+    try:
+        sink.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+
+def proxy_main(local, remote, master):
+    try:
+        os.unlink(local)
+    except OSError:
+        pass
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old = os.umask(0o177)
+    server.bind(local)
+    os.umask(old)
+    server.listen(64)
+    server.settimeout(0.5)
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    while not stop.is_set() and alive(master):
+        try:
+            client, _ = server.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        client.settimeout(None)
+        upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            upstream.connect(remote)
+        except OSError:
+            client.close()
+            continue
+        for a, b in ((client, upstream), (upstream, client)):
+            threading.Thread(target=pump, args=(a, b), daemon=True).start()
+    server.close()
+    try:
+        os.unlink(local)
+    except OSError:
+        pass
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv[:1] == ["--fake-master"]:
+        return master_main(argv[1], float(argv[2]))
+    if argv[:1] == ["--fake-proxy"]:
+        return proxy_main(argv[1], argv[2], int(argv[3]))
+    log = os.environ.get("FAKE_SSH_LOG")
+    if log:
+        with open(log, "a") as f:
+            f.write(json.dumps({"argv": argv}) + "\n")
+    opts, destination, words = parse(argv)
+    hosts = os.environ.get("FAKE_SSH_HOSTS")
+    if hosts and destination not in hosts.split(","):
+        sys.stderr.write(f"ssh: Could not resolve hostname {destination}: Name or service not known\n")
+        return 255
+    control = opts.get("S") or option(opts, "ControlPath")
+    if "O" in opts:
+        state = read_state(control) if control else None
+        running = state is not None and alive(state["pid"])
+        command = opts["O"]
+        if command == "check":
+            if running:
+                sys.stderr.write(f"Master running (pid={state['pid']})\r\n")
+                return 0
+            sys.stderr.write(f"Control socket connect({control}): No such file or directory\r\n")
+            return 255
+        if not running:
+            sys.stderr.write(f"Control socket connect({control}): No such file or directory\r\n")
+            return 255
+        if command == "exit":
+            os.kill(state["pid"], signal.SIGTERM)
+            for _ in range(100):
+                if not alive(state["pid"]):
+                    break
+                time.sleep(0.05)
+            sys.stderr.write("Exit request sent.\r\n")
+            return 0
+        if command in ("forward", "cancel"):
+            for spec in opts["L"]:
+                local, _, remote = spec.partition(":")
+                current = state["forwards"].get(local)
+                if command == "cancel":
+                    if current:
+                        os.kill(current["pid"], signal.SIGTERM)
+                        del state["forwards"][local]
+                    continue
+                if current and current["remote"] == remote and alive(current["pid"]):
+                    continue
+                if current:
+                    try:
+                        os.kill(current["pid"], signal.SIGTERM)
+                    except OSError:
+                        pass
+                proxy = detach(["--fake-proxy", local, remote, str(state["pid"])])
+                for _ in range(200):
+                    if os.path.exists(local):
+                        break
+                    time.sleep(0.02)
+                state["forwards"][local] = {"pid": proxy.pid, "remote": remote}
+            write_state(control, state)
+            return 0
+        sys.stderr.write(f"fake-ssh: -O {command} is not modelled\n")
+        return 255
+    if "M" in opts["flags"]:
+        if not ("N" in opts["flags"] and "f" in opts["flags"]):
+            sys.stderr.write("fake-ssh: a master needs -N -f here\n")
+            return 255
+        persist = option(opts, "ControlPersist") or "600"
+        persist = 600.0 if persist in ("yes", "0") else float(persist.rstrip("s"))
+        master = detach(["--fake-master", control, str(persist)])
+        write_state(control, {"pid": master.pid, "destination": destination, "forwards": {}})
+        return 0
+    if not words:
+        sys.stderr.write("fake-ssh: no command (interactive sessions are not modelled)\n")
+        return 255
+    env = dict(os.environ)
+    if os.environ.get("FAKE_SSH_HOME"):
+        env["HOME"] = os.environ["FAKE_SSH_HOME"]
+    for name in ("FAKE_SSH_LOG", "FAKE_SSH_HOSTS", "FAKE_SSH_HOME"):
+        env.pop(name, None)
+    child = subprocess.Popen(["sh", "-c", " ".join(words)], env=env, start_new_session=True,
+                             cwd=env.get("HOME", "/"))
+    code = child.wait()
+    return 255 if code < 0 else code
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

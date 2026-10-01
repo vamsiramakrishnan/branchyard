@@ -777,6 +777,20 @@ pub enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
+    /// Environment recipes: repository scripts that create a VM; list, check, trust them
+    /// (see docs/recipes.md)
+    #[command(
+        display_order = 112,
+        subcommand_required = true,
+        after_help = crate::recipe_cmd::RECIPE_EXAMPLES
+    )]
+    Recipe {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: crate::recipe_cmd::RecipeAction,
+    },
     /// Remove a branch's worktree and record
     #[command(display_order = 106)]
     Rm {
@@ -1226,6 +1240,20 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: crate::trigger_cmd::TriggerAction,
+    },
+    /// Servers by --remote ssh:// started on other hosts: their status, or stop one
+    /// (see docs/remote-ssh.md)
+    #[command(
+        display_order = 504,
+        subcommand_required = true,
+        after_help = crate::ssh_remote::REMOTE_EXAMPLES
+    )]
+    Remote {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: crate::ssh_remote::RemoteAction,
     },
     /// Print a shell completion script for by
     #[command(display_order = 600, after_help = COMPLETIONS_EXAMPLES)]

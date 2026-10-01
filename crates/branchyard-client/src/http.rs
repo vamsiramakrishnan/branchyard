@@ -1,11 +1,15 @@
 //! A minimal blocking HTTP/1.1 client: one connection per request, bodies
-//! by `Content-Length` or chunked encoding, optional TLS through rustls.
+//! by `Content-Length` or chunked encoding, optional TLS through rustls,
+//! over TCP or, for `unix:/path` (a server's `--listen-unix` socket, such as
+//! the one `by --remote ssh://` forwards), a Unix domain socket.
 //! Just enough for the Branchyard API; not a general HTTP client.
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,7 +20,9 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 /// Largest response head accepted.
 const MAX_HEAD: usize = 64 * 1024;
 
-/// Where the server is: `http://host:port/prefix` or `https://...`.
+/// Where the server is: `http://host:port/prefix`, `https://...`, or
+/// `unix:/absolute/path/to/socket` (plain HTTP over a Unix domain socket,
+/// with `localhost` as the host and no prefix).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
     pub tls: bool,
@@ -24,10 +30,27 @@ pub struct Endpoint {
     pub port: u16,
     /// Path prefix without a trailing slash, such as `""` or `/branchyard`.
     pub prefix: String,
+    /// The Unix domain socket to connect to instead of `host:port`.
+    pub unix: Option<PathBuf>,
 }
 
 impl Endpoint {
     pub fn parse(url: &str) -> Result<Endpoint, String> {
+        if let Some(path) = url.strip_prefix("unix:") {
+            let path = Path::new(path);
+            if !path.is_absolute() || path.as_os_str().to_string_lossy().contains(['?', '#']) {
+                return Err(format!(
+                    "{url:?} must name a socket by its absolute path, as unix:/path/to/socket"
+                ));
+            }
+            return Ok(Endpoint {
+                tls: false,
+                host: "localhost".into(),
+                port: 80,
+                prefix: String::new(),
+                unix: Some(path.to_path_buf()),
+            });
+        }
         let (tls, rest) = if let Some(rest) = url.strip_prefix("https://") {
             (true, rest)
         } else if let Some(rest) = url.strip_prefix("http://") {
@@ -67,6 +90,7 @@ impl Endpoint {
             host,
             port,
             prefix: path.trim_end_matches('/').to_owned(),
+            unix: None,
         })
     }
 
@@ -84,6 +108,9 @@ impl Endpoint {
 
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(path) = &self.unix {
+            return write!(f, "unix:{}", path.display());
+        }
         let scheme = if self.tls { "https" } else { "http" };
         write!(f, "{scheme}://{}{}", self.host_header(), self.prefix)
     }
@@ -127,6 +154,8 @@ pub fn tls_config(ca_file: Option<&Path>) -> Result<Arc<ClientConfig>, String> {
 pub enum Stream {
     Plain(TcpStream),
     Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+    #[cfg(unix)]
+    Unix(UnixStream),
 }
 
 impl Read for Stream {
@@ -134,6 +163,8 @@ impl Read for Stream {
         match self {
             Stream::Plain(s) => s.read(buf),
             Stream::Tls(s) => s.read(buf),
+            #[cfg(unix)]
+            Stream::Unix(s) => s.read(buf),
         }
     }
 }
@@ -143,6 +174,8 @@ impl Write for Stream {
         match self {
             Stream::Plain(s) => s.write(buf),
             Stream::Tls(s) => s.write(buf),
+            #[cfg(unix)]
+            Stream::Unix(s) => s.write(buf),
         }
     }
 
@@ -150,6 +183,8 @@ impl Write for Stream {
         match self {
             Stream::Plain(s) => s.flush(),
             Stream::Tls(s) => s.flush(),
+            #[cfg(unix)]
+            Stream::Unix(s) => s.flush(),
         }
     }
 }
@@ -160,6 +195,20 @@ pub fn connect(
     tls: Option<&Arc<ClientConfig>>,
     read_timeout: Duration,
 ) -> io::Result<Stream> {
+    if let Some(path) = &endpoint.unix {
+        #[cfg(unix)]
+        {
+            let stream = UnixStream::connect(path)?;
+            stream.set_read_timeout(Some(read_timeout))?;
+            stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+            return Ok(Stream::Unix(stream));
+        }
+        #[cfg(not(unix))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("{} needs Unix domain sockets", path.display()),
+        ));
+    }
     let addrs: Vec<_> = (endpoint.host.as_str(), endpoint.port)
         .to_socket_addrs()?
         .collect();
@@ -440,6 +489,13 @@ mod tests {
         let e = Endpoint::parse("https://by.example/api/").unwrap();
         assert_eq!((e.tls, e.port, e.prefix.as_str()), (true, 443, "/api"));
         assert_eq!(e.to_string(), "https://by.example/api");
+        let e = Endpoint::parse("unix:/run/by/by.sock").unwrap();
+        assert_eq!(e.unix.as_deref(), Some(Path::new("/run/by/by.sock")));
+        assert_eq!((e.tls, e.host_header().as_str()), (false, "localhost"));
+        assert_eq!(e.to_string(), "unix:/run/by/by.sock");
+        for bad in ["unix:", "unix:relative/by.sock", "unix:/a?b"] {
+            assert!(Endpoint::parse(bad).is_err(), "{bad}");
+        }
         let e = Endpoint::parse("http://[::1]:9000/").unwrap();
         assert_eq!((e.host.as_str(), e.port), ("::1", 9000));
         assert_eq!(e.host_header(), "[::1]:9000");
