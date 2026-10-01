@@ -7606,6 +7606,30 @@
                 "reason"
               ],
               "description": "`by pr --watch` stopped following the pull request."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "commit": {
+                  "type": "string"
+                },
+                "threads": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/ResolvedThread"
+                  }
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "threads_resolved"
+                }
+              },
+              "required": [
+                "kind",
+                "commit",
+                "threads"
+              ],
+              "description": "Review threads whose comments were delivered as feedback, and whose\nfiles `commit` (just pushed) changed, were answered \"Addressed in\n<commit>\" and resolved; each thread is attempted once."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -7834,6 +7858,40 @@
             "ci"
           ],
           "description": "What was observed of a pull request at one moment."
+        },
+        "ResolvedThread": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The thread's GraphQL node ID."
+            },
+            "path": {
+              "type": "string"
+            },
+            "replied": {
+              "type": "boolean",
+              "description": "The \"Addressed in\" reply was posted."
+            },
+            "resolved": {
+              "type": "boolean",
+              "description": "GitHub reports the thread resolved."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why not, when either failed."
+            }
+          },
+          "required": [
+            "id",
+            "path",
+            "replied",
+            "resolved"
+          ],
+          "description": "One review thread `by pr --watch` answered and resolved, or tried to."
         },
         "SandboxEvent": {
           "oneOf": [
@@ -10070,6 +10128,30 @@
                 "reason"
               ],
               "description": "`by pr --watch` stopped following the pull request."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "commit": {
+                  "type": "string"
+                },
+                "threads": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/ResolvedThread"
+                  }
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "threads_resolved"
+                }
+              },
+              "required": [
+                "kind",
+                "commit",
+                "threads"
+              ],
+              "description": "Review threads whose comments were delivered as feedback, and whose\nfiles `commit` (just pushed) changed, were answered \"Addressed in\n<commit>\" and resolved; each thread is attempted once."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -10298,6 +10380,40 @@
             "ci"
           ],
           "description": "What was observed of a pull request at one moment."
+        },
+        "ResolvedThread": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The thread's GraphQL node ID."
+            },
+            "path": {
+              "type": "string"
+            },
+            "replied": {
+              "type": "boolean",
+              "description": "The \"Addressed in\" reply was posted."
+            },
+            "resolved": {
+              "type": "boolean",
+              "description": "GitHub reports the thread resolved."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why not, when either failed."
+            }
+          },
+          "required": [
+            "id",
+            "path",
+            "replied",
+            "resolved"
+          ],
+          "description": "One review thread `by pr --watch` answered and resolved, or tried to."
         },
         "SandboxEvent": {
           "oneOf": [
@@ -14032,6 +14148,30 @@
                 "reason"
               ],
               "description": "`by pr --watch` stopped following the pull request."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "commit": {
+                  "type": "string"
+                },
+                "threads": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/ResolvedThread"
+                  }
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "threads_resolved"
+                }
+              },
+              "required": [
+                "kind",
+                "commit",
+                "threads"
+              ],
+              "description": "Review threads whose comments were delivered as feedback, and whose\nfiles `commit` (just pushed) changed, were answered \"Addressed in\n<commit>\" and resolved; each thread is attempted once."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -14260,6 +14400,40 @@
             "ci"
           ],
           "description": "What was observed of a pull request at one moment."
+        },
+        "ResolvedThread": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The thread's GraphQL node ID."
+            },
+            "path": {
+              "type": "string"
+            },
+            "replied": {
+              "type": "boolean",
+              "description": "The \"Addressed in\" reply was posted."
+            },
+            "resolved": {
+              "type": "boolean",
+              "description": "GitHub reports the thread resolved."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why not, when either failed."
+            }
+          },
+          "required": [
+            "id",
+            "path",
+            "replied",
+            "resolved"
+          ],
+          "description": "One review thread `by pr --watch` answered and resolved, or tried to."
         },
         "SandboxEvent": {
           "oneOf": [

@@ -2285,6 +2285,9 @@ pub struct PrArgs {
     pub interval: Duration,
     /// `--max-rounds`: stop after delivering feedback this many times.
     pub max_rounds: Option<u32>,
+    /// `--no-resolve`: leave review threads the watch fed back unresolved
+    /// after a push addresses them.
+    pub no_resolve: bool,
     /// Limits and permissions for the turns `--watch` starts.
     pub task: TaskArgs,
     pub json: bool,
@@ -2347,6 +2350,10 @@ pub struct PrFlags {
         help_heading = "Watching"
     )]
     max_rounds: Option<u32>,
+    /// With --watch: do not reply "Addressed in <commit>" to, and resolve, the review threads it
+    /// fed back once a pushed commit changes their files
+    #[arg(long, requires = "watch", help_heading = "Watching")]
+    no_resolve: bool,
     /// Print JSON
     #[arg(long, conflicts_with = "watch")]
     json: bool,
@@ -2385,6 +2392,7 @@ impl Flags for PrFlags {
             watch: self.watch,
             interval: self.interval,
             max_rounds: self.max_rounds,
+            no_resolve: self.no_resolve,
             task,
             json: self.json,
         })

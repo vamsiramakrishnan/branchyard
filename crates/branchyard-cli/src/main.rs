@@ -16,6 +16,7 @@ mod json;
 mod notify;
 mod open;
 mod pr;
+mod pr_threads;
 mod remote;
 mod render;
 mod review;

@@ -165,7 +165,7 @@ pub use inbox::{DeliveryHook, SteerDelivery};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use pull_request::{
     slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
-    PullRequestRef, Pushed,
+    PullRequestRef, Pushed, ResolvedThread,
 };
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
