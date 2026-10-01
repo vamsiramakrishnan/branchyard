@@ -1,8 +1,8 @@
 # Triggers and schedules
 
-A **trigger** starts an ordinary Branchyard task on its own: on a cron schedule, at an interval, or when a signed webhook from GitHub, Slack, Linear or any JSON sender arrives. It is a durable object in the server's store, beside the operation registry, and every firing goes through the same admission path as `POST /v1/repos/{repo}/tasks`: quotas, branch locks, worker labels and an idempotency key, so a redelivered webhook or a restarted scheduler never starts a second task. This is the *triggers and schedules* track of the [roadmap](roadmap.md#wave-2), learned from Manus automations (validated conditions, test runs, pausing after repeated failures), Devin automations, Claude Code routines and Cursor's and Jules's scheduled tasks; the precheck is ported from Orca.
+A **trigger** starts an ordinary Branchyard task on its own: on a cron schedule, at an interval, when a signed webhook from GitHub, Slack, Linear or any JSON sender arrives, or when an email arrives through Postmark's, Mailgun's or SendGrid's inbound webhook. It is a durable object in the server's store, beside the operation registry, and every firing goes through the same admission path as `POST /v1/repos/{repo}/tasks`: quotas, branch locks, worker labels and an idempotency key, so a redelivered webhook or a restarted scheduler never starts a second task. This is the *triggers and schedules* track of the [roadmap](roadmap.md#wave-2), learned from Manus automations (validated conditions, test runs, pausing after repeated failures), Devin automations, Claude Code routines and Cursor's and Jules's scheduled tasks; the precheck is ported from Orca.
 
-> **Status.** Implemented and tested hermetically: the cron parser, every adapter's signature check and normalization, the store's conformance suite on SQLite and PostgreSQL 16, two to four dispatchers racing for one schedule time, a dispatcher that dies mid-fire, the HTTP API over loopback with the fake ACP agent and a manual clock, and `by trigger` locally, through `by serve`, and with `--remote`. **Nothing has received a delivery from the real GitHub, Slack or Linear**: the payloads are built from their documentation, and the signatures from their documented schemes. Email triggers are not done.
+> **Status.** Implemented and tested hermetically: the cron parser, every adapter's signature check and normalization, the store's conformance suite on SQLite and PostgreSQL 16, two to four dispatchers racing for one schedule time, a dispatcher that dies mid-fire, the HTTP API over loopback with the fake ACP agent and a manual clock, and `by trigger` locally, through `by serve`, and with `--remote`. **Nothing has received a delivery from the real GitHub, Slack, Linear, Postmark, Mailgun or SendGrid**: the payloads are built from their documentation, and the signatures from their documented schemes. Email arrives only through a provider's inbound webhook; nothing polls a mailbox ([email](#email)).
 
 ## Where triggers fire
 
@@ -54,7 +54,7 @@ Every action takes `--json`, which prints the wire types below. Durations are `9
 |---|---|---|
 | `{"kind": "cron", "expr": "0 3 * * 1-5", "timezone": "Europe/Berlin"}` | At each matching minute in the time zone | `timezone` defaults to `UTC`; any IANA name the host's time-zone database knows |
 | `{"kind": "interval", "seconds": 3600}` | Every `seconds`, 60 to a year | Counted from creation, or from when it was last enabled |
-| `{"kind": "event", "source": "github"}` | On each delivery to its webhook URL | `github`, `slack`, `linear` or `generic` |
+| `{"kind": "event", "source": "github"}` | On each delivery to its webhook URL | `github`, `slack`, `linear` or `generic`; for email `postmark`, `mailgun` or `sendgrid` ([email](#email)) |
 
 **Cron syntax.** Five fields, minute (0–59), hour (0–23), day of month (1–31), month (1–12 or `jan`–`dec`) and day of week (0–7 or `sun`–`sat`, 0 and 7 both Sunday); each `*`, a number, a range `a-b`, a step `*/n`, `a-b/n` or `a/n`, or a list of those. `@hourly`, `@daily` (`@midnight`), `@weekly`, `@monthly` and `@yearly` (`@annually`) are shorthands. When both day fields are restricted, a day matching either fires (Vixie cron's rule: `0 0 13 * fri` is every 13th and every Friday). Seconds, `L`, `W`, `#` and `?` are refused, and so is an expression that never matches a date (`0 0 30 2 *`). No cron crate was in `Cargo.lock`, so the parser is [our own](../crates/branchyard-server/src/triggers/cron.rs), with tests for steps, lists, names, leap days and daylight saving; time zones come from [`jiff`](https://docs.rs/jiff), already locked.
 
@@ -78,12 +78,13 @@ Each event trigger has its own URL, `<public_url>/v1/triggers/<id>/fire`, and it
 | Slack | `X-Slack-Signature: v0=HMAC(secret, "v0:" + X-Slack-Request-Timestamp + ":" + body)` | the signed timestamp, ±`replay_window_seconds` (default 300) | `event_id` | `app_mention`; `url_verification` is answered with its `challenge` |
 | Linear | `Linear-Signature: HMAC(secret, body)` | the body's `webhookTimestamp`, ±`replay_window_seconds` | a hash of the body | `issue.create`, `issue.update`, `issue.remove` |
 | Generic | `X-Branchyard-Signature: sha256=HMAC(secret, body)` (the scheme of Branchyard's own [outgoing webhooks](server.md#webhooks)) | none | the body's `id`, else a hash of the body | the body's `kind`, default `event` |
+| Postmark, Mailgun, SendGrid | See [email](#email) | Mailgun's signed timestamp | the `Message-ID` header | `email.received` |
 
 **An event's ID comes only from the signed bytes.** A delivery ID header (`X-GitHub-Delivery`, `Linear-Delivery`, `X-Branchyard-Event-Id`) is not covered by the signature, so it is recorded as the event's `delivery`, for finding the delivery at its sender, but never used as the key: a captured delivery replayed under a new header is the same event, and a sender's own redelivery of the same body is too.
 
 The normalized event has `source`, `kind`, `id`, and where the source says: `repo` (GitHub `owner/name`, Linear team key, Slack team ID), `author` (GitHub login, Slack user ID, Linear actor name), `title`, `text` (issue or pull request body, comment, mention text, Linear description), `url`, `number` (issue or pull request number, Linear identifier such as `ENG-12`), `branch` (pull request head, check suite branch), `labels`, `channel` (Slack), and `payload`, the body as sent. A generic sender sets any of them as top-level fields. GitHub's `application/x-www-form-urlencoded` content type (`payload=…`) is read too.
 
-Answers: `202` with the pending run; `200` with a run skipped by condition, with `"duplicate": true` and the original run for a redelivery, or with `ignored` and why (a ping, an event kind no adapter reads, a disabled trigger); `200 {"challenge": …}` for Slack's URL verification; `401 invalid_signature` or `401 stale_delivery`; `404 unknown_trigger` for an unknown ID or a schedule's (the same answer, so IDs cannot be probed); `413` over `max_body_bytes`.
+Answers: `202` with the pending run; `200` with a run skipped by condition, with `"duplicate": true` and the original run for a redelivery, or with `ignored` and why (a ping, an event kind no adapter reads, a disabled trigger, an email from a sender off the allowlist); `200 {"challenge": …}` for Slack's URL verification; `401 invalid_signature` or `401 stale_delivery`; `404 unknown_trigger` for an unknown ID or a schedule's (the same answer, so IDs cannot be probed); `413` over `max_body_bytes`.
 
 ### Conditions
 
@@ -97,6 +98,9 @@ Field matchers on the normalized event, every given field must match (any one of
 | `author` | `author=alice` | Ignoring case |
 | `branch` | `branch=main` | Exactly; refused for Slack |
 | `text_contains` | `text=@branchyard` | The title or text contains it, ignoring case: a mention |
+| `sender` | `sender=alice@example.com`, `sender=@example.com` | Email only, and required there: the From address is one of these, ignoring case; `@domain` is that domain exactly, not its subdomains. Anyone else is answered `ignored` and recorded nowhere |
+| `recipient` | `recipient=agent@by.example`, `to=@by.example` | Email only: one of its To, Cc or envelope recipients |
+| `subject_contains` | `subject=[agent]` | Email only: the subject contains it, ignoring case |
 
 A schedule takes no conditions. A delivery that does not match is recorded as a `skipped_condition` run saying which field missed (`no label agent (it has bug)`), so `by trigger runs` shows why nothing happened.
 
@@ -108,6 +112,7 @@ A trigger's `task` is a [`TaskRequest`](server.md#requests): `prompt`, `harness`
 |---|---|
 | `{{event.title}}`, `text`, `url`, `number`, `repo`, `author`, `branch`, `channel`, `kind`, `id`, `source` | The event's field, empty when it has none |
 | `{{event.labels}}` | Its labels, comma-separated |
+| `{{event.from}}`, `to`, `cc`, `subject`, `message_id`, `attachments` | An email's sender, recipients (comma-separated), subject, `Message-ID`, and attachments as `name (type, N bytes)`; empty for other events |
 | `{{event.payload.issue.user.login}}` | Any value of the body by path; a number indexes an array (`assignees.0.login`) |
 | `{{trigger.name}}`, `{{trigger.id}}`, `{{trigger.repo}}`, `{{run.id}}` | The trigger's and the run's |
 | `{{scheduled_at}}` | The scheduled time, or the arrival time for an event, RFC 3339 in UTC |
@@ -212,6 +217,43 @@ TriggerRun
 }
 ```
 
+## Email
+
+An email trigger fires when a provider's inbound webhook posts a message to its URL. Branchyard does not poll a mailbox (no IMAP): you point an address or domain at Postmark, Mailgun or SendGrid, and the provider posts each message it receives.
+
+```sh
+by trigger add mail-in --on mailgun --secret-file mailgun-signing-key.txt \
+    --if sender=@partner.example --if to=agent@by.example --if subject=[agent] \
+    --prompt 'Email from {{event.from}}: {{event.subject}}\n\n{{event.text}}\n\nAttachments: {{event.attachments}}' \
+    --harness codex --yes
+```
+
+**A sender allowlist is required.** An email trigger is refused at creation without `--if sender=…` (an address, or `@domain`). A message from anyone else is answered `200` with `ignored` and recorded nowhere: answered, not refused, because every provider retries a refused delivery, SendGrid for days.
+
+| Provider | How a delivery is authenticated | Replay | Body |
+|---|---|---|---|
+| Postmark | Postmark signs nothing. HTTP Basic authentication with the trigger's secret as the password (any user name), put in the URL Postmark posts to (`https://branchyard:SECRET@by.example.com/v1/triggers/ID/fire`); or the secret as the URL's last segment (`…/fire/SECRET`). Postmark also publishes the addresses it posts from, which a proxy in front of the server can enforce | none: nothing is signed or timed; a captured delivery is the same message, so it is the run its first delivery recorded | JSON |
+| Mailgun | HMAC-SHA256 with the domain's HTTP webhook signing key (the trigger's secret), hex: for a form, over the `timestamp` and `token` fields; for JSON (a route URL ending in `json`: use `…/fire/json`), over `X-Mailgun-Timestamp` and the whole body, given in `X-Mailgun-Signature` | the signed timestamp within `replay_window_seconds` (default 300); a form's `token` is spent once | `multipart/form-data` with attachments, `application/x-www-form-urlencoded` without, or JSON |
+| SendGrid | Inbound Parse signs nothing unless you set up its signed or OAuth webhooks, which Branchyard does not verify. As Postmark: a Basic password in the Destination URL, or the secret as its last segment | none, as Postmark | `multipart/form-data` |
+
+Every comparison is constant-time; a missing or wrong password, path token or signature is `401 invalid_signature`, a timestamp outside the window `401 stale_delivery`, and nothing is recorded.
+
+**Mailgun's form signature does not cover the message.** It signs only the timestamp and a random token, so whoever captures a delivery could post the token again with another message inside the window. The trigger spends each token once, for the message it came with (a table of tokens beside the runs, kept for twice the window): the same token with another message is `401 stale_delivery`, while Mailgun's own retry of a message, with a fresh token or the same one, is the run already recorded. Mailgun's JSON form signs the body; prefer it where you can.
+
+**What a message becomes.** The normalized event has `source` (`postmark`, `mailgun`, `sendgrid`), `kind` `email.received`, `author` the From address, `title` the subject, `text` the plain text body (or the HTML body with its markup, scripts, styles and comments removed and character references decoded: plain text, never markup), cut at 64 KiB, and `email`: `from`, `from_name`, `to`, `cc`, `envelope_to`, `subject`, `message_id`, `date`, `text`, `text_truncated`, `attachments` (each `name`, `content_type`, `size`) and the provider's verdicts `spf`, `dkim` and `spam`. **Attachment contents are never kept**, and neither is the HTML: the event's `payload` is the `email` object, not the body as sent.
+
+**Exactly once.** The run's key is `event:` and the `Message-ID` header (angle brackets removed; a long or unusual one hashed), so a provider's retries and a redelivery are one run, fired through the same admission path and idempotency key as any event. A message without a `Message-ID` is keyed by a hash of its sender, subject, date and text.
+
+**The From address is what the message says.** A signature or password proves the provider delivered the message, not who wrote it: an allowlisted address can be forged unless its domain publishes DMARC and the provider enforces it. The provider's verdicts become labels for conditions: `spf:pass`, `dkim:pass` (Mailgun's DKIM check, SendGrid's verdict for the From domain, Postmark's `Authentication-Results` when present) and `spam`. `--if label=dkim:pass` fires only on messages DKIM-signed for their domain, where the provider says so. A prompt built from an email is text a stranger may have written: allow tools with care.
+
+**Setting one up.**
+
+- *Postmark:* Servers → your server → *Inbound* stream → *Settings* → *Webhook*: the trigger's URL with the password (`https://branchyard:SECRET@host/v1/triggers/ID/fire`) or the token (`…/fire/SECRET`). Postmark's *Check* button posts a sample, which the allowlist ignores unless its sender is on it.
+- *Mailgun:* *Receiving* → *Create route*: an expression for the recipient, action *Forward* to the trigger's URL (or `…/fire/json`). Give the trigger the domain's *HTTP webhook signing key* (Settings → Webhooks): `by trigger secret NAME --secret-file FILE`.
+- *SendGrid:* *Settings* → *Inbound Parse* → *Add Host & URL*: the trigger's URL with the password or the token as its Destination URL; leave *POST the raw, full MIME message* off (the raw form is not read).
+
+`by trigger test NAME --event FILE` takes a Postmark message as JSON, or a Mailgun or SendGrid delivery's form fields as a JSON object (`{"from": …, "subject": …, "body-plain": …}`), and shows what it would do, the allowlist included.
+
 ## Setting up a sender
 
 The webhook URL is `<public_url>/v1/triggers/<id>/fire`. Set `public_url` (or `--public-url`) to the address senders reach, such as your reverse proxy's `https://by.example.com`; it defaults to `http(s)://<listen>`, which only a sender on the same network can reach. GitHub, Slack and Linear need `https://` on a public address.
@@ -255,18 +297,19 @@ Both are in [`schema/server.config.json`](../schema/server.config.json). Every s
 |---|---|---|
 | Triggers, their secrets, state and next time | `DATA-DIR/state.db`'s `triggers`, or the database's `by_triggers` | Yes |
 | Runs, their claims and outcomes | `trigger_runs` / `by_trigger_runs` | Yes: a pending run fires after the restart (tested), a held one once its hold expires |
+| Mailgun form tokens already spent | `trigger_nonces` / `by_trigger_nonces`, until twice the replay window | Yes |
 | The task a run fired | The operation registry, as any task | Yes |
 
 The PostgreSQL tables are created like the registry's: a dispatcher opening the store checks the catalog first, and makes only what is missing, each step alone in a transaction under the schema's advisory lock.
 
 ## Not yet
 
-- Email triggers; GitHub `push`, `release` and other events; Linear comments; Slack messages other than mentions; replying to the sender.
+- Polling a mailbox (IMAP); SendGrid's signed (ECDSA) or OAuth-verified Inbound Parse; attachment contents in the event; a message's raw MIME (SendGrid's raw mode, Mailgun's `mime` URLs); character sets other than UTF-8 are read lossily. GitHub `push`, `release` and other events; Linear comments; Slack messages other than mentions; replying to the sender.
 - A GitHub App installation (one webhook for many repositories): each trigger has its own URL and secret.
 - Editing a trigger in place: remove it and add it again (its runs go with it).
 - Failover for a routed trigger's branch, as for any remote task; a limit on a trigger's concurrently running tasks beyond its tenant's `max_running`.
 - Runs and missed blocks are kept until the trigger is removed.
-- Real deliveries from GitHub, Slack and Linear: see the status note above.
+- Real deliveries from GitHub, Slack, Linear, Postmark, Mailgun and SendGrid: see the status note above.
 
 ## Code
 
@@ -275,6 +318,7 @@ The PostgreSQL tables are created like the registry's: a dispatcher opening the 
 | [`triggers/mod.rs`](../crates/branchyard-server/src/triggers/mod.rs) | The stored trigger, validation, conditions, the clock and settings |
 | [`triggers/cron.rs`](../crates/branchyard-server/src/triggers/cron.rs) | The cron parser |
 | [`triggers/events.rs`](../crates/branchyard-server/src/triggers/events.rs) | Signatures and the GitHub, Slack, Linear and generic adapters |
+| [`triggers/email.rs`](../crates/branchyard-server/src/triggers/email.rs) | Postmark, Mailgun and SendGrid: authentication, form and multipart parsing, HTML to text, the allowlist |
 | [`triggers/template.rs`](../crates/branchyard-server/src/triggers/template.rs) | Placeholders and branch names |
 | [`triggers/precheck.rs`](../crates/branchyard-server/src/triggers/precheck.rs), [`target.rs`](../crates/branchyard-server/src/triggers/target.rs) | Ported from Orca: the precheck runner and run-target resolution |
 | [`triggers/store.rs`](../crates/branchyard-server/src/triggers/store.rs) | The SQLite and PostgreSQL stores and their conformance suite |
@@ -282,4 +326,4 @@ The PostgreSQL tables are created like the registry's: a dispatcher opening the 
 | [`triggers/routes.rs`](../crates/branchyard-server/src/triggers/routes.rs) | The HTTP API and the webhook endpoint |
 | [`branchyard-client/src/triggers.rs`](../crates/branchyard-client/src/triggers.rs) | Wire types and client methods |
 | [`branchyard-cli/src/trigger_cmd.rs`](../crates/branchyard-cli/src/trigger_cmd.rs) | `by trigger` |
-| Tests | Unit tests in each module; [`tests/triggers.rs`](../crates/branchyard-server/tests/triggers.rs) (the server over loopback, and PostgreSQL); [`branchyard-cli/tests/triggers.rs`](../crates/branchyard-cli/tests/triggers.rs) (`by trigger` locally, through `by serve`, and remotely) |
+| Tests | Unit tests in each module (email: each provider's authentication, Mailgun's replay window and token, normalization of each, HTML, multipart, allowlists); [`tests/triggers.rs`](../crates/branchyard-server/tests/triggers.rs) (the server over loopback, email deliveries fired once on SQLite and PostgreSQL, and PostgreSQL); [`branchyard-cli/tests/triggers.rs`](../crates/branchyard-cli/tests/triggers.rs) (`by trigger` locally, through `by serve`, and remotely) |
