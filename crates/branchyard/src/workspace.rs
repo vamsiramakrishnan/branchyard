@@ -673,7 +673,7 @@ fn prepared(
                    excluded: &mut Vec<String>,
                    info: &envs::EnvironmentInfo,
                    mut used: envs::EnvironmentUse| {
-        match envs::restore(root, info, setup.worktree, true) {
+        match envs::restore(root, info, setup.worktree, &setup.spec.share) {
             Ok((method, shared)) => {
                 used.method = method.map(|m| m.as_str().to_owned());
                 used.built_by = Some(info.built_by.clone());

@@ -531,6 +531,7 @@ Limits:
 - **Same repositories, same checkouts.** Servers sharing a database must serve the same repositories under the same names, at paths that are the same checkout: the same host, or one shared file system. Worktrees and delegation tokens live in the checkout, and the engine's recovery kills a dead engine's harness only on its own host (elsewhere it waits for the turn's lease to expire).
 - **Same configuration.** An operation runs with its worker's `harness_commands`, secrets, allow flags and `tenants`; a worker that would refuse the request fails the operation with the error the request would have got from it. It runs as the principal that admitted it, recorded with the operation, so a `by worker` needs no `tokens` or `credentials`. Quotas are counted in the shared database ([quotas](#quotas)); give every server the same `tenants`.
 - **Webhooks** are delivered by every server that configures them, each from the shared cursor: configure them on one.
+- **Companion push** is sent once: each server claims the feed entries it read from the shared cursor (a compare-and-set) before sending ([companion](companion.md#notifications)). Servers that all send push need the same `vapid_key`.
 - **Throughput.** Each server uses one database connection for its registry; claims poll rather than `LISTEN`.
 - **No automatic failover of a running turn.** A turn whose server died is recovered as interrupted, never resumed elsewhere.
 

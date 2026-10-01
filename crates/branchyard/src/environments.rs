@@ -583,20 +583,20 @@ fn shared_by<'a>(share: &'a [String], path: &str) -> Option<&'a str> {
 }
 
 /// Restore `info` into `worktree`: every produced path cloned or copied,
-/// every shared one linked. What was in the worktree at those paths and
-/// is not tracked (an earlier attempt's) is replaced. Returns how, and the
-/// shared paths.
+/// every one under `share` linked. `share` is the branch's own
+/// configuration, not the one `info` was built with: it is not in the key,
+/// so a directory no longer shared is copied. What was in the worktree at
+/// those paths and is not tracked (an earlier attempt's) is replaced.
+/// Returns how, and the shared paths.
 pub(crate) fn restore(
     root: &Path,
     info: &EnvironmentInfo,
     worktree: &Path,
-    link: bool,
+    share: &[String],
 ) -> Result<(Option<Method>, Vec<String>), String> {
     let source = tree(root, &info.key);
-    let mut shared: Vec<String> = info
-        .share
+    let mut shared: Vec<String> = share
         .iter()
-        .filter(|_| link)
         .map(|s| s.trim_end_matches('/').to_owned())
         .filter(|s| fs::symlink_metadata(source.join(s)).is_ok())
         .collect();
@@ -1321,7 +1321,7 @@ pub(crate) fn after_sandbox_setup(
             // as copies (a link into this host's `.branchyard` would not
             // resolve in the sandbox).
             if *mounted {
-                if let Err(why) = restore(root, &info, worktree, false) {
+                if let Err(why) = restore(root, &info, worktree, &[]) {
                     report.ok = false;
                     report.error = Some(why);
                 }

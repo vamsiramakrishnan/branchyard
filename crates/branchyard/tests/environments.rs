@@ -234,6 +234,46 @@ fn shared_directories_are_links_kept_out_of_candidates_and_unlinked_on_removal()
 }
 
 #[test]
+fn a_restore_shares_what_the_current_spec_shares() {
+    let f = fixture("v1");
+    let shared = WorkspaceSpec {
+        share: vec!["deps".into()],
+        ..spec()
+    };
+    let a = f
+        .yard
+        .task("WRITE a.txt=1")
+        .options(with(&f, shared))
+        .name("a")
+        .run()
+        .unwrap();
+    assert!(fs::symlink_metadata(a.info().worktree.join("deps"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    // `share` is not in the key: the same environment, restored as the
+    // configuration now says, a copy of its own and no link.
+    let b = f
+        .yard
+        .task("WRITE b.txt=1")
+        .options(with(&f, spec()))
+        .name("b")
+        .run()
+        .unwrap();
+    assert_eq!(setups(&f), 1);
+    let used = reports(&b.events().unwrap())
+        .pop()
+        .unwrap()
+        .environment
+        .unwrap();
+    assert_eq!(used.origin, EnvironmentOrigin::Restored);
+    assert!(used.shared.is_empty(), "{used:?}");
+    let deps = b.info().worktree.join("deps");
+    assert!(fs::symlink_metadata(&deps).unwrap().is_dir());
+    assert_eq!(fs::read_to_string(deps.join("lib.txt")).unwrap(), "lib-v1");
+}
+
+#[test]
 fn a_failed_build_keeps_the_last_good_one_and_branches_say_so() {
     let f = fixture("v1");
     f.yard
