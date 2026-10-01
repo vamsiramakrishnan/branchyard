@@ -4,8 +4,10 @@
 # and review the diff. See crates/branchyard-controls/src/catalog.rs.
 #
 # Derived from generalaction/emdash at 873a3e2067f4abc136272ed2b61abea3a2c07bcf
-# (packages/plugins/src/agents/impl/*/index.ts), Copyright 2026 General Action,
-# Inc., licensed under the Apache License, Version 2.0 (vendor/emdash/LICENSE.md),
+# (packages/plugins/src/agents/impl/*/index.ts, with the install helpers of
+# packages/core/src/services/agent-plugins/api/plugins/helpers/host-dependency.ts),
+# Copyright 2026 General Action, Inc., licensed under the Apache License,
+# Version 2.0 (vendor/emdash/LICENSE.md),
 # and stablyai/orca at 280733273545f0b3eeedc1be54b14d406239030e
 # (src/shared/tui-agent-config.ts, src/shared/tui-agent.ts), Copyright (c) 2026
 # Lovecast Inc., MIT License (vendor/orca/LICENSE).

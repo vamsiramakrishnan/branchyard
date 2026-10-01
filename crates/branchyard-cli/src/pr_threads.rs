@@ -1,5 +1,5 @@
-// Derived from stablyai/orca src/main/github/client/update/
-// resolve-review-thread.ts, at revision
+// Derived from stablyai/orca
+// src/main/github/client/update/resolve-review-thread.ts, at revision
 // 280733273545f0b3eeedc1be54b14d406239030e.
 // Copyright (c) 2026 Lovecast Inc. Licensed under the MIT License; the
 // license text, which must accompany substantial portions of this code, is

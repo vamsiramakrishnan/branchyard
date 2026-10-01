@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Require every derived source to match the upstream it records.
 
+The emdash and Orca ports (patches/ports.json) are recorded like Scion's:
+each derived file, Rust or generated catalog data, lists the vendored
+sources it follows by upstream with their Git blob IDs, and its header must
+name each upstream's repository, revision, license and copyright, and say
+it was modified for Branchyard (Apache-2.0 section 4(b) for emdash).
+
 Herdr's resume recipes are extracted Rust: the checked-in patch must be the
 exact diff from the vendored file. Scion's provisioners are translated from
 Python to Rust, where a line diff between languages would record nothing
@@ -11,6 +17,7 @@ sources, license and modification, or when a vendored source changed since
 the translation was reviewed.
 """
 import difflib
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -86,9 +93,59 @@ def verify_scion():
           f"vendored sources at {commit[:7]}, and {rewritten} rewritten file(s)' attribution.")
 
 
+def _comment_header(path, lines=30):
+    """The leading comment block of a Rust (`//`) or TOML (`#`) file, joined."""
+    text = []
+    for line in path.read_text().splitlines()[:lines]:
+        stripped = line.lstrip()
+        for marker in ("//", "#"):
+            if stripped.startswith(marker):
+                text.append(stripped[len(marker):].strip())
+                break
+    return " ".join(text)
+
+
+def verify_ports(root=ROOT):
+    manifest = json.loads((root / "patches/ports.json").read_text())
+    lock = {e["path"]: e for e in json.loads((root / "vendor.lock.json").read_text())["files"]}
+    upstreams = manifest["upstreams"]
+    problems = []
+    count = 0
+    for derived in manifest["derivatives"]:
+        path = root / derived["path"]
+        if not path.is_file():
+            problems.append(f"{derived['path']} is recorded but missing")
+            continue
+        header = _comment_header(path)
+        named = derived.get("named_as", [])
+        if "Modified for Branchyard" not in header:
+            problems.append(f"{derived['path']}: its header does not say 'Modified for Branchyard'")
+        for name, sources in derived["from"].items():
+            upstream = upstreams[name]
+            for needed in (upstream["repository"], upstream["commit"], upstream["license"],
+                           upstream["copyright"]):
+                if needed not in header:
+                    problems.append(f"{derived['path']}: its header does not name {needed!r}")
+            for source, recorded in sources.items():
+                count += 1
+                if source not in header and not any(fnmatch.fnmatch(source, g) for g in named):
+                    problems.append(f"{derived['path']}: its header does not name {source}")
+                entry = lock.get(f"{upstream['vendor']}/{source}")
+                if entry is None or entry["commit"] != upstream["commit"]:
+                    problems.append(f"{source} is not vendored at {upstream['commit']}")
+                elif entry["git_blob"] != recorded:
+                    problems.append(f"{source} changed upstream since {derived['path']} was "
+                                    "derived: review the change, port it, and record the new blob")
+    if problems:
+        raise SystemExit("emdash and Orca ports out of date:\n  " + "\n  ".join(problems))
+    print(f"Verified {len(manifest['derivatives'])} emdash and Orca derivatives against "
+          f"{count} vendored sources.")
+
+
 def main():
     verify_herdr()
     verify_scion()
+    verify_ports()
 
 
 if __name__ == "__main__":

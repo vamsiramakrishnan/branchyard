@@ -329,8 +329,10 @@ pub(crate) mod tests {
              # and review the diff. See crates/branchyard-controls/src/catalog.rs.\n\
              #\n\
              # Derived from generalaction/emdash at {EMDASH_COMMIT}\n\
-             # (packages/plugins/src/agents/impl/*/index.ts), Copyright 2026 General Action,\n\
-             # Inc., licensed under the Apache License, Version 2.0 (vendor/emdash/LICENSE.md),\n\
+             # (packages/plugins/src/agents/impl/*/index.ts, with the install helpers of\n\
+             # packages/core/src/services/agent-plugins/api/plugins/helpers/host-dependency.ts),\n\
+             # Copyright 2026 General Action, Inc., licensed under the Apache License,\n\
+             # Version 2.0 (vendor/emdash/LICENSE.md),\n\
              # and stablyai/orca at {ORCA_COMMIT}\n\
              # (src/shared/tui-agent-config.ts, src/shared/tui-agent.ts), Copyright (c) 2026\n\
              # Lovecast Inc., MIT License (vendor/orca/LICENSE).\n\
