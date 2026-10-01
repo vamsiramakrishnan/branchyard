@@ -11,8 +11,11 @@
 //! cursor (the webhook cursors' table, keyed `<repo>:companion-push`), so
 //! a restart resumes instead of replaying; entries older than
 //! [`FRESH_MS`] when first read (after downtime) are skipped rather than
-//! sent late. One attempt per notification: a push is a nudge, and the
-//! page shows the same state when opened. A subscription whose push
+//! sent late. Servers sharing one database share the cursor: each claims
+//! the entries it read by moving it past them with a compare-and-set
+//! before it sends anything ([`Follower::take`]), so each notification is
+//! sent by one server. One attempt per notification: a push is a nudge,
+//! and the page shows the same state when opened. A subscription whose push
 //! service answers 404 or 410, or whose credential no longer verifies
 //! (revoked, expired, removed from the configuration), is dropped.
 
@@ -697,19 +700,20 @@ async fn run(
     store: Arc<dyn OperationStore>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let cursor_id = format!("{}:companion-push", repo.name);
-    let mut cursor = {
-        let (store, id) = (store.clone(), cursor_id.clone());
-        match tokio::task::spawn_blocking(move || store.load_webhook_cursor(&id)).await {
-            Ok(Ok(Some(cursor))) if cursor <= repo.feed.head() => cursor,
-            _ => repo.feed.head(),
-        }
+    let opened = {
+        let (store, feed, name) = (store.clone(), repo.feed.clone(), repo.name.clone());
+        tokio::task::spawn_blocking(move || {
+            Follower::open(store.as_ref(), &name, || {
+                feed.sync().unwrap_or_else(|_| feed.head())
+            })
+        })
+        .await
     };
-    let mut tracker = Tracker::default();
+    let Ok(mut follower) = opened else { return };
     let mut head = repo.feed.subscribe();
     loop {
         loop {
-            let (feed, from) = (repo.feed.clone(), cursor);
+            let (feed, from) = (repo.feed.clone(), follower.cursor());
             let entries: Vec<FeedEntry> = match tokio::task::spawn_blocking(move || {
                 feed.read_after(from, BATCH)
             })
@@ -722,21 +726,27 @@ async fn run(
                 }
                 Err(_) => return,
             };
-            let Some(last) = entries.last().map(|e| e.seq) else {
+            if entries.is_empty() {
                 break;
-            };
-            let now = crate::ops::now_ms();
-            for entry in &entries {
-                if now.saturating_sub(entry.at_ms) > FRESH_MS {
-                    continue;
-                }
-                if let Some(notice) = tracker.observe(&repo.name, &entry.branch, &entry.activity) {
-                    fan_out(&app, &notice, None).await;
-                }
             }
-            cursor = last;
-            let (store, id) = (store.clone(), cursor_id.clone());
-            let _ = tokio::task::spawn_blocking(move || store.save_webhook_cursor(&id, last)).await;
+            let store = store.clone();
+            let taken = tokio::task::spawn_blocking(move || {
+                let notices = follower.take(store.as_ref(), &entries, crate::ops::now_ms());
+                (follower, notices)
+            })
+            .await;
+            let Ok((taken, notices)) = taken else { return };
+            follower = taken;
+            let notices = match notices {
+                Ok(notices) => notices,
+                Err(e) => {
+                    tracing::warn!(repo = %repo.name, error = %e, "companion push: claiming the feed");
+                    break;
+                }
+            };
+            for notice in &notices {
+                fan_out(&app, notice, None).await;
+            }
         }
         if *shutdown.borrow() {
             return;
@@ -747,6 +757,167 @@ async fn run(
             _ = shutdown.changed() => {}
         }
     }
+}
+
+/// One server's place in a repository's feed: how far it has read, the
+/// shared cursor as it last saw it, and its tracker.
+pub struct Follower {
+    id: String,
+    repo: String,
+    cursor: u64,
+    stored: Option<u64>,
+    tracker: Tracker,
+}
+
+impl Follower {
+    /// Follow `repo`'s feed from its shared cursor, or from `head` when it
+    /// has none, or when the cursor is past it (a feed that started over:
+    /// moved back to `head`). `head` is read after the cursor, so another
+    /// server's claim meanwhile is never mistaken for one.
+    pub fn open(store: &dyn OperationStore, repo: &str, head: impl FnOnce() -> u64) -> Follower {
+        let id = format!("{repo}:companion-push");
+        let stored = store.load_webhook_cursor(&id).ok().flatten();
+        let head = head();
+        let (cursor, stored) = match stored {
+            Some(cursor) if cursor <= head => (cursor, stored),
+            Some(past) => match store.claim_webhook_cursor(&id, Some(past), head) {
+                Ok(true) => (head, Some(head)),
+                _ => (head, store.load_webhook_cursor(&id).ok().flatten()),
+            },
+            None => (head, None),
+        };
+        Follower {
+            id,
+            repo: repo.to_owned(),
+            cursor,
+            stored,
+            tracker: Tracker::default(),
+        }
+    }
+
+    /// The last entry this follower has read.
+    pub fn cursor(&self) -> u64 {
+        self.cursor
+    }
+
+    /// The notices to send for `entries`, read after [`Follower::cursor`]:
+    /// those of the entries this follower claimed by moving the shared
+    /// cursor past them before anything is sent. Entries another server
+    /// claimed are only observed, so this tracker follows the feed's state.
+    pub fn take(
+        &mut self,
+        store: &dyn OperationStore,
+        entries: &[FeedEntry],
+        now_ms: u64,
+    ) -> std::io::Result<Vec<Notice>> {
+        let mut notices = Vec::new();
+        let mut rest = entries;
+        while let Some(last) = rest.last().map(|e| e.seq) {
+            let fresh = rest
+                .iter()
+                .filter(|e| now_ms.saturating_sub(e.at_ms) <= FRESH_MS);
+            // Up to the shared cursor: another server's to send.
+            if let Some(theirs) = self.stored.filter(|s| *s > self.cursor) {
+                let at = rest.partition_point(|e| e.seq <= theirs);
+                for entry in fresh.take_while(|e| e.seq <= theirs) {
+                    self.tracker
+                        .observe(&self.repo, &entry.branch, &entry.activity);
+                }
+                rest = &rest[at..];
+                self.cursor = theirs.min(last);
+                continue;
+            }
+            // Claimed before sending: a server that loses the race reads
+            // how far the winner claimed, and sends none of it.
+            if !store.claim_webhook_cursor(&self.id, self.stored, last)? {
+                self.stored = store.load_webhook_cursor(&self.id)?;
+                continue;
+            }
+            for entry in fresh {
+                if let Some(notice) =
+                    self.tracker
+                        .observe(&self.repo, &entry.branch, &entry.activity)
+                {
+                    notices.push(notice);
+                }
+            }
+            self.stored = Some(last);
+            self.cursor = last;
+            rest = &[];
+        }
+        Ok(notices)
+    }
+}
+
+/// The delivery conformance every [`OperationStore`] passes: two servers'
+/// followers, on `one` and `other` (two connections to one database, or
+/// one store twice), reading one feed, take each notice once between
+/// them, in turn and racing on threads, and one that lost entries to the
+/// other still follows their state (a repeated status is not news).
+/// `repo` names a repository no other test of the store uses. Panics on a
+/// violation. Run on SQLite here and on PostgreSQL by `tests/postgres.rs`.
+#[doc(hidden)]
+pub fn check_claims(one: &dyn OperationStore, other: &dyn OperationStore, repo: &str) {
+    let now = crate::ops::now_ms();
+    let ready = |seq: u64, branch: &str| FeedEntry {
+        seq,
+        branch: branch.to_owned(),
+        at_ms: now,
+        activity: Activity::Status(BranchStatus::Ready),
+    };
+    let feed: Vec<FeedEntry> = (1..=6).map(|n| ready(n, &format!("b{n}"))).collect();
+    let turns = format!("{repo}-turns");
+    let mut a = Follower::open(one, &turns, || 0);
+    let mut b = Follower::open(other, &turns, || 0);
+    // Both read the same batch; the first to take it sends it.
+    assert_eq!(a.take(one, &feed[..3], now).unwrap().len(), 3);
+    assert_eq!(b.take(other, &feed[..3], now).unwrap(), []);
+    assert_eq!(b.cursor(), 3);
+    // Then the other way round.
+    assert_eq!(b.take(other, &feed[3..], now).unwrap().len(), 3);
+    assert_eq!(a.take(one, &feed[3..], now).unwrap(), []);
+    // b1 ready again, as recovery may record it: b saw a send the first.
+    assert_eq!(b.take(other, &[ready(7, "b1")], now).unwrap(), []);
+    assert_eq!(a.take(one, &[ready(7, "b1")], now).unwrap(), []);
+    assert_eq!((a.cursor(), b.cursor()), (7, 7));
+
+    // Racing, each reading the feed at its own pace. Both start before
+    // either claims, as servers do: a head read after the cursor is never
+    // behind it.
+    let feed: Vec<FeedEntry> = (1..=300).map(|n| ready(n, &format!("r{n}"))).collect();
+    let race = format!("{repo}-race");
+    let racers = [
+        (one, Follower::open(one, &race, || 0), 3),
+        (other, Follower::open(other, &race, || 0), 7),
+    ];
+    let sent: Vec<Vec<String>> = std::thread::scope(|scope| {
+        let racers: Vec<_> = racers
+            .into_iter()
+            .map(|(store, mut follower, batch)| {
+                let feed = &feed;
+                scope.spawn(move || {
+                    let mut sent = Vec::new();
+                    while follower.cursor() < 300 {
+                        let entries: Vec<FeedEntry> = feed
+                            .iter()
+                            .filter(|e| e.seq > follower.cursor())
+                            .take(batch)
+                            .cloned()
+                            .collect();
+                        let notices = follower.take(store, &entries, now).unwrap();
+                        sent.extend(notices.into_iter().map(|n| n.branch));
+                    }
+                    sent
+                })
+            })
+            .collect();
+        racers.into_iter().map(|r| r.join().unwrap()).collect()
+    });
+    let mut all: Vec<String> = sent.concat();
+    let total = all.len();
+    all.sort();
+    all.dedup();
+    assert_eq!((total, all.len()), (300, 300), "each notice once");
 }
 
 #[cfg(test)]
@@ -843,6 +1014,12 @@ mod tests {
         ] {
             assert!(endpoint_allowed(bad, &services).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn two_servers_over_one_store_send_each_notice_once() {
+        let store = crate::store::MemoryStore::default();
+        check_claims(&store, &store, "app");
     }
 
     #[test]

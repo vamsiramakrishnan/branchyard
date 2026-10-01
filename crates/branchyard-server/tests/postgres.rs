@@ -1038,6 +1038,18 @@ fn worker_labels_conform_on_postgres() {
     branchyard_server::store::check_labels(&store, "pg");
 }
 
+/// Two servers on one database send each push notification once: each
+/// claims the feed entries it read before sending.
+#[test]
+fn push_claims_conform_on_postgres() {
+    let Some(url) = database() else { return };
+    let (one, other) = (
+        PostgresStore::open(&url).unwrap(),
+        PostgresStore::open(&url).unwrap(),
+    );
+    branchyard_server::companion::push::check_claims(&one, &other, "pg");
+}
+
 /// A queue as it was before the `requires` column and the workers table,
 /// with one operation queued.
 fn old_queue(url: &str) {

@@ -5,9 +5,10 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use branchyard::{
-    harness_fault, Activity, BranchOutcome, BranchStatus, Error, Fleet, FleetActivity,
+    harness_fault, Activity, BranchOutcome, BranchStatus, Budget, Error, Fleet, FleetActivity,
     FleetCandidate, FleetEntry, Judge, JudgeOptions, JudgeSpec, JudgedBy, Provisioning,
     RecordedEvent, RouteOptions, TaskKind, TaskOptions, Yard,
 };
@@ -175,6 +176,81 @@ fn a_harness_failure_fails_over_to_the_next_candidate() {
     let of = |name: &str| outcomes.iter().find(|o| o.branch == name).unwrap().outcome;
     assert_eq!(of(from), BranchOutcome::Failed);
     assert_eq!(of(to), BranchOutcome::Ready);
+}
+
+#[test]
+fn a_failover_keeps_the_entrys_limits() {
+    let f = Fixture::new();
+    let broken = FleetCandidate {
+        command: Some(vec!["/bin/false".into()]),
+        ..candidate("gemini-cli")
+    };
+    let table = fleet(FleetEntry {
+        candidates: vec![broken, candidate("qwen-code")],
+        failover: true,
+        exploration: 0.0,
+        budget: Budget::default().duration(Duration::from_secs(2)),
+        ..FleetEntry::default()
+    });
+    let prompt = "Take your time\nSH sleep 6";
+    let seed = seed_picking(&f.yard, prompt, &f.options(), &table, 0);
+    let how = RouteOptions {
+        seed: Some(seed),
+        ..RouteOptions::default()
+    };
+    let routed = f
+        .yard
+        .run_routed(prompt, &f.options(), &table, &how)
+        .unwrap();
+    assert_eq!(routed.failovers.len(), 1, "{:?}", routed.failovers);
+    let next = &routed.branches[0];
+    assert_eq!(next.info().harness, "qwen-code");
+    // The entry's duration limit held on the branch failed over to, as on
+    // the first.
+    assert_eq!(
+        next.info().status,
+        BranchStatus::BudgetExceeded {
+            limit: "max_duration".into()
+        }
+    );
+}
+
+#[test]
+fn a_failover_never_moves_to_a_candidate_the_router_excluded() {
+    let f = Fixture::new();
+    let broken = FleetCandidate {
+        command: Some(vec!["/bin/false".into()]),
+        ..candidate("gemini-cli")
+    };
+    let table = fleet(FleetEntry {
+        candidates: vec![broken, candidate("qwen-code")],
+        failover: true,
+        ..FleetEntry::default()
+    });
+    // qwen-code's login is near its usage limit: the router excludes it,
+    // and so must the failover chain.
+    let how = RouteOptions {
+        excluded: [("qwen-code".to_owned(), "near its usage limit".to_owned())]
+            .into_iter()
+            .collect(),
+        ..RouteOptions::default()
+    };
+    let routed = f.yard.run_routed("x", &f.options(), &table, &how).unwrap();
+    assert_eq!(routed.route.excluded.len(), 1);
+    assert!(routed.failovers.is_empty(), "{:?}", routed.failovers);
+    let branch = &routed.branches[0];
+    assert_eq!(branch.info().harness, "gemini-cli");
+    let FleetActivity::Routed(decision) = &fleet_activity(&branch.events().unwrap())[0] else {
+        panic!("not routed");
+    };
+    assert!(decision.fallbacks.is_empty(), "{:?}", decision.fallbacks);
+    let events = branch.events().unwrap();
+    assert!(
+        events.iter().any(
+            |e| matches!(&e.activity, Activity::Warning(w) if w.contains("no candidate left"))
+        ),
+        "{events:?}"
+    );
 }
 
 #[test]

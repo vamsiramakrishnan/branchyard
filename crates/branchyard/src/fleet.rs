@@ -1140,10 +1140,13 @@ pub(crate) fn run_routed(
         .zip(&labels)
         .enumerate()
         .map(|(n, (pick, label))| {
+            // Only what the router found eligible: a candidate it excluded
+            // (over budget, near its usage limit) stays out of the chain.
             let fallbacks: Vec<FleetCandidate> = entry
                 .candidates
                 .iter()
                 .filter(|c| **c != pick.candidate)
+                .filter(|c| !route.excluded.iter().any(|e| e.candidate == **c))
                 .cloned()
                 .collect();
             let decision = RouteDecision {
@@ -1176,11 +1179,17 @@ pub(crate) fn run_routed(
         })
         .collect();
     let started = run::run_attempts(yard, prompt, options, specs)?;
+    // A branch failed over to runs under the limits of the one it replaces,
+    // with the cost limit shared along the chain (see `failover`).
+    let chained = &TaskOptions {
+        budget,
+        ..options.clone()
+    };
     let mut failovers = Vec::new();
     let chains: Vec<Result<Chain, Error>> = std::thread::scope(|scope| {
         let handles: Vec<_> = started
             .into_iter()
-            .map(|branch| scope.spawn(move || chain(yard, branch, options)))
+            .map(|branch| scope.spawn(move || chain(yard, branch, chained)))
             .collect();
         handles
             .into_iter()
@@ -1372,9 +1381,11 @@ pub fn harness_fault(status: &BranchStatus) -> Option<String> {
 /// When `name` ended its turn because its harness failed and its routing
 /// allows it, start the task again on the next candidate: a new branch
 /// from its candidate (or its base, when it has none), with a handoff
-/// brief, recording why on both. `None` when there is nothing to do: not
-/// routed with failover, a task failure, no candidate left, or no budget
-/// left.
+/// brief, recording why on both. The new branch runs under `options`'s
+/// limits with the cost limit cut to what the chain has left: a routed run
+/// passes the effective budget its first attempt ran under, `by send` its
+/// own. `None` when there is nothing to do: not routed with failover, a
+/// task failure, no candidate left, or no budget left.
 pub(crate) fn failover(
     yard: &Yard,
     name: &str,

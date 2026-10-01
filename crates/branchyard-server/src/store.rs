@@ -522,6 +522,11 @@ pub trait OperationStore: Send + Sync {
     /// Advance a webhook's cursor. Only ever moves forward; the caller
     /// guarantees that.
     fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()>;
+    /// Move a cursor from `expected` (`None`: it has none yet) to `next`, in
+    /// one compare-and-set; false when another server moved it first. What
+    /// lies between is the caller's: servers sharing the store claim each
+    /// feed entry once.
+    fn claim_webhook_cursor(&self, id: &str, expected: Option<u64>, next: u64) -> io::Result<bool>;
 }
 
 fn ms(duration: Duration) -> i64 {
@@ -1526,6 +1531,23 @@ impl OperationStore for SqliteStore {
             .map_err(sql)?;
         Ok(())
     }
+
+    fn claim_webhook_cursor(&self, id: &str, expected: Option<u64>, next: u64) -> io::Result<bool> {
+        let conn = self.conn();
+        let changed = match expected {
+            None => conn.execute(
+                "INSERT INTO webhook_cursors (id, cursor) VALUES (?1, ?2) \
+                 ON CONFLICT (id) DO NOTHING",
+                rusqlite::params![id, next as i64],
+            ),
+            Some(from) => conn.execute(
+                "UPDATE webhook_cursors SET cursor = ?3 WHERE id = ?1 AND cursor = ?2",
+                rusqlite::params![id, from as i64, next as i64],
+            ),
+        }
+        .map_err(sql)?;
+        Ok(changed == 1)
+    }
 }
 
 /// Operations, queue and locks in a PostgreSQL database, in the
@@ -2381,6 +2403,22 @@ impl OperationStore for PostgresStore {
         })?;
         Ok(())
     }
+
+    fn claim_webhook_cursor(&self, id: &str, expected: Option<u64>, next: u64) -> io::Result<bool> {
+        let (id, next) = (id.to_owned(), next as i64);
+        let changed = self.with(move |c| match expected {
+            None => c.execute(
+                "INSERT INTO by_webhook_cursors (id, cursor) VALUES ($1, $2) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[&id, &next],
+            ),
+            Some(from) => c.execute(
+                "UPDATE by_webhook_cursors SET cursor = $3 WHERE id = $1 AND cursor = $2",
+                &[&id, &(from as i64), &next],
+            ),
+        })?;
+        Ok(changed == 1)
+    }
 }
 
 /// The worker-label conformance every [`OperationStore`] passes: a worker
@@ -2963,6 +3001,7 @@ impl OperationStore for MemoryStore {
         reset() -> io::Result<()>;
         load_webhook_cursor(id: &str) -> io::Result<Option<u64>>;
         save_webhook_cursor(id: &str, cursor: u64) -> io::Result<()>;
+        claim_webhook_cursor(id: &str, expected: Option<u64>, next: u64) -> io::Result<bool>;
     }
 }
 
@@ -3056,6 +3095,13 @@ mod tests {
         assert_eq!(memory.load_webhook_cursor("h").unwrap(), None);
         memory.save_webhook_cursor("h", 3).unwrap();
         assert_eq!(memory.load_webhook_cursor("h").unwrap(), Some(3));
+
+        // A claim moves it only from where the claimer saw it.
+        assert!(store.claim_webhook_cursor("repo:new", None, 4).unwrap());
+        assert!(!store.claim_webhook_cursor("repo:new", None, 9).unwrap());
+        assert!(!store.claim_webhook_cursor("repo:new", Some(3), 9).unwrap());
+        assert!(store.claim_webhook_cursor("repo:new", Some(4), 9).unwrap());
+        assert_eq!(store.load_webhook_cursor("repo:new").unwrap(), Some(9));
     }
 
     #[test]
