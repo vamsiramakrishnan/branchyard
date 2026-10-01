@@ -1597,7 +1597,7 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
             .map(|s| s.connectors.clone())
             .unwrap_or_default();
         if !seat.connectors.is_empty() {
-            branchyard_provision_narrow(&seat.connectors, &above)
+            branchyard::connectors::narrow(Some(&seat.connectors), &above)
                 .map_err(|why| seat.error("connectors", why))?;
         }
     }
@@ -2537,12 +2537,4 @@ escalates_to = ["lead"]
             );
         }
     }
-}
-
-/// A seat's grant narrowed to its parent seat's, as a spawn narrows it.
-fn branchyard_provision_narrow(
-    seat: &[branchyard::connectors::GrantEntry],
-    parent: &[branchyard::connectors::GrantEntry],
-) -> Result<Vec<branchyard::connectors::GrantEntry>, String> {
-    branchyard::connectors::narrow(Some(seat), parent)
 }
