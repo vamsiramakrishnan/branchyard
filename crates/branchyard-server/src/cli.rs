@@ -163,6 +163,10 @@ struct Flags {
     /// Allow plain HTTP on an address other than loopback
     #[arg(long, help_heading = "TLS")]
     insecure_bind: bool,
+    /// Listen on a Unix domain socket at PATH instead of --listen: plain HTTP, mode 0600,
+    /// in a directory only you may enter (what by --remote ssh:// starts)
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["listen", "tls_cert", "worker"])]
+    listen_unix: Option<PathBuf>,
     /// Run harness H as CMD, split on spaces; repeatable
     #[arg(
         long = "harness-command",
@@ -587,6 +591,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         _ => return Err("--tls-cert and --tls-key go together".into()),
     };
     config.insecure_bind = flags.insecure_bind;
+    config.listen_unix = flags.listen_unix;
     if let Some(bytes) = partial.max_body_bytes {
         config.max_body_bytes = bytes;
     }

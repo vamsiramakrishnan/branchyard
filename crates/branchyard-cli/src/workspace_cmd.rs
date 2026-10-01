@@ -992,3 +992,42 @@ fn kill(env: &Env, branch: Option<&str>, port: Option<u16>, yes: bool, json: boo
     }
     print(&format!("sent SIGTERM to {}\n", described.join(", ")))
 }
+
+/// The digest trusted under `key` in the trust file, if any: for trust
+/// decisions about something other than a repository's `[workspace]`,
+/// such as one of its `[recipes]` (docs/recipes.md), whose keys are the
+/// repository's canonical root with a suffix of their own.
+pub(crate) fn trusted_digest(key: &str) -> Result<Option<String>, Failure> {
+    Ok(read_trust()?
+        .repositories
+        .get(key)
+        .map(|t| t.digest.clone()))
+}
+
+/// Record `digest` as trusted under `key`.
+pub(crate) fn record_trust(key: &str, digest: &str) -> Result<(), Failure> {
+    let mut file = read_trust()?;
+    file.version = TRUST_VERSION;
+    file.repositories.insert(
+        key.to_owned(),
+        Trusted {
+            digest: digest.to_owned(),
+            trusted_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        },
+    );
+    write_trust(&file)
+}
+
+/// Forget the decision under `key`; whether there was one.
+pub(crate) fn forget_trust(key: &str) -> Result<bool, Failure> {
+    let mut file = read_trust()?;
+    let removed = file.repositories.remove(key).is_some();
+    if removed {
+        file.version = TRUST_VERSION;
+        write_trust(&file)?;
+    }
+    Ok(removed)
+}

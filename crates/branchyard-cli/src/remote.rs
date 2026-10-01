@@ -46,11 +46,31 @@ impl Remote {
             .remote
             .as_deref()
             .ok_or_else(|| Failure::Message("no server URL".into()))?;
-        let token_file = globals.token_file.as_deref().ok_or_else(|| {
-            Failure::Message(
-                "remote mode needs a token: pass --token-file or set BRANCHYARD_TOKEN_FILE".into(),
-            )
-        })?;
+        // `ssh://`: a server this starts on the host, reached through a
+        // forwarded Unix socket, with the token it fetched (docs/remote-ssh.md).
+        let tunnel = match crate::ssh_remote::is_ssh(url) {
+            true => {
+                if globals.token_file.is_some() || globals.ca_file.is_some() {
+                    return Err(Failure::Message(
+                        "an ssh:// remote fetches its own token and needs no CA; drop                          --token-file and --ca-file (or BRANCHYARD_TOKEN_FILE and                          BRANCHYARD_CA_FILE)"
+                            .into(),
+                    ));
+                }
+                Some(crate::ssh_remote::connect(url)?)
+            }
+            false => None,
+        };
+        let tunnel_token = tunnel.as_ref().map(|t| t.token_file.display().to_string());
+        let url = tunnel.as_ref().map_or(url, |t| t.url.as_str());
+        let token_file = match &tunnel_token {
+            Some(file) => file.as_str(),
+            None => globals.token_file.as_deref().ok_or_else(|| {
+                Failure::Message(
+                    "remote mode needs a token: pass --token-file or set BRANCHYARD_TOKEN_FILE"
+                        .into(),
+                )
+            })?,
+        };
         let mut client = Client::from_token_file(url, token_file)?;
         if let Some(ca) = &globals.ca_file {
             client = client.with_ca_file(ca)?;

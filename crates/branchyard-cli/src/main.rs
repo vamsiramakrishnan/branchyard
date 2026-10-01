@@ -23,12 +23,14 @@ mod open;
 mod ports;
 mod pr;
 mod pr_threads;
+mod recipe_cmd;
 mod remote;
 mod render;
 mod review;
 mod review_format;
 mod rig;
 mod setup_io;
+mod ssh_remote;
 mod stats_cmd;
 mod trackers;
 mod trigger_cmd;
@@ -141,6 +143,8 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         Command::Config { json, action } => return config_cmd::main(&action, json),
         // The meters read this machine's session files; no repository needed.
         Command::Usage { json } => return usage::show(env, json),
+        // The ssh connection itself, not a server's API.
+        Command::Remote { json, action } => return ssh_remote::command(globals, &action, json),
         // The catalog is built in; no repository or server is involved.
         Command::Connectors {
             json,
@@ -333,6 +337,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             commands::merge(target, &branch, into.as_deref(), rm)
         }
         Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
+        Command::Recipe { json, action } => recipe_cmd::main(env, target, &action, json),
         Command::Env { json, action } => env_cmd::main(env, target, &action, json),
         Command::Trigger { json, action } => trigger_cmd::main(env, target, &action, json),
         Command::Rm {
@@ -432,6 +437,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Init { .. }
         | Command::Config { .. }
         | Command::Usage { .. }
+        | Command::Remote { .. }
         | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
     }
 }

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,8 @@ const TLS_HANDSHAKE: Duration = Duration::from_secs(10);
 /// A server that is accepting connections.
 pub struct Running {
     addr: SocketAddr,
+    /// `--listen-unix`'s socket, removed when the server stops.
+    unix: Option<PathBuf>,
     tls: bool,
     shutdown: watch::Sender<bool>,
     force: Arc<Notify>,
@@ -81,8 +84,12 @@ impl Running {
             .map(|(addr, _)| format!("http://{addr}/metrics"))
     }
 
-    /// `http://` or `https://` and the bound address.
+    /// `http://` or `https://` and the bound address, or `unix:` and the
+    /// socket's path.
     pub fn url(&self) -> String {
+        if let Some(path) = &self.unix {
+            return format!("unix:{}", path.display());
+        }
         let scheme = if self.tls { "https" } else { "http" };
         format!("{scheme}://{}", self.addr)
     }
@@ -137,6 +144,9 @@ impl Running {
         let interrupted = tokio::task::spawn_blocking(move || registry.close())
             .await
             .unwrap_or(0);
+        if let Some(path) = &self.unix {
+            let _ = std::fs::remove_file(path);
+        }
         Stopped { interrupted }
     }
 }
@@ -224,17 +234,22 @@ pub async fn start(config: Config) -> Result<Running, String> {
         false => crate::connectors::start(&config)?,
     };
     let worker = config.worker_only;
-    let listener = match worker {
-        true => None,
-        false => Some(
+    let listener = match (worker, &config.listen_unix) {
+        (true, _) => None,
+        (false, Some(path)) => Some(Listener::Unix(bind_unix(path)?)),
+        (false, None) => Some(Listener::Tcp(
             TcpListener::bind(config.listen)
                 .await
                 .map_err(|e| format!("cannot listen on {}: {e}", config.listen))?,
-        ),
+        )),
     };
     let addr = match &listener {
-        Some(listener) => listener.local_addr().map_err(|e| e.to_string())?,
-        None => config.listen,
+        Some(Listener::Tcp(listener)) => listener.local_addr().map_err(|e| e.to_string())?,
+        _ => config.listen,
+    };
+    let unix = match listener {
+        Some(Listener::Unix(_)) => config.listen_unix.clone(),
+        _ => None,
     };
     // A worker may serve metrics too: it has no other listener.
     let metrics_listener = match config.metrics.as_ref().and_then(|m| m.listen) {
@@ -306,7 +321,12 @@ pub async fn start(config: Config) -> Result<Running, String> {
             let router = api::metrics_router(app.clone());
             Some((
                 at,
-                tokio::spawn(accept_loop(listener, None, router, shutdown_rx.clone())),
+                tokio::spawn(accept_loop(
+                    Listener::Tcp(listener),
+                    None,
+                    router,
+                    shutdown_rx.clone(),
+                )),
             ))
         }
         None => None,
@@ -333,6 +353,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     };
     Ok(Running {
         addr,
+        unix,
         tls: tls.is_some(),
         shutdown: shutdown_tx,
         force: Arc::new(Notify::new()),
@@ -561,8 +582,89 @@ async fn poll(
     }
 }
 
+/// What the server accepts connections on.
+enum Listener {
+    Tcp(TcpListener),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixListener),
+    #[cfg(not(unix))]
+    #[allow(dead_code)]
+    Unix(std::convert::Infallible),
+}
+
+/// Bind `--listen-unix`'s socket: its directory must already exist and be
+/// private to its owner (no group or other access), a stale socket left
+/// by a server that is gone is replaced, a live one is refused, and the
+/// socket itself is made mode 0600.
+#[cfg(unix)]
+fn bind_unix(path: &Path) -> Result<tokio::net::UnixListener, String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    let shown = path.display();
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .ok_or_else(|| format!("--listen-unix {shown}: no directory"))?;
+    let meta = std::fs::metadata(dir).map_err(|e| format!("--listen-unix {shown}: {e}"))?;
+    if !meta.is_dir() || meta.mode() & 0o077 != 0 {
+        return Err(format!(
+            "--listen-unix {shown}: {} must be a directory only its owner may enter              (chmod 700)",
+            dir.display()
+        ));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(existing) if existing.file_type().is_socket() => {
+            if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                return Err(format!(
+                    "--listen-unix {shown}: a server already listens there"
+                ));
+            }
+            std::fs::remove_file(path).map_err(|e| format!("--listen-unix {shown}: {e}"))?;
+        }
+        Ok(_) => return Err(format!("--listen-unix {shown}: exists and is not a socket")),
+        Err(_) => {}
+    }
+    let listener = tokio::net::UnixListener::bind(path)
+        .map_err(|e| format!("cannot listen on {shown}: {e}"))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("--listen-unix {shown}: {e}"))?;
+    Ok(listener)
+}
+
+#[cfg(not(unix))]
+fn bind_unix(path: &Path) -> Result<std::convert::Infallible, String> {
+    Err(format!(
+        "--listen-unix {}: this platform has no Unix domain sockets",
+        path.display()
+    ))
+}
+
+/// A connection, over TCP or a Unix domain socket.
+enum Accepted {
+    Tcp(tokio::net::TcpStream),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixStream),
+}
+
+impl Listener {
+    async fn accept(&self) -> std::io::Result<Accepted> {
+        match self {
+            Listener::Tcp(listener) => listener.accept().await.map(|(tcp, _)| {
+                let _ = tcp.set_nodelay(true);
+                Accepted::Tcp(tcp)
+            }),
+            #[cfg(unix)]
+            Listener::Unix(listener) => listener
+                .accept()
+                .await
+                .map(|(unix, _)| Accepted::Unix(unix)),
+            #[cfg(not(unix))]
+            Listener::Unix(never) => match *never {},
+        }
+    }
+}
+
 async fn accept_loop(
-    listener: TcpListener,
+    listener: Listener,
     tls: Option<TlsAcceptor>,
     router: axum::Router,
     mut shutdown: watch::Receiver<bool>,
@@ -571,8 +673,13 @@ async fn accept_loop(
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((tcp, _)) => {
-                    let _ = tcp.set_nodelay(true);
+                #[cfg(unix)]
+                Ok(Accepted::Unix(unix)) => {
+                    // Configuration refuses TLS with --listen-unix.
+                    let service = TowerToHyperService::new(router.clone());
+                    tokio::spawn(serve_connection(unix, service, graceful.watcher()));
+                }
+                Ok(Accepted::Tcp(tcp)) => {
                     let service = TowerToHyperService::new(router.clone());
                     let watcher = graceful.watcher();
                     match tls.clone() {
@@ -616,4 +723,38 @@ where
         .header_read_timeout(Duration::from_secs(30));
     let connection = builder.serve_connection(TokioIo::new(io), service);
     let _ = watcher.watch(connection).await;
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn unix_sockets_need_a_private_directory_and_replace_only_stale_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = dir.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = bind_unix(&open.join("by.sock")).err().unwrap();
+        assert!(refused.contains("chmod 700"), "{refused}");
+
+        let private = dir.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = private.join("by.sock");
+        let listener = bind_unix(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let live = bind_unix(&path).err().unwrap();
+        assert!(live.contains("already listens"), "{live}");
+        drop(listener);
+        // The file a stopped server left is replaced.
+        assert!(bind_unix(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "not a socket").unwrap();
+        assert!(bind_unix(&path).err().unwrap().contains("not a socket"));
+    }
 }

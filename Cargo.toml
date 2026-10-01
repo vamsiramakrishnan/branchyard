@@ -11,6 +11,7 @@ members = [
     "crates/branchyard-mcp",
     "crates/branchyard-provision",
     "crates/branchyard-qualify",
+    "crates/branchyard-recipe",
     "crates/branchyard-runtime",
     "crates/branchyard-sandbox",
     "crates/branchyard-server",

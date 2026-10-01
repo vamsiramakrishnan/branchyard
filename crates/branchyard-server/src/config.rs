@@ -339,6 +339,11 @@ pub struct Config {
     pub tls: Option<TlsFiles>,
     /// Serve plain HTTP on a non-loopback address. Only from the flag.
     pub insecure_bind: bool,
+    /// Listen on this Unix domain socket instead of `listen` (plain HTTP,
+    /// mode 0600, in a directory only its owner may enter). Only from the
+    /// flag, `--listen-unix`; it is how `by --remote ssh://` reaches a
+    /// server it starts (docs/remote-ssh.md).
+    pub listen_unix: Option<PathBuf>,
     pub max_body_bytes: usize,
     /// Largest artifact a `POST .../artifacts` upload may publish; larger
     /// ones are refused with `413 body_too_large` before being written
@@ -466,6 +471,7 @@ impl Config {
             tenants: BTreeMap::new(),
             tls: None,
             insecure_bind: false,
+            listen_unix: None,
             max_body_bytes: 1024 * 1024,
             max_artifact_bytes: DEFAULT_MAX_ARTIFACT_BYTES,
             max_running: 8,
@@ -746,6 +752,18 @@ impl Config {
             for kind in &webhook.events {
                 check_webhook_event_kind(kind)?;
             }
+        }
+        if let Some(path) = &self.listen_unix {
+            if self.tls.is_some() {
+                return Err("--listen-unix serves plain HTTP on a socket; it takes no TLS".into());
+            }
+            if !path.is_absolute() {
+                return Err(format!(
+                    "--listen-unix {} must be an absolute path",
+                    path.display()
+                ));
+            }
+            return Ok(None);
         }
         if self.listen.ip().is_loopback() || self.tls.is_some() {
             return Ok(None);

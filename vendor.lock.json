@@ -1783,6 +1783,94 @@
       "license": "Apache-2.0",
       "use": "port-source",
       "modified": false
+    },
+    {
+      "path": "vendor/emdash/apps/emdash-desktop/src/core/services/hosts/node/workspace-server/layout.ts",
+      "upstream": "https://github.com/generalaction/emdash",
+      "commit": "873a3e2067f4abc136272ed2b61abea3a2c07bcf",
+      "upstream_path": "apps/emdash-desktop/src/core/services/hosts/node/workspace-server/layout.ts",
+      "git_blob": "c3ea1d69edab54e862bcaf70d33849f8182fe7f6",
+      "sha256": "218ae8c44e6c9283a4df95c01f5e234357d6fa28f5df714d7671cd6a5390afe7",
+      "license": "Apache-2.0",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/emdash/apps/emdash-desktop/src/core/services/hosts/node/workspace-server/provision/daemon-control.ts",
+      "upstream": "https://github.com/generalaction/emdash",
+      "commit": "873a3e2067f4abc136272ed2b61abea3a2c07bcf",
+      "upstream_path": "apps/emdash-desktop/src/core/services/hosts/node/workspace-server/provision/daemon-control.ts",
+      "git_blob": "5362d49d29c3b25843fb3d52a2e0e597d26074aa",
+      "sha256": "40d9ffb78eafecdc60e41bcb538d8dfeedd705450788952b2ec7ba7221e0a0e5",
+      "license": "Apache-2.0",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/shared/ephemeral-vm-recipe-destroy-result.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/shared/ephemeral-vm-recipe-destroy-result.ts",
+      "git_blob": "5a569a240cc5590bd40413e3073d4830984ea8af",
+      "sha256": "28ac03ee5a5a9058b183b5e43520cc1bbd7e28a74afc6a642bb41266dc07ca69",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/shared/ephemeral-vm-recipe-doctor.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/shared/ephemeral-vm-recipe-doctor.ts",
+      "git_blob": "35e279c18550a5d4c1a188250e343bd8d4de56a3",
+      "sha256": "51befcc6d70d12ed663a36ef674d4c8646881e71ce1373151c4bb3cdfaea8dc2",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/shared/ephemeral-vm-recipe-lifecycle-payload.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/shared/ephemeral-vm-recipe-lifecycle-payload.ts",
+      "git_blob": "4cee67602c25aca31d49c0470b96b2ac9fac44b3",
+      "sha256": "28a9da6a0ddda3f8a656e756e4dedd5e78187bac1978350d0d05bdb90d59a956",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/shared/ephemeral-vm-recipe-process.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/shared/ephemeral-vm-recipe-process.ts",
+      "git_blob": "e943567095c08191dacc8b580f5c10e4421a8d52",
+      "sha256": "aa1a8718b55cb2daa050c36f8bc2f5c2af4acdd26a581feae54df56c44a6dfe2",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/shared/ephemeral-vm-recipe-runner.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/shared/ephemeral-vm-recipe-runner.ts",
+      "git_blob": "9968d10601875644e216ac8f0bd357cbc5226774",
+      "sha256": "cd259228b6561a7fc326dccf6c93e220c00199eda7d862948cb5c44a67e77ed1",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/shared/ephemeral-vm-recipes.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/shared/ephemeral-vm-recipes.ts",
+      "git_blob": "108bd6ca4ffd75f33cd86d854d3b9e437f1dc1cb",
+      "sha256": "9d472582d8186f16c2c3e305e4c2617f1a5508eaf7ce34e9bbf3226be2bc617b",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
     }
   ]
 }

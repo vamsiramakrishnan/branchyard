@@ -17,11 +17,32 @@ Multi-stage: `rust:1.94.0-bookworm` builds `by` (`cargo build --release --locked
 
 `HEALTHCHECK` polls `GET /healthz` (no token needed; the only unauthenticated route, `docs/server.md#authentication`) every 10 seconds.
 
-By default the local process provider runs harnesses as the container's own user with **no isolation** beyond it (`docs/server.md`, "What it does not guarantee"). This image installs no harness executables; add a layer for the ones a served repository's requests will name, or the server refuses them with `harness_not_found`.
+By default the local process provider runs harnesses as the container's own user with **no isolation** beyond it (`docs/server.md`, "What it does not guarantee"). This image installs no harness executables; use the [image with harnesses](#image-with-harnesses), or add a layer for the ones a served repository's requests will name, or the server refuses them with `harness_not_found`.
 
 **Not built here.** This environment has no container runtime, so the image was validated statically (this file's build/run flags, the binary and feature it builds, the base images and packages) and the compose recipe only for YAML/schema validity (`docker compose -f deploy/compose.yaml config`, with placeholder values for its required variables), not by actually building or running either.
 
 `by init deploy` writes a compose file, its server configuration and generated secret files for one repository, checked with the server's loader and `docker compose config` ([setup](setup.md)). The image copies `plugins/branchyard/skills` as well as `crates`: `by init plugin` embeds the shipped skills.
+
+## Image with harnesses
+
+```sh
+docker build -f deploy/Dockerfile.harnesses -t branchyard-harnesses .
+docker run --rm -p 127.0.0.1:8421:8421 -v /path/to/a/repo:/repos/app -v branchyard-data:/data \
+  branchyard-harnesses --repo app=/repos/app --data-dir /data --listen 0.0.0.0:8421 --insecure-bind \
+  --secret ANTHROPIC_API_KEY=@/run/secrets/anthropic
+```
+
+`deploy/Dockerfile.harnesses` is `deploy/Dockerfile` with the harnesses the qualification workflow pins: three stages, the same `by` build stage (`tests/test_distribution.py` checks the two are identical), an `npm ci` of `deploy/harnesses/package-lock.json`, and a runtime on `node:22.22.2-bookworm-slim` pinned by digest, with `git`, `openssh-client` (for [recipes](recipes.md) and [ssh remotes](remote-ssh.md)), `ca-certificates` and `curl`, running as the non-root `branchyard` user.
+
+| Harness | Package | Command |
+|---|---|---|
+| Claude Code | `@anthropic-ai/claude-code@2.1.283` | `claude` |
+| Codex | `@openai/codex@0.157.1` | `codex` |
+| Claude Code over ACP | `@agentclientprotocol/claude-agent-acp@0.81.2` | `claude-agent-acp` |
+
+The lock records the SHA-512 `integrity` of every one of its 128 packages (each harness's platform binaries included), all from `registry.npmjs.org`, and `npm ci` refuses a tarball that differs; the test checks every entry has one and that the pins are exactly those in `.github/workflows/qualify.yml`. Claude Code's install script (which links its platform binary) runs, after that check. `DISABLE_AUTOUPDATER=1` keeps the pinned versions. No credential is in the image: pass them at run time, as `--secret` names ([provisioning](provisioning.md)). To change a version, edit `deploy/harnesses/package.json` and `qualify.yml` together and regenerate the lock with `npm install --package-lock-only --ignore-scripts` in `deploy/harnesses`.
+
+The release workflow builds it on every `v*` tag and smoke-tests `by`, `claude`, `codex`, `claude-agent-acp`, `ssh`, `git` and a non-root user in it; it pushes to `ghcr.io/<owner>/<repo>-harnesses:<version>` only when the repository variable `PUBLISH_IMAGES` is `true`. **Not built here** (no container daemon, and no `hadolint`): checked statically by `tests/test_distribution.py` and by review.
 
 ## Compose: server behind PostgreSQL
 
