@@ -49,6 +49,7 @@ Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped
 | `--label LABEL` | A label this process's worker carries (repeatable; replaces the configuration's `labels`): it claims only operations whose `require_labels` are all among its labels. See [worker labels](#worker-labels) |
 | `--public-url URL` | This server's URL as webhook senders reach it: the base of each event [trigger](triggers.md)'s webhook URL. Default `http(s)://<listen>` |
 | `--allow-trigger-prechecks` | Let every served repository's triggers run a [precheck](triggers.md#prechecks) command before firing. Default: none |
+| `--app` | Serve the [web companion](companion.md) at `/app/`, accept paired tokens, and send Web Push. Off by default |
 | `--unclaimable-after SECS` | How long an operation that requires labels may wait queued before it says why no live worker can claim it (`waiting`). Default 60 |
 | `--max-artifact-bytes N` | Largest artifact a `POST .../artifacts` upload may publish, in bytes. Default 268435456 (256 MiB) |
 | `--max-running N` | Operations this process runs at once; more wait queued. Default 8 |
@@ -102,13 +103,16 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "fair_share_window_seconds": 300,
   "metrics": { "listen": "127.0.0.1:9464", "token_file": "/etc/branchyard/metrics.token" },
   "public_url": "https://by.example.com",
-  "allow_trigger_prechecks": ["app"]
+  "allow_trigger_prechecks": ["app"],
+  "app": { "push_subject": "mailto:ops@example.com" }
 }
 ```
 
 `weight`, `max_priority`, `aging_seconds` and `fair_share_window_seconds` set [scheduling](#scheduling); `metrics` turns on [metrics](observability.md#metrics). Traces are configured by the standard OpenTelemetry variables instead ([observability](observability.md#traces)).
 
 `allow_workspace_scripts` (`true`, or a list of served repositories) lets a repository's own `[workspace]` scripts in its `branchyard.toml` run for the branches this server creates: copy, setup before the first turn, teardown on removal, with `BRANCHYARD_PORT` reserved per branch. Off by default, and no request can ask for it: every other repository's yard refuses workspace scripts outright. See [workspace](workspace.md#trust).
+
+`app` (`true`, or its settings) turns on the [web companion](companion.md#setting-it-up): the page at `/app/`, pairing links and Web Push.
 
 `allow_trigger_prechecks` (`true`, or a list of served repositories) is the same decision for [triggers](triggers.md): a trigger's precheck command runs, as the server's user, only for those repositories, and a trigger with one is refused (`403 precheck_not_allowed`) elsewhere. `public_url` is the base of every event trigger's webhook URL, for a server behind a proxy.
 
@@ -125,7 +129,7 @@ Every route except `GET /healthz`, `GET /.well-known/jwks.json` (public keys, [c
 **A request's identity comes only from its verified credential, never from anything the request itself says** — there is no `tenant_id` field anywhere in the wire protocol. Each configured credential names a **principal**: a `tenant` (1 to 128 characters, no `/`), a subject `name` (the caller's identity for idempotency scoping and audit), a set of **scopes**, and, optionally, its own repository allowlist narrower than its tenant's. Two ways to configure one:
 
 - **`tokens`** (unchanged from before tenants existed): `{"name", "token"|"token_file"}`, plus optional `tenant`, `scopes` and `repos`. A `tokens` entry that gives none of those three becomes a principal in the unconfigured `default` tenant with every scope and every repository — **exactly what a single-token server did before this existed**, so old configurations keep working unchanged.
-- **`credentials`**: `{"token_sha256", "tenant", "name"?, "scopes"?, "repos"?}` — the token's SHA-256 directly, so the plaintext never has to enter the configuration at all. `branchyard-server token new [--tenant T] [--scopes S,...] [--repo R,...]` (also `by serve token new`) generates a fresh token, prints it once (give it to the client, never store it), and prints the `credentials` object to paste in. There is no hot rotation or revocation API: replacing or removing a hash and restarting is how a token is rotated or revoked, the same restart a `tokens` change already needed.
+- **`credentials`**: `{"token_sha256", "tenant", "name"?, "scopes"?, "repos"?}` — the token's SHA-256 directly, so the plaintext never has to enter the configuration at all. `branchyard-server token new [--tenant T] [--scopes S,...] [--repo R,...]` (also `by serve token new`) generates a fresh token, prints it once (give it to the client, never store it), and prints the `credentials` object to paste in. There is no hot rotation or revocation API for these: replacing or removing a hash and restarting is how a token is rotated or revoked, the same restart a `tokens` change already needed. A third kind, **paired tokens**, exists only with the [companion](companion.md) on: `by serve token new --link` prints a one-time pairing link whose code becomes a token with the scopes, tenant and repositories the link was made with, stored hashed in the server's store, expiring, and revocable at once with `by serve token revoke NAME` (`token list` shows them).
 
 Scopes: `read` (every `GET`, including the event stream), `run` (submitting a task, send, fork, reincarnate or spawn, and acting on a running turn: cancel, steer, ask, report, escalate, answer), `merge` (merge, integrate), `admin` (removing a branch). Every endpoint checks the caller's scope and returns `403 scope_required` (`detail.scope`) when it is missing; `read` is checked once for every `GET` and `HEAD` before any handler runs, so a credential with `run`, `merge` or `admin` but not `read` sees nothing. A secret may appear once across `tokens` and `credentials`: the same secret twice (two tokens, or a token and a hash) is refused at startup, naming the entries, since it could otherwise authenticate as either principal.
 
@@ -239,6 +243,10 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `DELETE /v1/triggers/{t}`; `POST /v1/triggers/{t}/enable`, `/disable`, `/secret`, `/test` | Remove; enable or disable; set or generate its webhook secret; evaluate it without creating anything | `TriggerRemoved`, `Trigger`, `SecretSet`, `TriggerTest` |
 | `GET /v1/triggers/{t}/runs?limit=N` | Its runs, newest first | `TriggerRuns` |
 | `POST /v1/triggers/{id}/fire` | A webhook delivery from GitHub, Slack, Linear or a generic sender; no bearer token, the trigger's signature instead | `FireAck`, or Slack's `{"challenge"}` |
+| `GET /app/`, `/app/{file}` | The [web companion](companion.md)'s page, no token, only with `--app` | its files, with a strict CSP |
+| `POST /app/pair` | Redeem a pairing code `{code, device?}`, no token, single use, at most 10 attempts a minute | `Paired` (`{token, me}`), or `400 invalid_pairing_code`, `429 rate_limited` |
+| `GET /v1/app/me` | The caller's own principal | `Me` |
+| `GET /v1/app/push`; `POST`, `DELETE /v1/app/push/subscriptions`; `POST /v1/app/push/test` | The caller's own Web Push subscriptions (`read`) | `PushInfo`, `PushResult` |
 | `GET /v1/repos/{repo}/scratch/{name}/lock` | Its current holder, if any (needs `read` on a repository the caller's tenant owns; not scoped to an acting branch) | `{"lock": ScratchLock?}` |
 
 ### Requests
@@ -400,6 +408,8 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `not_found`, `method_not_allowed` | 404, 405 | No such route or method |
 | `unknown_repo`, `unknown_branch`, `unknown_operation`, `unknown_trigger` | 404 | No such thing, or another tenant's (indistinguishable from unknown) |
 | `trigger_exists` | 409 | The tenant has a trigger of that name |
+| `invalid_pairing_code`, `rate_limited` | 400, 429 | A pairing code that is unknown, used or expired; too many redemption attempts (`Retry-After`) |
+| `push_not_enabled` | 403 | A push subscription on a server whose `app.push` is off |
 | `precheck_not_allowed` | 403 | A trigger precheck on a repository whose prechecks the operator did not allow |
 | `invalid_signature`, `stale_delivery` | 401 | A trigger webhook whose signature does not match its secret, or whose signed timestamp is outside the replay window |
 | `scope_required` | 403 | The caller's principal lacks a scope this endpoint needs; `detail.scope` |
@@ -540,7 +550,8 @@ What it is not yet:
 - **Allowed providers use the server's credentials.** A token holder chooses which of the server's variables a sandboxed turn gets through `pass_env`, and which Substrate endpoint, router and key path it uses.
 - **Delegation** gives the server's harnesses the delegation tools, bounded by the envelope. As in local mode, a harness running as the server's user can read other branches' tokens in `.branchyard/`; the envelope stops honest mistakes, not a hostile harness, until harnesses run in sandboxes. `--allow-unapproved-tools` lets token holders run profiles whose tools the request's policy never sees.
 - **`allow_client_commands`** additionally lets any token holder choose the executable the server launches. Leave it off outside tests; configure `harness_commands` instead.
-- **Scopes and tenants bound what a credential can reach (`read`/`run`/`merge`/`admin`, a tenant's repositories, quotas), but not what it does within reach.** A `run`-scoped credential on an allowed repository can still make a harness do anything the server's operating-system user can, exactly as before: scopes are not sandboxing. There is still no expiry beyond a `credentials` hash the operator removes, and no hot rotation or revocation API — replacing a hash (or a `tokens` entry) and restarting is how a token is rotated or revoked.
+- **The web companion** ([its security model](companion.md#security-model)) is off unless `--app`; its page is static, adds no authority beyond the caller's token, and is served with a strict Content Security Policy.
+- **Scopes and tenants bound what a credential can reach (`read`/`run`/`merge`/`admin`, a tenant's repositories, quotas), but not what it does within reach.** A `run`-scoped credential on an allowed repository can still make a harness do anything the server's operating-system user can, exactly as before: scopes are not sandboxing. Configured credentials still have no expiry beyond a hash the operator removes, and no hot rotation or revocation — replacing a hash (or a `tokens` entry) and restarting is how one is rotated or revoked; paired tokens expire and are revoked at once ([companion](companion.md)).
 - **Plain HTTP** exposes tokens, prompts and code to anyone on the path. The server refuses it off loopback unless told `--insecure-bind`.
 - **Information exposure.** Responses include server paths (worktrees, repository roots) and the server's harness availability.
 - **Policy is per request.** A `deny` default is safe; rules match tool names only, as in the SDK.

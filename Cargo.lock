@@ -828,6 +828,7 @@ version = "0.0.1"
 dependencies = [
  "axum",
  "backon",
+ "base64 0.22.1",
  "blake3",
  "branchyard",
  "branchyard-client",
@@ -842,6 +843,7 @@ dependencies = [
  "postgres",
  "prost",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustix",
  "rustls",

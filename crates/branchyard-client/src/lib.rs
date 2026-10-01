@@ -44,6 +44,7 @@
 //!   CA file.
 
 pub mod api;
+pub mod companion;
 pub mod http;
 #[cfg(feature = "schema")]
 pub mod schema;

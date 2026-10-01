@@ -303,7 +303,19 @@ pub async fn start(config: Config) -> Result<Running, String> {
         config.triggers.clone(),
         base_url,
     ));
+    let companion = match config.app.enabled && !config.worker_only {
+        true => {
+            let config = config.clone();
+            Some(Arc::new(
+                tokio::task::spawn_blocking(move || crate::companion::Companion::open(&config))
+                    .await
+                    .map_err(|e| e.to_string())??,
+            ))
+        }
+        false => None,
+    };
     let app = Arc::new(App {
+        companion,
         repos,
         registry: registry.clone(),
         credentials: Credentials::new(config.all_credentials()),
@@ -331,6 +343,15 @@ pub async fn start(config: Config) -> Result<Running, String> {
         }
         None => None,
     };
+    // The companion's push notifications follow every repository's feed.
+    if app.companion.as_ref().is_some_and(|c| c.vapid.is_some()) {
+        let (store, _) = operation_store(&app.config)?;
+        pollers.extend(crate::companion::push::spawn(
+            app.clone(),
+            Arc::from(store),
+            shutdown_rx.clone(),
+        ));
+    }
     // Triggers fire wherever a dispatcher runs: this server or worker.
     if app.config.triggers.dispatch {
         pollers.push(crate::triggers::dispatch::spawn(

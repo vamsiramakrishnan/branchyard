@@ -170,6 +170,13 @@ pub fn serve_args(config: &ProjectConfig, args: Vec<String>) -> Vec<String> {
     if branchyard_server::cli::names_config(&args) {
         return args;
     }
+    // `token list`, `token revoke`, `token new --link`: the subcommand's
+    // own `--config`, after it.
+    if args.first().is_some_and(|a| a == "token") {
+        let mut with = args;
+        with.extend(["--config".to_owned(), path.clone()]);
+        return with;
+    }
     let mut with = vec!["--config".to_owned(), path.clone()];
     with.extend(args);
     with
@@ -583,6 +590,21 @@ connectors = ["github"]
         assert_eq!(
             serve_args(&config, vec!["token".into(), "new".into()]),
             ["token", "new"]
+        );
+        // The token commands that read the server's store take the file
+        // after them, unless they name their own place.
+        let words = |w: &[&str]| -> Vec<String> { w.iter().map(|a| a.to_string()).collect() };
+        assert_eq!(
+            serve_args(&config, words(&["token", "new", "--link"])),
+            ["token", "new", "--link", "--config", "/srv/server.json"]
+        );
+        assert_eq!(
+            serve_args(&config, words(&["token", "revoke", "phone"])),
+            ["token", "revoke", "phone", "--config", "/srv/server.json"]
+        );
+        assert_eq!(
+            serve_args(&config, words(&["token", "list", "--data-dir", "d"])),
+            ["token", "list", "--data-dir", "d"]
         );
         assert_eq!(
             serve_args(&config, vec!["--worker".into()]),
