@@ -286,7 +286,7 @@ Built as designed in outline, with the deviations listed below; [rigs](rigs.md) 
 | `can_observe` | Refused: authority is still descendants only |
 | `escalates_to` from A to an ancestor C | `seats.A.escalates_to = ["C"]`, `C` a seat above A's beyond its own parent (always allowed); `by escalate` reaches it, authority checked against the tree |
 | `collaborates_with` | Refused: messaging is parent/descendant only, no sibling-to-sibling |
-| `permission_policy` | Refused: presets are not implemented. The root seat has explicit `policy` rules (`default` allow, deny or ask; `deny`; `allow`; `delegation_commands`); a child seat may only add `deny` |
+| `permission_policy` | On a seat: a [preset](egress.md#permission-presets) (`read-only`, `edit-worktree`, `full`) expanded to explicit rules after the seat's own `policy`; a child seat's adds its denials only. At the top level, refused: a preset belongs to a seat. The root seat also has explicit `policy` rules (`default` allow, deny or ask; `deny`; `allow`; `delegation_commands`); a child seat may only add `deny` |
 | `startup.files` | Standing instructions through provisioning, after a generated section naming the seat and the seats it may spawn; never written to a worktree. Paths are relative, without `..`; `required = false` skips a missing file |
 | `startup.actions`, `delivery_hint` | Refused: the prompt is the first message, and drivers refuse slash commands |
 | `restore_policy: resume_if_possible` | Accepted: the default behaviour |

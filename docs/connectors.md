@@ -172,7 +172,11 @@ A sandboxed harness cannot reach the host's loopback, so a sandboxed branch with
 - **Microsandbox**: point `sandbox_gateway` at an address of the host the guest routes to, and have the gateway listen there (`listen = "0.0.0.0"` or that address). Anvil requires HTTPS for a non-loopback audience but not for the address a client dials, so the audience can stay `http://127.0.0.1:...`. Not checked on a KVM host.
 - **Substrate**: point `sandbox_gateway` at a URL the actor's egress reaches, such as the gateway exposed through the cluster's routed ingress. Not checked against a cluster.
 
-The target rule is that **a sandboxed branch may reach only the gateway**. It is **not enforced**: Microsandbox guests get the runtime's default network (egress restriction is an unimplemented capability, [providers](providers.md)), and Substrate's egress policy is not vendored. Until it is, a sandboxed harness can reach whatever its network allows; it still holds no upstream credential, and the gateway still enforces its grant.
+The target rule is that **a sandboxed branch may reach only the gateway**. It is **not enforced** in a sandbox: Microsandbox guests get the runtime's default network, and Substrate's egress policy is not vendored, so a branch's [network policy](egress.md) is not applied there. Until it is, a sandboxed harness can reach whatever its network allows; it still holds no upstream credential, and the gateway still enforces its grant.
+
+### Egress
+
+A local branch can be held to the gateway: `--network none --connector github:read` runs its harness under an [egress policy](egress.md) that allows nothing but the gateway. A turn with a grant adds the host and port of the gateway URL it is given to its policy's rules, for that turn only; the branch's stored policy stays as set. On Linux where unprivileged namespaces are allowed, the harness's only network is then the egress proxy, so the gateway is all it reaches. The packaged SDKs reach the gateway through `HTTPS_PROXY` and `HTTP_PROXY`, which the turn sets, with `NO_PROXY` empty so a gateway on loopback goes through the proxy too.
 
 ### Delegation, rigs and the server
 

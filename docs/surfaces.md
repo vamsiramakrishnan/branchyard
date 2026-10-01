@@ -492,3 +492,18 @@ See [knowledge](knowledge.md) and [plans and goals](plans-and-goals.md); each ha
 | `FleetEntry` | through `connectors` | adds `plan`, `goal_judge` |
 | `Error` | | adds `UnknownKnowledge` (`unknown_knowledge`, HTTP 404) and `NoPlan` (`no_plan`, HTTP 409) |
 | The fake ACP agent | `REPLY_FILE` | adds `REPLY_SEQUENCE <dir>`: the first file's contents, removed, for a judge answering a sequence |
+
+## Added with egress policy
+
+A branch's harness reaches only the hosts its policy allows, through an allowlisting proxy, and tool requests can be answered by a named preset; see [egress](egress.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `Provisioning::network` (`Network`, `NetworkEnforce`, `NetworkRule`, `network_narrow`) | none | `--network open\|none\|HOSTS` and `--network-enforce` on `run`, `fan`, `send`, `fork`, `reincarnate`; `[network] allow`, `enforce` for new branches; a seat's `network` in a rig; `provision.network` over HTTP and `by --remote`; stored with the branch; narrowed for children, seats and sends (`denied` when wider) |
+| Egress proxy and confinement | none | `branchyard_runtime::egress::{Proxy, Verdict, Decision}`; `LocalProvider::spawn_confined`, `confinement`; `Session::start_confined`; `BRANCHYARD_EGRESS_NETNS=off` |
+| `SandboxProvider::exec_confined`, `Capabilities::egress`, `Operation::Egress` | none | the local provider declares it where it can confine; Microsandbox, Substrate and recipes do not and refuse; the conformance suite's `egress_confinement` |
+| `Activity::Egress` (`EgressActivity`, `EgressEnforcement`) | none | `egress` in `by log --json` and event streams (`applied` once per turn, `decision` per destination), a line in `by log`, the latest decision in `by watch`, `egress` in `by show` and `by show --json`; in `schema/contract.json` |
+| Refusals | | `unsupported` before anything is created when a `required` policy cannot be enforced (a sandbox provider, or a host without confinement); a turn fails naming the reason when that is found only as it starts |
+| `PolicyPreset` (`PresetRules`, `EDIT_TOOLS`, `SHELL_TOOLS`, `WEB_TOOLS`) | none: rigs refused `permission_policy` | `--permissions read-only\|edit-worktree\|full` wherever `--yes` is; `[defaults] permissions` takes the presets; `policy.preset` in a request (`PolicySpec::preset`); a seat's `permission_policy` in a rig (a top-level one is refused); `plan::read_only` is the `read-only` preset |
+| `RigPlan`'s `root.policy` | `default`, `deny`, `allow`, `delegation_commands` | adds `preset` when a seat names one; the rules include its expansion |
+| `[network]` and `[defaults] permissions` in `branchyard.toml`; `network` and `permission_policy` on a rig seat | none; `ask` or `yes` | in `schema/branchyard.config.json` and `schema/rig.json` |

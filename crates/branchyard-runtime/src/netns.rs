@@ -95,8 +95,8 @@ pub fn spawn(command: &mut Command, port: u16) -> io::Result<(Child, TcpListener
         SocketFlags::CLOEXEC,
         None,
     )?;
-    let uid = rustix::process::getuid().as_raw();
-    let gid = rustix::process::getgid().as_raw();
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
     let prepared = Prepared {
         uid_map: format!("{uid} {uid} 1").into_bytes(),
         gid_map: format!("{gid} {gid} 1").into_bytes(),
