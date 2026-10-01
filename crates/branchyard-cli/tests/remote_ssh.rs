@@ -359,3 +359,42 @@ fn ssh_remotes_refuse_what_they_cannot_use_and_say_why() {
     );
     let _ = world.by(&["remote", "ssh", "stop", &url]);
 }
+
+/// `ssh -O forward` answers only once the local socket accepts, as
+/// OpenSSH's mux master does; the fake once answered as soon as the file
+/// existed (after bind, before listen), which `by` could race under load.
+#[test]
+fn the_fake_forward_answers_only_once_its_socket_accepts() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let dir = tempfile::tempdir().unwrap();
+    let dir = fs::canonicalize(dir.path()).unwrap();
+    let (control, local, remote) = (
+        dir.join("ctl"),
+        dir.join("local.sock"),
+        dir.join("remote.sock"),
+    );
+    let upstream = UnixListener::bind(&remote).unwrap();
+    let ssh = |args: &[&str]| {
+        Command::new("python3")
+            .arg(FAKE_SSH)
+            .args(["-S", control.to_str().unwrap()])
+            .args(args)
+            .env("FAKE_SSH_LISTEN_DELAY", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    assert!(ssh(&["-M", "-N", "-f", "host"]).status.success());
+    let spec = format!("{}:{}", local.display(), remote.display());
+    let out = ssh(&["-O", "forward", "-L", &spec, "host"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    // Straight away, as `by` does.
+    let mut client = UnixStream::connect(&local).expect("the forward accepts");
+    client.write_all(b"ping").unwrap();
+    let (mut accepted, _) = upstream.accept().unwrap();
+    let mut buf = [0; 4];
+    accepted.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"ping");
+    assert!(ssh(&["-O", "exit", "host"]).status.success());
+}
