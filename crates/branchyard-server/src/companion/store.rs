@@ -742,7 +742,7 @@ impl CompanionStore for PostgresCompanion {
         device: Option<&str>,
         now_ms: u64,
     ) -> io::Result<Option<PairedToken>> {
-        let (code, hash, device) = (
+        let (code, hash, label) = (
             code_sha256.to_owned(),
             token_sha256.to_owned(),
             device.map(str::to_owned),
@@ -773,7 +773,7 @@ impl CompanionStore for PostgresCompanion {
                     &principal.name,
                     &principal.tenant,
                     &pairing.1,
-                    &device,
+                    &label,
                     &i(now_ms),
                     &i(now_ms.saturating_add(u(pairing.2))),
                 ],

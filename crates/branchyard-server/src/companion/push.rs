@@ -619,7 +619,7 @@ pub(crate) async fn fan_out(
     let Some(companion) = app.companion.clone() else {
         return (0, Vec::new());
     };
-    let Some(vapid) = companion.vapid.as_ref() else {
+    let (Some(vapid), Some(client)) = (companion.vapid.as_ref(), companion.client.as_ref()) else {
         return (0, vec!["push is off on this server".into()]);
     };
     let store = companion.store.clone();
@@ -648,7 +648,7 @@ pub(crate) async fn fan_out(
             drop_subscription(&companion, &subscription.endpoint).await;
             continue;
         }
-        match send(&companion.client, vapid, &subscription, notice).await {
+        match send(client, vapid, &subscription, notice).await {
             Sent::Delivered => delivered += 1,
             Sent::Gone => {
                 drop_subscription(&companion, &subscription.endpoint).await;

@@ -101,7 +101,8 @@ pub struct Companion {
     pub store: Arc<dyn CompanionStore>,
     /// `None` when push is off.
     pub vapid: Option<push::Vapid>,
-    pub client: reqwest::Client,
+    /// The HTTP client pushes are sent with; `None` when push is off.
+    pub client: Option<reqwest::Client>,
     attempts: Mutex<VecDeque<Instant>>,
 }
 
@@ -109,16 +110,26 @@ impl Companion {
     /// Open the store and, with push on, the VAPID key. Blocking.
     pub fn open(config: &crate::Config) -> Result<Companion, String> {
         let store = store::open(config)?;
-        let vapid = match config.app.push {
+        let mut vapid = match config.app.push {
             true => Some(push::Vapid::load_or_create(
                 &config.app.vapid_key_path(&config.data_dir),
                 config.app.subject(config),
             )?),
             false => None,
         };
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| format!("push client: {e}"))?;
+        // A client that cannot be built (no readable trust roots, say)
+        // turns push off; the page and pairing still work.
+        let client = match vapid {
+            Some(_) => match reqwest::Client::builder().build() {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    tracing::warn!(%error, "companion: push is off: no HTTP client");
+                    vapid = None;
+                    None
+                }
+            },
+            None => None,
+        };
         Ok(Companion {
             store,
             vapid,
@@ -596,11 +607,10 @@ mod tests {
 
     #[test]
     fn the_rate_limit_counts_attempts_in_its_window() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let companion = Companion {
             store: Arc::new(store::SqliteCompanion::memory()),
             vapid: None,
-            client: reqwest::Client::new(),
+            client: None,
             attempts: Mutex::new(VecDeque::new()),
         };
         let start = Instant::now();
