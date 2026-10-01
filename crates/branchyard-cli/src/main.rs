@@ -288,9 +288,12 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::inbox(target, as_branch, unread, json),
         Command::Rig { json, action } => commands::rig(env, target, &action.into_args(json)),
         Command::Gateway { json, action } => gateway_cmd::main(target, &action, json),
-        Command::Connect { connector, account } => {
-            gateway_cmd::connect(target, &connector, account.as_deref())
-        }
+        Command::Connect {
+            connector,
+            account,
+            api_key_stdin,
+            open,
+        } => gateway_cmd::connect(target, &connector, account.as_deref(), api_key_stdin, open),
         Command::Artifact {
             branch,
             json,

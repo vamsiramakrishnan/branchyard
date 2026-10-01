@@ -48,8 +48,9 @@ elif args[:1] == ["connect"]:
     with open(os.environ["ANVIL_GATEWAY_TOKEN_FILE"]) as f:
         claims = claims_of(f.read())
     account = flag("--account") if "--account" in args else "default"
+    assert os.path.isdir(args[1]), "the workspace comes first"
     print("connect %s for %s account %s via %s grants %s" % (
-        args[1], claims["sub"], account, os.environ["ANVIL_GATEWAY_URL"], claims["by_grants"]))
+        args[2], claims["sub"], account, os.environ["ANVIL_GATEWAY_URL"], claims["by_grants"]))
 elif args[:2] == ["serve", "mcp"]:
     for var in ["ANVIL_INBOUND_AUTH_MODE", "ANVIL_INBOUND_ISSUER", "ANVIL_INBOUND_AUDIENCE",
                 "ANVIL_INBOUND_JWKS_URI", "ANVIL_AUDIT_FILE", "ANVIL_VAULT_KEY_FILE"]:

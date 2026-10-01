@@ -507,7 +507,8 @@ docs/connectors.md.";
 const CONNECT_EXAMPLES: &str = "\
 Examples:
   by connect github
-  by connect github --account work
+  by connect github --account work --open
+  by connect github --api-key-stdin < ~/.config/github-token
 
 Runs `anvil connect` against the gateway as you: it opens (or prints) the
 connector's authorization URL, and the gateway keeps the upstream token. A
@@ -1001,6 +1002,12 @@ pub enum Command {
         /// Which of your accounts to connect (default: your default account)
         #[arg(long, value_name = "NAME")]
         account: Option<String>,
+        /// For a key-based connector: read the API key or personal token from stdin
+        #[arg(long)]
+        api_key_stdin: bool,
+        /// Also open the authorization URL in your browser
+        #[arg(long)]
+        open: bool,
     },
 }
 
@@ -2953,10 +2960,12 @@ mod tests {
             }
         ));
         assert_eq!(
-            parse_str("connect github --account work").unwrap(),
+            parse_str("connect github --account work --api-key-stdin").unwrap(),
             Command::Connect {
                 connector: "github".into(),
-                account: Some("work".into())
+                account: Some("work".into()),
+                api_key_stdin: true,
+                open: false,
             }
         );
     }

@@ -347,9 +347,17 @@ fn status(yard: &Yard, dir: &Path, as_json: bool) -> Outcome {
     print(&out)
 }
 
-/// `by connect <connector> [--account NAME]`: `anvil connect` as the
-/// person, with a short-lived token that names them and grants nothing.
-pub fn connect(target: &Target, connector: &str, account: Option<&str>) -> Outcome {
+/// `by connect <connector> [--account NAME] [--api-key-stdin] [--open]`:
+/// `anvil connect <bundles> <connector>` as the person, with a short-lived
+/// token that names them and grants nothing. The gateway answers with an
+/// authorization URL, or takes a key from stdin.
+pub fn connect(
+    target: &Target,
+    connector: &str,
+    account: Option<&str>,
+    api_key_stdin: bool,
+    open: bool,
+) -> Outcome {
     local_only(target, "by connect")?;
     connectors::check_connector(connector).map_err(Failure::Message)?;
     let yard = commands::open()?;
@@ -362,11 +370,19 @@ pub fn connect(target: &Target, connector: &str, account: Option<&str>) -> Outco
     let mut command = Command::new(&anvil[0]);
     command
         .args(&anvil[1..])
-        .args(["connect", connector])
+        .arg("connect")
+        .arg(bundles(yard.root(), &config))
+        .arg(connector)
         .env(connectors::ENV_GATEWAY_URL, &gw.url)
         .env(connectors::ENV_GATEWAY_TOKEN_FILE, &file);
     if let Some(account) = account {
         command.args(["--account", account]);
+    }
+    if api_key_stdin {
+        command.arg("--api-key-stdin");
+    }
+    if open {
+        command.arg("--open");
     }
     let status = command.status();
     let _ = std::fs::remove_file(&file);

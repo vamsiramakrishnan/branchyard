@@ -1269,10 +1269,17 @@ mod tests {
             r#"{"listen": "127.0.0.1:0", "data_dir": "data", "repos": {"app": "repo"},
                 "tokens": [{"name": "ci", "token_file": "t.token"}],
                 "harness_commands": {"codex": ["/bin/codex"]},
-                "secrets": {"ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@codex.json"}}"#,
+                "secrets": {"ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@codex.json"},
+                "connectors": {"gateway": "http://127.0.0.1:8931/mcp", "bundles": "bundles",
+                               "signing_key": "gw.key", "run_gateway": true}}"#,
         )
         .unwrap();
         let partial = load_file(&path).unwrap();
+        let connectors = partial.connectors.clone().unwrap();
+        assert_eq!(connectors.bundles, dir.join("bundles"));
+        assert_eq!(connectors.signing_key, Some(dir.join("gw.key")));
+        assert_eq!(connectors.anvil, ["anvil"]);
+        assert!(connectors.run_gateway);
         assert_eq!(partial.data_dir, Some(dir.join("data")));
         assert_eq!(partial.repos, [("app".to_owned(), dir.join("repo"))]);
         assert_eq!(partial.tokens[0].secret, "0123456789abcdef");
