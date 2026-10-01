@@ -641,6 +641,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         });
     }
     config.webhook_insecure = partial.webhook_insecure || flags.webhook_insecure;
+    config.connectors = partial.connectors;
     if flags.check {
         for (name, path) in &config.repos {
             if !path.is_dir() {

@@ -190,6 +190,13 @@ enabled = true              # unset: on; --no-notify turns it off for one comman
 desktop = false             # also run notify-send (osascript on macOS)
 terminal = "auto"           # osc9, osc777, bell or none
 
+[connectors]                # the connector gateway; see docs/connectors.md
+gateway = "http://127.0.0.1:8931/mcp"    # its /mcp URL; without it, connectors are off
+bundles = "../connectors"                # the bundle root it serves
+anvil = "anvil"                          # Anvil's command line
+grants = ["github:read"]                 # for new branches with a private home that name none
+sandbox_gateway = "http://192.168.127.1:8931/mcp"   # the gateway as a sandbox reaches it
+
 [workspace]                 # project file only; scripts run once you trust them
 copy = [".env", ".env.*"]
 setup = "pnpm install --frozen-lockfile"
@@ -208,10 +215,11 @@ What each command takes, in `crates/branchyard-cli/src/defaults.rs` (`defaults::
 
 | Command | Takes |
 |---|---|
-| `run`, `fan` | every `[defaults]` key the flags left unset, `[mcp]`, and `[secrets]` when the branch has a private home; `isolated = true` cannot be turned off by a flag. With `fork`, `reincarnate` and `rig run`, the effective `[workspace]`, once trusted ([workspace](workspace.md#trust)) |
+| `run`, `fan` | every `[defaults]` key the flags left unset, `[mcp]`, and `[secrets]` and `[connectors] grants` (unless `--connector` names any) when the branch has a private home; `isolated = true` cannot be turned off by a flag. With `fork`, `reincarnate` and `rig run`, the effective `[workspace]`, once trusted ([workspace](workspace.md#trust)) |
 | `send`, `fork`, `reincarnate`, `spawn` | `permissions` only: the rest would override what the branch, its fork parent or its seat already has |
 | `serve`, `worker` | `[serve] config` as `--config`, unless the arguments give one (`--config FILE`, `--config=FILE`, `-c FILE`), ask for help or the version, or are `token new` |
 | `watch`, and `run`, `fan`, `send`, `fork` while they wait | `[notify]`, unless `--no-notify` is given |
+| every local command that opens the repository | `[connectors]`: the gateway its branches' turns are given, and what `by gateway` and `by connect` run ([connectors](connectors.md#configuration)) |
 | every command but `serve`, `worker`, `init`, `config`, `mcp`, `completions`, `man` | `[remote]` for what `--remote`, `--token-file`, `--ca-file`, `--repo` and their variables left unset; `token_file`, `ca_file` and `repo` only when `url` is the server in use |
 
 How "left unset" is decided: clap reads the four global variables itself (`env = "BRANCHYARD_REMOTE"` and so on), so by the time the files are consulted a variable is already in the parsed options and counts as given, which is what puts variables above both files. None of the options the files fill has a clap default value or a variable of its own, so an option that is `None` (or `--yes`/`--ask` both absent, or `--isolated` absent) was not on the command line. `by serve`'s `--config` is asked of the server's parser: `branchyard_server::cli::names_config` parses the arguments and checks `ArgMatches::value_source("config")` is the command line, so every spelling clap accepts counts and nothing else does.

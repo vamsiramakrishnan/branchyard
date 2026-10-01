@@ -34,6 +34,10 @@ postgres = { version = "0.19", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }
 schemars = { version = "1", optional = true }
 glob = "0.3"
+# Connector gateway tokens: Ed25519 (EdDSA) signatures over compact JWS,
+# and their base64url encoding. Both already in Cargo.lock.
+ring = "0.17"
+base64 = "0.22"
 
 [dev-dependencies]
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }

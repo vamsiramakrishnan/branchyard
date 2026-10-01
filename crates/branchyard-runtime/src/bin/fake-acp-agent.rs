@@ -148,6 +148,8 @@ fn main() {
         return;
     }
     let mut instructed = false;
+    // The last instructions preamble, for SHOW_INSTRUCTIONS.
+    let mut preamble = String::new();
     let mut servers = Value::Null;
     let mut session = "fake-session-1".to_owned();
     let mut resumed = false;
@@ -218,8 +220,9 @@ fn main() {
             (Some("session/prompt"), Some(id)) => {
                 let mut text = params["prompt"][0]["text"].as_str().unwrap_or_default();
                 if let Some(rest) = text.strip_prefix(PREAMBLE_OPEN) {
-                    if let Some((_, prompt)) = rest.split_once(PREAMBLE_CLOSE) {
+                    if let Some((given, prompt)) = rest.split_once(PREAMBLE_CLOSE) {
                         instructed = true;
+                        preamble = given.to_owned();
                         text = prompt.trim_start();
                     }
                 }
@@ -231,6 +234,11 @@ fn main() {
                     let reply_text = std::fs::read_to_string(path)
                         .unwrap_or_else(|e| format!("reply file {path}: {e}"));
                     chunk(&session, &reply_text);
+                    reply(&id, json!({"stopReason": "end_turn"}));
+                    continue;
+                }
+                if text.contains("SHOW_INSTRUCTIONS") {
+                    chunk(&session, &format!("instructions: {preamble}"));
                     reply(&id, json!({"stopReason": "end_turn"}));
                     continue;
                 }

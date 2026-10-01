@@ -100,6 +100,10 @@ A variable in the harness's environment reaches every command its tools run (its
 - Scion's Codex provisioner appends `model_reasoning_effort` after the last table of `config.toml`; with its own seed file that is `[projects."/workspace"]`, so TOML reads it as a key of that table. The port inserts top-level keys before the first table.
 - At the previously pinned revision, `54b9387`, Scion's Claude tests expected a Python alias resolver the provisioner did not have (11 of 12 failed). At `d9b9e6a` the provisioner has it and all 13 tests pass; see [validation](validation.md).
 
+## Connectors
+
+A branch with a connector grant (`--connector`, `Provisioning::connectors`; see [connectors](connectors.md)) is provisioned one more thing each turn, on the same path and before the sandbox exists: the granted connectors' packages and `INDEX.md` replace `~/.branchyard/connectors/` in its private home, a token for the turn is written to `~/.branchyard/gateway-token` (0600, removed when the turn ends), `ANVIL_GATEWAY_URL` and `ANVIL_GATEWAY_TOKEN_FILE` are set after the plan's variables, and one line pointing at `INDEX.md` is added after the task's instructions, so it reaches the harness on the same session channel. The `provisioned` event adds `connectors` (`by log`: `provisioned: connectors github; ...`); it never holds the token. A grant needs a private home, like secrets, and a connector the gateway does not serve fails the turn by name. A delegated child's grant is narrowed to its parent's ([delegation](delegation.md#connectors)).
+
 ## Using it
 
 SDK:
@@ -140,7 +144,7 @@ let options = TaskOptions {
 
 `McpServerSpec::env` is stored with the branch like the rest of the request; put secrets in `secret_env`. Remote MCP servers are taken by Claude Code's stream-json driver and by ACP agents that advertise `mcpCapabilities` (claude-agent-acp 0.81.2 does); Codex, Antigravity, Pi and Amp refuse them. They have no `by` flag yet: use the SDK or the HTTP API (`"remote_mcp_servers": [{"name", "url", "transport": "http" | "sse", "headers": {"Header": "SECRET"}}]`).
 
-`by run`, `fan`, `send` and `fork` take `--secret NAME[=VAR|=@FILE]` (repeatable), `--auth METHOD`, `--mcp NAME=COMMAND` (repeatable; an absolute executable and its arguments), `--instructions FILE`, `--model NAME`, `--effort low|medium|high|xhigh|0-100` and `--telemetry URL|off`:
+`by run`, `fan`, `send` and `fork` take `--connector GRANT` (repeatable; [connectors](connectors.md#grants)), `--secret NAME[=VAR|=@FILE]` (repeatable), `--auth METHOD`, `--mcp NAME=COMMAND` (repeatable; an absolute executable and its arguments), `--instructions FILE`, `--model NAME`, `--effort low|medium|high|xhigh|0-100` and `--telemetry URL|off`:
 
 ```sh
 by run "Fix the flaky parser test" --harness codex --isolated \

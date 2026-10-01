@@ -313,6 +313,22 @@ See [prepared environments](environments.md) and [worker labels](server.md#worke
 | `by show BRANCH --remote` for a branch not created yet | `unknown_branch` | the queued operation that will create it, with `requires` and `waiting` |
 | `workers` (SQLite), `by_workers` (PostgreSQL); `requires` on the queue | none | live workers with their labels; each queue row's required labels |
 
+## Added with connectors
+
+A branch's harness calls GitHub, Slack or an internal API through Anvil's gateway with a per-turn token for its grant; see [connectors](connectors.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `Provisioning::connectors` (`GrantEntry`, `GrantMode`, `Confirm`) | none | `--connector GRANT` on `run`, `fan`, `send`, `fork`; `[connectors] grants` for new private branches; a seat's `connectors` in a rig; `provision.connectors` over HTTP and `by --remote` (`403 connectors_not_configured` on a server without `connectors`); stored with the branch |
+| `Spawn::connectors`, `SpawnSpec::connectors` | none | `by spawn --connector`, the MCP `spawn` tool and graph proposals' `connectors`, `branchyard.spawn(..., connectors=[...])`, `connectors` on the server's spawn request; always narrowed to the parent's grant, an entry with nothing in common refused `denied` |
+| `TaskOptions::actor`, `connectors::Actor` | none | who a new branch acts for at the gateway; the server sets it to the request's principal; inherited by forks and children |
+| `Yard::use_connectors`, `connectors()`, `ingest_connector_audit`; `connectors::{Gateway, KeyRing, Claims, Packager, AnvilPackager, Bundle}`, `connectors::gateway::{GatewayCommand, Supervisor, Background}` | none | SDK: give a yard its gateway, sign tokens, package connectors, read the audit log, supervise Anvil; `by` sets the gateway from `[connectors]`, a server from its `connectors` configuration |
+| `Activity::ConnectorCall` (`ConnectorCall`); `Activity::Provisioned::connectors` | none | each gateway call on its branch's log: `connector_call` in `by log --json` and event streams, a `connector:` line in `by log`, the current call in `by watch`; the provisioned connectors; in `schema/contract.json` |
+| `by gateway start [--foreground]\|stop\|status\|rotate-key [--keep N]\|jwks` | none | local only: run Anvil's gateway supervised, inspect it, rotate the yard's signing key; a server runs one with `"run_gateway": true` |
+| `by connect CONNECTOR [--account NAME] [--api-key-stdin] [--open]` | none | local only: `anvil connect` as you, with a token naming you and granting nothing |
+| `GET /.well-known/jwks.json` | none | the server's public keys, no token; `404` without `connectors` |
+| `[connectors]` in `branchyard.toml`, `connectors` in the server configuration | none | in `schema/branchyard.config.json` and `schema/server.config.json`; a rig seat's `connectors` in `schema/rig.json` |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |

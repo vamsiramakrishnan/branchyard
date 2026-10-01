@@ -76,6 +76,10 @@
         "$ref": "#/$defs/FleetConfig"
       },
       "description": "Who runs each kind of task: `[fleet.bugfix]`, ..., and\n`[fleet.default]`. With a fleet, `by run` without `--harness` routes\n(docs/fleet.md). A project's entry replaces the user file's for the\nsame kind."
+    },
+    "connectors": {
+      "$ref": "#/$defs/Connectors",
+      "description": "The connector gateway (docs/connectors.md): where it is, which\nbundles it serves, how `by gateway` runs it, and the grants a new\nbranch gets when `--connector` names none."
     }
   },
   "title": "Branchyard configuration",
@@ -661,6 +665,62 @@
         "harness"
       ],
       "description": "`judge = { harness = \"claude-code\", rubric = \"...\" }`."
+    },
+    "Connectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gateway": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The gateway's canonical `/mcp` URL, such as\n`http://127.0.0.1:8931/mcp`: every token's audience, and what a\nharness on this machine is given. Without it, connectors are off."
+        },
+        "sandbox_gateway": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The same gateway as a sandboxed harness reaches it: a host address a\nMicrosandbox guest routes to, or Substrate's routed ingress. Without\nit, a sandboxed branch with a grant fails its turn."
+        },
+        "bundles": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The bundle root the gateway serves (`anvil serve mcp <root>\n--fleet`): every directory under it with an `air.yaml` or\n`air.json` is a connector."
+        },
+        "anvil": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Anvil's command line (default `anvil`), such as\n`\"node /opt/anvil/packages/cli/dist/bin-anvil.js\"`."
+        },
+        "listen": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The address `by gateway start` listens on (default: the gateway\nURL's loopback host); `0.0.0.0` for sandboxes to reach it."
+        },
+        "vault_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The gateway's vault key, a 0600 file of 32 bytes in 64 hex\ncharacters (default `.branchyard/gateway/vault.key`, made on first\nstart)."
+        },
+        "grants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Grants for a new branch (`by run`, `by fan`) when `--connector`\ngives none, in its form: `\"github:read\"`,\n`\"github@work:write:issues.*\"`. Applied only to isolated or\nsandboxed branches."
+        }
+      },
+      "description": "`[connectors]`."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

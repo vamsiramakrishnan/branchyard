@@ -132,6 +132,9 @@ pub struct SeatSpec {
     pub auth: Option<String>,
     pub secrets: Vec<String>,
     pub mcp: Vec<McpServerSpec>,
+    /// Connector grants (`--connector` form); a seat's is narrowed to its
+    /// parent seat's when it is spawned.
+    pub connectors: Vec<branchyard::connectors::GrantEntry>,
     pub telemetry: Option<Telemetry>,
     pub isolated: bool,
     pub budget: ChildBudget,
@@ -703,6 +706,11 @@ struct RawSeat {
         schemars(schema_with = "schema::ordered::<String>")
     )]
     mcp: Option<Ordered<String>>,
+    /// Connectors the seat's harness may call through the gateway, as
+    /// `by run --connector` takes them (github:read, github:write:issues.*);
+    /// each must be within its parent seat's. Needs isolated = true here
+    /// or above.
+    connectors: Option<Vec<String>>,
     /// `off`, or an http:// or https:// OTLP collector endpoint.
     telemetry: Option<String>,
     /// Run in a home private to the branch; inherited by the seats below.
@@ -1023,6 +1031,11 @@ impl RawSeat {
                 .and_then(|spec| spec.check().map(|()| spec))
                 .map_err(|e| fail(&format!("mcp.{server}"), e))?;
             seat.mcp.push(spec);
+        }
+        for grant in self.connectors.unwrap_or_default() {
+            let entry = branchyard::connectors::GrantEntry::parse(&grant)
+                .map_err(|e| fail("connectors", e))?;
+            seat.connectors.push(entry);
         }
         if let Some(text) = self.telemetry {
             seat.telemetry = Some(Telemetry::parse(&text).map_err(|e| fail("telemetry", e))?);
@@ -1564,6 +1577,29 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
                  true on this seat or one above it",
             ));
         }
+        if !seat.connectors.is_empty() && !own {
+            return Err(seat.error(
+                "connectors",
+                "connectors are placed only into a home private to the branch; set isolated = \
+                 true on this seat or one above it",
+            ));
+        }
+    }
+    // A seat's connectors are within its parent seat's, as a spawn will
+    // narrow them; one with nothing in common is refused now.
+    for seat in &order {
+        let Some(up) = parent.get(seat.name.as_str()) else {
+            continue;
+        };
+        let above = order
+            .iter()
+            .find(|s| s.name == *up)
+            .map(|s| s.connectors.clone())
+            .unwrap_or_default();
+        if !seat.connectors.is_empty() {
+            branchyard::connectors::narrow(Some(&seat.connectors), &above)
+                .map_err(|why| seat.error("connectors", why))?;
+        }
     }
 
     // Lower.
@@ -1711,6 +1747,7 @@ fn provision(
         mcp_servers: seat.mcp.clone(),
         // A rig declares only stdio servers.
         remote_mcp_servers: Vec::new(),
+        connectors: seat.connectors.clone(),
         instructions: Some(text),
         model: seat.model.clone(),
         effort: seat.effort,
@@ -1855,6 +1892,17 @@ fn provision_text(provision: &Provisioning) -> String {
         let names: Vec<&str> = provision.secrets.iter().map(|s| s.name.as_str()).collect();
         out.push_str(&format!("{pad}secrets {}\n", names.join(", ")));
     }
+    if !provision.connectors.is_empty() {
+        out.push_str(&format!(
+            "{pad}connectors {}\n",
+            provision
+                .connectors
+                .iter()
+                .map(|g| g.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
     if !provision.mcp_servers.is_empty() {
         let names: Vec<&str> = provision
             .mcp_servers
@@ -1908,6 +1956,56 @@ delegates_to = ["worker"]
         let header = format!("[{table}]\n");
         assert!(MINIMAL.contains(&header), "{table}");
         MINIMAL.replacen(&header, &format!("{header}{line}\n"), 1)
+    }
+
+    #[test]
+    fn seat_connectors_are_parsed_isolated_and_within_their_parents() {
+        let isolated = |root: &str, worker: &str| {
+            let text = with("seats.lead", &format!("isolated = true\n{root}"));
+            text.replacen(
+                "[seats.worker]\n",
+                &format!("[seats.worker]\n{worker}\n"),
+                1,
+            )
+        };
+        let planned = plan(
+            &parse(&isolated(
+                "connectors = [\"github:write:issues.*\"]",
+                "connectors = [\"github:read:issues.list\"]",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            planned.root.provision.connectors[0].to_string(),
+            "github:write:issues.*"
+        );
+        let seats = planned.seats.unwrap();
+        let worker = seats.table["worker"].provision.as_ref().unwrap();
+        assert_eq!(worker.connectors[0].to_string(), "github:read:issues.list");
+        assert!(render(
+            &plan(&parse(&isolated("connectors = [\"github\"]", "")).unwrap()).unwrap()
+        )
+        .contains("connectors github:read"));
+        // Outside the parent seat's grant.
+        refused(
+            &isolated(
+                "connectors = [\"github:read\"]",
+                "connectors = [\"slack:read\"]",
+            ),
+            "seats.worker.connectors",
+            "not within the parent's grant",
+        );
+        refused(
+            &with("seats.worker", "connectors = [\"github:admin\"]"),
+            "seats.worker.connectors",
+            "mode",
+        );
+        refused(
+            &with("seats.worker", "connectors = [\"github\"]"),
+            "seats.worker.connectors",
+            "isolated = true",
+        );
     }
 
     #[test]

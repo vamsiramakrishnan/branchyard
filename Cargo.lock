@@ -633,6 +633,7 @@ dependencies = [
 name = "branchyard"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "branchyard-bridge",
  "branchyard-harness",
@@ -645,6 +646,7 @@ dependencies = [
  "glob",
  "postgres",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustix",
  "schemars 1.2.2",

@@ -85,13 +85,27 @@ impl Work {
     }
 
     /// Run the work against `repo` on `app`'s configuration.
-    fn run(self, app: &App, repo: &RepoState) -> Result<OperationResult, ErrorBody> {
+    fn run(
+        self,
+        app: &App,
+        repo: &RepoState,
+        principal: Option<&crate::config::Principal>,
+    ) -> Result<OperationResult, ErrorBody> {
         let sdk = |e: branchyard::Error| *error::sdk(&e).body;
         let api = |e: ApiError| *e.body;
         let yard = &repo.yard;
+        // A new branch acts for the principal that asked for it at the
+        // connector gateway; see docs/connectors.md.
+        let actor = principal.map(|p| branchyard::connectors::Actor {
+            subject: p.name.clone(),
+            tenant: p.tenant.clone(),
+        });
         match self {
             Work::Task { request } => {
-                let options = task_options(app, repo, &request).map_err(api)?;
+                let options = TaskOptions {
+                    actor: actor.clone(),
+                    ..task_options(app, repo, &request).map_err(api)?
+                };
                 let builder = yard.task(request.prompt.clone()).options(options);
                 let ran = match request.harnesses.is_empty() {
                     true => builder.run().map(|b| vec![b]),
@@ -112,14 +126,20 @@ impl Work {
                     .map_err(sdk)
             }
             Work::Fork { branch, request } => {
-                let options = fork_options(app, repo, &request).map_err(api)?;
+                let options = TaskOptions {
+                    actor: actor.clone(),
+                    ..fork_options(app, repo, &request).map_err(api)?
+                };
                 yard.branch(&branch)
                     .and_then(|source| source.fork(&request.prompt, request.fresh_session, options))
                     .and_then(|b| finished(vec![b]))
                     .map_err(sdk)
             }
             Work::Reincarnate { branch, request } => {
-                let options = reincarnate_options(app, repo, &request).map_err(api)?;
+                let options = TaskOptions {
+                    actor: actor.clone(),
+                    ..reincarnate_options(app, repo, &request).map_err(api)?
+                };
                 yard.branch(&branch)
                     .and_then(|source| source.reincarnate(options))
                     .and_then(|b| finished(vec![b]))
@@ -206,7 +226,7 @@ impl Executor for AppExecutor {
         };
         let result = serde_json::from_value::<Work>(work.clone())
             .map_err(|e| *ApiError::internal(format!("unreadable operation description: {e}")).body)
-            .and_then(|work| work.run(app, repo));
+            .and_then(|work| work.run(app, repo, stored.principal.as_ref()));
         // Read the feed's head so the end cursor covers all the activity.
         let end_cursor = match repo.feed.sync() {
             Ok(head) => Some(head),
@@ -519,6 +539,7 @@ pub(crate) fn spawn_parts(
         depends_on: request.depends_on.clone(),
         after: request.after,
         bindings: request.bindings.clone(),
+        connectors: request.connectors.clone(),
         ..Spawn::default()
     };
     Ok((options, spawn))

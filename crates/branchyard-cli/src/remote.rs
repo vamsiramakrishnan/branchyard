@@ -581,6 +581,7 @@ pub fn spawn(
         after: args.after,
         bindings: args.bindings.clone(),
         require_labels: task.require_labels.clone(),
+        connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
     };
     let op = remote
         .repo

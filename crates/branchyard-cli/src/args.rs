@@ -220,6 +220,9 @@ pub struct SpawnArgs {
     pub after: branchyard::After,
     /// `--bind NAME:ACCESS`, repeatable.
     pub bindings: Vec<branchyard::Binding>,
+    /// `--connector`, repeatable: the child's grant, narrowed to its
+    /// parent's. Empty: its seat's or its parent's.
+    pub connectors: Vec<branchyard::connectors::GrantEntry>,
     pub json: bool,
 }
 
@@ -565,6 +568,30 @@ Examples:
   by config validate
   by config validate ~/.config/branchyard/config.toml
   by config schema > branchyard.config.json";
+
+const GATEWAY_EXAMPLES: &str = "\
+Examples:
+  by gateway start                 # in the background; its log in .branchyard/gateway/
+  by gateway status --json
+  by gateway start --foreground    # in this terminal, until interrupted
+  by gateway rotate-key            # a new signing key; the previous one stays valid
+  by gateway stop
+
+[connectors] in branchyard.toml says where the gateway is (gateway), which
+bundles it serves (bundles) and how to run Anvil (anvil). The gateway reads
+this yard's public keys from .branchyard/gateway/jwks.json and writes its audit
+log to .branchyard/gateway/audit.jsonl, which by log shows. See
+docs/connectors.md.";
+
+const CONNECT_EXAMPLES: &str = "\
+Examples:
+  by connect github
+  by connect github --account work --open
+  by connect github --api-key-stdin < ~/.config/github-token
+
+Runs `anvil connect` against the gateway as you: it opens (or prints) the
+connector's authorization URL, and the gateway keeps the upstream token. A
+harness never sees it. See docs/connectors.md.";
 
 const COMPLETIONS_EXAMPLES: &str = "\
 Examples:
@@ -1091,6 +1118,53 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
+    #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
+    Gateway {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: GatewayAction,
+    },
+    /// Connect your account for a connector through the gateway (anvil connect)
+    #[command(display_order = 404, after_help = CONNECT_EXAMPLES)]
+    Connect {
+        /// The connector, as the gateway serves it, such as github
+        connector: String,
+        /// Which of your accounts to connect (default: your default account)
+        #[arg(long, value_name = "NAME")]
+        account: Option<String>,
+        /// For a key-based connector: read the API key or personal token from stdin
+        #[arg(long)]
+        api_key_stdin: bool,
+        /// Also open the authorization URL in your browser
+        #[arg(long)]
+        open: bool,
+    },
+}
+
+/// `by gateway ...`; see docs/connectors.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum GatewayAction {
+    /// Start the gateway, supervised, in the background (or in this terminal)
+    Start {
+        /// Run in this terminal until interrupted, restarting the gateway if it exits
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop the gateway started in the background
+    Stop,
+    /// Whether the gateway runs and listens, what it serves, and the signing keys
+    Status,
+    /// Put a new signing key first; tokens the previous one signed stay valid until they expire
+    RotateKey {
+        /// Older keys to keep publishing
+        #[arg(long, value_name = "N", default_value = "1")]
+        keep: usize,
+    },
+    /// Print the public keys the gateway verifies tokens against (JWKS)
+    Jwks,
 }
 
 /// `by workspace ...`; see docs/workspace.md.
@@ -2064,6 +2138,11 @@ pub struct Provision {
     /// Send the harness's OpenTelemetry to this OTLP/gRPC collector, or turn it off
     #[arg(long, value_name = "URL|off", value_parser = branchyard::Telemetry::parse)]
     telemetry: Option<branchyard::Telemetry>,
+    /// A connector the harness may call through the gateway (docs/connectors.md):
+    /// CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]], such as github:read or
+    /// 'github:write:issues.*'; only into its private home (--isolated or a sandbox). Repeatable
+    #[arg(long = "connector", value_name = "GRANT", value_parser = branchyard::connectors::GrantEntry::parse)]
+    connectors: Vec<branchyard::connectors::GrantEntry>,
 }
 
 impl Provision {
@@ -2075,6 +2154,7 @@ impl Provision {
             model: self.model,
             effort: self.effort,
             telemetry: self.telemetry,
+            connectors: self.connectors,
             ..branchyard::Provisioning::default()
         };
         task.provision = (!spec.is_empty() || self.instructions.is_some()).then_some(spec);
@@ -2375,6 +2455,10 @@ pub struct SpawnGraph {
     /// writer lock for each turn); repeatable
     #[arg(long = "bind", value_name = "SCRATCH:ACCESS", value_parser = branchyard::Binding::parse)]
     bindings: Vec<branchyard::Binding>,
+    /// A connector the child may use, within its parent's grant (default: its seat's or its
+    /// parent's): CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]]. Repeatable
+    #[arg(long = "connector", value_name = "GRANT", value_parser = branchyard::connectors::GrantEntry::parse)]
+    connectors: Vec<branchyard::connectors::GrantEntry>,
 }
 
 impl Flags for SpawnFlags {
@@ -2399,6 +2483,7 @@ impl Flags for SpawnFlags {
             depends_on: self.graph.depends_on.map(|list| list.0).unwrap_or_default(),
             after: self.graph.after.map(Into::into).unwrap_or_default(),
             bindings: self.graph.bindings,
+            connectors: self.graph.connectors,
             json: self.json,
         })
     }
@@ -3048,6 +3133,54 @@ mod tests {
     }
 
     #[test]
+    fn connector_flags_repeat_and_parse() {
+        for line in [
+            "run go --isolated --connector github --connector 'github:write+confirm:issues.create'",
+            "fan go --harness a,b --isolated --connector github --connector 'github:write+confirm:issues.create'",
+            "fork b go --connector github --connector 'github:write+confirm:issues.create'",
+            "send b go --connector github --connector 'github:write+confirm:issues.create'",
+        ] {
+            let spec = task(line).provision.unwrap_or_else(|| panic!("{line}"));
+            let grants: Vec<String> = spec.connectors.iter().map(|g| g.to_string()).collect();
+            assert_eq!(
+                grants,
+                ["github:read", "github:write+confirm:issues.create"],
+                "{line}"
+            );
+        }
+        for (line, error) in [
+            ("run go --connector github:admin", "mode"),
+            ("run go --connector 'a b'", "connector id"),
+            ("run go --connector github:read:", "operation"),
+        ] {
+            assert!(err(line).contains(error), "{line}: {}", err(line));
+        }
+        assert!(matches!(
+            parse_str("gateway status --json").unwrap(),
+            Command::Gateway {
+                json: true,
+                action: GatewayAction::Status
+            }
+        ));
+        assert!(matches!(
+            parse_str("gateway rotate-key --keep 2").unwrap(),
+            Command::Gateway {
+                action: GatewayAction::RotateKey { keep: 2 },
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_str("connect github --account work --api-key-stdin").unwrap(),
+            Command::Connect {
+                connector: "github".into(),
+                account: Some("work".into()),
+                api_key_stdin: true,
+                open: false,
+            }
+        );
+    }
+
+    #[test]
     fn substrate_flags_configure_tls_and_the_insecure_escape() {
         let task = task(
             "run go --provider substrate --substrate-endpoint https://control:443 \
@@ -3194,6 +3327,15 @@ mod tests {
         assert_eq!(spawn.depends_on, ["a", "b"]);
         assert_eq!(spawn.after, branchyard::After::Integrated);
         assert_eq!(spawn.bindings.len(), 2);
+        assert!(spawn.connectors.is_empty());
+        let Command::Spawn { spawn: granted, .. } =
+            parse_str("spawn go --connector github:read --connector 'linear@work:write:issues.*'")
+                .unwrap()
+        else {
+            panic!("not spawn")
+        };
+        let grants: Vec<String> = granted.connectors.iter().map(|g| g.to_string()).collect();
+        assert_eq!(grants, ["github:read", "linear@work:write:issues.*"]);
         assert_eq!(spawn.seat.as_deref(), Some("worker"));
         assert!(err("spawn go --after soon").contains("[possible values: settled, integrated]"));
         assert!(err("spawn go --bind cache").contains("--bind"));

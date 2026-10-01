@@ -100,6 +100,7 @@ mod checkpoint;
 mod compare;
 #[cfg(test)]
 mod conformance;
+pub mod connectors;
 mod delegation;
 mod engine;
 mod environments;
@@ -330,6 +331,34 @@ impl Yard {
     /// leave [`SteerState::Pending`].
     pub fn wait_steer(&self, branch: &str, id: u64, timeout: Duration) -> Result<Steer, Error> {
         steer::wait(&self.store(), branch, id, timeout)
+    }
+
+    /// Give this yard's branches the connector gateway `gateway`: a
+    /// branch with a connector grant gets a signed token for each turn and
+    /// its granted packages; see `docs/connectors.md`. Replaces any gateway
+    /// set before. Shared by every clone of this `Yard`.
+    pub fn use_connectors(&self, gateway: connectors::Gateway) {
+        *self
+            .hub
+            .connectors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+    }
+
+    /// The connector gateway set with [`Yard::use_connectors`], if any.
+    pub fn connectors(&self) -> Option<Arc<connectors::Gateway>> {
+        self.hub
+            .connectors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Record the gateway's new audit lines on the branches they name, as
+    /// [`Activity::ConnectorCall`] events; see [`connectors::ingest`].
+    /// Returns how many were recorded; none without a gateway.
+    pub fn ingest_connector_audit(&self) -> Result<usize, Error> {
+        connectors::ingest(self)
     }
 
     /// Try `hook` before a message waits for its recipient's next turn to
@@ -919,6 +948,13 @@ pub struct TaskOptions {
     /// parent's. Whether a repository's scripts may run is the caller's
     /// decision: `by` asks you to trust them. See `docs/workspace.md`.
     pub workspace: Option<WorkspaceSpec>,
+    /// Who a new branch acts for at the connector gateway: its tokens'
+    /// `sub` and `by_tenant`. Read only when a branch is created (run, fan,
+    /// fork, reincarnate); a fork without one keeps its parent's, and a
+    /// delegated child always has its parent's. `None`: the yard's gateway
+    /// default (`local:<user>` locally). A server sets it to the request's
+    /// principal. See `docs/connectors.md`.
+    pub actor: Option<connectors::Actor>,
 }
 
 /// Where a branch's harness runs.
@@ -1749,6 +1785,11 @@ pub enum Activity {
         secrets: Vec<Delivery>,
         /// Secrets given that this harness does not read.
         unused_secrets: Vec<String>,
+        /// Connectors granted for the turn, whose packages and index were
+        /// placed in the home and whose gateway token was written there
+        /// (never shown); see `docs/connectors.md`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        connectors: Vec<String>,
     },
     /// Input from `by` was written into the running turn; see
     /// [`Branch::steer`]. The harness's `steer_accepted` or
@@ -1822,6 +1863,10 @@ pub enum Activity {
     /// branch, or a judge's score. See [`FleetActivity`] and
     /// `docs/fleet.md`.
     Fleet(Box<FleetActivity>),
+    /// A call the harness made through the connector gateway, from the
+    /// gateway's audit log: allowed, denied, or refused for want of
+    /// confirmation. See `docs/connectors.md`.
+    ConnectorCall(Box<connectors::ConnectorCall>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

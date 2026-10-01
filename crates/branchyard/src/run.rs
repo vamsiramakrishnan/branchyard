@@ -90,6 +90,8 @@ pub(crate) struct NewBranch<'a> {
     /// The provider snapshot its first sandbox should come from; see
     /// `crate::snapshots`.
     pub seed: Option<crate::snapshots::SandboxSeed>,
+    /// Who it acts for at the connector gateway; see `crate::connectors`.
+    pub actor: Option<crate::connectors::Actor>,
 }
 
 /// The journaled step that creates a branch's worktree.
@@ -149,6 +151,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         context: None,
         workspace: new.workspace.map(crate::workspace::WorkspaceState::new),
         sandbox_seed: new.seed,
+        actor: new.actor,
     })
 }
 
@@ -281,6 +284,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             provision: options.provision.clone(),
             workspace: options.workspace.clone(),
             seed: None,
+            actor: options.actor.clone(),
         },
     );
     let (record, lease) = record.inspect_err(|_| store.release(&name))?;
@@ -353,6 +357,7 @@ pub(crate) fn run_on(
                 provision: options.provision.clone(),
                 workspace: options.workspace.clone(),
                 seed: None,
+                actor: options.actor.clone(),
             },
         );
         match record {
@@ -492,6 +497,7 @@ pub(crate) fn run_attempts(
                 provision: o.provision.clone(),
                 workspace: options.workspace.clone(),
                 seed: None,
+                actor: options.actor.clone(),
             },
         )
         .and_then(|(record, lease)| {
@@ -884,7 +890,21 @@ pub(crate) fn prepare_send(
         record.check = options.check.clone();
     }
     if let Some(asked) = &options.provision {
-        record.provision = Some(same_model(name, &record, asked.clone())?);
+        let mut spec = same_model(name, &record, asked.clone())?;
+        // A delegated child's connectors stay within its parent's grant,
+        // whoever sends it.
+        if let (Some(parent), true) = (&record.info.parent, record.info.depth > 0) {
+            let parent_grant = store
+                .read(parent)
+                .ok()
+                .and_then(|p| p.provision)
+                .map(|p| p.connectors)
+                .unwrap_or_default();
+            spec.connectors =
+                branchyard_provision::connectors::narrow(Some(&spec.connectors), &parent_grant)
+                    .map_err(|why| Error::Denied(format!("{name}: {why}")))?;
+        }
+        record.provision = Some(spec);
     }
     crate::provisioning::check(record.provision.as_ref(), record.home.is_some())?;
     // A delegated child keeps the envelope and seats its parent gave it.
@@ -1098,6 +1118,7 @@ pub(crate) fn fork(
                 .clone()
                 .or_else(|| parent.workspace.as_ref().map(|w| w.spec.clone())),
             seed,
+            actor: options.actor.clone().or(parent.actor.clone()),
         },
     )
     .inspect_err(|_| store.release(&reserved))?;
@@ -1253,6 +1274,7 @@ pub(crate) fn reincarnate_with(
                 .clone()
                 .or_else(|| parent.workspace.as_ref().map(|w| w.spec.clone())),
             seed: None,
+            actor: options.actor.clone().or(parent.actor.clone()),
         },
     )
     .inspect_err(|_| store.release(&reserved))?;

@@ -67,6 +67,7 @@ pub mod api;
 pub mod auth;
 pub mod cli;
 pub mod config;
+pub mod connectors;
 pub mod error;
 pub mod feed;
 pub mod logging;

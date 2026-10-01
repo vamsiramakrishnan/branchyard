@@ -78,6 +78,13 @@ impl Doing {
             Activity::Harness(Event::PermissionWithdrawn { .. }) | Activity::Decision { .. } => {
                 self.asking = None;
             }
+            // A gateway call is what the harness is doing, as a tool is.
+            Activity::ConnectorCall(call) => {
+                self.tool = Some(format!(
+                    "{} {} ({})",
+                    call.connector, call.operation, call.decision
+                ));
+            }
             _ => {}
         }
     }
@@ -457,7 +464,11 @@ impl Source {
 
     fn branches(&self) -> Result<Vec<BranchInfo>, Failure> {
         Ok(match self {
-            Source::Local { yard, .. } => yard.branches()?,
+            Source::Local { yard, .. } => {
+                // The gateway's newest calls, as connector_call events.
+                let _ = yard.ingest_connector_audit();
+                yard.branches()?
+            }
             Source::Remote { repo, .. } => repo.branches()?,
         })
     }
