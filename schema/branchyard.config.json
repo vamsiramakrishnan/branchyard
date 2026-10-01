@@ -492,6 +492,17 @@
             "type": "string"
           },
           "description": "Directories setup produces that every branch with the same key\nshares, as a symbolic link to the prepared environment, instead of a\ncopy of its own (`node_modules`). Literal relative paths."
+        },
+        "pool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PoolConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A warm pool (docs/pools.md): worktrees made ready, with the prepared\nenvironment in place, before a branch asks for one."
         }
       },
       "description": "A branch's workspace lifecycle: `[workspace]`."
@@ -527,6 +538,54 @@
         "command"
       ],
       "description": "A named command: `[workspace.run.NAME]`."
+    },
+    "PoolConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "size": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Ready worktrees kept, 0 to 32. `by serve` and `by worker` refill it\nafter each claim; `by env pool fill` fills it once."
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Labels a `by serve` or `by worker` must all carry to keep this pool\nfilled; others leave it alone."
+        },
+        "max_age_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Minutes a ready worktree is kept before it is discarded. Default:\n1440 (a day)."
+        },
+        "max_behind": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "How many commits the base may have moved past a ready worktree for\na branch to still take it (it is brought forward). Default: 20. A\ncommit that changes an environment input always makes it stale."
+        },
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The revision worktrees are made at. Default: `HEAD` of the checkout."
+        }
+      },
+      "required": [
+        "size"
+      ],
+      "description": "A warm pool: `[workspace.pool]`."
     },
     "ProjectOverride": {
       "type": "object",

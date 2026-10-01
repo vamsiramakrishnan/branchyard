@@ -498,6 +498,23 @@ A branch runs on an [environment recipe's](recipes.md#running-a-branch-on-a-reci
 | Webhook endpoint | `POST /v1/triggers/{id}/fire` | also `…/fire/{token}`; the bearer-token exemption covers both |
 | Trigger store | `triggers`, `trigger_runs` (`by_` on PostgreSQL) | also `trigger_nonces` / `by_trigger_nonces`, made like the others (catalog first, each step alone under the advisory lock) |
 
+## Added with warm pools
+
+See [warm pools](pools.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `[workspace.pool]` in `branchyard.toml` | none | `size`, `labels`, `max_age_minutes`, `max_behind`, `base`; checked strictly; not part of the trust digest; in `schema/branchyard.config.json` |
+| `WorkspaceSpec` | through `share` | adds `pool` (`PoolSpec`: `size`, `labels`, `max_age_secs`, `max_behind`, `base`); in `schema/contract.json` |
+| `WorkspaceReport` | through `environment` | adds `pool` (`PoolUse`: `slot`, `reason`, `requested_ms`, `worktree_ms`) on the setup event of a branch whose workspace has a pool; `by log` adds `worktree from warm pool slot …` or `no warm pool slot (…)` |
+| SDK | none | `Yard::pool_status`, `pool_slots`, `fill_pool`, `drain_pool`, `keep_pool` (`PoolStatus`, `PoolSlot`, `PoolSlotState`, `PoolFill`, `PoolDrained`, `PoolKeeper`, `pool_recipe`, `POOL_*` defaults); `Repository::adopt_worktree` in `branchyard-workspace` |
+| `by env pool status\|fill\|drain` | none | with `--json`; `fill` needs trust and is refused in a harness; `--remote` refused |
+| `by run`, `fan`, a server's tasks | always made a worktree | a new top-level host branch takes a ready slot of its pool when one fits |
+| `by serve`, `by worker` | | keep each served repository's pool filled when they carry its labels and may run its scripts |
+| `by stats` | | adds `pool` and `start` lines, and `pool` in `--json` |
+| `/metrics` | | adds `branchyard_pool_slots`, `branchyard_pool_claims_total`, `branchyard_pool_slots_made_total`, `branchyard_pool_fill_seconds`, `branchyard_pool_slots_discarded_total`, `branchyard_start_seconds` |
+| Store | | `pool_slots` (SQLite, in the `BEGIN IMMEDIATE` schema transaction) and `by_pool_slots` (PostgreSQL, one catalog-checked step) |
+
 ## Added with knowledge, plans and goals
 
 See [knowledge](knowledge.md) and [plans and goals](plans-and-goals.md); each has its own surface table.

@@ -48,6 +48,11 @@ const SECONDS: &[f64] = &[
     0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
 ];
 
+/// Start latencies are seconds, often under one.
+const START_SECONDS: &[f64] = &[
+    0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 1800.0,
+];
+
 const fn family(name: &'static str, kind: Kind, help: &'static str) -> Family {
     Family {
         name,
@@ -76,6 +81,12 @@ pub const WEBHOOKS: &str = "branchyard_webhook_deliveries_total";
 pub const WORKERS: &str = "branchyard_workers_live";
 pub const WORKER_SEEN: &str = "branchyard_worker_last_seen_seconds";
 pub const BUILD: &str = "branchyard_build_info";
+pub const POOL_SLOTS: &str = "branchyard_pool_slots";
+pub const POOL_CLAIMS: &str = "branchyard_pool_claims_total";
+pub const POOL_MADE: &str = "branchyard_pool_slots_made_total";
+pub const POOL_FILL: &str = "branchyard_pool_fill_seconds";
+pub const POOL_DISCARDED: &str = "branchyard_pool_slots_discarded_total";
+pub const START: &str = "branchyard_start_seconds";
 
 /// Every family this server exposes, in the order it is written.
 pub const FAMILIES: &[Family] = &[
@@ -176,6 +187,38 @@ pub const FAMILIES: &[Family] = &[
         Kind::Gauge,
         "Seconds since each live worker last recorded itself alive.",
     ),
+    family(
+        POOL_SLOTS,
+        Kind::Gauge,
+        "Warm pool slots of each repository on this host, by state (ready, filling, claimed).",
+    ),
+    family(
+        POOL_CLAIMS,
+        Kind::Counter,
+        "New branches of operations this process ran whose workspace has a pool, by repository and result (hit, miss).",
+    ),
+    family(
+        POOL_MADE,
+        Kind::Counter,
+        "Warm pool slots this process's keepers made, by repository and result (made, failed).",
+    ),
+    Family {
+        name: POOL_FILL,
+        kind: Kind::Histogram,
+        help: "Time this process's keepers took to make one warm pool slot, by repository.",
+        buckets: SECONDS,
+    },
+    family(
+        POOL_DISCARDED,
+        Kind::Counter,
+        "Warm pool slots this process's keepers removed as stale or left by a stopped process, by repository.",
+    ),
+    Family {
+        name: START,
+        kind: Kind::Histogram,
+        help: "Start latency of a task's new branches, from admission to the harness's first prompt, by pool (hit, miss, none).",
+        buckets: START_SECONDS,
+    },
 ];
 
 fn declared(name: &str) -> &'static Family {
@@ -461,6 +504,41 @@ pub fn queue_gauges(
     );
 }
 
+/// The warm pool gauge read at scrape time: `repo`'s slots on this host
+/// by state, every state written (zero included).
+pub fn pool_gauges(snapshot: &mut Snapshot, repo: &str, slots: &[branchyard::PoolSlot]) {
+    for (state, name) in [
+        (branchyard::PoolSlotState::Ready, "ready"),
+        (branchyard::PoolSlotState::Filling, "filling"),
+        (branchyard::PoolSlotState::Claimed, "claimed"),
+    ] {
+        let n = slots.iter().filter(|s| s.state == state).count();
+        set(
+            snapshot,
+            POOL_SLOTS,
+            &[("repo", repo), ("state", name)],
+            n as f64,
+        );
+    }
+}
+
+/// Count what a keeper's fill of `repo`'s pool did.
+pub fn record_fill(metrics: &Metrics, repo: &str, filled: &branchyard::PoolFill) {
+    for slot in &filled.made {
+        metrics.inc(POOL_MADE, &[("repo", repo), ("result", "made")]);
+        if let Some(ms) = slot.fill_ms {
+            metrics.observe(POOL_FILL, &[("repo", repo)], ms as f64 / 1000.0);
+        }
+    }
+    if filled.error.is_some() {
+        metrics.inc(POOL_MADE, &[("repo", repo), ("result", "failed")]);
+    }
+    let removed = filled.discarded.len() + filled.reclaimed.len();
+    if removed > 0 {
+        metrics.add(POOL_DISCARDED, &[("repo", repo)], removed as f64);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,6 +796,81 @@ mod tests {
         assert_eq!(
             sample(&samples, WORKER_SEEN, &[("worker", "w_1"), ("host", "h")]),
             Some("1.5")
+        );
+    }
+
+    #[test]
+    fn warm_pool_gauges_and_fills_encode() {
+        let slot = |state: &str, fill_ms: Option<u64>| -> branchyard::PoolSlot {
+            serde_json::from_value(serde_json::json!({
+                "id": "s", "state": state, "base": "c", "path": "/p",
+                "created_ms": 1, "changed_ms": 1, "fill_ms": fill_ms
+            }))
+            .unwrap()
+        };
+        let metrics = Metrics::default();
+        record_fill(
+            &metrics,
+            "app",
+            &branchyard::PoolFill {
+                made: vec![slot("ready", Some(2_500)), slot("ready", Some(500))],
+                discarded: vec![("old".into(), "setup changed".into())],
+                reclaimed: vec![("gone".into(), "its process stopped".into())],
+                error: Some("setup failed".into()),
+                ..branchyard::PoolFill::default()
+            },
+        );
+        metrics.observe(START, &[("pool", "hit")], 0.2);
+        let mut snapshot = metrics.snapshot();
+        pool_gauges(
+            &mut snapshot,
+            "app",
+            &[
+                slot("ready", None),
+                slot("ready", None),
+                slot("filling", None),
+            ],
+        );
+        let samples = parse(&encode(&snapshot));
+        let gauge = |state| sample(&samples, POOL_SLOTS, &[("repo", "app"), ("state", state)]);
+        assert_eq!(gauge("ready"), Some("2"));
+        assert_eq!(gauge("filling"), Some("1"));
+        assert_eq!(gauge("claimed"), Some("0"));
+        assert_eq!(
+            sample(&samples, POOL_MADE, &[("repo", "app"), ("result", "made")]),
+            Some("2")
+        );
+        assert_eq!(
+            sample(
+                &samples,
+                POOL_MADE,
+                &[("repo", "app"), ("result", "failed")]
+            ),
+            Some("1")
+        );
+        assert_eq!(
+            sample(&samples, POOL_DISCARDED, &[("repo", "app")]),
+            Some("2")
+        );
+        assert_eq!(
+            sample(&samples, &format!("{POOL_FILL}_sum"), &[("repo", "app")]),
+            Some("3")
+        );
+        assert_eq!(
+            sample(
+                &samples,
+                &format!("{START}_bucket"),
+                &[("pool", "hit"), ("le", "0.25")]
+            ),
+            Some("1")
+        );
+        assert_eq!(
+            sample(
+                &samples,
+                &format!("{START}_bucket"),
+                &[("pool", "hit"), ("le", "0.1")]
+            ),
+            Some("0")
         );
     }
 

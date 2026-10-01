@@ -905,3 +905,99 @@ fn worktreeinclude_names_only_ignored_literal_paths_that_exist() {
     fs::remove_file(root.join(include::WORKTREE_INCLUDE_FILE)).unwrap();
     assert_eq!(include::resolve(&root), include::Included::default());
 }
+
+/// A detached worktree at `rev`, as a warm pool's slot is.
+fn detached(f: &Fixture, name: &str, rev: &str) -> PathBuf {
+    let slot = f.dir.join(name);
+    git(
+        &f.root(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            slot.to_str().unwrap(),
+            rev,
+        ],
+    );
+    slot
+}
+
+#[test]
+fn a_detached_worktree_is_adopted_as_a_branch() {
+    let f = Fixture::new();
+    let base = f.head("main");
+    // What setup produced (ignored) and a link beside the checkout.
+    let slot = detached(&f, "slot", "main");
+    fs::write(slot.join("build.log"), "built").unwrap();
+    std::os::unix::fs::symlink(f.dir.join("scratch"), slot.join("shared")).unwrap();
+    let name: BranchName = "warm".parse().unwrap();
+    let ws = f
+        .repo
+        .adopt_worktree(&name, &base, &slot, &f.dir.join("warm"))
+        .unwrap();
+    assert!(!slot.exists());
+    assert_eq!(ws.path, f.dir.join("warm"));
+    assert_eq!(
+        fs::read_to_string(ws.path.join("build.log")).unwrap(),
+        "built"
+    );
+    assert!(fs::symlink_metadata(ws.path.join("shared"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        branchyard_workspace::git::current_branch(&ws.path).unwrap(),
+        Some("by/warm".into())
+    );
+    // Listed like a created branch, with its base recorded.
+    let listed = f.repo.workspace(&name).unwrap().unwrap();
+    assert_eq!(listed.base, base);
+    assert_eq!(listed.path, ws.path);
+
+    // A slot behind the base is moved forward by the checkout.
+    let older = f.head("main");
+    let newer = f.commit_on_main("b.txt", "b\n");
+    let slot = detached(&f, "slot2", older.as_str());
+    let ws = f
+        .repo
+        .adopt_worktree(
+            &"ahead".parse().unwrap(),
+            &newer,
+            &slot,
+            &f.dir.join("ahead"),
+        )
+        .unwrap();
+    assert_eq!(ws.base, newer);
+    assert_eq!(fs::read_to_string(ws.path.join("b.txt")).unwrap(), "b\n");
+
+    // An existing branch is refused before the slot is touched.
+    let slot = detached(&f, "slot3", "main");
+    let refused = f
+        .repo
+        .adopt_worktree(&name, &newer, &slot, &f.dir.join("again"));
+    assert!(
+        matches!(refused, Err(GitError::BranchExists(_))),
+        "{refused:?}"
+    );
+    assert!(slot.is_dir() && !f.dir.join("again").exists());
+
+    // A checkout that cannot happen (an untracked file in the way) removes
+    // the moved worktree and leaves no branch.
+    let slot = detached(&f, "slot4", older.as_str());
+    fs::write(slot.join("b.txt"), "in the way").unwrap();
+    let failed = f.repo.adopt_worktree(
+        &"blocked".parse().unwrap(),
+        &newer,
+        &slot,
+        &f.dir.join("blocked"),
+    );
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(!slot.exists() && !f.dir.join("blocked").exists());
+    assert!(f
+        .repo
+        .workspace(&"blocked".parse().unwrap())
+        .unwrap()
+        .is_none());
+    assert!(!git(&f.root(), &["branch", "--list", "by/blocked"]).contains("blocked"));
+}

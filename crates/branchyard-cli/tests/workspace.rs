@@ -615,3 +615,105 @@ fn by_env_lists_shows_rebuilds_and_prunes_prepared_environments() {
     let out = repo.by(&["--remote", "http://127.0.0.1:9", "env", "list"]);
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[test]
+fn by_env_pool_fills_and_by_run_starts_from_a_ready_slot() {
+    let repo = Repo::new(
+        "[workspace]\nsetup = \"mkdir -p deps && echo lib > deps/lib.txt && \
+         echo ran >> $BRANCHYARD_ROOT/../setups.log\"\nprepare = true\nshare = [\"deps\"]\n\n\
+         [workspace.pool]\nsize = 1\n",
+    );
+    let setups = || {
+        fs::read_to_string(repo.dir.join("setups.log"))
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    };
+    let out = repo.by(&["env", "pool", "status"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("0 of 1 ready"), "{}", stdout(&out));
+    // Filling may run setup: it needs trust, and never from a harness.
+    let out = repo.by(&["env", "pool", "fill"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("by workspace trust"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(repo.by(&["workspace", "trust"]).status.success());
+    let out = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["env", "pool", "fill"])
+        .env("BRANCHYARD_BRANCH", "some-branch")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("a person's decision"),
+        "{}",
+        stderr(&out)
+    );
+
+    let filled = repo.json(&["env", "pool", "fill", "--json"]);
+    assert_eq!(filled["ready"], 1, "{filled}");
+    let slot = filled["made"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(setups(), 1);
+    let status = repo.json(&["env", "pool", "status", "--json"]);
+    assert_eq!(status["slots"][0]["id"], slot.as_str());
+    assert_eq!(status["slots"][0]["state"], "ready");
+    let out = repo.by(&["env", "pool", "status"]);
+    assert!(stdout(&out).contains("1 of 1 ready"), "{}", stdout(&out));
+
+    // `by run` takes the ready slot: its setup runs nothing, its worktree
+    // is the slot's, the shared directory still a link.
+    let out = repo.by_agent(&["run", "SH cat deps/lib.txt", "--name", "a"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(setups(), 1);
+    let log = repo.json(&["log", "a", "--json"]);
+    let setup = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["activity"] == "workspace" && e["pool"].is_object())
+        .unwrap_or_else(|| panic!("{log}"));
+    assert_eq!(setup["pool"]["slot"], slot.as_str(), "{setup}");
+    assert_eq!(setup["environment"]["origin"], "restored");
+    let out = repo.by(&["log", "a"]);
+    assert!(
+        stdout(&out).contains(&format!("worktree from warm pool slot {slot}")),
+        "{}",
+        stdout(&out)
+    );
+    let worktree = PathBuf::from(
+        repo.json(&["workspace", "show", "a", "--json"])["worktree"]
+            .as_str()
+            .unwrap(),
+    );
+    assert!(fs::symlink_metadata(worktree.join("deps"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    // The CLI does not refill: the next branch misses, and says why.
+    let out = repo.by_agent(&["run", "SH cat deps/lib.txt", "--name", "b"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stats = repo.json(&["stats", "--json"]);
+    assert_eq!(stats["pool"]["hits"], 1, "{stats}");
+    assert_eq!(stats["pool"]["misses"], 1, "{stats}");
+    assert_eq!(stats["pool"]["ready"], 0, "{stats}");
+    assert_eq!(stats["pool"]["size"], 1, "{stats}");
+    assert_eq!(stats["pool"]["start_hit_seconds"]["count"], 1, "{stats}");
+    let out = repo.by(&["stats"]);
+    assert!(
+        stdout(&out).contains("pool      1 hits, 1 misses; 0 of 1 ready"),
+        "{}",
+        stdout(&out)
+    );
+
+    // Drained: nothing left.
+    assert!(repo.by(&["env", "pool", "fill"]).status.success());
+    let drained = repo.json(&["env", "pool", "drain", "--json"]);
+    assert_eq!(drained["removed"].as_array().unwrap().len(), 1, "{drained}");
+    let status = repo.json(&["env", "pool", "status", "--json"]);
+    assert!(status["slots"].as_array().unwrap().is_empty());
+    let out = repo.by(&["--remote", "http://127.0.0.1:9", "env", "pool", "status"]);
+    assert_eq!(out.status.code(), Some(1));
+}

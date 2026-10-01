@@ -407,6 +407,16 @@ fn observe_run(
         &entries,
         parent.as_ref(),
     );
+    if operation.kind == OperationKind::Task {
+        let created = operation.branches.iter().cloned().collect();
+        crate::observe::record_starts(
+            &observability.metrics,
+            &repo.name,
+            operation.created_at_ms,
+            &created,
+            &entries,
+        );
+    }
 }
 
 /// The scope an operation of `kind` needs, as its endpoint checks it.

@@ -112,6 +112,10 @@ pub struct WorkspaceSpec {
     /// environment instead of copying (on this host only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub share: Vec<String>,
+    /// A warm pool of ready worktrees new branches take instead of waiting
+    /// for theirs (`docs/pools.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<crate::PoolSpec>,
 }
 
 impl WorkspaceSpec {
@@ -142,6 +146,9 @@ pub(crate) struct WorkspaceState {
     /// The prepared environment its setup built or came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// What its worktree took from its warm pool, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<crate::pool::PoolClaim>,
 }
 
 impl WorkspaceState {
@@ -152,6 +159,7 @@ impl WorkspaceState {
             copied: Vec::new(),
             produced: Vec::new(),
             environment: None,
+            pool: None,
         }
     }
 }
@@ -236,6 +244,10 @@ pub struct WorkspaceReport {
     /// The prepared environment setup built, or that stood in for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<Box<crate::environments::EnvironmentUse>>,
+    /// Whether the branch's worktree came from its warm pool (a hit) or
+    /// not (a miss, with why), and when the branch was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<Box<crate::PoolUse>>,
 }
 
 impl WorkspaceReport {
@@ -255,6 +267,7 @@ impl WorkspaceReport {
             ran_in: None,
             inherited_from: None,
             environment: None,
+            pool: None,
         }
     }
 
@@ -454,6 +467,8 @@ pub(crate) fn prepare(
             .flatten()
             .map(|by| format!("cancelled by {by}"))
     };
+    // What the worktree took from its warm pool, on the setup report.
+    let pool_use = state.pool.as_ref().map(|p| Box::new(p.used.clone()));
     let result = if !copied_ok {
         Err(copied.failure())
     } else if let Some(inherit) = inherit {
@@ -487,6 +502,12 @@ pub(crate) fn prepare(
             None => Ok(()),
         }
     } else if state.spec.setup.is_empty() {
+        if pool_use.is_some() {
+            let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(port));
+            report.ran_in = Some(RanIn::Host);
+            report.pool = pool_use;
+            recorder.record(Activity::Workspace(report))?;
+        }
         Ok(())
     } else if yard.hub.scripts_denied() {
         let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(port));
@@ -508,10 +529,11 @@ pub(crate) fn prepare(
             fence,
             copied: &copied_paths,
             cancel: &cancel,
+            pool: state.pool.as_ref(),
         };
         let host_environment = state.spec.prepare && matches!(runner, Runner::Host);
         let mut links = Vec::new();
-        let (report, made, key) = match host_environment {
+        let (mut report, made, key) = match host_environment {
             true => prepared(&setup, recorder, &mut links)?,
             false => {
                 let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(port));
@@ -546,6 +568,7 @@ pub(crate) fn prepare(
             "error": report.error,
             "environment": environment,
         });
+        report.pool = pool_use;
         let failed = (!report.ok).then(|| report.failure());
         recorder.record(Activity::Workspace(report))?;
         match failed {
@@ -579,6 +602,8 @@ pub(crate) struct Setup<'a> {
     /// The paths copy placed.
     pub copied: &'a [String],
     pub cancel: &'a dyn Fn() -> Option<String>,
+    /// What the worktree took from its warm pool.
+    pub pool: Option<&'a crate::pool::PoolClaim>,
 }
 
 impl Setup<'_> {
@@ -703,10 +728,45 @@ fn prepared(
             return Ok((report, Vec::new(), None));
         }
     };
+    // A worktree from a warm pool already holds an environment: the one
+    // the plan wants (nothing to restore), or another, whose files go
+    // before this one is placed or built.
+    let slot = setup.pool.filter(|p| p.used.slot.is_some());
+    let in_slot = |info: &envs::EnvironmentInfo| {
+        slot.and_then(|p| p.key.as_deref()) == Some(info.key.as_str())
+    };
+    let from_slot = |report: &mut WorkspaceReport,
+                     excluded: &mut Vec<String>,
+                     info: &envs::EnvironmentInfo,
+                     mut used: envs::EnvironmentUse| {
+        let claim = slot.expect("checked by in_slot");
+        used.method = claim.method.clone();
+        used.built_by = Some(info.built_by.clone());
+        for path in &claim.shared {
+            if !excluded.contains(path) {
+                excluded.push(path.clone());
+            }
+        }
+        used.shared = claim.shared.clone();
+        envs::touch(root, info);
+        report.environment = Some(Box::new(used));
+        Some(info.key.clone())
+    };
+    let reused = match &plan {
+        Plan::Restore(info) | Plan::LastGood { good: info, .. } => in_slot(info),
+        Plan::Build { .. } => false,
+    };
+    if let (Some(claim), false) = (slot, reused) {
+        envs::clear_failed(setup.worktree, &claim.produced, setup.copied);
+        envs::clear_failed(setup.worktree, &claim.shared, setup.copied);
+    }
     match plan {
         Plan::Restore(info) => {
             let used = envs::new_use(&info.key, EnvironmentOrigin::Restored);
-            let key = restore(&mut report, excluded, &info, used);
+            let key = match reused {
+                true => from_slot(&mut report, excluded, &info, used),
+                false => restore(&mut report, excluded, &info, used),
+            };
             report.duration_ms = started.elapsed().as_millis() as u64;
             Ok((report, info.produced.clone(), key))
         }
@@ -714,7 +774,10 @@ fn prepared(
             let mut used = envs::new_use(&key, EnvironmentOrigin::LastGood);
             used.used = Some(good.key.clone());
             used.reason = Some(reason);
-            let used_key = restore(&mut report, excluded, &good, used);
+            let used_key = match reused {
+                true => from_slot(&mut report, excluded, &good, used),
+                false => restore(&mut report, excluded, &good, used),
+            };
             report.duration_ms = started.elapsed().as_millis() as u64;
             Ok((report, good.produced.clone(), used_key))
         }

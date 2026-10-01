@@ -665,6 +665,13 @@ impl App {
             prepare: w.prepare,
             inputs: w.inputs.clone(),
             share: w.share.clone(),
+            pool: w.pool.as_ref().map(|p| branchyard::PoolSpec {
+                size: p.size,
+                labels: p.labels.clone(),
+                max_age_secs: p.max_age_secs(),
+                max_behind: p.max_behind,
+                base: p.base.clone(),
+            }),
         }))
     }
 }
@@ -857,7 +864,7 @@ async fn metrics_route(State(app): State<Shared>, headers: HeaderMap) -> Respons
             None => ApiError::unauthorized().into_response(),
         };
     }
-    render_metrics(app.registry.clone()).await
+    render_metrics(app.clone()).await
 }
 
 /// Whether `header` presents the metrics token.
@@ -877,14 +884,24 @@ pub(crate) fn metrics_token_matches(
     crate::auth::constant_time_eq(digest.as_bytes(), expected.as_bytes())
 }
 
-/// The registry's counters, and the shared queue's and workers' gauges
-/// read now, in the Prometheus text format.
-pub(crate) async fn render_metrics(registry: Arc<Registry>) -> Response {
+/// The registry's counters, and the shared queue's and workers' gauges and
+/// each repository's warm pool read now, in the Prometheus text format.
+pub(crate) async fn render_metrics(app: Shared) -> Response {
     let rendered = tokio::task::spawn_blocking(move || {
+        let registry = &app.registry;
         let mut snapshot = registry.observability().metrics.snapshot();
         let queue = registry.queue()?;
         let workers = registry.live_workers()?;
         crate::metrics::queue_gauges(&mut snapshot, &queue, &workers, crate::ops::now_ms() as i64);
+        for repo in app.repos.values() {
+            // Only a repository whose workspace has a pool.
+            if let Ok(Some(spec)) = app.workspace(repo) {
+                if spec.pool.is_some() {
+                    let slots = repo.yard.pool_slots().map_err(std::io::Error::other)?;
+                    crate::metrics::pool_gauges(&mut snapshot, &repo.name, &slots);
+                }
+            }
+        }
         Ok::<_, std::io::Error>(crate::metrics::encode(&snapshot))
     })
     .await;
@@ -911,7 +928,7 @@ pub fn metrics_router(app: Shared) -> Router {
         if metrics.token_sha256.is_some() && !metrics_token_matches(metrics, header) {
             return ApiError::unauthorized().into_response();
         }
-        render_metrics(app.registry.clone()).await
+        render_metrics(app.clone()).await
     }
     Router::new()
         .route("/metrics", get(serve))

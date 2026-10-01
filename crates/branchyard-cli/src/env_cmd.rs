@@ -1,18 +1,24 @@
 //! `by env list|show|rebuild|prune`: the prepared environments of a
 //! repository whose `[workspace]` has `prepare = true`. See
-//! docs/environments.md.
+//! docs/environments.md. `by env pool status|fill|drain`: its warm pool
+//! (`[workspace.pool]`). See docs/pools.md.
 //!
-//! `rebuild` runs the repository's setup, so it needs the same trust as a
-//! new branch (`by workspace trust`), and a harness on a branch can never
-//! run it. The other actions read or delete files under
-//! `.branchyard/environments/` and run nothing.
+//! `rebuild` and `pool fill` run the repository's setup (a fill does when
+//! the environment is not built), so they need the same trust as a new
+//! branch (`by workspace trust`), and a harness on a branch can never run
+//! them. The other actions read or delete files under `.branchyard/` and
+//! run nothing.
+//!
+//! The CLI never keeps a pool filled in the background: `by run` only
+//! claims a ready slot. `by serve` and `by worker` refill after each claim;
+//! locally, `by env pool fill` fills once.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use branchyard::{EnvironmentInfo, EnvironmentState, WorkspaceSpec, Yard};
 use serde_json::json;
 
-use crate::args::EnvAction;
+use crate::args::{EnvAction, PoolAction};
 use crate::commands::{self, print, Env, Failure, Outcome, Target};
 use crate::workspace_cmd;
 
@@ -35,6 +41,142 @@ pub fn main(env: &Env, target: &Target, action: &EnvAction, json: bool) -> Outco
             keep,
             older_than,
         } => prune(&yard, keys, *keep, *older_than, json),
+        EnvAction::Pool(action) => pool(env, &yard, action, json),
+    }
+}
+
+/// The `[workspace]` that applies here, when it has a pool.
+fn pool_spec(yard: &Yard) -> Result<(WorkspaceSpec, workspace_cmd::Resolved), Failure> {
+    let resolved = workspace_cmd::resolve(yard.root())?;
+    match resolved {
+        Some(resolved) if resolved.workspace.pool.is_some() => Ok((resolved.spec(), resolved)),
+        _ => Err(Failure::Message(
+            "[workspace] has no pool here: add [workspace.pool] with a size (see docs/pools.md)"
+                .into(),
+        )),
+    }
+}
+
+fn slot_line(slot: &branchyard::PoolSlot) -> String {
+    let state = match slot.state {
+        branchyard::PoolSlotState::Filling => "filling",
+        branchyard::PoolSlotState::Ready => "ready",
+        branchyard::PoolSlotState::Claimed => "claimed",
+    };
+    let short = |s: &str| s.chars().take(12).collect::<String>();
+    let mut line = format!(
+        "{:<20} {state:<8} {:<13} {:<13} {:<9}",
+        slot.id,
+        short(&slot.base),
+        slot.environment
+            .as_deref()
+            .map(short)
+            .unwrap_or_else(|| "-".into()),
+        age(slot.changed_ms),
+    );
+    if let Some(ms) = slot.fill_ms {
+        line.push_str(&format!(" made in {:.1}s", ms as f64 / 1000.0));
+    }
+    if let Some(branch) = &slot.branch {
+        line.push_str(&format!(" for {branch}"));
+    }
+    line.push('\n');
+    line
+}
+
+fn pool(env: &Env, yard: &Yard, action: &PoolAction, json: bool) -> Outcome {
+    match action {
+        PoolAction::Status => {
+            let (spec, _) = pool_spec(yard)?;
+            let status = yard.pool_status(&spec)?;
+            if json {
+                return print(&to_json(&serde_json::to_value(&status).unwrap_or_default()));
+            }
+            let mut text = format!(
+                "pool {} at {}: {} of {} ready\n",
+                &status.recipe[..status.recipe.len().min(12)],
+                status
+                    .base
+                    .as_deref()
+                    .map(|b| &b[..b.len().min(12)])
+                    .unwrap_or("?"),
+                status.ready(),
+                status.size
+            );
+            if !status.slots.is_empty() {
+                text.push_str(
+                    "SLOT                 STATE    BASE          ENVIRONMENT   CHANGED\n",
+                );
+                for slot in &status.slots {
+                    text.push_str(&slot_line(slot));
+                }
+            }
+            if status.other > 0 {
+                text.push_str(&format!(
+                    "{} slot(s) of an earlier setup: the next fill discards them\n",
+                    status.other
+                ));
+            }
+            print(&text)
+        }
+        PoolAction::Fill => {
+            if workspace_cmd::in_harness().is_some() {
+                return Err(Failure::Message(
+                    "a harness running on a branch cannot fill the pool: it may run the \
+                     repository's setup, which is a person's decision"
+                        .into(),
+                ));
+            }
+            let (spec, resolved) = pool_spec(yard)?;
+            workspace_cmd::require_trust(env, &resolved)?;
+            let filled = yard.fill_pool(&spec)?;
+            if json {
+                print(&to_json(&serde_json::to_value(&filled).unwrap_or_default()))?;
+            } else {
+                let mut text = String::new();
+                for (id, why) in filled.reclaimed.iter().chain(&filled.discarded) {
+                    text.push_str(&format!("removed {id}: {why}\n"));
+                }
+                for slot in &filled.made {
+                    text.push_str(&format!(
+                        "made    {} in {:.1}s\n",
+                        slot.id,
+                        slot.fill_ms.unwrap_or(0) as f64 / 1000.0
+                    ));
+                }
+                if let Some(why) = &filled.skipped {
+                    text.push_str(&format!("{why}\n"));
+                }
+                text.push_str(&format!("{} of {} ready\n", filled.ready, filled.size));
+                if let Some(error) = &filled.error {
+                    text.push_str(&format!("stopped: {error}\n"));
+                }
+                print(&text)?;
+            }
+            match filled.error {
+                Some(_) => Err(Failure::Reported),
+                None => Ok(()),
+            }
+        }
+        PoolAction::Drain => {
+            let drained = yard.drain_pool()?;
+            if json {
+                return print(&to_json(
+                    &serde_json::to_value(&drained).unwrap_or_default(),
+                ));
+            }
+            let mut text = String::new();
+            for (id, why) in &drained.removed {
+                text.push_str(&format!("removed {id}: {why}\n"));
+            }
+            for (id, why) in &drained.kept {
+                text.push_str(&format!("kept    {id}: {why}\n"));
+            }
+            if text.is_empty() {
+                text.push_str("nothing to drain\n");
+            }
+            print(&text)
+        }
     }
 }
 

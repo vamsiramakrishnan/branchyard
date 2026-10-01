@@ -54,6 +54,9 @@ pub struct Running {
     _gateway: Option<branchyard::connectors::gateway::Supervisor>,
     /// `--metrics-addr`'s listener: its address and its accept loop.
     metrics: Option<(SocketAddr, tokio::task::JoinHandle<()>)>,
+    /// One keeper per repository whose workspace has a warm pool this
+    /// process's labels keep; stopped when shutdown begins.
+    pools: Vec<branchyard::PoolKeeper>,
 }
 
 /// How a shutdown went.
@@ -121,6 +124,7 @@ impl Running {
     pub async fn wait(self) -> Stopped {
         let mut begun = self.shutdown.subscribe();
         let _ = begun.wait_for(|stop| *stop).await;
+        drop(self.pools);
         for poller in self.pollers {
             poller.abort();
         }
@@ -359,6 +363,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
             shutdown_rx.clone(),
         ));
     }
+    let pools = keep_pools(&app);
     let accept = match listener {
         Some(listener) => {
             let router = api::router(app);
@@ -387,7 +392,47 @@ pub async fn start(config: Config) -> Result<Running, String> {
         worker,
         _gateway: gateway,
         metrics,
+        pools,
     })
+}
+
+/// Keep the warm pool of every served repository whose workspace has one
+/// and whose scripts may run here, when this process carries the pool's
+/// labels: refilled after each claim here, and every
+/// [`branchyard::POOL_KEEP_EVERY`]. The workspace is read again each time,
+/// so a changed `[workspace.pool]` takes effect without a restart. See
+/// docs/pools.md.
+fn keep_pools(app: &Arc<App>) -> Vec<branchyard::PoolKeeper> {
+    app.repos
+        .values()
+        .filter(|repo| app.config.allow_workspace_scripts.allows(&repo.name))
+        .map(|repo| {
+            let spec = {
+                let app = app.clone();
+                let name = repo.name.clone();
+                move || {
+                    let repo = app.repos.get(&name)?;
+                    app.workspace(repo).ok().flatten().filter(|spec| {
+                        spec.pool
+                            .as_ref()
+                            .is_some_and(|pool| pool.kept_by(&app.config.labels))
+                    })
+                }
+            };
+            let on_fill = {
+                let metrics = app.registry.observability().metrics.clone();
+                let name = repo.name.clone();
+                move |filled: &branchyard::PoolFill| {
+                    crate::metrics::record_fill(&metrics, &name, filled);
+                    if let Some(error) = &filled.error {
+                        tracing::warn!(repo = %name, error = %error, "filling the warm pool");
+                    }
+                }
+            };
+            repo.yard
+                .keep_pool(spec, branchyard::POOL_KEEP_EVERY, on_fill)
+        })
+        .collect()
 }
 
 /// A worker runs operations only; the gateway runs beside a server.

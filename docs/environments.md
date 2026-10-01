@@ -58,6 +58,10 @@ A sandboxed branch's environment is the sandbox itself. Its key's place is the p
 - **A fan** whose key already has an environment does not prepare its own sandbox: every member branches from the environment. Without one, the fan sets up once as before ([setup once](sandbox-snapshots.md#by-fan-setup-once)), and that setup builds the environment.
 - **Providers.** Only a provider that can live-branch keeps an environment: a snapshot must not disturb the running sandbox, and a provider that can only checkpoint pauses it (a Substrate actor's attempt ends). Without live branch the event says `environment: … not kept (provider can't …)` and nothing changes. `share` does not apply in a sandbox (a link into this host's `.branchyard` would not resolve there).
 
+## Warm pools
+
+`[workspace.pool]` keeps worktrees ready with the current environment already restored, so a new branch waits for neither the worktree nor the restore. A fill builds the key's environment in a slot when it has none. See [warm pools](pools.md).
+
 ## Commands
 
 ```sh
@@ -110,7 +114,7 @@ A restore cut short leaves the branch's workspace not ready; its next turn resto
 | [`workspace.rs`](../crates/branchyard/src/workspace.rs) | the turn's setup with `prepare`; `.worktreeinclude` in the copy phase |
 | [`snapshots.rs`](../crates/branchyard/src/snapshots.rs), [`placement.rs`](../crates/branchyard/src/placement.rs) | branching a sandbox from an environment; taking and releasing its snapshot |
 | [`branchyard-workspace` `include.rs`, `materialize.rs`](../crates/branchyard-workspace/src/materialize.rs) | `.worktreeinclude` resolution; clone, copy and link, ported from Orca (MIT) and pinned in [`vendor/orca`](../vendor/orca) ([third-party](../THIRD_PARTY.md)) |
-| [`env_cmd.rs`](../crates/branchyard-cli/src/env_cmd.rs) | `by env` |
+| [`env_cmd.rs`](../crates/branchyard-cli/src/env_cmd.rs) | `by env`, and `by env pool` ([warm pools](pools.md)) |
 
 Tested hermetically:
 

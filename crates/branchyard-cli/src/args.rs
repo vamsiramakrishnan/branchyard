@@ -724,11 +724,13 @@ Examples:
   by env show
   by env rebuild
   by env prune --keep 2 --older-than 7
+  by env pool fill
 
 With prepare = true in [workspace], setup runs once per environment key (the
 setup commands, copy globs and lockfiles) and new branches start from what it
 produced. A failed build never replaces the last good one. See
-docs/environments.md.";
+docs/environments.md. With [workspace.pool], ready worktrees wait for new
+branches; by serve and by worker refill them. See docs/pools.md.";
 
 const PR_EXAMPLES: &str = "\
 Examples:
@@ -979,7 +981,7 @@ pub enum Command {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
-    /// Prepared environments: list, show, rebuild or prune them
+    /// Prepared environments: list, show, rebuild or prune them; the warm pool
     #[command(display_order = 111, subcommand_required = true, after_help = ENV_EXAMPLES)]
     Env {
         /// Print JSON
@@ -1641,6 +1643,21 @@ pub enum EnvAction {
         #[arg(long, value_name = "DAYS")]
         older_than: Option<u64>,
     },
+    /// The warm pool of ready worktrees (`[workspace.pool]`); see docs/pools.md
+    #[command(subcommand)]
+    Pool(PoolAction),
+}
+
+/// `by env pool ...`; see docs/pools.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum PoolAction {
+    /// The pool's slots: ready, being made, being claimed
+    Status,
+    /// Discard stale slots and make new ones until the pool is full (runs setup when
+    /// the environment is not built)
+    Fill,
+    /// Remove every ready slot on this host
+    Drain,
 }
 
 /// `by config ...`.
@@ -4727,6 +4744,19 @@ mod tests {
                 }
             )
         );
+        assert_eq!(
+            env("env pool fill --json"),
+            (true, EnvAction::Pool(PoolAction::Fill))
+        );
+        assert_eq!(
+            env("env pool status"),
+            (false, EnvAction::Pool(PoolAction::Status))
+        );
+        assert_eq!(
+            env("env pool drain"),
+            (false, EnvAction::Pool(PoolAction::Drain))
+        );
+        assert!(err("env pool").contains("Usage"));
         assert!(err("env").contains("Usage"));
     }
 

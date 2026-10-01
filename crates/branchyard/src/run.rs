@@ -158,8 +158,9 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
 }
 
 /// Create the worktree of a branch whose first turn holds `lease`, from
-/// `record.info.base`, as a journaled step. A worktree that cannot be
-/// created leaves the branch `Failed`.
+/// `record.info.base`, as a journaled step: a ready slot of its warm pool
+/// when it has one (`crate::pool`), else a new worktree. A worktree that
+/// cannot be created leaves the branch `Failed`.
 pub(crate) fn materialize(
     yard: &Yard,
     mut record: Record,
@@ -174,15 +175,86 @@ pub(crate) fn materialize(
         store
             .backend()
             .begin_step(&fence, fence.turn, STEP_CREATE, &intent)?;
-        let created = {
-            let _lock = git::lock();
-            yard.repo
-                .create_branch(&branch, &Commit(base.clone()), &record.info.worktree)
+        let started = std::time::Instant::now();
+        let pooled = crate::pool::eligible(&record);
+        let taken = pooled.then(|| crate::pool::take(yard, &record, &base));
+        let mut slot = None;
+        let mut missed = None;
+        let created = match taken {
+            Some(Ok(taken)) => {
+                let adopted = {
+                    let _lock = git::lock();
+                    yard.repo.adopt_worktree(
+                        &branch,
+                        &Commit(base.clone()),
+                        std::path::Path::new(&taken.row.path),
+                        &record.info.worktree,
+                    )
+                };
+                match adopted {
+                    Ok(workspace) => {
+                        crate::pool::settle(yard, &taken);
+                        slot = Some(taken);
+                        Ok(workspace)
+                    }
+                    Err(error) => {
+                        crate::pool::abandon(yard, &taken);
+                        missed = Some(format!("could not take slot {}: {error}", taken.row.id));
+                        let _lock = git::lock();
+                        yard.repo.create_branch(
+                            &branch,
+                            &Commit(base.clone()),
+                            &record.info.worktree,
+                        )
+                    }
+                }
+            }
+            taken => {
+                missed = taken.and_then(Result::err);
+                let _lock = git::lock();
+                yard.repo
+                    .create_branch(&branch, &Commit(base.clone()), &record.info.worktree)
+            }
         };
+        if pooled {
+            let used = crate::PoolUse {
+                slot: slot.as_ref().map(|t| t.row.id.clone()),
+                reason: match &slot {
+                    Some(t) if t.behind > 0 => Some(format!(
+                        "brought forward {} commit{}",
+                        t.behind,
+                        if t.behind == 1 { "" } else { "s" }
+                    )),
+                    Some(_) => None,
+                    None => missed,
+                },
+                requested_ms: record.created_ms,
+                worktree_ms: started.elapsed().as_millis() as u64,
+            };
+            let claim = match &slot {
+                Some(taken) => crate::pool::claim_of(taken, used),
+                None => crate::pool::PoolClaim {
+                    used,
+                    key: None,
+                    method: None,
+                    shared: Vec::new(),
+                    produced: Vec::new(),
+                },
+            };
+            if let Some(workspace) = record.workspace.as_mut() {
+                workspace.pool = Some(claim);
+            }
+        }
         let outcome = match created {
             Ok(workspace) => {
                 record.info.worktree = workspace.path;
-                json!({ "worktree": record.info.worktree })
+                match &slot {
+                    Some(taken) => json!({
+                        "worktree": record.info.worktree,
+                        "pool_slot": taken.row.id,
+                    }),
+                    None => json!({ "worktree": record.info.worktree }),
+                }
             }
             Err(error) => {
                 let reason = format!("could not create the worktree: {error}");

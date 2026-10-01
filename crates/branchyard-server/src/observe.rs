@@ -241,6 +241,51 @@ pub fn record_events(
     }
 }
 
+/// Count the start of each of a task's new branches (`created`): from the
+/// operation's admission (`admitted_ms`) to the branch's first prompt, by
+/// whether its worktree came from a warm pool (`hit`), had a pool and
+/// found no slot (`miss`), or had none (`none`); and the pool's hits and
+/// misses in `repo`.
+pub fn record_starts(
+    metrics: &Metrics,
+    repo: &str,
+    admitted_ms: u64,
+    created: &BTreeSet<String>,
+    entries: &[FeedEntry],
+) {
+    let mut pooled: BTreeMap<&str, &'static str> = BTreeMap::new();
+    let mut started: BTreeSet<&str> = BTreeSet::new();
+    for entry in entries {
+        let branch = entry.branch.as_str();
+        if !created.contains(branch) || started.contains(branch) {
+            continue;
+        }
+        match &entry.activity {
+            Activity::Workspace(report) => {
+                if let Some(used) = &report.pool {
+                    let result = match used.slot {
+                        Some(_) => "hit",
+                        None => "miss",
+                    };
+                    if pooled.insert(branch, result).is_none() {
+                        metrics.inc(metrics::POOL_CLAIMS, &[("repo", repo), ("result", result)]);
+                    }
+                }
+            }
+            Activity::Prompt(_) => {
+                started.insert(branch);
+                let pool = pooled.get(branch).copied().unwrap_or("none");
+                metrics.observe(
+                    metrics::START,
+                    &[("pool", pool)],
+                    entry.at_ms.saturating_sub(admitted_ms) as f64 / 1000.0,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Count `stored`'s harness cost: the growth of each branch's recorded
 /// `cost_usd` over the operation (`before` holds what the branches that
 /// existed at its start had).
@@ -291,6 +336,59 @@ mod tests {
             Some(Value::Histogram { count, .. }) => *count as f64,
             None => 0.0,
         }
+    }
+
+    #[test]
+    fn a_tasks_new_branches_count_their_start_and_pool_use() {
+        let metrics = Metrics::default();
+        let pooled = |slot: Option<&str>| {
+            let mut report =
+                branchyard::WorkspaceReport::new(branchyard::WorkspacePhase::Setup, None);
+            report.pool = Some(Box::new(branchyard::PoolUse {
+                slot: slot.map(str::to_owned),
+                reason: None,
+                requested_ms: 1_050,
+                worktree_ms: 1,
+            }));
+            Activity::Workspace(report)
+        };
+        let created: BTreeSet<String> = ["hit", "miss", "plain"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let entries = vec![
+            entry(1, "hit", 1_100, pooled(Some("s1"))),
+            entry(2, "hit", 1_200, Activity::Prompt("p".into())),
+            entry(3, "miss", 1_100, pooled(None)),
+            entry(4, "miss", 4_000, Activity::Prompt("p".into())),
+            entry(5, "plain", 2_000, Activity::Prompt("p".into())),
+            // Not a start: a later prompt, and another operation's branch.
+            entry(6, "hit", 9_000, Activity::Prompt("again".into())),
+            entry(7, "other", 9_000, Activity::Prompt("p".into())),
+        ];
+        record_starts(&metrics, "app", 1_000, &created, &entries);
+        let count = |pool: &str| counter(&metrics, metrics::START, &[("pool", pool)]);
+        assert_eq!(
+            (count("hit"), count("miss"), count("none")),
+            (1.0, 1.0, 1.0)
+        );
+        let claims = |result: &str| {
+            counter(
+                &metrics,
+                metrics::POOL_CLAIMS,
+                &[("repo", "app"), ("result", result)],
+            )
+        };
+        assert_eq!((claims("hit"), claims("miss")), (1.0, 1.0));
+        let snapshot = metrics.snapshot();
+        let sum = |pool: &str| match snapshot[metrics::START]
+            .get(&vec![("pool".to_string(), pool.to_string())])
+        {
+            Some(Value::Histogram { sum, .. }) => *sum,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(sum("hit"), 0.2);
+        assert_eq!(sum("miss"), 3.0);
     }
 
     #[test]

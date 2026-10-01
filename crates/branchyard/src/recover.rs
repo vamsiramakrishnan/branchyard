@@ -68,6 +68,9 @@ pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
             }
         }
     }
+    // Warm pool slots a stopped process was making or claiming, and
+    // directories in the pool with no record.
+    crate::pool::reclaim(yard);
     match failed {
         Some(error) => Err(error),
         None => Ok(recovered),
