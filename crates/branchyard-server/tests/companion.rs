@@ -705,6 +705,7 @@ fn the_configuration_file_turns_the_companion_on() {
 #[cfg(feature = "postgres")]
 #[test]
 fn the_postgres_store_conforms() {
+    use store::CompanionStore;
     let Some(base) = std::env::var("BY_TEST_POSTGRES_URL")
         .ok()
         .filter(|u| !u.is_empty())

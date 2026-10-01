@@ -91,6 +91,7 @@ The page and the server notice the same things `by watch` does, each once: a per
 - One rate limit per server process, not per client address (the server does not see client addresses behind a proxy).
 - Pairing codes and tokens are in the operation store's database; there is no expiry sweep beyond the codes a new link removes, so `token list` keeps old rows.
 - No push retry: a nudge that fails is logged, and the page shows the state when opened.
+- A server that cannot build its HTTP client (no readable trust roots, say) starts with push off and says so in its log; the page and pairing still work.
 
 ## Code and tests
 
