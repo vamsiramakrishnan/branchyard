@@ -1,0 +1,155 @@
+name: Release
+# Prebuilt `by` and `branchyard-server` for Linux (static, musl) and macOS,
+# with SHA-256 checksums and build provenance attestations, as a draft
+# GitHub release; and the image with harnesses (deploy/Dockerfile.harnesses).
+# Runs only when a v* tag is pushed. See docs/distribution.md.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  FEATURES: branchyard-cli/postgres,branchyard-server/postgres
+  # 46 MB unstripped, 37 MB stripped for x86_64 Linux (glibc, measured).
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # musl, linked statically: ring, the bundled SQLite and BLAKE3's C
+          # are compiled by musl-gcc; nothing links OpenSSL or aws-lc.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          # Both macOS targets on an Apple silicon runner; Apple's clang
+          # compiles the C dependencies for either architecture.
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install musl-gcc
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo fetch --locked
+      - name: Build
+        env:
+          # cc-rs looks for <arch>-linux-musl-gcc; musl-tools installs musl-gcc.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: >-
+          cargo build --release --locked --offline --target ${{ matrix.target }}
+          -p branchyard-cli -p branchyard-server --features "$FEATURES"
+      - name: Check the binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir=target/${{ matrix.target }}/release
+          for bin in by branchyard-server; do
+            file "$dir/$bin"
+            case "${{ matrix.target }}" in
+              *-linux-musl) file "$dir/$bin" | grep -q 'statically linked' ;;
+            esac
+          done
+          # Runs where the runner can execute it (not x86_64 on Apple silicon without Rosetta).
+          "$dir/by" --version || [ "${{ matrix.target }}" = x86_64-apple-darwin ]
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="branchyard-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name/licenses"
+          cp target/${{ matrix.target }}/release/by target/${{ matrix.target }}/release/branchyard-server "dist/$name/"
+          cp LICENSE THIRD_PARTY.md README.md "dist/$name/"
+          cp vendor/orca/LICENSE "dist/$name/licenses/orca-LICENSE"
+          cp vendor/emdash/LICENSE.md "dist/$name/licenses/emdash-LICENSE.md"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: dist/*.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Collect the archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" --dir artifacts --pattern 'release-*'
+          mkdir -p dist
+          find artifacts -type f -exec mv {} dist/ \;
+          cd dist && cat *.sha256 | sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS
+          cp ../install.sh .
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: dist/SHA256SUMS
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag
+          --title "$GITHUB_REF_NAME" --notes "See docs/distribution.md to install and verify."
+          dist/*.tar.gz dist/SHA256SUMS dist/install.sh
+
+  image:
+    # The image with harnesses: built and smoke-tested on every v* tag;
+    # pushed to GHCR only when the repository variable PUBLISH_IMAGES is
+    # 'true'.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build
+        run: docker build -f deploy/Dockerfile.harnesses -t branchyard-harnesses:ci .
+      - name: Smoke test
+        run: |
+          docker run --rm --entrypoint by branchyard-harnesses:ci --version
+          docker run --rm --entrypoint claude branchyard-harnesses:ci --version
+          docker run --rm --entrypoint codex branchyard-harnesses:ci --version
+          docker run --rm --entrypoint sh branchyard-harnesses:ci -c 'test "$(id -u)" != 0 && command -v claude-agent-acp && command -v ssh && command -v git'
+      - name: Push
+        if: vars.PUBLISH_IMAGES == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-harnesses:${GITHUB_REF_NAME#v}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag branchyard-harnesses:ci "$image"
+          docker push "$image"

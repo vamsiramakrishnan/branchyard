@@ -22,6 +22,16 @@ The system is designed to support:
 
 A task, a conversation, a sandbox, and a code branch have separate identities. Forking a conversation does not automatically copy its filesystem or credentials.
 
+## Install
+
+Prebuilt `by` and `branchyard-server` for Linux (static, x86_64 and aarch64) and macOS (Apple silicon and Intel) come with each release, with SHA-256 checksums and build provenance attestations. Download `install.sh` from the release, read it, and run it; it verifies the archive against `SHA256SUMS` and installs into `~/.local/bin` without `sudo` ([distribution](docs/distribution.md#prebuilt-binaries)). Or build from source:
+
+```sh
+cargo install --locked --path crates/branchyard-cli   # installs `by`
+```
+
+A container image with Claude Code, Codex and claude-agent-acp pinned and integrity-checked is `deploy/Dockerfile.harnesses` ([deploy](docs/deploy.md#image-with-harnesses)).
+
 ## Quick start
 
 ```sh
@@ -79,6 +89,8 @@ Every tool permission request reaches Branchyard. The Antigravity, Pi and Amp pr
 
 A fresh worktree has no `.env`, no dependencies and no dev server. `[workspace]` in `branchyard.toml` fixes that for every new branch: it copies untracked files such as `.env` from the repository root, runs `setup` (an install) before the first turn, gives scripts and the harness `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and a port of its own in `BRANCHYARD_PORT`, runs named scripts with `by workspace run <branch> [name]`, and runs `teardown` on `by rm` or `by merge --rm`. A repository's scripts never run until you trust them (`by workspace trust`, or once on a terminal), and trust lapses when they change. See [workspace](docs/workspace.md).
 
+A repository can also say how to make a machine to work on: `[recipes.NAME]` names scripts that create, suspend, resume and destroy a VM (or a container) and print how to reach it, trusted like `[workspace]`; `by recipe check NAME` runs its doctor and a create, exec, suspend, resume and destroy, through a sandbox provider that runs commands there over ssh ([recipes](docs/recipes.md), ported from Orca).
+
 With `prepare = true`, setup runs once per environment key (the setup commands, copy globs and lockfiles) and every later branch with that key starts from what it produced: cloned where the filesystem can, linked for `share` directories such as `node_modules`, or, in a sandbox, branched from a snapshot of a sandbox setup ran in. A failed build never replaces the last good one, and branches that fall back say so. A `.worktreeinclude` file is honoured. `by env list|show|rebuild|prune` manages them. See [prepared environments](docs/environments.md).
 
 ```toml
@@ -120,6 +132,8 @@ by run "Make the flaky parser test deterministic" --check "cargo test" --yes
 by ls
 by merge make-the-flaky-parser-test-deterministic
 ```
+
+A repository on a machine you can `ssh` to needs no server setup: `by --remote ssh://me@build.example/srv/app run …` starts `by serve` there on a Unix socket in a private directory, forwards it through an ssh control master, and fetches a token generated there into a 0600 file; `by remote ssh status|stop` manage it ([remote over ssh](docs/remote-ssh.md)).
 
 For more than one user, TLS, PostgreSQL, quotas or webhooks, `by init server` writes a configuration with a hashed credential per tenant and each token in a 0600 file, checks it with the server's own loader, and prints the `by serve --config … --check` and `by serve --config …` to run.
 
@@ -351,7 +365,8 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | `branchyard-cli` | The `by` command on the SDK: `run`, `fan`, `send`, `fork`, `ls`, `show`, `diff`, `log` (with `--follow`), `merge`, `rm`, `rewind`, `try`, `compare`, `judge`, `fleet`, `gateway`, `connect`, `pr` (with `--watch`, which resolves the review threads a push addressed), `review`, `open`, `cancel`, `send --steer`, `harnesses` (`--all`: every CLI in the catalog), `connectors catalog`, `watch` (a cockpit whose keys run these), `serve`, `rig`, `artifact`, `scratch`, `graph`, and the delegation commands, each also in remote mode where it can be, with a [clap](https://docs.rs/clap) command line, shell completions and a man page; `init` (the setup wizard and its JSON protocol) and `config`, with `branchyard.toml` defaults under the flags; 203 tests, 76 of them running the built binary (12 the pull-request loop against a fake `gh`, 3 `by review` with a fake editor) against temporary repositories, a spawned server, a fake Substrate cluster and a fake ACP agent, and 1 more on PostgreSQL |
 | `branchyard-setup` | The [setup](docs/setup.md) interview without I/O: declarative questions per topic (project, server, rig, deploy, plugin) with conditions, rules and defaults detected through an injected probe, batches for a harness's question tool, plans of files with diffs and validator verdicts, secrets never in any output; `branchyard.toml`'s format, layering and JSON Schema, including `[workspace]`, imported from a committed `.emdash.json`, `orca.yaml`, `.superset/config.json` or `.conductor/settings.toml`; 45 tests Connectors: `[connectors]` and grants; |
 | `branchyard-server` | The server: a queue claimed by priority with aging, then weighted fair share across tenants ([scheduling](docs/server.md#scheduling)), Prometheus metrics and OpenTelemetry traces ([observability](docs/observability.md)); bearer-token authentication with tenant identity (principals with scopes and repository ownership, hashed credentials, `token new`) and per-tenant quotas counted in the admission's transaction, durable operations with idempotency keys, admitted as a durable enqueue and run by workers under fenced leases, cancellation, steering a running turn, a resumable SSE activity feed read from the engine's store, recovery, one server per data directory or several (and `by worker` processes) on one PostgreSQL database, TLS and graceful shutdown, operator opt-ins for providers, delegation and unapproved tools, secrets resolved from the operator's own table, delegation endpoints including graph proposals (a spawn that waits is queued work like any other, and every server and worker resumes graphs on its recovery tick), rig seats checked on submission, artifacts and scratch areas over HTTP (`--max-artifact-bytes`), and a PostgreSQL store, and `--check` to validate a configuration without serving; SIGTERM and SIGINT shut down within the grace period; 91 tests, 45 over real HTTP (2 of them the binary stopped by SIGTERM and SIGINT) against a fake ACP agent (including adversarial webhook receivers that hang, close without answering or refuse forever, none of which delay an operation or the feed, and identity, scopes, tenant isolation and quotas: `tests/tenants.rs`), and 12 more on PostgreSQL (including a spawn that waits run by a worker alone, and two servers and a worker starting one dependent once) (with the feature, 1 SQLite-only parity test is left out); see [the server reference](docs/server.md) Connectors: signing keys, `GET /.well-known/jwks.json`, an optional supervised Anvil gateway and audit ingestion ([connectors](docs/connectors.md)); |
-| `branchyard-client` | The remote SDK: typed blocking client for every endpoint, including artifacts and scratch areas (digest-verified downloads), SSE parsing and reconnect by cursor, retries and reconnects with backon; 14 tests (15 with `--features schema`) |
+| `branchyard-client` | The remote SDK: typed blocking client for every endpoint, over TCP, TLS or a Unix socket (`unix:/path`), including artifacts and scratch areas (digest-verified downloads), SSE parsing and reconnect by cursor, retries and reconnects with backon; 14 tests (15 with `--features schema`) |
+| `branchyard-recipe` | Environment recipes (Orca's contract): the scripts' runner, result parsing and doctor, and `RecipeProvider`, a `SandboxProvider` running execs on the recipe's machine over ssh or an exec command; 13 tests, including the sandbox conformance suite against a fake-ssh "VM" |
 | `branchyard-herdr` | The [Herdr plugin](plugins/herdr/README.md)'s binary: a bridge from the server's event stream to one Herdr tab per branch and `herdr pane report-agent` states, with merge, cancel and send actions; 12 tests, 2 of them against a spawned server, the fake ACP agent and a fake `herdr`; not run against a real Herdr |
 | `branchyard-mcp` | Branchyard's delegation tools over MCP on stdio (`by mcp`), for harnesses whose shell is restricted; the same operations and token as `by spawn` and the SDKs; 11 tests |
 | `branchyard-sandbox` | The vendor-independent `SandboxProvider` contract, provider conformance checks, and capability admission, including pause, live branch and full snapshots, and an in-process fake provider that models them; unsupported requirements are rejected, never weakened; 12 tests |
@@ -396,7 +411,8 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Lifecycle](docs/lifecycle.md): stall detection, webhook notifications and reincarnation.
 - [Pull requests](docs/pull-requests.md): `by run --issue` (GitHub, Linear, Jira, GitLab), `--pr`, `by pr`, `by pr --watch`, merge readiness and `by open`.
 - [Usage and adopting sessions](docs/usage.md): quota meters per login, the guard and the router, and `by adopt`.
-- [Distribution](docs/distribution.md): installing the skill for Claude Code and Codex, and reproducible plugin/SDK archives.
+- [Distribution](docs/distribution.md): prebuilt binaries, `install.sh` and a Homebrew formula; installing the skill for Claude Code and Codex, and reproducible plugin/SDK archives.
+- [Remote over ssh](docs/remote-ssh.md) and [environment recipes](docs/recipes.md).
 - [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
 

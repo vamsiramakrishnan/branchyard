@@ -1,0 +1,44 @@
+# `by serve` with harnesses installed: Claude Code, Codex and the
+# claude-agent-acp adapter, at the versions qualify.yml pins, plus git and an
+# ssh client. See docs/deploy.md#image-with-harnesses.
+#
+# The harness CLIs come from deploy/harnesses/package-lock.json through
+# `npm ci`, which refuses any tarball whose SHA-512 differs from the lock's
+# `integrity`. Credentials are never baked in: pass them at run time
+# (`--secret`, docs/provisioning.md).
+#
+# The build stage is deploy/Dockerfile's, kept identical
+# (tests/test_distribution.py checks it).
+FROM rust:1.94.0-bookworm AS build
+WORKDIR /source
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
+COPY crates ./crates
+# `by init plugin` embeds the shipped skills (crates/branchyard-setup/src/skills.rs).
+COPY plugins/branchyard/skills ./plugins/branchyard/skills
+# --features postgres: deploy/compose.yaml passes `by serve --database
+# postgres://...`, which needs this build-time feature (docs/server.md).
+RUN cargo build --release --locked --features postgres -p branchyard-cli
+
+FROM node:22.22.2-bookworm-slim@sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e AS harnesses
+WORKDIR /opt/harnesses
+COPY deploy/harnesses/package.json deploy/harnesses/package-lock.json ./
+# Claude Code's install script links its platform binary; every package,
+# that one included, is checked against the lock's integrity first.
+RUN npm ci --omit=dev --no-audit --no-fund \
+    && npm cache clean --force
+
+FROM node:22.22.2-bookworm-slim@sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --home-dir /home/branchyard --shell /usr/sbin/nologin branchyard
+COPY --from=harnesses /opt/harnesses /opt/harnesses
+COPY --from=build /source/target/release/by /usr/local/bin/by
+# The pinned versions stay pinned: no self-update into a root-owned directory.
+ENV PATH=/opt/harnesses/node_modules/.bin:$PATH \
+    DISABLE_AUTOUPDATER=1
+USER branchyard
+WORKDIR /home/branchyard
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8421/healthz || exit 1
+ENTRYPOINT ["by", "serve"]

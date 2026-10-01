@@ -4101,11 +4101,11 @@ mod tests {
         let error = parse_str("mrege b").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
         assert_eq!(error.exit_code(), 2);
-        // `review` is close to `mrege` too, so clap lists both.
+        // `review`, `recipe` and `remote` are close to `mrege` too, so clap lists them.
         assert!(
             error
                 .to_string()
-                .contains("similar subcommands exist: 'review', 'merge'"),
+                .contains("similar subcommands exist: 'review', 'recipe', 'remote', 'merge'"),
             "{error}"
         );
         assert!(err("run go --budget 2").contains("a similar argument exists: '--budget-usd'"));

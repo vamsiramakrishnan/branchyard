@@ -1,0 +1,10 @@
+{
+  "name": "branchyard-harnesses",
+  "private": true,
+  "description": "The harness CLIs deploy/Dockerfile.harnesses installs, pinned; package-lock.json records each tarball's integrity.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.283",
+    "@openai/codex": "0.157.1",
+    "@agentclientprotocol/claude-agent-acp": "0.81.2"
+  }
+}

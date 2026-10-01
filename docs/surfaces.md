@@ -453,3 +453,23 @@ Tasks started on a schedule or by a signed webhook; see [triggers](triggers.md).
 | `POST /v1/repos/{repo}/tasks` | its handler admitted the task | the same admission (`api::admit_task`) also admits a firing trigger's task, as the trigger's creating principal, with the idempotency key `trigger:<tenant>/<id>` + the run's key |
 | `TriggerSpec`, `Trigger`, `TriggerRun`, `TriggerEvent`, `TriggerTest`, `FireAck` and the rest of `branchyard_client::triggers` | none | in `schema/contract.json` |
 | Authentication | every route but `/healthz` and `/.well-known/jwks.json` needs a bearer token | also not `POST /v1/triggers/{id}/fire`, which checks the trigger's signature instead |
+
+## Added with ssh remotes, recipes and distribution
+
+`--remote` also takes `ssh://[user@]host[:port]/path/to/repo` ([remote over ssh](remote-ssh.md)) and `unix:/path/to/socket`; [environment recipes](recipes.md) are local-only.
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Reach a server over ssh | n/a | `--remote ssh://…` starts or reuses `by serve` there and forwards its socket | every command, as with `http(s)://` | the same API, over a Unix socket | `Client::new("unix:/path", token)` | no: a harness reaches its own server only |
+| Its connection and server | n/a | `remote ssh status`, `remote ssh stop` | the same, with `--remote ssh://…` naming it | n/a | n/a | no |
+| List, show, trust and untrust recipes | `branchyard_setup::config::RecipeConfig` | `recipe list`, `show`, `trust`, `untrust` | no: a recipe runs on the machine that has the repository; refused | n/a | n/a | no: a harness can never trust |
+| Check a recipe (doctor, then create, exec, suspend, resume, destroy) | `branchyard_recipe::{static_checks, run, RecipeProvider}` | `recipe check [--no-smoke]` | no; refused | n/a | n/a | no |
+| A sandbox on a recipe's machine | `RecipeProvider` (`SandboxProvider`: exec; pause when the recipe has suspend and resume) | not yet (`--provider recipe:NAME` is not wired) | no | no | no | no |
+
+| Surface | Before | Now |
+|---|---|---|
+| `by serve` / `branchyard-server` | TCP only | also `--listen-unix PATH`: plain HTTP on a 0600 socket in a directory only its owner may enter; refuses TLS, `--listen` and `--worker` with it |
+| `[remote] url` in `branchyard.toml` | `http://` or `https://` | also `ssh://` and `unix:/` |
+| `[recipes.NAME]` in `branchyard.toml` and the user file | none | `create`, `suspend`, `resume`, `destroy`, `doctor`, `description`, `timeout_seconds`; in `schema/branchyard.config.json` |
+| Trust file | `[workspace]` digests by repository root | also recipe digests, keyed `<root>#recipe:<name>` |
+| Releases | none | `release.yml` on a `v*` tag: static Linux and macOS archives, `SHA256SUMS`, attestations, a draft release, the image with harnesses; `install.sh`; a Homebrew template ([distribution](distribution.md#prebuilt-binaries)) |
