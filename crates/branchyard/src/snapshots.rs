@@ -1249,7 +1249,7 @@ pub(crate) fn inherited(
                 from: format!("environment {}", &used_key[..used_key.len().min(12)]),
                 worktree: mounted.then(|| crate::environments::tree(&yard.root, used_key)),
                 produced: info.produced,
-                environment: Some(environment),
+                environment: Some(Box::new(environment)),
             });
         }
         _ => return None,

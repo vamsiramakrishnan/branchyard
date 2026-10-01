@@ -1133,7 +1133,7 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
             Ok(info) => {
                 let mut used = EnvironmentUse::new(&key, EnvironmentOrigin::Built);
                 used.built_by = Some(info.built_by.clone());
-                report.environment = Some(used);
+                report.environment = Some(Box::new(used));
                 Some(info)
             }
             Err(why) => {
@@ -1266,7 +1266,7 @@ pub(crate) fn after_sandbox_setup(
     let mut used = EnvironmentUse::new(&key, EnvironmentOrigin::NotKept);
     let not_kept = |report: &mut crate::WorkspaceReport, mut used: EnvironmentUse, why: String| {
         used.reason = Some(why);
-        report.environment = Some(used);
+        report.environment = Some(Box::new(used));
         None
     };
     let _lock = match KeyLock::try_take(root, &key) {
@@ -1331,7 +1331,7 @@ pub(crate) fn after_sandbox_setup(
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_owned));
             used.built_by = Some(info.built_by);
-            report.environment = Some(used);
+            report.environment = Some(Box::new(used));
             prune_after_build(yard);
             Some(key)
         }

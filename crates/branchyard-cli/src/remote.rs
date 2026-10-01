@@ -259,6 +259,7 @@ fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operatio
     let mut streaming = true;
     let mut polled = Instant::now();
     let poll = Duration::from_millis(250);
+    let mut said_waiting = false;
     loop {
         if let Some(done) = &finished {
             let drained = done.end_cursor.is_none_or(|end| seen >= end);
@@ -304,6 +305,10 @@ fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operatio
         if finished.is_none() && polled.elapsed() >= poll {
             polled = Instant::now();
             let op = remote.client.operation(&op.id)?;
+            if let (Some(waiting), false) = (&op.waiting, said_waiting) {
+                eprintln!("by: {} is still queued: {waiting}", op.id);
+                said_waiting = true;
+            }
             if op.state.is_terminal() {
                 finished = Some(op);
             }
@@ -350,6 +355,7 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         provider: provider.clone(),
         provision: provision(task)?,
         seats: None,
+        require_labels: task.require_labels.clone(),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -406,6 +412,7 @@ pub fn fan(
         provider: provider.clone(),
         provision: provision(task)?,
         seats: None,
+        require_labels: task.require_labels.clone(),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -438,6 +445,7 @@ fn send_request(
             allow_delegation: task.allow_delegation,
             unapproved_tools: task.unapproved_tools,
             provision: provision(task)?,
+            require_labels: task.require_labels.clone(),
         },
         notice,
     ))
@@ -515,6 +523,7 @@ pub fn fork(
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
         provision: provision(task)?,
+        require_labels: task.require_labels.clone(),
     };
     let op = remote.repo.fork(branch, &request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -537,6 +546,7 @@ pub fn reincarnate(env: &Env, remote: &Remote, branch: &str, task: &TaskArgs) ->
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
         provision: provision(task)?,
+        require_labels: task.require_labels.clone(),
     };
     let op = remote.repo.reincarnate(branch, &request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -570,6 +580,7 @@ pub fn spawn(
         depends_on: args.depends_on.clone(),
         after: args.after,
         bindings: args.bindings.clone(),
+        require_labels: task.require_labels.clone(),
     };
     let op = remote
         .repo
@@ -718,6 +729,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         provider: None,
         provision: Some(root.provision.clone()),
         seats: plan.seats.clone(),
+        require_labels: Vec::new(),
     };
     let op = match remote.repo.submit_task(&request, &new_key()) {
         Ok(op) => op,

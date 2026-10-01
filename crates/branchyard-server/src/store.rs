@@ -210,6 +210,62 @@ pub struct Claim {
     pub fence: i64,
 }
 
+/// A worker as its last [`OperationStore::beat`] recorded it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveWorker {
+    pub id: String,
+    pub host: String,
+    pub labels: Vec<String>,
+    pub repos: Vec<String>,
+    /// Milliseconds since its last beat.
+    pub seen_ms_ago: u64,
+}
+
+/// Why a queued operation requiring `requires` of `repo` cannot be claimed
+/// by any of `workers`, if none of them serving the repository carries
+/// every label; `None` when one can (it is only busy).
+pub fn unclaimable(requires: &[String], repo: &str, workers: &[LiveWorker]) -> Option<String> {
+    if requires.is_empty() {
+        return None;
+    }
+    let serving: Vec<&LiveWorker> = workers
+        .iter()
+        .filter(|w| w.repos.iter().any(|r| r == repo))
+        .collect();
+    if serving
+        .iter()
+        .any(|w| requires.iter().all(|l| w.labels.contains(l)))
+    {
+        return None;
+    }
+    let live = match serving.is_empty() {
+        true => format!("no live worker serves {repo}"),
+        false => format!(
+            "live workers serving {repo}: {}",
+            serving
+                .iter()
+                .map(|w| format!("{} on {} [{}]", w.id, w.host, w.labels.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    };
+    Some(format!(
+        "no live worker carries the labels it requires ({}); {live}",
+        requires.join(", ")
+    ))
+}
+
+/// Whether `label` may name a worker label: 1 to 63 of lowercase letters,
+/// digits, `.`, `_` and `-`, starting with a letter or digit.
+pub fn valid_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && label.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
 /// What [`OperationStore::admit`] did.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Admission {
@@ -265,14 +321,22 @@ pub trait OperationStore: Send + Sync {
     /// The tenant's queued and running operations.
     fn unfinished(&self, tenant: &str) -> io::Result<Vec<StoredOperation>>;
     /// Claim the oldest queued operation of one of `repos` that no live
-    /// claim holds, for `lease`. A claim whose lease expired, or whose
-    /// process is gone from this host, is claimed again under a new fence.
+    /// claim holds and whose required labels are all among `labels`, for
+    /// `lease`. A claim whose lease expired, or whose process is gone from
+    /// this host, is claimed again under a new fence.
     fn claim(
         &self,
         worker: &Worker,
         repos: &[String],
+        labels: &[String],
         lease: Duration,
     ) -> io::Result<Option<Claim>>;
+    /// Record that `worker`, carrying `labels`, serves `repos` now.
+    fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()>;
+    /// Workers that beat within `within`.
+    fn workers(&self, within: Duration) -> io::Result<Vec<LiveWorker>>;
+    /// Forget `worker`, which is stopping.
+    fn leave(&self, worker: &Worker) -> io::Result<()>;
     /// Extend a claim's lease; false when the claim was lost.
     fn renew(&self, worker: &Worker, id: &str, fence: i64, lease: Duration) -> io::Result<bool>;
     /// Record `operation` (now running) and extend the lease, if the claim
@@ -495,7 +559,30 @@ const SQLITE_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS webhook_cursors (
         id TEXT PRIMARY KEY,
         cursor INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workers (
+        id TEXT PRIMARY KEY,
+        host TEXT NOT NULL,
+        pid INTEGER NOT NULL,
+        labels TEXT NOT NULL,
+        repos TEXT NOT NULL,
+        seen INTEGER NOT NULL
     );";
+
+/// Columns added since the table was first created.
+fn sqlite_migrate(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let has: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('operation_queue') WHERE name = 'requires'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has == 0 {
+        conn.execute_batch(
+            "ALTER TABLE operation_queue ADD COLUMN requires TEXT NOT NULL DEFAULT '[]'",
+        )?;
+    }
+    Ok(())
+}
 
 fn sqlite_now() -> i64 {
     crate::ops::now_ms() as i64
@@ -548,6 +635,7 @@ impl SqliteStore {
         conn.execute_batch("PRAGMA synchronous = FULL;")
             .map_err(sql)?;
         conn.execute_batch(SQLITE_SCHEMA).map_err(sql)?;
+        sqlite_migrate(&conn).map_err(sql)?;
         let store = SqliteStore {
             path,
             conn: Mutex::new(conn),
@@ -567,6 +655,7 @@ impl SqliteStore {
         let conn = rusqlite::Connection::open_in_memory().expect("an in-memory database");
         conn.execute_batch(SQLITE_SCHEMA)
             .expect("the schema on an in-memory database");
+        sqlite_migrate(&conn).expect("the schema on an in-memory database");
         SqliteStore {
             path: PathBuf::from(":memory:"),
             conn: Mutex::new(conn),
@@ -772,9 +861,9 @@ impl OperationStore for SqliteStore {
             }
             sqlite_insert(tx, operation, false)?;
             tx.execute(
-                "INSERT INTO operation_queue (id, seq, repo, work) \
-                 VALUES (?1, (SELECT seq FROM operations WHERE id = ?1), ?2, ?3)",
-                rusqlite::params![op.id, op.repo, work],
+                "INSERT INTO operation_queue (id, seq, repo, work, requires) \
+                 VALUES (?1, (SELECT seq FROM operations WHERE id = ?1), ?2, ?3, ?4)",
+                rusqlite::params![op.id, op.repo, work, serde_json::to_string(&op.requires)?],
             )
             .map_err(sql)?;
             Ok((Admission::Admitted, true))
@@ -789,9 +878,11 @@ impl OperationStore for SqliteStore {
         &self,
         worker: &Worker,
         repos: &[String],
+        labels: &[String],
         lease: Duration,
     ) -> io::Result<Option<Claim>> {
         let repos = serde_json::to_string(repos)?;
+        let labels = serde_json::to_string(labels)?;
         self.immediate(|tx| {
             let now = sqlite_now();
             sqlite_reap(tx, worker, now)?;
@@ -800,8 +891,10 @@ impl OperationStore for SqliteStore {
                     "SELECT id, attempt, work FROM operation_queue \
                      WHERE repo IN (SELECT value FROM json_each(?1)) \
                        AND (lease_until IS NULL OR lease_until <= ?2) \
+                       AND NOT EXISTS (SELECT 1 FROM json_each(requires) r \
+                           WHERE r.value NOT IN (SELECT value FROM json_each(?3))) \
                      ORDER BY seq LIMIT 1",
-                    rusqlite::params![repos, now],
+                    rusqlite::params![repos, now, labels],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()
@@ -836,6 +929,65 @@ impl OperationStore for SqliteStore {
                 true,
             ))
         })
+    }
+
+    fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO workers (id, host, pid, labels, repos, seen) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (id) DO UPDATE SET \
+                 labels = excluded.labels, repos = excluded.repos, seen = excluded.seen",
+                rusqlite::params![
+                    worker.id,
+                    worker.host,
+                    worker.pid,
+                    serde_json::to_string(labels)?,
+                    serde_json::to_string(repos)?,
+                    sqlite_now()
+                ],
+            )
+            .map_err(sql)?;
+        Ok(())
+    }
+
+    fn workers(&self, within: Duration) -> io::Result<Vec<LiveWorker>> {
+        let now = sqlite_now();
+        let conn = self.conn();
+        let mut statement = conn
+            .prepare(
+                "SELECT id, host, labels, repos, seen FROM workers WHERE seen > ?1 ORDER BY id",
+            )
+            .map_err(sql)?;
+        let rows = statement
+            .query_map([now - ms(within)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(sql)?;
+        let mut live = Vec::new();
+        for row in rows {
+            let (id, host, labels, repos, seen) = row.map_err(sql)?;
+            live.push(LiveWorker {
+                id,
+                host,
+                labels: serde_json::from_str(&labels)?,
+                repos: serde_json::from_str(&repos)?,
+                seen_ms_ago: (now - seen).max(0) as u64,
+            });
+        }
+        Ok(live)
+    }
+
+    fn leave(&self, worker: &Worker) -> io::Result<()> {
+        self.conn()
+            .execute("DELETE FROM workers WHERE id = ?1", [&worker.id])
+            .map_err(sql)?;
+        Ok(())
     }
 
     fn renew(&self, worker: &Worker, id: &str, fence: i64, lease: Duration) -> io::Result<bool> {
@@ -1059,6 +1211,15 @@ const PG_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS by_webhook_cursors (
         id TEXT PRIMARY KEY,
         cursor BIGINT NOT NULL
+    );
+    ALTER TABLE by_operation_queue ADD COLUMN IF NOT EXISTS requires TEXT[] NOT NULL DEFAULT '{}';
+    CREATE TABLE IF NOT EXISTS by_workers (
+        id TEXT PRIMARY KEY,
+        host TEXT NOT NULL,
+        pid BIGINT NOT NULL,
+        labels TEXT[] NOT NULL,
+        repos TEXT[] NOT NULL,
+        seen TIMESTAMPTZ NOT NULL
     )";
 
 #[cfg(feature = "postgres")]
@@ -1239,6 +1400,7 @@ impl OperationStore for PostgresStore {
         let idem = operation.idempotency.clone();
         let locks = lock_order(&operation.locks);
         let tenant = operation.tenant().to_owned();
+        let requires = op.requires.clone();
         let admitted = self.with(move |c| {
             let mut tx = c.transaction()?;
             if !quota.is_empty() {
@@ -1299,8 +1461,9 @@ impl OperationStore for PostgresStore {
                 }
             }
             tx.execute(
-                "INSERT INTO by_operation_queue (id, repo, work) VALUES ($1, $2, $3)",
-                &[&id, &repo, &work],
+                "INSERT INTO by_operation_queue (id, repo, work, requires) \
+                 VALUES ($1, $2, $3, $4)",
+                &[&id, &repo, &work, &requires],
             )?;
             tx.commit()?;
             Ok(Ok(()))
@@ -1347,10 +1510,12 @@ impl OperationStore for PostgresStore {
         &self,
         worker: &Worker,
         repos: &[String],
+        labels: &[String],
         lease: Duration,
     ) -> io::Result<Option<Claim>> {
         let worker = worker.clone();
         let repos = repos.to_vec();
+        let labels = labels.to_vec();
         let lease = pg_lease(lease);
         let claimed = self.with(move |c| {
             // Claims whose process is gone from this host need not wait for
@@ -1380,6 +1545,7 @@ impl OperationStore for PostgresStore {
                  WHERE q.id = (SELECT id FROM by_operation_queue \
                      WHERE repo = ANY($1) \
                        AND (lease_until IS NULL OR lease_until <= clock_timestamp()) \
+                       AND requires <@ $7::text[] \
                      ORDER BY seq FOR UPDATE SKIP LOCKED LIMIT 1) \
                  RETURNING q.id, q.attempt, q.work, \
                      (SELECT body FROM by_operations o WHERE o.id = q.id)",
@@ -1390,6 +1556,7 @@ impl OperationStore for PostgresStore {
                     &pid,
                     &worker.start,
                     &(lease as f64),
+                    &labels,
                 ],
             )?;
             Ok(rows.first().map(|row| {
@@ -1406,6 +1573,56 @@ impl OperationStore for PostgresStore {
             work: serde_json::from_str(&work)?,
             fence,
         }))
+    }
+
+    fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()> {
+        let worker = worker.clone();
+        let (labels, repos) = (labels.to_vec(), repos.to_vec());
+        self.with(move |c| {
+            c.execute(
+                "INSERT INTO by_workers (id, host, pid, labels, repos, seen) \
+                 VALUES ($1, $2, $3, $4, $5, clock_timestamp()) ON CONFLICT (id) DO UPDATE SET \
+                 labels = EXCLUDED.labels, repos = EXCLUDED.repos, seen = EXCLUDED.seen",
+                &[
+                    &worker.id,
+                    &worker.host,
+                    &i64::from(worker.pid),
+                    &labels,
+                    &repos,
+                ],
+            )
+        })?;
+        Ok(())
+    }
+
+    fn workers(&self, within: Duration) -> io::Result<Vec<LiveWorker>> {
+        let within = ms(within) as f64;
+        let rows = self.with(move |c| {
+            c.query(
+                "SELECT id, host, labels, repos, \
+                     (EXTRACT(EPOCH FROM clock_timestamp() - seen) * 1000)::float8 \
+                 FROM by_workers \
+                 WHERE seen > clock_timestamp() - $1::float8 * interval '1 millisecond' \
+                 ORDER BY id",
+                &[&within],
+            )
+        })?;
+        Ok(rows
+            .iter()
+            .map(|row| LiveWorker {
+                id: row.get(0),
+                host: row.get(1),
+                labels: row.get(2),
+                repos: row.get(3),
+                seen_ms_ago: row.get::<_, f64>(4).max(0.0) as u64,
+            })
+            .collect())
+    }
+
+    fn leave(&self, worker: &Worker) -> io::Result<()> {
+        let id = worker.id.clone();
+        self.with(move |c| c.execute("DELETE FROM by_workers WHERE id = $1", &[&id]))?;
+        Ok(())
     }
 
     fn renew(&self, worker: &Worker, id: &str, fence: i64, lease: Duration) -> io::Result<bool> {
@@ -1586,6 +1803,159 @@ impl OperationStore for PostgresStore {
     }
 }
 
+/// The worker-label conformance every [`OperationStore`] passes: a worker
+/// claims only operations whose required labels it all carries; one
+/// requiring nothing is anyone's; two workers racing for labeled work
+/// claim each operation once, and a worker without the label none of it;
+/// beats are seen by [`OperationStore::workers`], and a leaving worker is
+/// not. `repo` names a repository no other test of the store uses. Panics
+/// on a violation. Run on SQLite here and on PostgreSQL by
+/// `tests/postgres.rs`.
+#[doc(hidden)]
+pub fn check_labels(store: &dyn OperationStore, repo: &str) {
+    use branchyard_client::api::{OperationKind, OperationState};
+    const LEASE: Duration = Duration::from_secs(30);
+    let stored = |id: &str, requires: &[&str]| StoredOperation {
+        operation: Operation {
+            id: id.into(),
+            repo: repo.into(),
+            kind: OperationKind::Task,
+            state: OperationState::Queued,
+            branches: Vec::new(),
+            cursor: 0,
+            end_cursor: None,
+            created_at_ms: 1,
+            finished_at_ms: None,
+            result: None,
+            error: None,
+            requires: requires.iter().map(|l| l.to_string()).collect(),
+            waiting: None,
+        },
+        idempotency: None,
+        locks: Vec::new(),
+        tenant: String::new(),
+        principal: None,
+        creates: Vec::new(),
+    };
+    let admit = |id: &str, requires: &[&str]| {
+        let admitted = store
+            .admit(
+                &stored(&format!("{repo}-{id}"), requires),
+                &serde_json::json!({}),
+                &AdmissionQuota::default(),
+            )
+            .unwrap();
+        assert_eq!(admitted, Admission::Admitted);
+    };
+    let worker = |id: &str| Worker {
+        id: format!("{repo}-{id}"),
+        ..Worker::current()
+    };
+    let labels = |list: &[&str]| list.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+    let repos = vec![repo.to_owned()];
+    let claimed = |claim: Option<Claim>| claim.map(|c| c.operation.operation.id);
+    admit("gpu", &["gpu"]);
+    admit("any", &[]);
+    admit("both", &["gpu", "linux"]);
+    // Oldest first among what each may claim.
+    let plain = worker("plain");
+    assert_eq!(
+        claimed(store.claim(&plain, &repos, &[], LEASE).unwrap()),
+        Some(format!("{repo}-any"))
+    );
+    assert_eq!(
+        claimed(
+            store
+                .claim(&plain, &repos, &labels(&["linux"]), LEASE)
+                .unwrap()
+        ),
+        None
+    );
+    let gpu = worker("gpu");
+    assert_eq!(
+        claimed(store.claim(&gpu, &repos, &labels(&["gpu"]), LEASE).unwrap()),
+        Some(format!("{repo}-gpu"))
+    );
+    assert_eq!(
+        claimed(store.claim(&gpu, &repos, &labels(&["gpu"]), LEASE).unwrap()),
+        None
+    );
+    let both = worker("both");
+    assert_eq!(
+        claimed(
+            store
+                .claim(&both, &repos, &labels(&["linux", "x", "gpu"]), LEASE)
+                .unwrap()
+        ),
+        Some(format!("{repo}-both"))
+    );
+
+    // Two labeled workers race for eight labeled operations while an
+    // unlabeled one tries too.
+    for n in 0..8 {
+        admit(&format!("race-{n}"), &["gpu"]);
+    }
+    let racers = [worker("racer-a"), worker("racer-b")];
+    let outsider = worker("outsider");
+    let (mut won, outside) = std::thread::scope(|scope| {
+        let handles: Vec<_> = racers
+            .iter()
+            .map(|w| {
+                let repos = repos.clone();
+                scope.spawn(move || {
+                    let mut got = Vec::new();
+                    while let Some(claim) =
+                        store.claim(w, &repos, &labels(&["gpu"]), LEASE).unwrap()
+                    {
+                        got.push(claim.operation.operation.id);
+                    }
+                    got
+                })
+            })
+            .collect();
+        let outside = scope.spawn(|| {
+            let mut got = Vec::new();
+            for _ in 0..20 {
+                if let Some(claim) = store.claim(&outsider, &repos, &[], LEASE).unwrap() {
+                    got.push(claim.operation.operation.id);
+                }
+            }
+            got
+        });
+        let won: Vec<String> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+        (won, outside.join().unwrap())
+    });
+    assert!(outside.is_empty(), "{outside:?}");
+    won.sort();
+    let mut expected: Vec<String> = (0..8).map(|n| format!("{repo}-race-{n}")).collect();
+    expected.sort();
+    assert_eq!(won, expected, "each operation claimed exactly once");
+
+    // Beats.
+    store.beat(&gpu, &labels(&["gpu"]), &repos).unwrap();
+    store.beat(&plain, &[], &repos).unwrap();
+    let live = store.workers(Duration::from_secs(60)).unwrap();
+    let mine: Vec<&LiveWorker> = live.iter().filter(|w| w.id.starts_with(repo)).collect();
+    assert_eq!(mine.len(), 2, "{live:?}");
+    let seen = mine.iter().find(|w| w.id == gpu.id).unwrap();
+    assert_eq!(seen.labels, ["gpu"]);
+    assert_eq!(seen.repos, repos);
+    assert!(seen.seen_ms_ago < 60_000);
+    let reason = unclaimable(&labels(&["gpu", "linux"]), repo, &live).unwrap();
+    assert!(
+        reason.contains("gpu, linux") && reason.contains(&gpu.id),
+        "{reason}"
+    );
+    assert_eq!(unclaimable(&labels(&["gpu"]), repo, &live), None);
+    store.leave(&gpu).unwrap();
+    let live = store.workers(Duration::from_secs(60)).unwrap();
+    assert!(!live.iter().any(|w| w.id == gpu.id));
+    assert!(unclaimable(&labels(&["gpu"]), repo, &live).is_some());
+}
+
 /// Operations in memory only, for tests and embedding: a [`SqliteStore`]
 /// on an in-memory database.
 pub struct MemoryStore(SqliteStore);
@@ -1619,7 +1989,11 @@ impl OperationStore for MemoryStore {
         admit(operation: &StoredOperation, work: &Value, quota: &AdmissionQuota)
             -> io::Result<Admission>;
         unfinished(tenant: &str) -> io::Result<Vec<StoredOperation>>;
-        claim(worker: &Worker, repos: &[String], lease: Duration) -> io::Result<Option<Claim>>;
+        claim(worker: &Worker, repos: &[String], labels: &[String], lease: Duration)
+            -> io::Result<Option<Claim>>;
+        beat(worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()>;
+        workers(within: Duration) -> io::Result<Vec<LiveWorker>>;
+        leave(worker: &Worker) -> io::Result<()>;
         renew(worker: &Worker, id: &str, fence: i64, lease: Duration) -> io::Result<bool>;
         start(worker: &Worker, fence: i64, operation: &StoredOperation, lease: Duration)
             -> io::Result<bool>;
@@ -1654,6 +2028,8 @@ mod tests {
                 finished_at_ms: None,
                 result: None,
                 error: None,
+                requires: Vec::new(),
+                waiting: None,
             },
             idempotency: None,
             locks: Vec::new(),
@@ -1825,13 +2201,19 @@ mod tests {
 
         // Claimed once; a second worker finds nothing claimable.
         let (one, two) = (worker("one"), worker("two"));
-        let claim = store.claim(&one, &["r".into()], LEASE).unwrap().unwrap();
+        let claim = store
+            .claim(&one, &["r".into()], &[], LEASE)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (claim.operation.operation.id.as_str(), claim.fence),
             ("a", 1)
         );
         assert_eq!(claim.work, work);
-        assert!(store.claim(&two, &["r".into()], LEASE).unwrap().is_none());
+        assert!(store
+            .claim(&two, &["r".into()], &[], LEASE)
+            .unwrap()
+            .is_none());
         assert!(store.renew(&one, "a", 1, LEASE).unwrap());
         assert!(!store.renew(&two, "a", 1, LEASE).unwrap());
         let mut done = claim.operation.clone();
@@ -1857,6 +2239,45 @@ mod tests {
     }
 
     #[test]
+    fn workers_claim_only_what_their_labels_allow_on_sqlite() {
+        check_labels(&MemoryStore::default(), "mem");
+        let temp = temp("labels");
+        let path = temp.path().join("state.db");
+        check_labels(&SqliteStore::open(&path, None).unwrap(), "file");
+        // An older queue without the column gains it, its rows requiring
+        // nothing.
+        let old = temp.path().join("old.db");
+        let conn = rusqlite::Connection::open(&old).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE operation_queue (id TEXT PRIMARY KEY, seq INTEGER NOT NULL, \
+             repo TEXT NOT NULL, work TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, \
+             worker TEXT, host TEXT, pid INTEGER, start TEXT, lease_until INTEGER); \
+             INSERT INTO operation_queue (id, seq, repo, work) VALUES ('x', 1, 'r', '{}');",
+        )
+        .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&old, None).unwrap();
+        let requires: String = store
+            .conn()
+            .query_row("SELECT requires FROM operation_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(requires, "[]");
+    }
+
+    #[test]
+    fn labels_are_checked_and_unclaimable_work_says_why() {
+        for good in ["gpu", "linux", "x86_64", "a.b-c", "9"] {
+            assert!(valid_label(good), "{good}");
+        }
+        for bad in ["", "GPU", "-x", "a b", "a,b", &"x".repeat(64)] {
+            assert!(!valid_label(bad), "{bad}");
+        }
+        assert_eq!(unclaimable(&[], "r", &[]), None);
+        let reason = unclaimable(&["gpu".into()], "r", &[]).unwrap();
+        assert!(reason.contains("no live worker serves r"), "{reason}");
+    }
+
+    #[test]
     fn an_expired_claim_is_claimed_again_under_a_new_fence() {
         let store = MemoryStore::default();
         store
@@ -1869,11 +2290,11 @@ mod tests {
         let (one, two) = (worker("one"), worker("two"));
         let repos = ["r".to_owned()];
         let first = store
-            .claim(&one, &repos, Duration::from_millis(1))
+            .claim(&one, &repos, &[], Duration::from_millis(1))
             .unwrap()
             .unwrap();
         std::thread::sleep(Duration::from_millis(20));
-        let second = store.claim(&two, &repos, LEASE).unwrap().unwrap();
+        let second = store.claim(&two, &repos, &[], LEASE).unwrap().unwrap();
         assert_eq!(second.fence, first.fence + 1);
         // The first worker is fenced out of every write.
         assert!(!store.renew(&one, "a", first.fence, LEASE).unwrap());
@@ -1883,11 +2304,11 @@ mod tests {
         assert!(!store.finish(&one, first.fence, &first.operation).unwrap());
         // Given back unstarted, another claim follows at once.
         store.release(&two, "a", second.fence).unwrap();
-        let third = store.claim(&one, &repos, LEASE).unwrap().unwrap();
+        let third = store.claim(&one, &repos, &[], LEASE).unwrap().unwrap();
         assert_eq!(third.fence, second.fence + 1);
         // A reset store (its only process restarted) frees every claim.
         store.reset().unwrap();
-        assert!(store.claim(&two, &repos, LEASE).unwrap().is_some());
+        assert!(store.claim(&two, &repos, &[], LEASE).unwrap().is_some());
     }
 
     #[test]
@@ -1965,7 +2386,10 @@ mod tests {
         assert!(store.unfinished(DEFAULT_TENANT).unwrap().is_empty());
         // Finished: it no longer counts.
         let one = worker("one");
-        let claim = store.claim(&one, &["r".into()], LEASE).unwrap().unwrap();
+        let claim = store
+            .claim(&one, &["r".into()], &[], LEASE)
+            .unwrap()
+            .unwrap();
         assert_eq!(claim.operation.operation.id, "a");
         let mut done = claim.operation.clone();
         done.operation.state = OperationState::Succeeded;

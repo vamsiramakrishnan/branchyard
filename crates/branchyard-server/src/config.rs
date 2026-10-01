@@ -343,6 +343,13 @@ pub struct Config {
     /// Only run queued operations: bind no listener and deliver no
     /// webhooks. Needs `database`.
     pub worker_only: bool,
+    /// The labels this server's worker carries (`gpu`, `linux`): it claims
+    /// only operations whose `require_labels` are all among them. See
+    /// `docs/server.md#worker-labels`.
+    pub labels: Vec<String>,
+    /// How long an operation may wait queued before it says why no live
+    /// worker can claim it.
+    pub unclaimable_after: Duration,
     /// How long shutdown waits for running operations.
     pub shutdown_grace: Duration,
     /// Executable per harness, used when a request names none.
@@ -407,6 +414,8 @@ impl Config {
             max_running: 8,
             operation_lease: crate::ops::DEFAULT_LEASE,
             worker_only: false,
+            labels: Vec::new(),
+            unclaimable_after: crate::ops::DEFAULT_UNCLAIMABLE_AFTER,
             shutdown_grace: Duration::from_secs(60),
             harness_commands: BTreeMap::new(),
             allow_client_commands: false,
@@ -562,6 +571,12 @@ impl Config {
         if self.operation_lease < Duration::from_millis(100) {
             return Err("operation_lease must be at least 100 milliseconds".into());
         }
+        if let Some(bad) = self.labels.iter().find(|l| !crate::store::valid_label(l)) {
+            return Err(format!(
+                "label {bad:?} is not a worker label: 1 to 63 of a-z, 0-9, '.', '_' and '-', \
+                 starting with a letter or digit"
+            ));
+        }
         if self.max_body_bytes < 1024 {
             return Err("max_body_bytes must be at least 1024".into());
         }
@@ -700,6 +715,14 @@ pub(crate) struct FileConfig {
     #[serde(default)]
     secrets: BTreeMap<String, String>,
     database: Option<String>,
+    /// The labels this server's worker carries; it claims only operations
+    /// whose `require_labels` are all among them. See
+    /// docs/server.md#worker-labels.
+    #[serde(default)]
+    labels: Vec<String>,
+    /// How long an operation may wait queued before it says why no live
+    /// worker can claim it. Default 60.
+    unclaimable_after_seconds: Option<f64>,
     #[serde(default)]
     webhooks: Vec<FileWebhook>,
     #[serde(default)]
@@ -812,6 +835,8 @@ pub struct Partial {
     pub allow_workspace_scripts: WorkspaceScripts,
     pub secrets: BTreeMap<String, branchyard::SecretSource>,
     pub database: Option<String>,
+    pub labels: Vec<String>,
+    pub unclaimable_after: Option<Duration>,
     pub webhooks: Vec<WebhookConfig>,
     pub webhook_insecure: bool,
     /// Warnings to print, such as a world-readable token file.
@@ -945,6 +970,11 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         Some(s) => return Err(format!("shutdown_grace_seconds {s} is not usable")),
         None => None,
     };
+    let unclaimable_after = match file.unclaimable_after_seconds {
+        Some(s) if (0.0..1e9).contains(&s) => Some(Duration::from_secs_f64(s)),
+        Some(s) => return Err(format!("unclaimable_after_seconds {s} is not usable")),
+        None => None,
+    };
     Ok(Partial {
         listen,
         data_dir: file.data_dir.map(resolve),
@@ -988,6 +1018,8 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             })
             .collect::<Result<_, String>>()?,
         database: file.database,
+        labels: file.labels,
+        unclaimable_after,
         webhooks: file
             .webhooks
             .into_iter()

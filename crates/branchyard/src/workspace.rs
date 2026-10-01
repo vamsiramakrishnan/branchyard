@@ -235,7 +235,7 @@ pub struct WorkspaceReport {
     pub inherited_from: Option<String>,
     /// The prepared environment setup built, or that stood in for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<crate::environments::EnvironmentUse>,
+    pub environment: Option<Box<crate::environments::EnvironmentUse>>,
 }
 
 impl WorkspaceReport {
@@ -374,7 +374,7 @@ pub(crate) struct Inherit {
     /// What its setup produced or changed, relative to its worktree.
     pub produced: Vec<String>,
     /// The prepared environment it is, when it is one.
-    pub environment: Option<crate::environments::EnvironmentUse>,
+    pub environment: Option<Box<crate::environments::EnvironmentUse>>,
 }
 
 /// Prepare the worktree of the turn's branch when its workspace is not
@@ -683,14 +683,14 @@ fn prepared(
                     }
                 }
                 used.shared = shared;
-                report.environment = Some(used);
+                report.environment = Some(Box::new(used));
                 report.ok = true;
                 Some(info.key.clone())
             }
             Err(why) => {
                 report.ok = false;
                 report.error = Some(why);
-                report.environment = Some(used);
+                report.environment = Some(Box::new(used));
                 None
             }
         }
@@ -784,7 +784,7 @@ fn prepared(
                     // goes on, without an environment for the next one.
                     let mut used = envs::new_use(&key, EnvironmentOrigin::NotKept);
                     used.reason = Some(why);
-                    report.environment = Some(used);
+                    report.environment = Some(Box::new(used));
                     Ok((report, made, None))
                 }
             }

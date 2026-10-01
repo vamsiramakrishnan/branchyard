@@ -339,6 +339,8 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         poll: config.poll_interval,
         repos: config.repos.iter().map(|(name, _)| name.clone()).collect(),
         exclusive: config.database.is_none(),
+        labels: config.labels.clone(),
+        unclaimable_after: config.unclaimable_after,
     };
     let registry =
         Registry::open(store, options).map_err(|e| format!("operation registry {place}: {e}"))?;

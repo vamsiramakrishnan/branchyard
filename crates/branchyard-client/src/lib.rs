@@ -655,6 +655,17 @@ impl Repo {
         self.client.get(&self.branch_path(name, ""))
     }
 
+    /// The caller's queued and running operations of this repository, or
+    /// only those working on `branch`; each says why it waits when no live
+    /// worker can claim it (`Operation::waiting`).
+    pub fn operations(&self, branch: Option<&str>) -> Result<Vec<Operation>, Error> {
+        let path = match branch {
+            Some(branch) => self.path(&format!("/operations?branch={}", encode(branch))),
+            None => self.path("/operations"),
+        };
+        Ok(self.client.get::<api::OperationList>(&path)?.operations)
+    }
+
     pub fn diff(&self, name: &str) -> Result<String, Error> {
         Ok(self
             .client

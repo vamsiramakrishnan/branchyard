@@ -66,6 +66,7 @@ pub fn contract() -> Value {
     entry::<api::FeedEntry>("FeedEntry", &mut types);
     entry::<api::BranchEvents>("BranchEvents", &mut types);
     entry::<api::BranchList>("BranchList", &mut types);
+    entry::<api::OperationList>("OperationList", &mut types);
     entry::<api::Diff>("Diff", &mut types);
     entry::<api::Removed>("Removed", &mut types);
     entry::<api::RepoEntry>("RepoEntry", &mut types);

@@ -88,6 +88,8 @@ pub struct NewOperation {
     pub creates: Vec<String>,
     /// The tenant's ceilings, checked in the admission's transaction.
     pub quota: AdmissionQuota,
+    /// Worker labels the operation needs (`require_labels`).
+    pub requires: Vec<String>,
 }
 
 /// How a registry dispatches.
@@ -105,6 +107,12 @@ pub struct Options {
     /// by its lock): every claim in it is a predecessor's, released at
     /// open.
     pub exclusive: bool,
+    /// The labels this process's worker carries: it claims only operations
+    /// whose required labels are all among them.
+    pub labels: Vec<String>,
+    /// How long an operation may wait queued before, when no live worker
+    /// carries the labels it requires, it reports why (`waiting`).
+    pub unclaimable_after: Duration,
 }
 
 impl Options {
@@ -115,9 +123,17 @@ impl Options {
             poll: Duration::from_millis(250),
             repos,
             exclusive: true,
+            labels: Vec::new(),
+            unclaimable_after: DEFAULT_UNCLAIMABLE_AFTER,
         }
     }
 }
+
+/// How long an operation waits before an unclaimable one says why.
+pub const DEFAULT_UNCLAIMABLE_AFTER: Duration = Duration::from_secs(60);
+/// How often a dispatcher records that its worker is alive, with its
+/// labels; a worker unseen for three beats is not counted as live.
+pub const BEAT: Duration = Duration::from_secs(5);
 
 /// How long a claim lasts without renewal, by default: as long as an
 /// engine's lease on a turn.
@@ -215,8 +231,25 @@ impl Registry {
     pub fn get(&self, id: &str) -> Result<Option<Operation>, ApiError> {
         self.store
             .get(id)
-            .map(|found| found.map(|s| s.operation))
+            .map(|found| found.map(|s| self.describe(s.operation)))
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))
+    }
+
+    /// `operation`, saying why it waits when it has waited longer than
+    /// [`Options::unclaimable_after`] queued and no live worker serving its
+    /// repository carries every label it requires.
+    pub fn describe(&self, mut operation: Operation) -> Operation {
+        let waited = now_ms().saturating_sub(operation.created_at_ms);
+        if operation.state == OperationState::Queued
+            && !operation.requires.is_empty()
+            && waited >= self.options.unclaimable_after.as_millis() as u64
+        {
+            if let Ok(workers) = self.store.workers(BEAT * 3) {
+                operation.waiting =
+                    crate::store::unclaimable(&operation.requires, &operation.repo, &workers);
+            }
+        }
+        operation
     }
 
     /// `id`'s operation, only when it belongs to `tenant`: an operation of
@@ -230,7 +263,7 @@ impl Registry {
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))?;
         Ok(found
             .filter(|stored| stored.tenant() == tenant)
-            .map(|stored| stored.operation))
+            .map(|stored| self.describe(stored.operation)))
     }
 
     /// `tenant`'s queued and running operations, as the store holds them.
@@ -265,7 +298,7 @@ impl Registry {
             .map(|found| {
                 found
                     .filter(|stored| stored.tenant() == tenant)
-                    .map(|s| s.operation)
+                    .map(|s| self.describe(s.operation))
             })
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))
     }
@@ -296,6 +329,8 @@ impl Registry {
                 finished_at_ms: None,
                 result: None,
                 error: None,
+                requires: new.requires,
+                waiting: None,
             },
             idempotency: new.idempotency,
             locks: new.locks,
@@ -332,7 +367,17 @@ impl Registry {
     fn dispatch(self: Arc<Self>) {
         let mut renewed = Instant::now();
         let renew_every = self.options.lease / 3;
+        let mut beaten: Option<Instant> = None;
         loop {
+            if beaten.is_none_or(|at| at.elapsed() >= BEAT) {
+                if let Err(e) =
+                    self.store
+                        .beat(&self.worker, &self.options.labels, &self.options.repos)
+                {
+                    tracing::warn!(error = %e, "could not record this worker as alive");
+                }
+                beaten = Some(Instant::now());
+            }
             let (free, executor) = {
                 let mut state = self.lock();
                 if state.closed || !state.accepting {
@@ -350,10 +395,12 @@ impl Registry {
                 renewed = Instant::now();
             }
             if free {
-                match self
-                    .store
-                    .claim(&self.worker, &self.options.repos, self.options.lease)
-                {
+                match self.store.claim(
+                    &self.worker,
+                    &self.options.repos,
+                    &self.options.labels,
+                    self.options.lease,
+                ) {
                     Ok(Some(claim)) => {
                         self.run(claim, executor);
                         continue;
@@ -594,6 +641,7 @@ impl Registry {
                 count += 1;
             }
         }
+        let _ = self.store.leave(&self.worker);
         self.lock().closed = true;
         self.changed.notify_all();
         count
@@ -727,6 +775,7 @@ mod tests {
             principal: Principal::default_for("c"),
             creates: Vec::new(),
             quota: AdmissionQuota::default(),
+            requires: Vec::new(),
         }
     }
 
@@ -973,8 +1022,8 @@ mod tests {
         // over again), short enough for the takeover below to come quickly.
         let lease = Duration::from_millis(750);
         let repos = ["r".to_owned()];
-        let first = store.claim(&ghost, &repos, lease).unwrap().unwrap();
-        let second = store.claim(&ghost, &repos, lease).unwrap().unwrap();
+        let first = store.claim(&ghost, &repos, &[], lease).unwrap().unwrap();
+        let second = store.claim(&ghost, &repos, &[], lease).unwrap().unwrap();
         assert_eq!(first.operation.operation.id, unstarted.id);
         assert_eq!(second.operation.operation.id, started_op.id);
         let mut running = second.operation.clone();

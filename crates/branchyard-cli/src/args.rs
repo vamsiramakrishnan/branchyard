@@ -109,6 +109,8 @@ pub struct TaskArgs {
     /// `--issue URL|#N|N`: the GitHub issue that is the task; see
     /// `crate::pr::issue_task`.
     pub issue: Option<String>,
+    /// `--require-label`: worker labels the server's operation needs.
+    pub require_labels: Vec<String>,
 }
 
 /// Options for `--provider microsandbox`.
@@ -1680,6 +1682,9 @@ pub struct Launch {
     substrate: SubstrateFlags,
     #[command(flatten)]
     lifecycle: LifecycleFlags,
+    /// With --remote: only a worker carrying this label runs it (repeatable)
+    #[arg(long = "require-label", value_name = "LABEL")]
+    require_label: Vec<String>,
 }
 
 #[derive(Args, Clone, Debug, Default, PartialEq)]
@@ -1811,6 +1816,7 @@ impl SubstrateFlags {
 impl Launch {
     fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
         task.isolated = self.isolated;
+        task.require_labels = self.require_label.clone();
         task.command = self.command.map(|argv| argv.0);
         let chosen = self.provider;
         let micro = &self.microsandbox;
@@ -2070,6 +2076,9 @@ pub struct SendFlags {
     delegation: Delegation,
     #[command(flatten)]
     provision: Provision,
+    /// With --remote: only a worker carrying this label runs it (repeatable)
+    #[arg(long = "require-label", value_name = "LABEL", help_heading = "Launch")]
+    require_label: Vec<String>,
 }
 
 impl Flags for SendFlags {
@@ -2077,6 +2086,7 @@ impl Flags for SendFlags {
     fn check(self) -> Result<TaskArgs, String> {
         let mut task = TaskArgs {
             command: self.command.map(|argv| argv.0),
+            require_labels: self.require_label,
             ..TaskArgs::default()
         };
         self.limits.apply(&mut task);
@@ -2823,6 +2833,7 @@ mod tests {
                 provision: None,
                 instructions: None,
                 issue: None,
+                require_labels: Vec::new(),
             }
         );
     }
@@ -3086,6 +3097,15 @@ mod tests {
         assert!(help("inspect").contains("Usage: by inspect [OPTIONS] [BRANCH]"));
         assert!(task("run go --delegate --allow-delegation").allow_delegation);
         assert!(task("send b go --allow-unapproved-tools").unapproved_tools);
+        for line in [
+            "run go --require-label gpu --require-label linux",
+            "fan go --harness a,b --require-label gpu --require-label linux",
+            "send b go --require-label gpu --require-label linux",
+            "fork b go --require-label gpu --require-label linux",
+            "reincarnate b --require-label gpu --require-label linux",
+        ] {
+            assert_eq!(task(line).require_labels, ["gpu", "linux"], "{line}");
+        }
     }
 
     #[test]

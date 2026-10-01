@@ -198,6 +198,11 @@ pub struct TaskRequest {
     /// held to the same rules as `provision`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seats: Option<Seats>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -240,6 +245,11 @@ pub struct SendRequest {
     /// runs, refused unless it allows client commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<Provisioning>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/fork`.
@@ -289,6 +299,11 @@ pub struct ForkRequest {
     /// runs, refused unless it allows client commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<Provisioning>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/reincarnate`: a new branch from
@@ -329,6 +344,11 @@ pub struct ReincarnateRequest {
     /// kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<Provisioning>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/merge`. Without a target, the
@@ -383,6 +403,11 @@ pub struct SpawnRequest {
     pub after: After,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
 }
 
 fn is_settled(after: &After) -> bool {
@@ -557,6 +582,15 @@ pub struct Operation {
     pub result: Option<OperationResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorBody>,
+    /// Worker labels the operation needs; only a worker carrying all of
+    /// them claims it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+    /// Why a queued operation has not been claimed, once it has waited
+    /// longer than the server's `unclaimable_after`: no live worker serving
+    /// its repository carries the labels it requires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 /// A structured error. `code` is stable; `message` is for people.
@@ -600,6 +634,15 @@ pub struct BranchEvents {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchList {
     pub branches: Vec<BranchInfo>,
+}
+
+/// `GET /v1/repos/{repo}/operations[?branch=NAME]`: the caller's tenant's
+/// queued and running operations of the repository, oldest first, each
+/// saying why it waits when no live worker can claim it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OperationList {
+    pub operations: Vec<Operation>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
