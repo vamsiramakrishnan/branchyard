@@ -54,6 +54,10 @@ pub struct Snapshot {
     pub now_ms: u64,
     /// The branch `by try` has applied to this checkout, if any.
     pub trying: Option<String>,
+    /// `by usage`'s one-line summary of the local logins (local only).
+    pub usage: Option<String>,
+    /// Each branch's listening ports, one line each (local only).
+    pub ports: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// A key, as the dashboard reads it.
@@ -371,6 +375,10 @@ pub struct Model {
     pub notified: notify::Tracker,
     /// The branch `by try` has applied to this checkout.
     pub trying: Option<String>,
+    /// `by usage`'s summary line, shown under the header.
+    pub usage: Option<String>,
+    /// Each branch's listening ports.
+    pub ports: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// One row of the tree as shown.
@@ -518,6 +526,8 @@ impl Model {
         self.now_ms = snapshot.now_ms;
         self.infos = snapshot.infos;
         self.trying = snapshot.trying;
+        self.usage = snapshot.usage;
+        self.ports = snapshot.ports;
         if self
             .toast
             .as_ref()
@@ -1183,6 +1193,16 @@ fn header_line(model: &Model) -> Line<'static> {
     if infos.iter().any(|i| i.cost_usd.is_some()) {
         spans.push(Span::raw(format!(" · {} reported", render::usd(cost))));
     }
+    if let Some(usage) = &model.usage {
+        spans.push(Span::styled(
+            format!(" · usage {usage}"),
+            Style::new().fg(if usage.contains("full") {
+                Color::Red
+            } else {
+                Color::DarkGray
+            }),
+        ));
+    }
     Line::from(spans)
 }
 
@@ -1494,6 +1514,21 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
             Span::styled(
                 crate::pr::readiness_text(&readiness, model.now_ms, render::Style { color: false }),
                 look,
+            ),
+        ]));
+    }
+    if let Some(ports) = model.ports.get(&info.name).filter(|p| !p.is_empty()) {
+        for (i, port) in ports.iter().enumerate() {
+            lines.push(Line::from(vec![
+                label(if i == 0 { "ports" } else { "" }),
+                Span::raw(port.clone()),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            label(""),
+            Span::styled(
+                "b opens one in a browser · K stops them",
+                Style::new().fg(Color::DarkGray),
             ),
         ]));
     }
@@ -2075,6 +2110,8 @@ mod tests {
                 .collect(),
             now_ms: 1_130_000,
             trying: None,
+            usage: None,
+            ports: Default::default(),
         }
     }
 
@@ -2347,7 +2384,7 @@ mod tests {
         assert!(
             screen[23].starts_with(
                 "j/k move  Enter focus  / filter  S steer  x cancel  f fork  l log  y copy name  \
-                 Y copy path  o open  c compare  ? keys  q quit"
+                 Y copy path  o open  c compare  b browse  K stop ports"
             ),
             "{}",
             screen[23]

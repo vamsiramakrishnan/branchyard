@@ -61,7 +61,19 @@ by pr issue-42-parser-crash --watch --yes         # CI failures and review comme
 by review issue-42-parser-crash                   # comment on the diff in your editor; all comments go as one prompt
 by show issue-42-parser-crash                     # merge readiness: check, PR, CI, threads, mergeability
 by open issue-42-parser-crash --editor cursor     # the worktree in your editor ($VISUAL, $EDITOR)
+by run --issue linear:ENG-123 --yes               # or jira:PROJ-7, gitlab:group/project#12, or the issue's URL
+by run --pr 7 "add a benchmark" --yes             # continue a pull request from its head; by pr updates it
 ```
+
+Your harness logins, and the sessions already in them ([usage](docs/usage.md)):
+
+```sh
+by usage                                          # each Claude Code and Codex login's 5-hour and weekly use, and resets
+by adopt                                          # this repository's Claude Code and Codex sessions
+by adopt 0b5e7a1c --name faster                   # make one a branch; by send faster "…" resumes it
+```
+
+`[usage] guard = "refuse"` stops `by run` and `by fan` on a login near its limit (the default warns), and `skip_over` makes the router pass such a candidate over. The meters read only the harnesses' own session files: Codex records its rate limits there; Claude Code only tokens, so its percent needs a budget you set.
 
 Every tool permission request reaches Branchyard. The Antigravity, Pi and Amp profiles cannot route them, so `by` refuses them unless you pass `--allow-unapproved-tools` (see [harness integration](docs/harness-integration.md#implemented-drivers)). `--ask` prompts on the terminal, `--yes` allows each one, and with neither flag and no terminal they are denied. `by log` shows each decision. These commands are tested end to end against a fake ACP agent. Against a real harness, one `by run` → `by diff` → `by merge` has run with Claude Code 2.1.283 ([validation](docs/validation.md)); the rest is on the [live testing checklist](docs/testing-live.md). Resuming or forking a session in another worktree may fail for harnesses that keep sessions per directory, such as Claude Code; the branch then reports the failure rather than starting over silently.
 
@@ -126,9 +138,9 @@ The global options choose where commands run, and may come before or after the c
 | `--repo NAME` | `BRANCHYARD_REPO` |
 | `--ca-file FILE` | `BRANCHYARD_CA_FILE` |
 
-Pull requests: `by pr BRANCH [--git-remote NAME] [--head BRANCH] [--base BRANCH] [--title T] [--draft] [--no-check | --allow-failing-check] [--allow-not-ready] [--json]`, and with `--watch [--interval SECS] [--max-rounds N] [--no-resolve]`; `by review BRANCH [--print] [--editor E] [--file FILE] [--detach]`; `by run|fan|spawn --issue URL|#N|N`; `by show BRANCH --refresh`; `by open BRANCH [--editor NAME|--print]`. `by pr` pushes to `--git-remote`, since `--remote` is the global option naming a server; `by pr`, `by open` and `by show --refresh` are local-mode only ([pull requests](docs/pull-requests.md)).
+Pull requests: `by pr BRANCH [--git-remote NAME] [--head BRANCH] [--base BRANCH] [--title T] [--draft] [--no-check | --allow-failing-check] [--allow-not-ready] [--json]`, and with `--watch [--interval SECS] [--max-rounds N] [--no-resolve]`; `by review BRANCH [--print] [--editor E] [--file FILE] [--detach]`; `by run|fan|spawn --issue URL|#N|N|linear:KEY|jira:KEY|gitlab:PATH#N` (Linear, Jira and GitLab through their APIs with tokens from the environment, or a connector gateway); `by run|fan --pr N`; `by show BRANCH --refresh`; `by open BRANCH [--editor NAME|--print]`. `by pr` pushes to `--git-remote`, since `--remote` is the global option naming a server; `by pr`, `by open` and `by show --refresh` are local-mode only ([pull requests](docs/pull-requests.md)).
 
-`by workspace show [BRANCH]|trust|untrust|run [BRANCH] [NAME] [--detach] [--json]` manages a repository's [workspace](docs/workspace.md) scripts and runs them. `by env list|show [KEY]|rebuild|prune [KEY...] [--keep N] [--older-than DAYS]` manages its [prepared environments](docs/environments.md).
+`by workspace show [BRANCH]|trust|untrust|run [BRANCH] [NAME...] [--detach]|ports [BRANCH]|browse [BRANCH] [--port N] [--print]|kill [BRANCH] [--port N] [--yes] [--json]` manages a repository's [workspace](docs/workspace.md) scripts, runs them (several at once with `--detach`, each with its own port), and finds, opens and stops what each branch listens on. `by usage [--json]` meters the local logins and `by adopt [--list] [SESSION] [--name N] [--harness ID] [--no-diff] [--json]` adopts their sessions ([usage](docs/usage.md)). `by env list|show [KEY]|rebuild|prune [KEY...] [--keep N] [--older-than DAYS]` manages its [prepared environments](docs/environments.md).
 
 Routing and judging ([fleet](docs/fleet.md)): `by run|fan [--auto] [--kind KIND] [--seed N]`, `by fan --auto [--attempts N] [--judge]`, `by judge <FAN|BRANCH...> [--harness ID [--command CMD] | --deterministic] [--rubric TEXT] [--pick [--into T] [--discard-others] [--yes]] [--json]`, `by fleet stats [--kind KIND]|route PROMPT [--kind KIND] [--attempts N] [--seed N] [--json]`; local mode only.
 
@@ -187,6 +199,7 @@ It is also a cockpit: keys act on the selected branch by running the `by` comman
 | `c` | Compare the branch with its siblings (the rest of its `by fan`, or its parent's other children) in a pane | `by compare` |
 | `t` | Try the branch's changes in this checkout, after a yes; `t` on the tried branch restores it | `by try`, `by try --off` |
 | `v` | Review: the diff in `$VISUAL` or `$EDITOR`, which gets the terminal; comments written on `>>` lines go to the branch as one prompt when the editor closes | `by review --detach` |
+| `b` / `K` | Open a port the branch listens on in a browser; stop its listening processes, after a yes (the detail pane lists them) | `by workspace browse`, `by workspace kill --yes` |
 
 Commands that run a turn start detached (their output goes to `.branchyard/watch/` in the repository), so they carry on if the dashboard quits; a result or a refusal (such as `R` on a branch that is not interrupted) appears in the status line. With no terminal to ask on, those turns get the permissions `branchyard.toml` sets, and requests are otherwise denied. Remotely, an action that needs this machine (copying a worktree's path, and `p`, `P`, `o`, `r` and `t`, which act on this machine's repository, worktree or checkout) is refused with the reason. The detail pane shows the branch's checkpoint (`at 2 of 3`), its merge readiness once it has pull-request steps, and whether it is being tried. The keys come from one table, `crates/branchyard-cli/src/watch/actions.rs`, which also generates the `?` sheet.
 
@@ -333,11 +346,11 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | Scion controls | Nine provisioners at `d9b9e6a`, adjacent helpers/configuration, the authoring guide, and tests; eight suites run 261 tests, 260 passing and 1 skipped; seven provisioners translated into `branchyard-provision` |
 | Herdr controls | Original resume source (kept down to the official-agent-source registry check) and 22 terminal-observation manifests |
 | OpenRig controls | Launch/readiness contract and configuration fragments; not a standalone adapter |
-| emdash and Orca | 41 emdash files (37 agent plugins, install helpers, the MCP catalog, the project configuration schema, license) and 9 Orca files (agent table, resume guard, diff-comment format, review-thread resolution, `orca.yaml` parser, license); read as data by tests and ported into `by review`, `by pr --watch` and `by init project` ([vendoring](docs/vendoring.md#emdash-and-orca-ports-as-data-and-as-translations)) |
+| emdash and Orca | 45 emdash files (37 agent plugins, install helpers, the MCP catalog, the project configuration schema, the Linear, Jira and GitLab issue mappers, license) and 28 Orca files (agent table, resume guard, diff-comment format, review-thread resolution, `orca.yaml` parser, worktree helpers, usage parsers and price tables, Jira's ADF renderer, the port scanner, session-store readers, license); read as data by tests and ported into `by review`, `by pr --watch`, `by init project`, `by usage`, `--issue`, `by workspace ports` and `by adopt` ([vendoring](docs/vendoring.md#emdash-and-orca-ports-as-data-and-as-translations)) |
 | Warp controls | Separate AGPL source references for process supervision; excluded from the Rust build |
 | Architecture and plan | Server design, harness contracts, implementation milestones, and release gates |
 
-All **136 vendored files** are pinned to upstream revisions, licenses, Git blob IDs, and SHA-256 hashes. `vendor/` is a pinned reference snapshot: a file may carry a local patch only when `vendor.patches.json` records it with its reason and upstream commit (none does today), and `tools/verify_vendor.py` checks every other file against its pin. Adaptations built into Branchyard are recorded outside `vendor/` (`patches/`). [Vendoring decisions](docs/vendoring.md) explain their intended use. [Replicas](https://replicas.dev/) remains a product reference; no licensed runtime source was identified to copy.
+All **159 vendored files** are pinned to upstream revisions, licenses, Git blob IDs, and SHA-256 hashes. `vendor/` is a pinned reference snapshot: a file may carry a local patch only when `vendor.patches.json` records it with its reason and upstream commit (none does today), and `tools/verify_vendor.py` checks every other file against its pin. Adaptations built into Branchyard are recorded outside `vendor/` (`patches/`). [Vendoring decisions](docs/vendoring.md) explain their intended use. [Replicas](https://replicas.dev/) remains a product reference; no licensed runtime source was identified to copy.
 
 Scion's Claude provisioner and its model-alias tests disagreed at the previous pin; at `d9b9e6a` all 13 pass, and CI checks that no incompatibility reappears. See [validation](docs/validation.md).
 
@@ -366,7 +379,8 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Implementation plan](docs/implementation-plan.md): ordered milestones and acceptance gates.
 - [Comparison](docs/comparison.md): Scion, OpenRig and Herdr against Branchyard, and what to absorb from each.
 - [Lifecycle](docs/lifecycle.md): stall detection, webhook notifications and reincarnation.
-- [Pull requests](docs/pull-requests.md): `by run --issue`, `by pr`, `by pr --watch`, merge readiness and `by open`, through `gh`.
+- [Pull requests](docs/pull-requests.md): `by run --issue` (GitHub, Linear, Jira, GitLab), `--pr`, `by pr`, `by pr --watch`, merge readiness and `by open`.
+- [Usage and adopting sessions](docs/usage.md): quota meters per login, the guard and the router, and `by adopt`.
 - [Distribution](docs/distribution.md): installing the skill for Claude Code and Codex, and reproducible plugin/SDK archives.
 - [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.

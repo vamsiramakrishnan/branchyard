@@ -110,6 +110,70 @@
       "named_as": [
         "packages/plugins/src/agents/impl/*/index.ts"
       ]
+    },
+    {
+      "path": "crates/branchyard-cli/src/usage.rs",
+      "from": {
+        "orca": {
+          "src/main/claude-usage/transcript-record-parser.ts": "2ad51f3ee906b961c26ecc7b6a208a71a5bcea75",
+          "src/main/claude-usage/transcript-file-discovery.ts": "7ca1e770cae769588aeb116d8256f4a139935f7c",
+          "src/main/claude-usage/claude-model-pricing.ts": "6d8583cf27960587734940a95d816a559c988556",
+          "src/main/codex-usage/codex-rollout-file-parse.ts": "01755ee69aab7d548463e83830f2269112cf5b84",
+          "src/main/codex-usage/codex-usage-record-parser.ts": "a54b8428e0e89d2b6832db123df58abde7fea8cf",
+          "src/main/codex-usage/codex-model-pricing.ts": "3aac4771d066bd8b3113e485f09776aeeea30388",
+          "src/main/rate-limits/codex-rate-limit-window-classification.ts": "cdf667b6306a7cb8cb58d56d04262d0469ebc727",
+          "src/main/rate-limits/codex-rate-limit-window-mapper.ts": "24c05f21f899a920293a9b004d0939ec51e23056"
+        }
+      }
+    },
+    {
+      "path": "catalog/pricing.toml",
+      "from": {
+        "orca": {
+          "src/main/claude-usage/claude-model-pricing.ts": "6d8583cf27960587734940a95d816a559c988556",
+          "src/main/codex-usage/codex-model-pricing.ts": "3aac4771d066bd8b3113e485f09776aeeea30388"
+        }
+      }
+    },
+    {
+      "path": "crates/branchyard-cli/src/adf.rs",
+      "from": {
+        "orca": {
+          "src/main/jira/adf-markdown.ts": "2706e64697ebf64c0e6b6f314c1c40a05f6c747a",
+          "src/main/jira/adf-media-destination.ts": "67deb7a685d22f54ea07e694015c752bc121632c"
+        }
+      }
+    },
+    {
+      "path": "crates/branchyard-cli/src/trackers.rs",
+      "from": {
+        "emdash": {
+          "packages/plugins/src/issues/impl/linear/queries.ts": "a7d89ae318cb83a2dc204b624a53b768e9271d59",
+          "packages/plugins/src/issues/impl/linear/mapper.ts": "28482dacfb57b2e32ca23d647b0c5b525fcd51d6",
+          "packages/plugins/src/issues/impl/jira/mapper.ts": "22a9f569d3091e15b44adeada361ec9bea90e8a5",
+          "packages/plugins/src/issues/impl/gitlab/mapper.ts": "157ccdda3b70c9cf13ad3146e1233afa81e5a137"
+        }
+      }
+    },
+    {
+      "path": "crates/branchyard-cli/src/ports.rs",
+      "from": {
+        "orca": {
+          "src/main/ports/local-workspace-platform-port-scanner.ts": "9a760870540566e98eb13b38467935544a4cadb1",
+          "src/main/ports/local-workspace-port-attribution.ts": "21180a512e130f2e59a17b4610749a7a802b7731",
+          "src/main/ports/local-workspace-port-address.ts": "77b6e0b0b196a4edf9e95d70368f6011983ed82c"
+        }
+      }
+    },
+    {
+      "path": "crates/branchyard-cli/src/adopt.rs",
+      "from": {
+        "orca": {
+          "src/main/ai-vault/claude-project-dir-encoding.ts": "5cd720b2e0d98946c64bf85e0ec572c1008a6c4b",
+          "src/main/ai-vault/session-scanner-codex-session-meta.ts": "061607b5dec3c14816906c724775a149c026cc39",
+          "src/main/ai-vault/session-scanner-codex-non-user-origin.ts": "1d308c40108900dedd028b016634597ce4dbfab1"
+        }
+      }
     }
   ]
 }

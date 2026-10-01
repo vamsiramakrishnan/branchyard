@@ -325,6 +325,11 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome
         return remote::run(env, remote, &prompt, &task);
     }
     let yard = open()?;
+    if !crate::fleet_cmd::is_routed(task) {
+        // A login near its 5-hour or weekly limit (docs/usage.md).
+        let harness = task.harness.clone().unwrap_or_else(|| "claude-code".into());
+        crate::usage::guard(&[harness])?;
+    }
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let task = &task;
     let workspace = workspace(env, &yard)?;
@@ -395,6 +400,10 @@ pub fn fan(
         return remote::fan(env, remote, &prompt, harnesses, &task);
     }
     let yard = open()?;
+    if !routed {
+        // Logins near their 5-hour or weekly limits (docs/usage.md).
+        crate::usage::guard(harnesses)?;
+    }
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let (prompt, task) = (prompt.as_str(), &task);
     let workspace = workspace(env, &yard)?;
@@ -743,6 +752,7 @@ fn show_queued(branch: &str, op: &branchyard_client::api::Operation, as_json: bo
 }
 
 pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bool) -> Outcome {
+    let mut listening = None;
     let (info, events) = match target {
         Target::Local => {
             let yard = open()?;
@@ -750,6 +760,11 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
                 crate::pr::refresh(&yard, branch)?;
             }
             let branch = yard.branch(branch)?;
+            listening = Some(
+                crate::ports::of_yard(&yard)
+                    .remove(&branch.info().name)
+                    .unwrap_or_default(),
+            );
             (branch.info().clone(), branch.events()?)
         }
         Target::Remote(_) if refresh => {
@@ -778,12 +793,20 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         let mut value = json::branch(&info);
         value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
         value["merge_readiness"] = readiness;
+        // Only when something listens, so local and remote `show --json`
+        // agree for a branch with no servers.
+        if let Some(listening) = listening.as_ref().filter(|l| !l.is_empty()) {
+            value["listening"] = serde_json::to_value(listening).unwrap_or_default();
+        }
         return print(&json::text(&value));
     }
-    let extra = line
+    let mut extra: Vec<(&str, String)> = line
         .map(|line| ("merge readiness", line))
         .into_iter()
         .collect();
+    if let Some(listening) = listening.filter(|l| !l.is_empty()) {
+        extra.push(("listening", crate::ports::lines(&listening).join("; ")));
+    }
     let mut text = render::details(&info, now(), env.style(), extra);
     text.push_str(&crate::attempts::checkpoint_lines(
         &checkpoints,

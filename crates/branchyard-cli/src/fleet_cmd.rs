@@ -51,6 +51,7 @@ pub fn route_options(task: &TaskArgs, attempts: Option<u32>) -> RouteOptions {
         // `--auto` always fails over; a route implied by [fleet] does when
         // its entry says so.
         failover: task.auto.then_some(true),
+        excluded: Default::default(),
     }
 }
 
@@ -96,7 +97,9 @@ pub fn routed(
     attempts: Option<u32>,
 ) -> Result<Routed, Failure> {
     let fleet = table(task)?;
-    let how = route_options(task, attempts);
+    let mut how = route_options(task, attempts);
+    // Candidates whose login is near its usage limit (docs/usage.md).
+    how.excluded = crate::usage::route_exclusions(fleet);
     let route = yard.route(
         prompt,
         options,

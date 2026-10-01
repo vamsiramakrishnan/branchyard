@@ -73,7 +73,7 @@ by:   not gemini-cli: gemini-cli is unavailable: gemini was not found on PATH
 
 The router (`branchyard::fleet::plan`) works per kind and candidate (harness, model, effort):
 
-1. **Eligible** candidates are those whose profile exists and is allowed (`--allow-unapproved-tools` for profiles without tool approvals), whose executable is found (the check `by harnesses` makes, with the candidate's or the task's `command`; skipped in a sandbox), and whose **mean recorded cost** for the kind is not over the entry's `budget_usd`. None eligible is an error listing each reason, and nothing is created.
+1. **Eligible** candidates are those whose profile exists and is allowed (`--allow-unapproved-tools` for profiles without tool approvals), whose executable is found (the check `by harnesses` makes, with the candidate's or the task's `command`; skipped in a sandbox), and whose **mean recorded cost** for the kind is not over the entry's `budget_usd`, and whose login has not used more than `[usage] skip_over` of its 5-hour or weekly window ([usage](usage.md#the-guard-and-the-router); also `near_percent` with `guard = "refuse"`). None eligible is an error listing each reason, and nothing is created.
 2. With probability `exploration`, one eligible candidate is picked uniformly at random.
 3. Otherwise it is **Thompson sampling**: each candidate's success rate is drawn from Beta(1 + successes, 1 + failures) of its recorded outcomes (see [credit](#outcomes)), and the highest draw wins; an equal draw goes to the earlier candidate. A candidate with no history draws from Beta(1, 1).
 4. A fan of N attempts picks without replacement; more attempts than eligible candidates start another round, so a candidate can run twice (best of N on one harness).

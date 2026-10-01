@@ -46,6 +46,8 @@ pub enum ActionId {
     Compare,
     Try,
     Review,
+    Browse,
+    StopPorts,
 }
 
 /// What an action asks before it runs.
@@ -470,6 +472,28 @@ pub const ACTIONS: &[Action] = &[
         when: reviewable,
         remote: Remote::Yes,
     },
+    Action {
+        key: 'b',
+        id: ActionId::Browse,
+        name: "browse",
+        help: "open a port the branch listens on in a browser (by workspace browse)",
+        ask: Ask::Nothing,
+        run: Run::Wait(&["workspace", "browse", "--", "{branch}"]),
+        when: always,
+        remote: Remote::No("its processes run on the server, not this machine"),
+    },
+    Action {
+        key: 'K',
+        id: ActionId::StopPorts,
+        name: "stop ports",
+        help: "stop the processes listening on the branch's ports (by workspace kill)",
+        ask: Ask::Confirm {
+            question: "Send SIGTERM to every process of {branch} that listens on a TCP port?",
+        },
+        run: Run::Wait(&["workspace", "kill", "--yes", "--", "{branch}"]),
+        when: always,
+        remote: Remote::No("its processes run on the server, not this machine"),
+    },
 ];
 
 /// The action bound to `key`.
@@ -742,6 +766,30 @@ mod tests {
                         ..
                     },
                 ) => assert_eq!(branch, "impl"),
+                (
+                    ActionId::Browse,
+                    Command::Workspace {
+                        action:
+                            crate::args::WorkspaceAction::Browse {
+                                branch,
+                                port: None,
+                                print: false,
+                            },
+                        ..
+                    },
+                ) => assert_eq!(branch.as_deref(), Some("impl")),
+                (
+                    ActionId::StopPorts,
+                    Command::Workspace {
+                        action:
+                            crate::args::WorkspaceAction::Kill {
+                                branch,
+                                port: None,
+                                yes: true,
+                            },
+                        ..
+                    },
+                ) => assert_eq!(branch.as_deref(), Some("impl")),
                 (id, command) => panic!("{id:?} parsed as {command:?}"),
             }
         }

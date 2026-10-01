@@ -655,6 +655,53 @@ struct Cockpit {
     source: Source,
     runner: Runner,
     notify: notify::Settings,
+    /// `by usage`'s header line and listening ports, refreshed less often
+    /// than the branches (they read files and `/proc`), locally only.
+    extras: Extras,
+}
+
+/// What the dashboard shows beyond the branches, with when each was read.
+#[derive(Default)]
+struct Extras {
+    usage: Option<String>,
+    usage_at: Option<std::time::Instant>,
+    ports: std::collections::BTreeMap<String, Vec<String>>,
+    ports_at: Option<std::time::Instant>,
+}
+
+/// How often the usage meters are read again.
+const USAGE_EVERY: Duration = Duration::from_secs(60);
+/// How often the listening ports are scanned again.
+const PORTS_EVERY: Duration = Duration::from_secs(5);
+
+impl Extras {
+    fn refresh(&mut self, source: &Source) {
+        let Source::Local { yard, .. } = source else {
+            return;
+        };
+        let stale = |at: Option<std::time::Instant>, every: Duration| {
+            at.is_none_or(|at| at.elapsed() >= every)
+        };
+        if stale(self.usage_at, USAGE_EVERY) {
+            let cwd = yard.root().to_path_buf();
+            let vars = |name: &str| std::env::var(name).ok();
+            let config = crate::defaults::config_at(&cwd, &vars)
+                .ok()
+                .flatten()
+                .map(|c| c.usage)
+                .unwrap_or_default();
+            let logins = crate::usage::meter(&config, &vars, crate::usage::now_ms());
+            self.usage = crate::usage::header(&logins);
+            self.usage_at = Some(std::time::Instant::now());
+        }
+        if stale(self.ports_at, PORTS_EVERY) {
+            self.ports = crate::ports::of_yard(yard)
+                .into_iter()
+                .map(|(branch, listeners)| (branch, crate::ports::lines(&listeners)))
+                .collect();
+            self.ports_at = Some(std::time::Instant::now());
+        }
+    }
 }
 
 /// Runs `by` for the dashboard's actions.
@@ -696,6 +743,7 @@ impl Cockpit {
         Cockpit {
             source,
             notify,
+            extras: Extras::default(),
             runner: Runner {
                 by: std::env::current_exe().ok(),
                 globals,
@@ -847,12 +895,15 @@ impl tui::Effects for Cockpit {
     fn refresh(&mut self) -> Result<tui::Snapshot, Failure> {
         let infos = self.source.branches()?;
         let events = self.source.events(&infos);
+        self.extras.refresh(&self.source);
         Ok(tui::Snapshot {
             label: self.source.label(),
             infos,
             events,
             now_ms: now_ms(),
             trying: self.source.trying(),
+            usage: self.extras.usage.clone(),
+            ports: self.extras.ports.clone(),
         })
     }
 

@@ -56,6 +56,10 @@ pub enum PullRequestActivity {
         commit: String,
         threads: Vec<ResolvedThread>,
     },
+    /// The branch started from this pull request's head (`by run --pr`);
+    /// its pull request is that one, so `by pr` pushes to its head and
+    /// updates it.
+    Started(PullRequestRef),
 }
 
 /// One review thread `by pr --watch` answered and resolved, or tried to.
@@ -78,9 +82,18 @@ pub struct ResolvedThread {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueLink {
+    /// The issue's number: GitHub's and GitLab's, or the number in a Linear
+    /// or Jira key (`123` of `ENG-123`).
     pub number: u64,
     pub url: String,
     pub title: String,
+    /// The tracker, when not GitHub: `linear`, `jira` or `gitlab`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<String>,
+    /// The tracker's own reference when it is not `#number`: `ENG-123`,
+    /// `PROJ-7`, `group/project#12`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// A check run on one commit; see [`Branch::verify_candidate`].

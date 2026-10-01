@@ -3,6 +3,8 @@
 //! mode, and of a Branchyard server through `branchyard-client` in remote
 //! mode (`--remote URL`).
 
+mod adf;
+mod adopt;
 mod args;
 mod attempts;
 mod catalog_cmd;
@@ -18,6 +20,7 @@ mod init;
 mod json;
 mod notify;
 mod open;
+mod ports;
 mod pr;
 mod pr_threads;
 mod remote;
@@ -27,6 +30,8 @@ mod review_format;
 mod rig;
 mod setup_io;
 mod stats_cmd;
+mod trackers;
+mod usage;
 mod watch;
 mod wizard;
 mod workspace_cmd;
@@ -133,6 +138,8 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
         Command::Config { json, action } => return config_cmd::main(&action, json),
+        // The meters read this machine's session files; no repository needed.
+        Command::Usage { json } => return usage::show(env, json),
         // The catalog is built in; no repository or server is involved.
         Command::Connectors {
             json,
@@ -214,6 +221,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                     seed,
                     attempts,
                     failover: None,
+                    ..Default::default()
                 },
                 fleet_table()?.as_ref(),
                 json,
@@ -338,6 +346,25 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             print,
         } => open::main(target, &branch, editor.as_deref(), print),
         Command::Watch { interval, once } => watch::run(env, target, interval, once),
+        Command::Adopt {
+            session,
+            list,
+            name,
+            no_diff,
+            harness,
+            json,
+        } => adopt::main(
+            env,
+            target,
+            &adopt::Asked {
+                session: session.as_deref(),
+                name: name.as_deref(),
+                profile: harness.as_deref(),
+                list,
+                with_diff: !no_diff,
+                json,
+            },
+        ),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
         Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),
         Command::Inspect { branch, json } => commands::inspect(env, target, branch, json),
@@ -402,6 +429,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Man
         | Command::Init { .. }
         | Command::Config { .. }
+        | Command::Usage { .. }
         | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
     }
 }

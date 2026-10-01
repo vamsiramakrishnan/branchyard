@@ -14,7 +14,11 @@
 //!   tui-agent-config.ts` and `tui-agent.ts`: executables and display
 //!   names), joined through [`crate::harness::HARNESSES`];
 //! - connectors: emdash's MCP catalog (`vendor/emdash/apps/emdash-desktop/
-//!   src/core/primitives/mcp/api/catalog.ts`).
+//!   src/core/primitives/mcp/api/catalog.ts`);
+//! - pricing (`catalog/pricing.toml`, read by `by usage`): Orca's Claude
+//!   and Codex price tables (`vendor/orca/src/main/claude-usage/
+//!   claude-model-pricing.ts`, `vendor/orca/src/main/codex-usage/
+//!   codex-model-pricing.ts`).
 //!
 //! An entry is knowledge, not support: whether Branchyard can drive a
 //! harness is its profile's business (`branchyard_harness::profiles`), and a
@@ -480,6 +484,173 @@ pub(crate) mod tests {
             ));
         }
         out
+    }
+
+    pub const ORCA_CLAUDE_PRICING: &str =
+        "vendor/orca/src/main/claude-usage/claude-model-pricing.ts";
+    pub const ORCA_CODEX_PRICING: &str = "vendor/orca/src/main/codex-usage/codex-model-pricing.ts";
+
+    /// The value assigned to `const NAME` in `source`.
+    fn constant(source: &str, name: &str) -> Value {
+        let at = source
+            .find(&format!("const {name}"))
+            .unwrap_or_else(|| panic!("no const {name}"));
+        let eq = at + source[at..].find('=').unwrap() + 1;
+        crate::tsdata::value_at(source, eq).unwrap().0
+    }
+
+    fn price(value: &Value) -> String {
+        let n = value
+            .as_f64()
+            .unwrap_or_else(|| panic!("not a number: {value}"));
+        match n.fract() == 0.0 {
+            true => format!("{n:.1}"),
+            false => format!("{n}"),
+        }
+    }
+
+    /// An object literal with its spreads and identifiers resolved from
+    /// `consts`.
+    fn resolved(
+        value: &Value,
+        consts: &std::collections::BTreeMap<&str, Value>,
+    ) -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        for (key, v) in value.as_object().unwrap() {
+            let v = match v["$ident"].as_str() {
+                Some(name) => consts[name].clone(),
+                None => v.clone(),
+            };
+            match key.starts_with("$spread") {
+                true => out.extend(resolved(&v, consts)),
+                false => {
+                    out.insert(key.clone(), v);
+                }
+            }
+        }
+        out
+    }
+
+    pub(crate) fn pricing_toml() -> String {
+        let claude = upstream::read(ORCA_CLAUDE_PRICING);
+        let codex = upstream::read(ORCA_CODEX_PRICING);
+        let mut consts = std::collections::BTreeMap::new();
+        consts.insert(
+            "LONG_CONTEXT_THRESHOLD_TOKENS",
+            constant(&claude, "LONG_CONTEXT_THRESHOLD_TOKENS"),
+        );
+        let sonnet = constant(&claude, "SONNET_LONG_CONTEXT_PRICING");
+        consts.insert(
+            "SONNET_LONG_CONTEXT_PRICING",
+            Value::Object(resolved(&sonnet, &consts)),
+        );
+        let mut out = format!(
+            "# Generated from pinned upstream sources by branchyard-controls' catalog tests;\n\
+             # do not edit. Regenerate with\n\
+             #   BRANCHYARD_BLESS=1 cargo test -p branchyard-controls catalog\n\
+             # and review the diff. Read by `by usage` (crates/branchyard-cli/src/usage.rs;\n\
+             # docs/usage.md) to estimate what the tokens in a window cost.\n\
+             #\n\
+             # Derived from stablyai/orca at {ORCA_COMMIT}\n\
+             # (src/main/claude-usage/claude-model-pricing.ts,\n\
+             # src/main/codex-usage/codex-model-pricing.ts), Copyright (c) 2026 Lovecast Inc.,\n\
+             # MIT License (vendor/orca/LICENSE).\n\
+             # Modified for Branchyard: the TypeScript tables were reduced to data, dollars\n\
+             # per million tokens; Claude's long-context tier is written out on each model\n\
+             # it applies to, and entries are sorted by model.\n\n\
+             codex_long_context_threshold = {}\n",
+            constant(&codex, "LONG_CONTEXT_THRESHOLD_TOKENS")
+        );
+        out.push_str("\n[claude_aliases]\n");
+        let aliases = constant(&claude, "MODEL_ALIASES");
+        let mut aliases: Vec<(&String, &Value)> = aliases.as_object().unwrap().iter().collect();
+        aliases.sort_by(|a, b| a.0.cmp(b.0));
+        for (from, to) in aliases {
+            out.push_str(&format!("{} = {}\n", q(from), q(to.as_str().unwrap())));
+        }
+        let table = constant(&claude, "MODEL_PRICING");
+        let mut models: Vec<(&String, &Value)> = table.as_object().unwrap().iter().collect();
+        models.sort_by(|a, b| a.0.cmp(b.0));
+        for (model, value) in models {
+            let p = resolved(value, &consts);
+            out.push_str(&format!("\n[[claude]]\nmodel = {}\n", q(model)));
+            for (ts, toml) in [
+                ("input", "input"),
+                ("output", "output"),
+                ("cacheRead", "cache_read"),
+                ("cacheWrite", "cache_write"),
+                ("cacheWrite1h", "cache_write_1h"),
+                ("thresholdTokens", "threshold_tokens"),
+                ("inputAboveThreshold", "input_above"),
+                ("outputAboveThreshold", "output_above"),
+                ("cacheReadAboveThreshold", "cache_read_above"),
+                ("cacheWriteAboveThreshold", "cache_write_above"),
+                ("cacheWrite1hAboveThreshold", "cache_write_1h_above"),
+            ] {
+                if let Some(v) = p.get(ts) {
+                    out.push_str(&format!("{toml} = {}\n", price(v)));
+                }
+            }
+            let known = [
+                "input",
+                "output",
+                "cacheRead",
+                "cacheWrite",
+                "cacheWrite1h",
+                "thresholdTokens",
+                "inputAboveThreshold",
+                "outputAboveThreshold",
+                "cacheReadAboveThreshold",
+                "cacheWriteAboveThreshold",
+                "cacheWrite1hAboveThreshold",
+            ];
+            for key in p.keys() {
+                assert!(
+                    known.contains(&key.as_str()),
+                    "Orca's Claude pricing gained {key}"
+                );
+            }
+        }
+        let table = {
+            let at = codex.find("const MODEL_PRICING").unwrap();
+            let brace = at + codex[at..].find("= {").unwrap() + 2;
+            crate::tsdata::value_at(&codex, brace).unwrap().0
+        };
+        let mut models: Vec<(&String, &Value)> = table.as_object().unwrap().iter().collect();
+        models.sort_by(|a, b| a.0.cmp(b.0));
+        for (model, p) in models {
+            out.push_str(&format!(
+                "\n[[codex]]\nmodel = {}\ninput = {}\ncached_input = {}\noutput = {}\n",
+                q(model),
+                price(&p["input"]),
+                price(&p["cachedInput"]),
+                price(&p["output"])
+            ));
+            if let Some(long) = p.get("longContext") {
+                out.push_str(&format!(
+                    "long_context = {{ input = {}, cached_input = {}, output = {} }}\n",
+                    price(&long["input"]),
+                    price(&long["cachedInput"]),
+                    price(&long["output"])
+                ));
+            }
+            for key in p.as_object().unwrap().keys() {
+                assert!(
+                    ["input", "cachedInput", "output", "longContext"].contains(&key.as_str()),
+                    "Orca's Codex pricing gained {key}"
+                );
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn pricing_catalog_matches_the_vendored_sources() {
+        fresh("catalog/pricing.toml", pricing_toml());
+        let text = upstream::read("catalog/pricing.toml");
+        assert!(text.contains("model = \"claude-sonnet-4-5\"\ninput = 3.0"));
+        assert!(text.contains("threshold_tokens = 200000.0"));
+        assert!(text.contains("codex_long_context_threshold = 272000"));
     }
 
     /// The checked-in file is what the vendored sources generate.

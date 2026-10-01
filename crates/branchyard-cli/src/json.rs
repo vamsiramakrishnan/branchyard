@@ -232,6 +232,10 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "activity": "connector_call",
             "connector_call": call,
         }),
+        Activity::Adopted(adoption) => json!({
+            "activity": "adopted",
+            "adopted": adoption,
+        }),
         Activity::Sandbox(event) => json!({
             "activity": "sandbox",
             "sandbox": event,

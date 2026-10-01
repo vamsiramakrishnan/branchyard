@@ -142,6 +142,30 @@ impl Gateway {
         };
         self.keys()?.sign(&claims)
     }
+
+    /// A token for the person themselves with `grants` and no branch, for a
+    /// call `by` makes as them (such as fetching an issue for `--issue`
+    /// through a tracker's connector). Lives `ttl`, at most [`MAX_TTL`].
+    pub fn person_token_granted(
+        &self,
+        grants: Vec<GrantEntry>,
+        ttl: Duration,
+    ) -> Result<String, Error> {
+        let now = now_secs();
+        let claims = Claims {
+            iss: self.issuer.clone(),
+            aud: self.url.clone(),
+            sub: self.subject.clone(),
+            iat: now,
+            exp: now + ttl.min(self.max_ttl).min(MAX_TTL).as_secs().max(1),
+            jti: keys::random_id()?,
+            by_tenant: self.tenant.clone(),
+            by_branch: String::new(),
+            by_turn: String::new(),
+            by_grants: grants,
+        };
+        self.keys()?.sign(&claims)
+    }
 }
 
 /// `.branchyard/gateway` of the repository at `root`.

@@ -89,6 +89,112 @@ pub struct ProjectConfig {
     /// branch gets when `--connector` names none.
     #[serde(default, skip_serializing_if = "Connectors::is_empty")]
     pub connectors: Connectors,
+    /// Quota meters per login (`by usage`, docs/usage.md): what `by run`
+    /// and `by fan` do when a candidate's login is near its 5-hour or
+    /// weekly limit, and named logins to meter.
+    #[serde(default, skip_serializing_if = "UsageConfig::is_empty")]
+    pub usage: UsageConfig,
+    /// Issue trackers for `--issue` besides GitHub (docs/pull-requests.md):
+    /// each one's API address and, instead of a token in the environment,
+    /// a connector gateway tool to fetch issues through.
+    #[serde(default, skip_serializing_if = "Trackers::is_empty")]
+    pub trackers: Trackers,
+}
+
+/// `[usage]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    /// What `by run` and `by fan` do when a candidate's login is near its
+    /// limit: `warn` (the default), `refuse`, or `off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<UsageGuard>,
+    /// The percent of a 5-hour or weekly window at which a login counts as
+    /// near its limit. Default 90.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub near_percent: Option<f64>,
+    /// The router (docs/fleet.md) skips a candidate whose login has used
+    /// more than this percent of a window. Unset: it never skips one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub skip_over: Option<f64>,
+    /// Claude Code keeps no record of its limits on disk: the tokens a
+    /// 5-hour window allows you, so `by usage` can show a percent. Unset: it
+    /// shows tokens and cost only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_five_hour_tokens: Option<u64>,
+    /// The same for Claude Code's weekly window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_weekly_tokens: Option<u64>,
+    /// More logins to meter, by name: `[usage.accounts.work]` with the
+    /// harness and the configuration directory it logs in from.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accounts: BTreeMap<String, UsageAccount>,
+}
+
+impl UsageConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &UsageConfig::default()
+    }
+}
+
+/// `guard` in `[usage]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum UsageGuard {
+    /// Say so on stderr, and start anyway.
+    Warn,
+    /// Refuse to start, naming the login and its window.
+    Refuse,
+    /// Do not look.
+    Off,
+}
+
+/// `[usage.accounts.NAME]`: a login other than the default one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageAccount {
+    /// `claude-code` or `codex`.
+    pub harness: String,
+    /// Its configuration directory: what `CLAUDE_CONFIG_DIR` or
+    /// `CODEX_HOME` is set to when you use this login.
+    pub dir: String,
+}
+
+/// `[trackers]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Trackers {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<TrackerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jira: Option<TrackerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gitlab: Option<TrackerConfig>,
+}
+
+impl Trackers {
+    pub fn is_empty(&self) -> bool {
+        self == &Trackers::default()
+    }
+}
+
+/// One tracker in `[trackers]`. Never a credential: tokens come from the
+/// environment (docs/pull-requests.md) or the connector gateway.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TrackerConfig {
+    /// The API's address: Linear's GraphQL endpoint, a Jira site
+    /// (`https://acme.atlassian.net`) or a GitLab instance
+    /// (`https://gitlab.example.com`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Fetch issues through this connector gateway tool (such as
+    /// `linear__get_issue`) when no token is in the environment; needs
+    /// `[connectors] gateway`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_tool: Option<String>,
 }
 
 /// The keys `[fleet]` takes: the task kinds, then `default`.
@@ -1089,6 +1195,57 @@ impl ProjectConfig {
                 "connectors.grants",
                 "grants need a gateway; set connectors.gateway".into(),
             );
+        }
+        for (key, value) in [
+            ("usage.near_percent", self.usage.near_percent),
+            ("usage.skip_over", self.usage.skip_over),
+        ] {
+            if value.is_some_and(|v| !(0.0..=100.0).contains(&v)) {
+                return fail(key, "must be a percent, from 0 to 100".into());
+            }
+        }
+        for (name, account) in &self.usage.accounts {
+            if !matches!(account.harness.as_str(), "claude-code" | "codex") {
+                return fail(
+                    &format!("usage.accounts.{name}.harness"),
+                    format!("must be claude-code or codex, not {:?}", account.harness),
+                );
+            }
+            if account.dir.trim().is_empty() {
+                return fail(
+                    &format!("usage.accounts.{name}.dir"),
+                    "must not be empty".into(),
+                );
+            }
+        }
+        for (name, tracker) in [
+            ("linear", &self.trackers.linear),
+            ("jira", &self.trackers.jira),
+            ("gitlab", &self.trackers.gitlab),
+        ] {
+            let Some(tracker) = tracker else { continue };
+            if let Some(url) = &tracker.url {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return fail(
+                        &format!("trackers.{name}.url"),
+                        format!("must be an http:// or https:// URL, not {url:?}"),
+                    );
+                }
+            }
+            if let Some(tool) = &tracker.gateway_tool {
+                if tool.trim().is_empty() {
+                    return fail(
+                        &format!("trackers.{name}.gateway_tool"),
+                        "must not be empty".into(),
+                    );
+                }
+                if self.connectors.gateway.is_none() {
+                    return fail(
+                        &format!("trackers.{name}.gateway_tool"),
+                        "needs a gateway; set connectors.gateway".into(),
+                    );
+                }
+            }
         }
         if let Some(sandbox) = &self.microsandbox {
             if sandbox.image.trim().is_empty() {
