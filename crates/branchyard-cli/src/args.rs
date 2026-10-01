@@ -184,7 +184,7 @@ pub enum PlanAction {
     Reject {
         branch: String,
         /// Why; with --replan, the branch's next planning turn gets it
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         reason: Option<String>,
         /// Plan again (read-only) instead of ending the branch
         #[arg(long)]

@@ -842,6 +842,51 @@ mod tests {
                         ..
                     },
                 ) => assert_eq!(branch.as_deref(), Some("impl")),
+                (
+                    ActionId::ApprovePlan,
+                    Command::Plan {
+                        action:
+                            crate::args::PlanAction::Approve {
+                                branch,
+                                edit: false,
+                                file: None,
+                                ..
+                            },
+                        ..
+                    },
+                ) => assert_eq!(branch, "impl"),
+                (
+                    ActionId::Replan,
+                    Command::Plan {
+                        action:
+                            crate::args::PlanAction::Reject {
+                                branch,
+                                reason,
+                                replan: true,
+                                ..
+                            },
+                        ..
+                    },
+                ) => {
+                    assert_eq!(branch, "impl");
+                    assert_eq!(reason.as_deref(), Some(text));
+                }
+                (
+                    ActionId::RejectPlan,
+                    Command::Plan {
+                        action:
+                            crate::args::PlanAction::Reject {
+                                branch,
+                                reason,
+                                replan: false,
+                                ..
+                            },
+                        ..
+                    },
+                ) => {
+                    assert_eq!(branch, "impl");
+                    assert_eq!(reason.as_deref(), Some(text));
+                }
                 (id, command) => panic!("{id:?} parsed as {command:?}"),
             }
         }

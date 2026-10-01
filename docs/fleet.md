@@ -58,6 +58,8 @@ connectors = ["github"]     # recorded, not acted on yet
 | `exploration` | 0 to 1 |
 | `judge` | A judge harness: `harness`, optional `model`, `effort`, `command`, `rubric` |
 | `environment`, `connectors` | Opaque strings passed through to the `routed` event for the prepared-environments and connectors tracks; Branchyard does not act on them yet |
+| `plan` | Plan first: a new branch of this kind, routed or not, starts with a read-only planning turn and waits for approval ([plans and goals](plans-and-goals.md)) |
+| `goal_judge` | The judge harness of a `--goal` given to a branch of this kind when the command names none: `harness`, optional `model`, `effort`, `command`, `rubric` ([plans and goals](plans-and-goals.md#goals)) |
 
 The table is checked as strictly as `[workspace]`: unknown keys, an unknown harness, a bad effort, an empty candidate list, `attempts = 0`, an exploration outside 0 to 1 are errors naming the key (`by config validate` reports them). It may be in the project file or the user file; a project's `[fleet.<kind>]` replaces the user file's for the same kind. It is in `schema/branchyard.config.json`. A harness running on a branch (`BRANCHYARD_BRANCH` set) reads no configuration, so its `by` never routes.
 
@@ -141,6 +143,8 @@ A routed branch fails over when its turn ended `failed` **because of its harness
 | Rate limits and overload (`429`, `rate limit`, `overloaded`, `quota`) and authentication (`401`, `403`, `invalid api key`, `not logged in`), as the driver reports them | Anything else |
 
 Failing over starts a new branch on the next remaining candidate that is available, through reincarnation: from the failed branch's candidate with a handoff brief, or, when it has none, from its base with its original prompt (or a brief, when a turn ran). The new branch is named `<branch>-<harness>`, records a `routed` event with `from`, and the failed branch records `failing over to …: the harness exited: …` and is `superseded_by` the new one. A chain is bounded: each candidate is tried at most once, and the chain stops once its cost reaches the entry's `budget_usd` (the next branch gets what is left). When nothing is left the failed branch says why (`not failing over: no candidate left (…)`). `by run --auto` and `by fan --auto` fail over until a branch succeeds or the chain ends, and print each move; `by send` on a routed branch fails over the same way after its turn (`Yard::failover`).
+
+A judge's pick (and a merge) also proposes [repository knowledge](knowledge.md) from the branch's corrections, for a person to adopt; nothing is used before that. A goal's judge ([plans and goals](plans-and-goals.md#goals)) is the same machinery with another verdict: `{met, evidence, missing}`.
 
 ## What is deterministic, and what needs a model
 

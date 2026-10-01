@@ -1155,7 +1155,15 @@ pub(crate) fn distill(
         fallback,
         trigger: trigger.to_owned(),
     };
-    Recorder::open(&store, name, None)?.record(Activity::Knowledge(Box::new(activity)))?;
+    // A branch's end that taught nothing leaves its log as it was; one that
+    // was asked for, or proposed or recognized something, says so.
+    let quiet = trigger != "asked"
+        && stored.is_empty()
+        && duplicates == 0
+        && matches!(by, JudgedBy::Deterministic);
+    if !quiet {
+        Recorder::open(&store, name, None)?.record(Activity::Knowledge(Box::new(activity)))?;
+    }
     Ok(Distilled {
         branch: name.to_owned(),
         proposed: stored,
@@ -1373,7 +1381,7 @@ mod tests {
         }
         let many = format!(
             r#"{{"entries": [{}]}}"#,
-            vec![r#"{"text": "x", "path": null, "kind": null, "why": "y"}"#; 6].join(",")
+            [r#"{"text": "x", "path": null, "kind": null, "why": "y"}"#; 6].join(",")
         );
         assert!(parse_distilled(&many).is_err());
     }

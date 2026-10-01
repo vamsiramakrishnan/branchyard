@@ -237,19 +237,17 @@ async fn plan(
 async fn admit_plan(
     app: Shared,
     caller: Caller,
-    repo: String,
-    branch: String,
+    (repo, branch): (String, String),
     headers: HeaderMap,
     canonical: String,
-    send: &branchyard_client::api::SendRequest,
-    kind: OperationKind,
     work: Work,
 ) -> Result<Response, ApiError> {
     let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
     let policy = app.tenant_policy(&caller);
-    let route = match kind {
-        OperationKind::ApprovePlan => "approve",
-        _ => "reject",
+    let (kind, send, route) = match &work {
+        Work::ApprovePlan { request, .. } => (OperationKind::ApprovePlan, &request.send, "approve"),
+        Work::RejectPlan { request, .. } => (OperationKind::RejectPlan, &request.send, "reject"),
+        _ => return Err(ApiError::internal("not a plan decision")),
     };
     let route = format!(
         "POST /v1/repos/{}/branches/{branch}/plan/{route}",
@@ -296,23 +294,11 @@ async fn approve_plan(
     headers: HeaderMap,
     JsonBody(request, canonical): JsonBody<PlanApproveRequest>,
 ) -> Result<Response, ApiError> {
-    let send = request.send.clone();
     let work = Work::ApprovePlan {
         branch: branch.clone(),
         request,
     };
-    admit_plan(
-        app,
-        caller,
-        repo,
-        branch,
-        headers,
-        canonical,
-        &send,
-        OperationKind::ApprovePlan,
-        work,
-    )
-    .await
+    admit_plan(app, caller, (repo, branch), headers, canonical, work).await
 }
 
 async fn reject_plan(
@@ -322,21 +308,9 @@ async fn reject_plan(
     headers: HeaderMap,
     JsonBody(request, canonical): JsonBody<PlanRejectRequest>,
 ) -> Result<Response, ApiError> {
-    let send = request.send.clone();
     let work = Work::RejectPlan {
         branch: branch.clone(),
         request,
     };
-    admit_plan(
-        app,
-        caller,
-        repo,
-        branch,
-        headers,
-        canonical,
-        &send,
-        OperationKind::RejectPlan,
-        work,
-    )
-    .await
+    admit_plan(app, caller, (repo, branch), headers, canonical, work).await
 }

@@ -275,6 +275,21 @@
           ],
           "format": "int32",
           "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+        },
+        "plan": {
+          "type": "boolean",
+          "description": "Plan first, like `by run --plan`: the first turn runs read-only and\nthe branch waits for `POST .../plan/approve`. See\n`docs/plans-and-goals.md`."
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GoalRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A goal a judge verifies, like `by run --goal`."
         }
       },
       "required": [
@@ -1140,6 +1155,2063 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GoalRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "rounds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "judge": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
+        }
+      }
+    },
+    "GoalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "rounds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "judge": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide.",
+      "title": "GoalRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "KnowledgeList": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KnowledgeEntry"
+          }
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "description": "`GET /v1/repos/{repo}/knowledge[?status=...]`.",
+      "title": "KnowledgeList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "KnowledgeEntry": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Assigned by the store, from 1."
+            },
+            "scope": {
+              "$ref": "#/$defs/KnowledgeScope"
+            },
+            "text": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/KnowledgeSource"
+            },
+            "status": {
+              "$ref": "#/$defs/KnowledgeStatus"
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch."
+            },
+            "adopted_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Who adopted it, while it is adopted."
+            },
+            "decided_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When a person last adopted, rejected or edited it."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it was proposed, or why it was rejected."
+            }
+          },
+          "required": [
+            "id",
+            "scope",
+            "text",
+            "source",
+            "status",
+            "created_ms"
+          ],
+          "description": "One knowledge entry, durable in the store; entries outlive the\nbranches they came from."
+        },
+        "KnowledgeScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A glob over repository paths (`src/parser/**`, `*.sql`); the entry\napplies when the task touches a matching file."
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The entry applies to tasks of this kind."
+            }
+          },
+          "description": "Where an entry applies: the whole repository, files matching a path\nglob, a kind of task, or both of the last two. Serialized as\n`{\"path\": \"src/**\", \"kind\": \"bugfix\"}`, either key omitted when unset."
+        },
+        "TaskKind": {
+          "type": "string",
+          "enum": [
+            "bugfix",
+            "feature",
+            "refactor",
+            "review",
+            "research",
+            "docs",
+            "migration",
+            "tests",
+            "other"
+          ],
+          "description": "What a task is, for choosing who does it. Given with `--kind`, or\ninferred from the prompt by [`classify`]."
+        },
+        "KnowledgeSource": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "person"
+                }
+              },
+              "required": [
+                "from",
+                "name"
+              ],
+              "description": "Written by a person (`by knowledge add`)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "via": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branch"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "via"
+              ],
+              "description": "Proposed by a distiller from a branch: from the correction sent\nbefore turn `turn`, or (`turn` unset) from the branch as a whole.\n`via` is what it came from: `send`, `steer`, `review`,\n`pull_request`, or `harness <id>` for a harness distiller."
+            }
+          ],
+          "description": "Where an entry came from. Serialized as an object tagged by `from`:\n`{\"from\": \"person\", \"name\": \"ana\"}` or `{\"from\": \"branch\", \"branch\":\n\"fix-parser\", \"turn\": 2, \"via\": \"send\"}`."
+        },
+        "KnowledgeStatus": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "proposed",
+              "description": "Waiting for a person; never given to a harness."
+            },
+            {
+              "type": "string",
+              "const": "adopted",
+              "description": "A person adopted it: matching branches are given it."
+            },
+            {
+              "type": "string",
+              "const": "rejected",
+              "description": "A person rejected it; the same text is not proposed again."
+            }
+          ],
+          "description": "Whether an entry is used."
+        }
+      }
+    },
+    "KnowledgeAddRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/KnowledgeScope",
+          "default": {}
+        },
+        "propose": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "description": "`POST /v1/repos/{repo}/knowledge`: an entry a person wrote, adopted by\nthe caller unless `propose`.",
+      "title": "KnowledgeAddRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "KnowledgeScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A glob over repository paths (`src/parser/**`, `*.sql`); the entry\napplies when the task touches a matching file."
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The entry applies to tasks of this kind."
+            }
+          },
+          "description": "Where an entry applies: the whole repository, files matching a path\nglob, a kind of task, or both of the last two. Serialized as\n`{\"path\": \"src/**\", \"kind\": \"bugfix\"}`, either key omitted when unset."
+        },
+        "TaskKind": {
+          "type": "string",
+          "enum": [
+            "bugfix",
+            "feature",
+            "refactor",
+            "review",
+            "research",
+            "docs",
+            "migration",
+            "tests",
+            "other"
+          ],
+          "description": "What a task is, for choosing who does it. Given with `--kind`, or\ninferred from the prompt by [`classify`]."
+        }
+      }
+    },
+    "KnowledgeDecisionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why, for a rejection."
+        }
+      },
+      "description": "`POST .../knowledge/{id}/adopt` and `.../reject`.",
+      "title": "KnowledgeDecisionRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "KnowledgeEditRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "description": "`POST .../knowledge/{id}/edit`: each field changes when given; `\"\"`\nclears `path` or `kind`.",
+      "title": "KnowledgeEditRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "KnowledgeExport": {
+      "type": "object",
+      "properties": {
+        "markdown": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "markdown",
+        "entries"
+      ],
+      "description": "`GET /v1/repos/{repo}/knowledge/export`: the adopted entries as an\n`AGENTS.md`-style file.",
+      "title": "KnowledgeExport",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "DistillRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`POST .../branches/{branch}/distill`: the deterministic extractor.",
+      "title": "DistillRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "PlanApproveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "edited": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "send": {
+          "$ref": "#/$defs/SendRequest",
+          "default": {
+            "prompt": "",
+            "budget": {},
+            "policy": {
+              "mode": "deny"
+            }
+          }
+        }
+      },
+      "description": "`POST .../branches/{branch}/plan/approve`: the plan, or `edited` in its\nplace, run as the branch's next turn with `send`'s limits and policy\n(its `prompt` is ignored).",
+      "title": "PlanApproveRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "SendRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "prompt": {
+              "type": "string"
+            },
+            "budget": {
+              "$ref": "#/$defs/BudgetSpec",
+              "default": {}
+            },
+            "policy": {
+              "$ref": "#/$defs/PolicySpec",
+              "default": {
+                "mode": "deny"
+              }
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "delegation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Envelope"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Let the harness delegate within this envelope, like\n[`branchyard::TaskOptions::delegation`]. Refused unless the server\nallows delegation."
+            },
+            "allow_delegation": {
+              "type": "boolean",
+              "description": "Allow the harness's shell commands that run the server's `by` with a\ndelegation subcommand, after the policy's own rules, like\n`by --allow-delegation`. Refused unless the server allows delegation."
+            },
+            "unapproved_tools": {
+              "type": "boolean",
+              "description": "Run a profile whose driver cannot route tool approvals, like\n[`branchyard::TaskOptions::unapproved_tools`]. Refused unless the\nserver allows unapproved tools."
+            },
+            "provision": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Provisioning"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
+            },
+            "require_labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+            },
+            "priority": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "description": "`POST /v1/repos/{repo}/branches/{branch}/send`."
+        },
+        "BudgetSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "max_turns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Per call, like [`branchyard::Budget::max_duration`]."
+            },
+            "stall_after_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Like [`branchyard::Budget::stall_after`], in seconds."
+            },
+            "stall_action": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StallAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Like [`branchyard::Budget::stall_action`]; ignored without\n`stall_after_seconds`."
+            }
+          },
+          "description": "Limits for a branch; see [`branchyard::Budget`]."
+        },
+        "StallAction": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "notify",
+              "description": "Record [`Activity::Stalled`] and keep running; the branch shows\n`stalled: true` until new activity or the turn ends."
+            },
+            {
+              "type": "string",
+              "const": "interrupt",
+              "description": "Record [`Activity::Stalled`], then interrupt the turn as\n[`BranchStatus::Interrupted`], the same way a cancel does."
+            }
+          ],
+          "description": "What a detected stall does to the turn."
+        },
+        "PolicySpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/PolicyMode",
+              "default": "deny"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RuleSpec"
+              }
+            }
+          },
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+        },
+        "PolicyMode": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny"
+          ],
+          "description": "How requests no rule decides are answered. There is no remote `ask`:\na server has no terminal to ask on."
+        },
+        "RuleSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "Exact tool name, or a `*` suffix wildcard such as `mcp__*`."
+            },
+            "allow": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "tool",
+            "allow"
+          ]
+        },
+        "Envelope": {
+          "type": "object",
+          "properties": {
+            "max_depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Levels of descendants below this branch: 1 allows children but no\ngrandchildren; 0 allows no children."
+            },
+            "max_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Children this branch may have, counting finished ones until they\nare removed."
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            }
+          },
+          "required": [
+            "max_depth",
+            "max_children",
+            "harnesses"
+          ],
+          "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "Provisioning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secrets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SecretSource"
+              },
+              "description": "Credentials by the name the harness knows them by, such as\n`ANTHROPIC_API_KEY` or `CODEX_AUTH`. Each harness uses the ones its\nprovisioner reads; the rest are reported as unused."
+            },
+            "auth": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "mcp_servers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/McpServerSpec"
+              },
+              "description": "Stdio MCP servers the harness starts, besides Branchyard's own."
+            },
+            "remote_mcp_servers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RemoteMcpSpec"
+              },
+              "description": "HTTP and SSE MCP servers the harness connects to, where it can."
+            },
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Standing instructions, besides Branchyard's delegation skill."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A model name, or a size alias (`small`, `medium`, `large`,\n`extra-large`, or `s`, `m`, `l`, `xl`) where the harness defines one."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "telemetry": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Telemetry"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            }
+          },
+          "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
+        },
+        "SecretSource": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The name the harness knows it by."
+            },
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SecretFrom"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Unset: the variable of the same name, in the environment of the\nprocess that runs the turn (on a server, the server's own table of\nsecrets decides)."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "description": "Where a secret's value comes from."
+        },
+        "SecretFrom": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "var": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "env"
+                }
+              },
+              "required": [
+                "kind",
+                "var"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "file"
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ]
+            }
+          ],
+          "description": "A variable or a file on the host that runs the turn."
+        },
+        "McpServerSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "command": {
+              "type": "string",
+              "description": "Absolute path of the executable, as the harness sees it."
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Stored with the branch like the rest of the request: not for\nsecrets. Use [`McpServerSpec::secret_env`] for those."
+            },
+            "secret_env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Variables set from the task's secrets, by variable and secret name.\nEach turn resolves them with the other secrets; only the names are\nstored."
+            }
+          },
+          "required": [
+            "name",
+            "command"
+          ],
+          "description": "A stdio MCP server, in a form that is stored and sent over the API."
+        },
+        "RemoteMcpSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "transport": {
+              "$ref": "#/$defs/RemoteMcpTransport",
+              "description": "`http` (streamable HTTP, the default) or `sse`."
+            },
+            "url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Header name to the name of the secret holding its value."
+            }
+          },
+          "required": [
+            "name",
+            "url"
+          ],
+          "description": "An HTTP or SSE MCP server, in a form that is stored and sent over the\nAPI. Every header's value is one of the task's secrets, named here and\nresolved each turn, so no header value is stored."
+        },
+        "RemoteMcpTransport": {
+          "type": "string",
+          "enum": [
+            "http",
+            "sse"
+          ],
+          "description": "[`RemoteMcpSpec::transport`]."
+        },
+        "Effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "How hard the model reasons, where the harness can be told."
+        },
+        "Telemetry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "`false` turns the harness's export off where it can be told to."
+            },
+            "endpoint": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "OTLP/gRPC collector, as the harness reaches it. Unset:\n[`Telemetry::DEFAULT_ENDPOINT`]."
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "description": "The harness's own OpenTelemetry export."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
+        }
+      }
+    },
+    "PlanRejectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replan": {
+          "type": "boolean",
+          "default": false
+        },
+        "send": {
+          "$ref": "#/$defs/SendRequest",
+          "default": {
+            "prompt": "",
+            "budget": {},
+            "policy": {
+              "mode": "deny"
+            }
+          }
+        }
+      },
+      "description": "`POST .../branches/{branch}/plan/reject`: the branch fails, or with\n`replan`, plans again with `reason` under `send`'s limits.",
+      "title": "PlanRejectRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "SendRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "prompt": {
+              "type": "string"
+            },
+            "budget": {
+              "$ref": "#/$defs/BudgetSpec",
+              "default": {}
+            },
+            "policy": {
+              "$ref": "#/$defs/PolicySpec",
+              "default": {
+                "mode": "deny"
+              }
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "delegation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Envelope"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Let the harness delegate within this envelope, like\n[`branchyard::TaskOptions::delegation`]. Refused unless the server\nallows delegation."
+            },
+            "allow_delegation": {
+              "type": "boolean",
+              "description": "Allow the harness's shell commands that run the server's `by` with a\ndelegation subcommand, after the policy's own rules, like\n`by --allow-delegation`. Refused unless the server allows delegation."
+            },
+            "unapproved_tools": {
+              "type": "boolean",
+              "description": "Run a profile whose driver cannot route tool approvals, like\n[`branchyard::TaskOptions::unapproved_tools`]. Refused unless the\nserver allows unapproved tools."
+            },
+            "provision": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Provisioning"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
+            },
+            "require_labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+            },
+            "priority": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "description": "`POST /v1/repos/{repo}/branches/{branch}/send`."
+        },
+        "BudgetSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "max_turns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Per call, like [`branchyard::Budget::max_duration`]."
+            },
+            "stall_after_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Like [`branchyard::Budget::stall_after`], in seconds."
+            },
+            "stall_action": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StallAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Like [`branchyard::Budget::stall_action`]; ignored without\n`stall_after_seconds`."
+            }
+          },
+          "description": "Limits for a branch; see [`branchyard::Budget`]."
+        },
+        "StallAction": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "notify",
+              "description": "Record [`Activity::Stalled`] and keep running; the branch shows\n`stalled: true` until new activity or the turn ends."
+            },
+            {
+              "type": "string",
+              "const": "interrupt",
+              "description": "Record [`Activity::Stalled`], then interrupt the turn as\n[`BranchStatus::Interrupted`], the same way a cancel does."
+            }
+          ],
+          "description": "What a detected stall does to the turn."
+        },
+        "PolicySpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/PolicyMode",
+              "default": "deny"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RuleSpec"
+              }
+            }
+          },
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+        },
+        "PolicyMode": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny"
+          ],
+          "description": "How requests no rule decides are answered. There is no remote `ask`:\na server has no terminal to ask on."
+        },
+        "RuleSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "Exact tool name, or a `*` suffix wildcard such as `mcp__*`."
+            },
+            "allow": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "tool",
+            "allow"
+          ]
+        },
+        "Envelope": {
+          "type": "object",
+          "properties": {
+            "max_depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Levels of descendants below this branch: 1 allows children but no\ngrandchildren; 0 allows no children."
+            },
+            "max_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Children this branch may have, counting finished ones until they\nare removed."
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            }
+          },
+          "required": [
+            "max_depth",
+            "max_children",
+            "harnesses"
+          ],
+          "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "Provisioning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secrets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SecretSource"
+              },
+              "description": "Credentials by the name the harness knows them by, such as\n`ANTHROPIC_API_KEY` or `CODEX_AUTH`. Each harness uses the ones its\nprovisioner reads; the rest are reported as unused."
+            },
+            "auth": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "mcp_servers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/McpServerSpec"
+              },
+              "description": "Stdio MCP servers the harness starts, besides Branchyard's own."
+            },
+            "remote_mcp_servers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RemoteMcpSpec"
+              },
+              "description": "HTTP and SSE MCP servers the harness connects to, where it can."
+            },
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Standing instructions, besides Branchyard's delegation skill."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A model name, or a size alias (`small`, `medium`, `large`,\n`extra-large`, or `s`, `m`, `l`, `xl`) where the harness defines one."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "telemetry": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Telemetry"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            }
+          },
+          "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
+        },
+        "SecretSource": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The name the harness knows it by."
+            },
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SecretFrom"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Unset: the variable of the same name, in the environment of the\nprocess that runs the turn (on a server, the server's own table of\nsecrets decides)."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "description": "Where a secret's value comes from."
+        },
+        "SecretFrom": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "var": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "env"
+                }
+              },
+              "required": [
+                "kind",
+                "var"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "file"
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ]
+            }
+          ],
+          "description": "A variable or a file on the host that runs the turn."
+        },
+        "McpServerSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "command": {
+              "type": "string",
+              "description": "Absolute path of the executable, as the harness sees it."
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Stored with the branch like the rest of the request: not for\nsecrets. Use [`McpServerSpec::secret_env`] for those."
+            },
+            "secret_env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Variables set from the task's secrets, by variable and secret name.\nEach turn resolves them with the other secrets; only the names are\nstored."
+            }
+          },
+          "required": [
+            "name",
+            "command"
+          ],
+          "description": "A stdio MCP server, in a form that is stored and sent over the API."
+        },
+        "RemoteMcpSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "transport": {
+              "$ref": "#/$defs/RemoteMcpTransport",
+              "description": "`http` (streamable HTTP, the default) or `sse`."
+            },
+            "url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Header name to the name of the secret holding its value."
+            }
+          },
+          "required": [
+            "name",
+            "url"
+          ],
+          "description": "An HTTP or SSE MCP server, in a form that is stored and sent over the\nAPI. Every header's value is one of the task's secrets, named here and\nresolved each turn, so no header value is stored."
+        },
+        "RemoteMcpTransport": {
+          "type": "string",
+          "enum": [
+            "http",
+            "sse"
+          ],
+          "description": "[`RemoteMcpSpec::transport`]."
+        },
+        "Effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "How hard the model reasons, where the harness can be told."
+        },
+        "Telemetry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "`false` turns the harness's export off where it can be told to."
+            },
+            "endpoint": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "OTLP/gRPC collector, as the harness reaches it. Unset:\n[`Telemetry::DEFAULT_ENDPOINT`]."
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "description": "The harness's own OpenTelemetry export."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
+        }
+      }
+    },
+    "KnowledgeEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Assigned by the store, from 1."
+        },
+        "scope": {
+          "$ref": "#/$defs/KnowledgeScope"
+        },
+        "text": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/KnowledgeSource"
+        },
+        "status": {
+          "$ref": "#/$defs/KnowledgeStatus"
+        },
+        "created_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Milliseconds since the Unix epoch."
+        },
+        "adopted_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Who adopted it, while it is adopted."
+        },
+        "decided_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "When a person last adopted, rejected or edited it."
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why it was proposed, or why it was rejected."
+        }
+      },
+      "required": [
+        "id",
+        "scope",
+        "text",
+        "source",
+        "status",
+        "created_ms"
+      ],
+      "description": "One knowledge entry, durable in the store; entries outlive the\nbranches they came from.",
+      "title": "KnowledgeEntry",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "KnowledgeScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A glob over repository paths (`src/parser/**`, `*.sql`); the entry\napplies when the task touches a matching file."
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The entry applies to tasks of this kind."
+            }
+          },
+          "description": "Where an entry applies: the whole repository, files matching a path\nglob, a kind of task, or both of the last two. Serialized as\n`{\"path\": \"src/**\", \"kind\": \"bugfix\"}`, either key omitted when unset."
+        },
+        "TaskKind": {
+          "type": "string",
+          "enum": [
+            "bugfix",
+            "feature",
+            "refactor",
+            "review",
+            "research",
+            "docs",
+            "migration",
+            "tests",
+            "other"
+          ],
+          "description": "What a task is, for choosing who does it. Given with `--kind`, or\ninferred from the prompt by [`classify`]."
+        },
+        "KnowledgeSource": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "person"
+                }
+              },
+              "required": [
+                "from",
+                "name"
+              ],
+              "description": "Written by a person (`by knowledge add`)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "via": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branch"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "via"
+              ],
+              "description": "Proposed by a distiller from a branch: from the correction sent\nbefore turn `turn`, or (`turn` unset) from the branch as a whole.\n`via` is what it came from: `send`, `steer`, `review`,\n`pull_request`, or `harness <id>` for a harness distiller."
+            }
+          ],
+          "description": "Where an entry came from. Serialized as an object tagged by `from`:\n`{\"from\": \"person\", \"name\": \"ana\"}` or `{\"from\": \"branch\", \"branch\":\n\"fix-parser\", \"turn\": 2, \"via\": \"send\"}`."
+        },
+        "KnowledgeStatus": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "proposed",
+              "description": "Waiting for a person; never given to a harness."
+            },
+            {
+              "type": "string",
+              "const": "adopted",
+              "description": "A person adopted it: matching branches are given it."
+            },
+            {
+              "type": "string",
+              "const": "rejected",
+              "description": "A person rejected it; the same text is not proposed again."
+            }
+          ],
+          "description": "Whether an entry is used."
+        }
+      }
+    },
+    "Distilled": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "proposed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KnowledgeEntry"
+          },
+          "description": "The entries proposed now, new in the store."
+        },
+        "duplicates": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Proposals left out because an entry with the same text and scope\nexists already (in any status, so a rejection sticks)."
+        },
+        "by": {
+          "$ref": "#/$defs/JudgedBy",
+          "description": "The extractor, the harness distiller, or the extractor after the\nharness distiller's answer was refused (and why)."
+        },
+        "trigger": {
+          "type": "string",
+          "description": "What started it: `merged`, `judged_best`, `ready` or `asked`."
+        }
+      },
+      "required": [
+        "branch",
+        "proposed",
+        "duplicates",
+        "by",
+        "trigger"
+      ],
+      "description": "What [`Yard::distill`] proposed.",
+      "title": "Distilled",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "KnowledgeEntry": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Assigned by the store, from 1."
+            },
+            "scope": {
+              "$ref": "#/$defs/KnowledgeScope"
+            },
+            "text": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/KnowledgeSource"
+            },
+            "status": {
+              "$ref": "#/$defs/KnowledgeStatus"
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch."
+            },
+            "adopted_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Who adopted it, while it is adopted."
+            },
+            "decided_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When a person last adopted, rejected or edited it."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it was proposed, or why it was rejected."
+            }
+          },
+          "required": [
+            "id",
+            "scope",
+            "text",
+            "source",
+            "status",
+            "created_ms"
+          ],
+          "description": "One knowledge entry, durable in the store; entries outlive the\nbranches they came from."
+        },
+        "KnowledgeScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A glob over repository paths (`src/parser/**`, `*.sql`); the entry\napplies when the task touches a matching file."
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The entry applies to tasks of this kind."
+            }
+          },
+          "description": "Where an entry applies: the whole repository, files matching a path\nglob, a kind of task, or both of the last two. Serialized as\n`{\"path\": \"src/**\", \"kind\": \"bugfix\"}`, either key omitted when unset."
+        },
+        "TaskKind": {
+          "type": "string",
+          "enum": [
+            "bugfix",
+            "feature",
+            "refactor",
+            "review",
+            "research",
+            "docs",
+            "migration",
+            "tests",
+            "other"
+          ],
+          "description": "What a task is, for choosing who does it. Given with `--kind`, or\ninferred from the prompt by [`classify`]."
+        },
+        "KnowledgeSource": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "person"
+                }
+              },
+              "required": [
+                "from",
+                "name"
+              ],
+              "description": "Written by a person (`by knowledge add`)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "turn": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "via": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "const": "branch"
+                }
+              },
+              "required": [
+                "from",
+                "branch",
+                "via"
+              ],
+              "description": "Proposed by a distiller from a branch: from the correction sent\nbefore turn `turn`, or (`turn` unset) from the branch as a whole.\n`via` is what it came from: `send`, `steer`, `review`,\n`pull_request`, or `harness <id>` for a harness distiller."
+            }
+          ],
+          "description": "Where an entry came from. Serialized as an object tagged by `from`:\n`{\"from\": \"person\", \"name\": \"ana\"}` or `{\"from\": \"branch\", \"branch\":\n\"fix-parser\", \"turn\": 2, \"via\": \"send\"}`."
+        },
+        "KnowledgeStatus": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "proposed",
+              "description": "Waiting for a person; never given to a harness."
+            },
+            {
+              "type": "string",
+              "const": "adopted",
+              "description": "A person adopted it: matching branches are given it."
+            },
+            {
+              "type": "string",
+              "const": "rejected",
+              "description": "A person rejected it; the same text is not proposed again."
+            }
+          ],
+          "description": "Whether an entry is used."
+        },
+        "JudgedBy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string",
+                  "const": "deterministic"
+                }
+              },
+              "required": [
+                "by"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "const": "judge"
+                }
+              },
+              "required": [
+                "by",
+                "name"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "const": "fallback"
+                }
+              },
+              "required": [
+                "by",
+                "name",
+                "error"
+              ],
+              "description": "The judge was asked, and its answer was not used."
+            }
+          ],
+          "description": "Who decided a judgement."
+        }
+      }
+    },
+    "PlanInfo": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/PlanPhase"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Plan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The latest plan proposed, if any."
+        },
+        "round": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "branch",
+        "phase",
+        "round"
+      ],
+      "description": "A branch's plan as [`Yard::plan`] reports it.",
+      "title": "PlanInfo",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "PlanPhase": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "planning",
+              "description": "Its turns run read-only, to produce a plan."
+            },
+            {
+              "type": "string",
+              "const": "awaiting",
+              "description": "A plan waits for approval; the branch is `awaiting_plan_approval`."
+            },
+            {
+              "type": "string",
+              "const": "approved",
+              "description": "The plan was approved and sent as a turn."
+            },
+            {
+              "type": "string",
+              "const": "rejected",
+              "description": "The plan was rejected, and the branch ended."
+            }
+          ],
+          "description": "Where a branch's plan is."
+        },
+        "Plan": {
+          "type": "object",
+          "properties": {
+            "markdown": {
+              "type": "string",
+              "description": "The reply, in Markdown."
+            },
+            "tasks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/PlanTask"
+              },
+              "description": "The fenced JSON task list, when the reply ended with a valid one."
+            },
+            "tasks_error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a task list in the reply was not used."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The branch's turn that produced it."
+            },
+            "round": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "From 1; one more for each re-plan."
+            }
+          },
+          "required": [
+            "markdown",
+            "turn",
+            "round"
+          ],
+          "description": "A proposed plan: the planning turn's reply, and the task list it ended\nwith, if it gave one that parses."
+        },
+        "PlanTask": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "description": "One step of a plan's task list."
         }
       }
     },
@@ -3731,6 +5803,10 @@
                   },
                   "description": "The child's connector grant, narrowed to its parent's; unset\ninherits the parent's (or its seat's). See `docs/connectors.md`."
                 },
+                "plan": {
+                  "type": "boolean",
+                  "description": "Plan first; its plan is escalated to the parent for approval."
+                },
                 "kind": {
                   "type": "string",
                   "const": "spawn"
@@ -4100,6 +6176,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -4400,6 +6489,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -4671,6 +6773,16 @@
           "type": "string",
           "const": "reincarnate",
           "description": "A branch started with `POST .../reincarnate`."
+        },
+        {
+          "type": "string",
+          "const": "approve_plan",
+          "description": "A plan approved with `POST .../plan/approve`, run as a turn."
+        },
+        {
+          "type": "string",
+          "const": "reject_plan",
+          "description": "A plan rejected with `POST .../plan/reject`."
         }
       ],
       "title": "OperationKind",
@@ -4943,6 +7055,19 @@
                 "state"
               ],
               "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
             },
             {
               "type": "object",
@@ -5417,6 +7542,16 @@
               "type": "string",
               "const": "reincarnate",
               "description": "A branch started with `POST .../reincarnate`."
+            },
+            {
+              "type": "string",
+              "const": "approve_plan",
+              "description": "A plan approved with `POST .../plan/approve`, run as a turn."
+            },
+            {
+              "type": "string",
+              "const": "reject_plan",
+              "description": "A plan rejected with `POST .../plan/reject`."
             }
           ]
         },
@@ -5683,6 +7818,19 @@
                 "state"
               ],
               "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
             },
             {
               "type": "object",
@@ -6315,6 +8463,15 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "knowledge": {
+                      "description": "The adopted knowledge entries given to the harness in its\ninstructions this turn, most specific first; see\n`docs/knowledge.md`.",
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "minimum": 0
+                      }
                     }
                   },
                   "required": [
@@ -6633,6 +8790,45 @@
               ],
               "additionalProperties": false,
               "description": "The branch was made from a harness session that already existed on\nthis machine (`by adopt`); its next turn resumes that session."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "knowledge": {
+                  "$ref": "#/$defs/KnowledgeActivity"
+                }
+              },
+              "required": [
+                "knowledge"
+              ],
+              "additionalProperties": false,
+              "description": "Repository knowledge: the branch was distilled into proposed\nentries. See [`KnowledgeActivity`] and `docs/knowledge.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "plan": {
+                  "$ref": "#/$defs/PlanActivity"
+                }
+              },
+              "required": [
+                "plan"
+              ],
+              "additionalProperties": false,
+              "description": "Plan approval: planning, a proposed plan, its approval, rejection or\nescalation. See [`PlanActivity`] and `docs/plans-and-goals.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "$ref": "#/$defs/GoalActivity"
+                }
+              },
+              "required": [
+                "goal"
+              ],
+              "additionalProperties": false,
+              "description": "A goal and its judge's verdicts. See [`GoalActivity`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -7327,6 +9523,19 @@
                 "state"
               ],
               "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
             },
             {
               "type": "object",
@@ -9224,6 +11433,428 @@
             "how"
           ],
           "description": "What `by adopt` recorded about the session it adopted, as the branch's\nfirst event."
+        },
+        "KnowledgeActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "duplicates": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "by": {
+                  "type": "string",
+                  "description": "`deterministic`, a harness, or the fallback from one."
+                },
+                "fallback": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why a harness distiller's answer was not used."
+                },
+                "trigger": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "distilled"
+                }
+              },
+              "required": [
+                "type",
+                "ids",
+                "duplicates",
+                "by",
+                "trigger"
+              ],
+              "description": "The branch was distilled: these entries were proposed."
+            }
+          ],
+          "description": "Knowledge activity on a branch, recorded as [`Activity::Knowledge`].\nSerialized as an object tagged by `type`."
+        },
+        "PlanActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "planning"
+                }
+              },
+              "required": [
+                "type",
+                "round"
+              ],
+              "description": "The branch plans before it changes anything: round `round` runs\nread-only."
+            },
+            {
+              "$ref": "#/$defs/Plan",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "proposed"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A planning turn proposed this plan; the branch awaits approval."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string"
+                },
+                "edited": {
+                  "type": "boolean"
+                },
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "approved"
+                }
+              },
+              "required": [
+                "type",
+                "by",
+                "edited",
+                "round"
+              ],
+              "description": "Someone approved the plan, as proposed or edited, and it was sent as\nthe next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "replan": {
+                  "type": "boolean"
+                },
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "rejected"
+                }
+              },
+              "required": [
+                "type",
+                "by",
+                "replan",
+                "round"
+              ],
+              "description": "Someone rejected the plan; with `replan`, another planning round\nruns with the reason."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "to": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "escalated"
+                }
+              },
+              "required": [
+                "type",
+                "to",
+                "message"
+              ],
+              "description": "The plan of this delegated child was escalated to its parent's\ninbox for approval, as message `message`."
+            }
+          ],
+          "description": "Plan activity on a branch, recorded as [`Activity::Plan`]. Serialized\nas an object tagged by `type`."
+        },
+        "PlanTask": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "description": "One step of a plan's task list."
+        },
+        "Plan": {
+          "type": "object",
+          "properties": {
+            "markdown": {
+              "type": "string",
+              "description": "The reply, in Markdown."
+            },
+            "tasks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/PlanTask"
+              },
+              "description": "The fenced JSON task list, when the reply ended with a valid one."
+            },
+            "tasks_error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a task list in the reply was not used."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The branch's turn that produced it."
+            },
+            "round": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "From 1; one more for each re-plan."
+            }
+          },
+          "required": [
+            "markdown",
+            "turn",
+            "round"
+          ],
+          "description": "A proposed plan: the planning turn's reply, and the task list it ended\nwith, if it gave one that parses."
+        },
+        "GoalActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "type": "string"
+                },
+                "rounds": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "judge": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "const": "set"
+                }
+              },
+              "required": [
+                "type",
+                "goal",
+                "rounds"
+              ],
+              "description": "The branch has this goal, checked when a turn ends ready."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": "boolean"
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deterministic": {
+                  "$ref": "#/$defs/GoalCheck"
+                },
+                "by": {
+                  "$ref": "#/$defs/JudgedBy",
+                  "description": "`deterministic`, the judge, or the fallback from it."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "verdict"
+                }
+              },
+              "required": [
+                "type",
+                "round",
+                "turn",
+                "met",
+                "evidence",
+                "missing",
+                "deterministic",
+                "by"
+              ],
+              "description": "A verdict, after the branch's turn `turn` (`round` 0 for the first,\nthen one per follow-up)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rounds": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "type": {
+                  "type": "string",
+                  "const": "exhausted"
+                }
+              },
+              "required": [
+                "type",
+                "rounds",
+                "missing"
+              ],
+              "description": "Unmet with no follow-up left: the branch failed."
+            }
+          ],
+          "description": "Goal activity on a branch, recorded as [`Activity::Goal`]. Serialized\nas an object tagged by `type`."
+        },
+        "GoalCheck": {
+          "type": "object",
+          "properties": {
+            "check": {
+              "type": "string",
+              "description": "The branch's check on its candidate: `passed`, `failed`, `none`, ..."
+            },
+            "changes": {
+              "type": "boolean",
+              "description": "Whether the candidate changes anything."
+            },
+            "passed": {
+              "type": "boolean",
+              "description": "Whether the deterministic checks passed."
+            }
+          },
+          "required": [
+            "check",
+            "changes",
+            "passed"
+          ],
+          "description": "How a goal was decided."
+        },
+        "JudgedBy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string",
+                  "const": "deterministic"
+                }
+              },
+              "required": [
+                "by"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "const": "judge"
+                }
+              },
+              "required": [
+                "by",
+                "name"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "const": "fallback"
+                }
+              },
+              "required": [
+                "by",
+                "name",
+                "error"
+              ],
+              "description": "The judge was asked, and its answer was not used."
+            }
+          ],
+          "description": "Who decided a judgement."
         }
       }
     },
@@ -9455,6 +12086,15 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "knowledge": {
+                      "description": "The adopted knowledge entries given to the harness in its\ninstructions this turn, most specific first; see\n`docs/knowledge.md`.",
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "minimum": 0
+                      }
                     }
                   },
                   "required": [
@@ -9773,6 +12413,45 @@
               ],
               "additionalProperties": false,
               "description": "The branch was made from a harness session that already existed on\nthis machine (`by adopt`); its next turn resumes that session."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "knowledge": {
+                  "$ref": "#/$defs/KnowledgeActivity"
+                }
+              },
+              "required": [
+                "knowledge"
+              ],
+              "additionalProperties": false,
+              "description": "Repository knowledge: the branch was distilled into proposed\nentries. See [`KnowledgeActivity`] and `docs/knowledge.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "plan": {
+                  "$ref": "#/$defs/PlanActivity"
+                }
+              },
+              "required": [
+                "plan"
+              ],
+              "additionalProperties": false,
+              "description": "Plan approval: planning, a proposed plan, its approval, rejection or\nescalation. See [`PlanActivity`] and `docs/plans-and-goals.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "$ref": "#/$defs/GoalActivity"
+                }
+              },
+              "required": [
+                "goal"
+              ],
+              "additionalProperties": false,
+              "description": "A goal and its judge's verdicts. See [`GoalActivity`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -10467,6 +13146,19 @@
                 "state"
               ],
               "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
             },
             {
               "type": "object",
@@ -12364,6 +15056,428 @@
             "how"
           ],
           "description": "What `by adopt` recorded about the session it adopted, as the branch's\nfirst event."
+        },
+        "KnowledgeActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "duplicates": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "by": {
+                  "type": "string",
+                  "description": "`deterministic`, a harness, or the fallback from one."
+                },
+                "fallback": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why a harness distiller's answer was not used."
+                },
+                "trigger": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "distilled"
+                }
+              },
+              "required": [
+                "type",
+                "ids",
+                "duplicates",
+                "by",
+                "trigger"
+              ],
+              "description": "The branch was distilled: these entries were proposed."
+            }
+          ],
+          "description": "Knowledge activity on a branch, recorded as [`Activity::Knowledge`].\nSerialized as an object tagged by `type`."
+        },
+        "PlanActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "planning"
+                }
+              },
+              "required": [
+                "type",
+                "round"
+              ],
+              "description": "The branch plans before it changes anything: round `round` runs\nread-only."
+            },
+            {
+              "$ref": "#/$defs/Plan",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "proposed"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A planning turn proposed this plan; the branch awaits approval."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string"
+                },
+                "edited": {
+                  "type": "boolean"
+                },
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "approved"
+                }
+              },
+              "required": [
+                "type",
+                "by",
+                "edited",
+                "round"
+              ],
+              "description": "Someone approved the plan, as proposed or edited, and it was sent as\nthe next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "replan": {
+                  "type": "boolean"
+                },
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "rejected"
+                }
+              },
+              "required": [
+                "type",
+                "by",
+                "replan",
+                "round"
+              ],
+              "description": "Someone rejected the plan; with `replan`, another planning round\nruns with the reason."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "to": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "escalated"
+                }
+              },
+              "required": [
+                "type",
+                "to",
+                "message"
+              ],
+              "description": "The plan of this delegated child was escalated to its parent's\ninbox for approval, as message `message`."
+            }
+          ],
+          "description": "Plan activity on a branch, recorded as [`Activity::Plan`]. Serialized\nas an object tagged by `type`."
+        },
+        "PlanTask": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "description": "One step of a plan's task list."
+        },
+        "Plan": {
+          "type": "object",
+          "properties": {
+            "markdown": {
+              "type": "string",
+              "description": "The reply, in Markdown."
+            },
+            "tasks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/PlanTask"
+              },
+              "description": "The fenced JSON task list, when the reply ended with a valid one."
+            },
+            "tasks_error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a task list in the reply was not used."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The branch's turn that produced it."
+            },
+            "round": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "From 1; one more for each re-plan."
+            }
+          },
+          "required": [
+            "markdown",
+            "turn",
+            "round"
+          ],
+          "description": "A proposed plan: the planning turn's reply, and the task list it ended\nwith, if it gave one that parses."
+        },
+        "GoalActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "type": "string"
+                },
+                "rounds": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "judge": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "const": "set"
+                }
+              },
+              "required": [
+                "type",
+                "goal",
+                "rounds"
+              ],
+              "description": "The branch has this goal, checked when a turn ends ready."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": "boolean"
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deterministic": {
+                  "$ref": "#/$defs/GoalCheck"
+                },
+                "by": {
+                  "$ref": "#/$defs/JudgedBy",
+                  "description": "`deterministic`, the judge, or the fallback from it."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "verdict"
+                }
+              },
+              "required": [
+                "type",
+                "round",
+                "turn",
+                "met",
+                "evidence",
+                "missing",
+                "deterministic",
+                "by"
+              ],
+              "description": "A verdict, after the branch's turn `turn` (`round` 0 for the first,\nthen one per follow-up)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rounds": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "type": {
+                  "type": "string",
+                  "const": "exhausted"
+                }
+              },
+              "required": [
+                "type",
+                "rounds",
+                "missing"
+              ],
+              "description": "Unmet with no follow-up left: the branch failed."
+            }
+          ],
+          "description": "Goal activity on a branch, recorded as [`Activity::Goal`]. Serialized\nas an object tagged by `type`."
+        },
+        "GoalCheck": {
+          "type": "object",
+          "properties": {
+            "check": {
+              "type": "string",
+              "description": "The branch's check on its candidate: `passed`, `failed`, `none`, ..."
+            },
+            "changes": {
+              "type": "boolean",
+              "description": "Whether the candidate changes anything."
+            },
+            "passed": {
+              "type": "boolean",
+              "description": "Whether the deterministic checks passed."
+            }
+          },
+          "required": [
+            "check",
+            "changes",
+            "passed"
+          ],
+          "description": "How a goal was decided."
+        },
+        "JudgedBy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string",
+                  "const": "deterministic"
+                }
+              },
+              "required": [
+                "by"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "const": "judge"
+                }
+              },
+              "required": [
+                "by",
+                "name"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "const": "fallback"
+                }
+              },
+              "required": [
+                "by",
+                "name",
+                "error"
+              ],
+              "description": "The judge was asked, and its answer was not used."
+            }
+          ],
+          "description": "Who decided a judgement."
         }
       }
     },
@@ -12583,6 +15697,19 @@
                 "state"
               ],
               "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
             },
             {
               "type": "object",
@@ -12809,6 +15936,16 @@
               "type": "string",
               "const": "reincarnate",
               "description": "A branch started with `POST .../reincarnate`."
+            },
+            {
+              "type": "string",
+              "const": "approve_plan",
+              "description": "A plan approved with `POST .../plan/approve`, run as a turn."
+            },
+            {
+              "type": "string",
+              "const": "reject_plan",
+              "description": "A plan rejected with `POST .../plan/reject`."
             }
           ]
         },
@@ -13075,6 +16212,19 @@
                 "state"
               ],
               "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
             },
             {
               "type": "object",
@@ -13833,6 +16983,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -14111,6 +17274,19 @@
                 "state"
               ],
               "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
             },
             {
               "type": "object",
@@ -14548,6 +17724,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -14864,6 +18053,15 @@
                       "type": "array",
                       "items": {
                         "type": "string"
+                      }
+                    },
+                    "knowledge": {
+                      "description": "The adopted knowledge entries given to the harness in its\ninstructions this turn, most specific first; see\n`docs/knowledge.md`.",
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "minimum": 0
                       }
                     }
                   },
@@ -15183,6 +18381,45 @@
               ],
               "additionalProperties": false,
               "description": "The branch was made from a harness session that already existed on\nthis machine (`by adopt`); its next turn resumes that session."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "knowledge": {
+                  "$ref": "#/$defs/KnowledgeActivity"
+                }
+              },
+              "required": [
+                "knowledge"
+              ],
+              "additionalProperties": false,
+              "description": "Repository knowledge: the branch was distilled into proposed\nentries. See [`KnowledgeActivity`] and `docs/knowledge.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "plan": {
+                  "$ref": "#/$defs/PlanActivity"
+                }
+              },
+              "required": [
+                "plan"
+              ],
+              "additionalProperties": false,
+              "description": "Plan approval: planning, a proposed plan, its approval, rejection or\nescalation. See [`PlanActivity`] and `docs/plans-and-goals.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "$ref": "#/$defs/GoalActivity"
+                }
+              },
+              "required": [
+                "goal"
+              ],
+              "additionalProperties": false,
+              "description": "A goal and its judge's verdicts. See [`GoalActivity`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -15877,6 +19114,19 @@
                 "state"
               ],
               "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
             },
             {
               "type": "object",
@@ -17774,6 +21024,428 @@
             "how"
           ],
           "description": "What `by adopt` recorded about the session it adopted, as the branch's\nfirst event."
+        },
+        "KnowledgeActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "duplicates": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "by": {
+                  "type": "string",
+                  "description": "`deterministic`, a harness, or the fallback from one."
+                },
+                "fallback": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why a harness distiller's answer was not used."
+                },
+                "trigger": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "distilled"
+                }
+              },
+              "required": [
+                "type",
+                "ids",
+                "duplicates",
+                "by",
+                "trigger"
+              ],
+              "description": "The branch was distilled: these entries were proposed."
+            }
+          ],
+          "description": "Knowledge activity on a branch, recorded as [`Activity::Knowledge`].\nSerialized as an object tagged by `type`."
+        },
+        "PlanActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "planning"
+                }
+              },
+              "required": [
+                "type",
+                "round"
+              ],
+              "description": "The branch plans before it changes anything: round `round` runs\nread-only."
+            },
+            {
+              "$ref": "#/$defs/Plan",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "proposed"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A planning turn proposed this plan; the branch awaits approval."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string"
+                },
+                "edited": {
+                  "type": "boolean"
+                },
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "approved"
+                }
+              },
+              "required": [
+                "type",
+                "by",
+                "edited",
+                "round"
+              ],
+              "description": "Someone approved the plan, as proposed or edited, and it was sent as\nthe next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "replan": {
+                  "type": "boolean"
+                },
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "rejected"
+                }
+              },
+              "required": [
+                "type",
+                "by",
+                "replan",
+                "round"
+              ],
+              "description": "Someone rejected the plan; with `replan`, another planning round\nruns with the reason."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "to": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "type": {
+                  "type": "string",
+                  "const": "escalated"
+                }
+              },
+              "required": [
+                "type",
+                "to",
+                "message"
+              ],
+              "description": "The plan of this delegated child was escalated to its parent's\ninbox for approval, as message `message`."
+            }
+          ],
+          "description": "Plan activity on a branch, recorded as [`Activity::Plan`]. Serialized\nas an object tagged by `type`."
+        },
+        "PlanTask": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "description": "One step of a plan's task list."
+        },
+        "Plan": {
+          "type": "object",
+          "properties": {
+            "markdown": {
+              "type": "string",
+              "description": "The reply, in Markdown."
+            },
+            "tasks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/PlanTask"
+              },
+              "description": "The fenced JSON task list, when the reply ended with a valid one."
+            },
+            "tasks_error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a task list in the reply was not used."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The branch's turn that produced it."
+            },
+            "round": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "From 1; one more for each re-plan."
+            }
+          },
+          "required": [
+            "markdown",
+            "turn",
+            "round"
+          ],
+          "description": "A proposed plan: the planning turn's reply, and the task list it ended\nwith, if it gave one that parses."
+        },
+        "GoalActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "type": "string"
+                },
+                "rounds": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "judge": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "const": "set"
+                }
+              },
+              "required": [
+                "type",
+                "goal",
+                "rounds"
+              ],
+              "description": "The branch has this goal, checked when a turn ends ready."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "round": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "turn": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "met": {
+                  "type": "boolean"
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deterministic": {
+                  "$ref": "#/$defs/GoalCheck"
+                },
+                "by": {
+                  "$ref": "#/$defs/JudgedBy",
+                  "description": "`deterministic`, the judge, or the fallback from it."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "verdict"
+                }
+              },
+              "required": [
+                "type",
+                "round",
+                "turn",
+                "met",
+                "evidence",
+                "missing",
+                "deterministic",
+                "by"
+              ],
+              "description": "A verdict, after the branch's turn `turn` (`round` 0 for the first,\nthen one per follow-up)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "rounds": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "type": {
+                  "type": "string",
+                  "const": "exhausted"
+                }
+              },
+              "required": [
+                "type",
+                "rounds",
+                "missing"
+              ],
+              "description": "Unmet with no follow-up left: the branch failed."
+            }
+          ],
+          "description": "Goal activity on a branch, recorded as [`Activity::Goal`]. Serialized\nas an object tagged by `type`."
+        },
+        "GoalCheck": {
+          "type": "object",
+          "properties": {
+            "check": {
+              "type": "string",
+              "description": "The branch's check on its candidate: `passed`, `failed`, `none`, ..."
+            },
+            "changes": {
+              "type": "boolean",
+              "description": "Whether the candidate changes anything."
+            },
+            "passed": {
+              "type": "boolean",
+              "description": "Whether the deterministic checks passed."
+            }
+          },
+          "required": [
+            "check",
+            "changes",
+            "passed"
+          ],
+          "description": "How a goal was decided."
+        },
+        "JudgedBy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string",
+                  "const": "deterministic"
+                }
+              },
+              "required": [
+                "by"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "const": "judge"
+                }
+              },
+              "required": [
+                "by",
+                "name"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "const": "fallback"
+                }
+              },
+              "required": [
+                "by",
+                "name",
+                "error"
+              ],
+              "description": "The judge was asked, and its answer was not used."
+            }
+          ],
+          "description": "Who decided a judgement."
         }
       }
     },
@@ -19011,6 +22683,21 @@
               ],
               "format": "int32",
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            },
+            "plan": {
+              "type": "boolean",
+              "description": "Plan first, like `by run --plan`: the first turn runs read-only and\nthe branch waits for `POST .../plan/approve`. See\n`docs/plans-and-goals.md`."
+            },
+            "goal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoalRequest"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A goal a judge verifies, like `by run --goal`."
             }
           },
           "required": [
@@ -19874,6 +23561,33 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GoalRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "rounds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "judge": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
         },
         "RouteSpec": {
           "type": "object",
@@ -20315,6 +24029,21 @@
               ],
               "format": "int32",
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            },
+            "plan": {
+              "type": "boolean",
+              "description": "Plan first, like `by run --plan`: the first turn runs read-only and\nthe branch waits for `POST .../plan/approve`. See\n`docs/plans-and-goals.md`."
+            },
+            "goal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoalRequest"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A goal a judge verifies, like `by run --goal`."
             }
           },
           "required": [
@@ -21178,6 +24907,33 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GoalRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "rounds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "judge": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
         },
         "RouteSpec": {
           "type": "object",
@@ -21638,6 +25394,21 @@
               ],
               "format": "int32",
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            },
+            "plan": {
+              "type": "boolean",
+              "description": "Plan first, like `by run --plan`: the first turn runs read-only and\nthe branch waits for `POST .../plan/approve`. See\n`docs/plans-and-goals.md`."
+            },
+            "goal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoalRequest"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A goal a judge verifies, like `by run --goal`."
             }
           },
           "required": [
@@ -22501,6 +26272,33 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GoalRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "rounds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "judge": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
         },
         "RouteSpec": {
           "type": "object",
@@ -22957,6 +26755,21 @@
               ],
               "format": "int32",
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            },
+            "plan": {
+              "type": "boolean",
+              "description": "Plan first, like `by run --plan`: the first turn runs read-only and\nthe branch waits for `POST .../plan/approve`. See\n`docs/plans-and-goals.md`."
+            },
+            "goal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoalRequest"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A goal a judge verifies, like `by run --goal`."
             }
           },
           "required": [
@@ -23820,6 +27633,33 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GoalRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "rounds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "judge": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
         },
         "RouteSpec": {
           "type": "object",
@@ -24425,6 +28265,21 @@
               ],
               "format": "int32",
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            },
+            "plan": {
+              "type": "boolean",
+              "description": "Plan first, like `by run --plan`: the first turn runs read-only and\nthe branch waits for `POST .../plan/approve`. See\n`docs/plans-and-goals.md`."
+            },
+            "goal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoalRequest"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A goal a judge verifies, like `by run --goal`."
             }
           },
           "required": [
@@ -25288,6 +29143,33 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GoalRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "rounds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "judge": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
         },
         "RouteSpec": {
           "type": "object",

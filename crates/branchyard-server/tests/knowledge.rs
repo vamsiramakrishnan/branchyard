@@ -45,7 +45,8 @@ fn knowledge_is_a_persons_decision_over_http_and_reaches_harnesses() {
     assert_eq!(proposed.status, KnowledgeStatus::Proposed);
     assert_eq!(repo.knowledge(None).unwrap().len(), 2);
     let waiting = repo.knowledge(Some(KnowledgeStatus::Proposed)).unwrap();
-    assert_eq!(waiting, [proposed.clone()]);
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0], proposed);
     assert_eq!(repo.knowledge_entry(proposed.id).unwrap(), proposed);
 
     // Edited, then adopted; the export has both.

@@ -104,6 +104,10 @@ A variable in the harness's environment reaches every command its tools run (its
 
 A branch with a connector grant (`--connector`, `Provisioning::connectors`; see [connectors](connectors.md)) is provisioned one more thing each turn, on the same path and before the sandbox exists: the granted connectors' packages and `INDEX.md` replace `~/.branchyard/connectors/` in its private home, a token for the turn is written to `~/.branchyard/gateway-token` (0600, removed when the turn ends), `ANVIL_GATEWAY_URL` and `ANVIL_GATEWAY_TOKEN_FILE` are set after the plan's variables, and one line pointing at `INDEX.md` is added after the task's instructions, so it reaches the harness on the same session channel. The `provisioned` event adds `connectors` (`by log`: `provisioned: connectors github; ...`); it never holds the token. A grant needs a private home, like secrets, and a connector the gateway does not serve fails the turn by name. A delegated child's grant is narrowed to its parent's ([delegation](delegation.md#connectors)).
 
+## Repository knowledge
+
+Each turn, the adopted [knowledge](knowledge.md) entries that match the branch (its repository, the files its task touches, its kind) are added to its instructions, after the task's own `--instructions` and before the connectors' line, on the same path as every other instruction: the session channel where the driver has one, else the managed block between `<!-- BEGIN BRANCHYARD MANAGED -->` markers in the harness's home. They come most specific first, within `[knowledge] budget_tokens` (default 1500), as a `## Repository knowledge` block whose lines carry each entry's id (`[k3]`). The `provisioned` event adds `knowledge`, the ids given (`by log`: `provisioned: knowledge #3, #1; ...`); entries that matched but did not fit are named in a warning. A judge's or distiller's scratch branch gets none, and `[knowledge] provision = false` turns it off.
+
 ## Using it
 
 SDK:
