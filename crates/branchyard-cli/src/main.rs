@@ -5,6 +5,7 @@
 
 mod args;
 mod attempts;
+mod catalog_cmd;
 mod commands;
 mod config_cmd;
 mod console;
@@ -17,6 +18,8 @@ mod open;
 mod pr;
 mod remote;
 mod render;
+mod review;
+mod review_format;
 mod rig;
 mod setup_io;
 mod watch;
@@ -125,6 +128,11 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
         Command::Config { json, action } => return config_cmd::main(&action, json),
+        // The catalog is built in; no repository or server is involved.
+        Command::Connectors {
+            json,
+            action: args::ConnectorsAction::Catalog,
+        } => return catalog_cmd::connectors(env, json),
         _ => {}
     }
     let target = match &globals.remote {
@@ -217,6 +225,25 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 json,
             },
         ),
+        Command::Review {
+            branch,
+            print,
+            editor,
+            file,
+            detach,
+            task,
+        } => review::main(
+            env,
+            target,
+            &review::ReviewArgs {
+                branch: &branch,
+                print_only: print,
+                editor: editor.as_deref(),
+                file: file.as_deref(),
+                detach,
+                task: &task,
+            },
+        ),
         Command::Reincarnate { branch, task } => commands::reincarnate(env, target, &branch, &task),
         Command::Ls { json } => commands::ls(env, target, json),
         Command::Show {
@@ -238,7 +265,8 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             branch,
             keep_credentials,
         } => commands::rm(target, &branch, keep_credentials),
-        Command::Harnesses { json } => commands::harnesses(env, target, json),
+        Command::Harnesses { json, all: false } => commands::harnesses(env, target, json),
+        Command::Harnesses { json, all: true } => catalog_cmd::harnesses(env, target, json),
         Command::Pr { branch, pr } => pr::main(env, target, &branch, &pr),
         Command::Open {
             branch,
@@ -302,6 +330,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Completions { .. }
         | Command::Man
         | Command::Init { .. }
-        | Command::Config { .. } => unreachable!("handled before choosing a target"),
+        | Command::Config { .. }
+        | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
     }
 }
