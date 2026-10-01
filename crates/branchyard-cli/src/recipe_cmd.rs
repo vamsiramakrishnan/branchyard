@@ -453,6 +453,45 @@ fn check(r: &Resolved, smoke: bool, json: bool) -> Outcome {
     }
 }
 
+/// The provider options `--provider recipe:NAME` names: the recipe as
+/// resolved here, refused unless it may run (trusted as it is now, or your
+/// own), and never from a harness on a branch. Its commands are stored
+/// with the branch, so later turns, recovery and removal run what was
+/// trusted now.
+pub fn provider(args: &crate::args::RecipeArgs) -> Result<branchyard::RecipeOptions, Failure> {
+    in_harness()?;
+    let root = root()?;
+    let r = resolve(&root, &args.name)?;
+    if !r.runs_ok() {
+        let why = match r.trust {
+            Trust::Changed => "changed since you trusted it",
+            _ => "has commands you have not trusted",
+        };
+        return Err(Failure::Message(format!(
+            "recipe {} in {} {why}; nothing ran. Review it with `by recipe show {}`, then run \
+             `by recipe trust {}`",
+            r.name,
+            r.file.display(),
+            r.name,
+            r.name
+        )));
+    }
+    Ok(branchyard::RecipeOptions {
+        name: r.name.clone(),
+        create: r.config.create.clone(),
+        suspend: r.config.suspend.clone(),
+        resume: r.config.resume.clone(),
+        destroy: r.config.destroy.clone(),
+        timeout_seconds: r.config.timeout_seconds,
+        digest: r.digest.clone(),
+        workdir: args.workdir.clone().unwrap_or_default(),
+        home: args.home.clone().unwrap_or_default(),
+        pass_env: args.pass_env.clone(),
+        keep: args.lifecycle.keep.unwrap_or_default(),
+        max_paused: args.lifecycle.max_paused,
+    })
+}
+
 fn smoke_test(recipe: &Recipe, checks: &mut Vec<Check>) {
     let ssh = std::env::var("BRANCHYARD_SSH")
         .ok()

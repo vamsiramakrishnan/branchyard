@@ -206,7 +206,11 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             Choice::new(true, "Yes", "private HOME; give the harness a secret next"),
         ]),
     ];
-    if facts.platform.kvm || d.provider == Some(ProviderKind::Microsandbox) {
+    // A recipe chosen by hand is kept: this question offers only local and
+    // Microsandbox.
+    if (facts.platform.kvm || d.provider == Some(ProviderKind::Microsandbox))
+        && d.provider != Some(ProviderKind::Recipe)
+    {
         qs.push(
             Question::new(
                 "provider",

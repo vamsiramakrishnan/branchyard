@@ -477,6 +477,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -668,6 +682,84 @@
             "key"
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
         },
         "Provisioning": {
           "type": "object",
@@ -4039,6 +4131,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -4230,6 +4336,84 @@
             "key"
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
         },
         "Provisioning": {
           "type": "object",
@@ -4819,6 +5003,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -5010,6 +5208,84 @@
             "key"
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
         },
         "Provisioning": {
           "type": "object",
@@ -22883,6 +23159,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -23074,6 +23364,84 @@
             "key"
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
         },
         "Provisioning": {
           "type": "object",
@@ -24229,6 +24597,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -24420,6 +24802,84 @@
             "key"
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
         },
         "Provisioning": {
           "type": "object",
@@ -25594,6 +26054,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -25785,6 +26259,84 @@
             "key"
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
         },
         "Provisioning": {
           "type": "object",
@@ -26955,6 +27507,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -27146,6 +27712,84 @@
             "key"
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
         },
         "Provisioning": {
           "type": "object",
@@ -28465,6 +29109,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -28656,6 +29314,84 @@
             "key"
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
         },
         "Provisioning": {
           "type": "object",

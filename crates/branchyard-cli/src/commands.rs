@@ -187,7 +187,8 @@ impl Live {
             .with_notifier(env.notifier()),
         );
         let choice = console::choose(task.permissions, env.stdin_tty, env.stderr_tty);
-        match provider(task).or(branch) {
+        // A recipe that cannot be used is refused by `options`, below.
+        match provider(task).ok().flatten().or(branch) {
             None | Some(Provider::Local) => {
                 eprintln!("by: local mode: harnesses run as your user, with no isolation beyond it")
             }
@@ -201,6 +202,11 @@ impl Live {
                  the worktree is copied to {} and back",
                 options.template,
                 options.workdir()
+            ),
+            Some(Provider::Recipe(options)) => eprintln!(
+                "by: harnesses run on machines recipe {} makes; the worktree is copied there and \
+                 back",
+                options.name
             ),
         }
         if choice == (Choice::DenyAll { notice: true }) {
@@ -243,7 +249,7 @@ impl Live {
             observer: Some(Arc::new(move |event| console.event(event))),
             isolated: task.isolated,
             command: task.command.clone(),
-            provider: provider(task),
+            provider: provider(task)?,
             delegation: task.delegate.map(Envelope::depth),
             delegation_cli: exe,
             delegation_server: None,
@@ -2028,9 +2034,14 @@ pub(crate) fn provision(task: &TaskArgs) -> Result<Option<branchyard::Provisioni
     Ok(spec)
 }
 
-pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
+/// The provider the flags name, if any. `--provider recipe:NAME` resolves
+/// the recipe here and is refused unless it may run.
+pub(crate) fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
+    if let Some(recipe) = &task.recipe {
+        return crate::recipe_cmd::provider(recipe).map(|o| Some(Provider::Recipe(o)));
+    }
     if let Some(substrate) = &task.substrate {
-        return Some(Provider::Substrate(SubstrateOptions {
+        return Ok(Some(Provider::Substrate(SubstrateOptions {
             endpoint: substrate.endpoint.clone(),
             router: substrate.router.clone(),
             atespace: substrate.atespace.clone().unwrap_or_default(),
@@ -2047,9 +2058,9 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
             keep: substrate.lifecycle.keep.unwrap_or_default(),
             snapshots: substrate.lifecycle.snapshots,
             max_paused: substrate.lifecycle.max_paused,
-        }));
+        })));
     }
-    match (&task.sandbox, task.local) {
+    Ok(match (&task.sandbox, task.local) {
         (Some(sandbox), _) => Some(Provider::Microsandbox(SandboxOptions {
             image: sandbox.image.clone(),
             cpus: sandbox.cpus,
@@ -2062,7 +2073,7 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
         })),
         (None, true) => Some(Provider::Local),
         (None, false) => None,
-    }
+    })
 }
 
 /// `by rig check FILE` prints the plan; `by rig run FILE PROMPT` runs the

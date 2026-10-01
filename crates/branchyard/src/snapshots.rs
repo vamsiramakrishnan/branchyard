@@ -378,6 +378,8 @@ pub(crate) fn lifecycle(provider: Option<&Provider>) -> Option<Lifecycle> {
         Provider::Local => return None,
         Provider::Microsandbox(o) => (o.keep, o.snapshots, o.max_paused),
         Provider::Substrate(o) => (o.keep, o.snapshots, o.max_paused),
+        // A recipe's machine has no checkpoints to keep.
+        Provider::Recipe(o) => (o.keep, Some(0), o.max_paused),
     };
     Some(Lifecycle {
         keep: keep == SandboxKeep::Pause,
@@ -392,6 +394,7 @@ pub(crate) fn provider_name(provider: &Provider) -> &'static str {
         Provider::Local => "local",
         Provider::Microsandbox(_) => "microsandbox",
         Provider::Substrate(_) => "substrate",
+        Provider::Recipe(_) => "recipe",
     }
 }
 
@@ -406,6 +409,7 @@ pub(crate) fn provider_key(provider: &Provider) -> String {
             o.atespace(),
             o.template
         ),
+        Provider::Recipe(o) => format!("recipe:{}", o.name),
         other => provider_name(other).to_owned(),
     }
 }
@@ -462,6 +466,7 @@ pub(crate) fn open(yard: &Yard, provider: &Provider) -> Result<Arc<dyn SandboxPr
     match provider {
         Provider::Local => Err("a local harness has no sandbox".into()),
         Provider::Microsandbox(options) => crate::placement::microsandbox(yard, options),
+        Provider::Recipe(options) => Ok(crate::placement::recipe_provider(yard, options)),
         Provider::Substrate(options) => crate::placement::substrate_signed(options)
             .map(|p| Arc::new(p) as Arc<dyn SandboxProvider>),
     }

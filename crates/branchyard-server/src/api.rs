@@ -435,6 +435,23 @@ impl App {
             Provider::Local => return Ok(Some(provider)),
             Provider::Microsandbox(_) => "microsandbox",
             Provider::Substrate(_) => "substrate",
+            // A recipe is the repository's own scripts, run as the person
+            // who trusted them on the machine that has the repository; a
+            // request carries its commands, which this server would run
+            // as itself. Refused whatever allow_providers says.
+            Provider::Recipe(options) => {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "provider_not_allowed",
+                    format!(
+                        "a server does not run environment recipes (recipe {}): a recipe runs \
+                         where the repository is, as the person who trusted it; run it with by \
+                         run --provider recipe:{} there, without --remote",
+                        options.name, options.name
+                    ),
+                )
+                .detail(serde_json::json!({ "provider": "recipe" })))
+            }
         };
         if !self.config.allow_providers.contains(kind) {
             return Err(ApiError::new(

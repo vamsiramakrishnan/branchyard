@@ -200,6 +200,13 @@
           ],
           "description": "Where the harness runs."
         },
+        "recipe": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "With `provider = \"recipe\"`: which `[recipes.NAME]` (docs/recipes.md)."
+        },
         "instructions": {
           "type": [
             "string",
@@ -235,6 +242,11 @@
           "type": "string",
           "const": "microsandbox",
           "description": "A microVM per turn; needs `[microsandbox]` and a build with the\n`microsandbox` feature."
+        },
+        {
+          "type": "string",
+          "const": "recipe",
+          "description": "The machine an environment recipe makes (`--provider recipe:NAME`);\n`defaults.recipe` names it."
         }
       ]
     },

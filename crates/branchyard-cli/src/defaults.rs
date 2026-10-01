@@ -223,7 +223,15 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
     if d.isolated == Some(true) {
         task.isolated = true;
     }
-    let chose_provider = task.sandbox.is_some() || task.substrate.is_some() || task.local;
+    let chose_provider =
+        task.sandbox.is_some() || task.substrate.is_some() || task.recipe.is_some() || task.local;
+    if let (false, Some(ProviderKind::Recipe), Some(name)) = (chose_provider, d.provider, &d.recipe)
+    {
+        task.recipe = Some(crate::args::RecipeArgs {
+            name: name.clone(),
+            ..crate::args::RecipeArgs::default()
+        });
+    }
     if !chose_provider && d.provider == Some(ProviderKind::Microsandbox) {
         if let Some(sandbox) = &config.microsandbox {
             task.sandbox = Some(SandboxArgs {
@@ -248,7 +256,10 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
     }
     // Provisioning: fill each unset part; add servers and secrets the
     // flags did not name.
-    let private_home = task.isolated || task.sandbox.is_some() || task.substrate.is_some();
+    let private_home = task.isolated
+        || task.sandbox.is_some()
+        || task.substrate.is_some()
+        || task.recipe.is_some();
     let secrets = match private_home {
         true => config.secret_sources().map_err(|e| e.to_string())?,
         false => Vec::new(),

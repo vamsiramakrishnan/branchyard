@@ -91,6 +91,10 @@ pub struct TaskArgs {
     pub sandbox: Option<SandboxArgs>,
     /// `--provider substrate` and its options.
     pub substrate: Option<SubstrateArgs>,
+    /// `--provider recipe:NAME` and its options; the recipe is resolved
+    /// and its trust checked when the command runs
+    /// (`crate::recipe_cmd::provider`).
+    pub recipe: Option<RecipeArgs>,
     /// `--provider local`.
     pub local: bool,
     /// From `--delegate[=DEPTH]`: levels of children the harness may create.
@@ -362,6 +366,20 @@ pub struct SubstrateArgs {
     /// than loopback.
     pub insecure: bool,
     /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`.
+    pub lifecycle: LifecycleArgs,
+}
+
+/// Options for `--provider recipe:NAME`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RecipeArgs {
+    /// The recipe's name, `[recipes.NAME]`.
+    pub name: String,
+    /// `--recipe-workdir`: where the worktree goes on the machine.
+    pub workdir: Option<String>,
+    /// `--recipe-home`: the harness's `HOME` on the machine.
+    pub home: Option<String>,
+    pub pass_env: Vec<String>,
+    /// `--keep-sandbox` and `--max-paused`.
     pub lifecycle: LifecycleArgs,
 }
 
@@ -2000,6 +2018,25 @@ impl ScratchAction {
     }
 }
 
+impl Command {
+    /// The recipe `--provider recipe:NAME` names, for commands that take
+    /// it: a server never runs one, so remote mode refuses it before
+    /// connecting.
+    pub fn recipe(&self) -> Option<&str> {
+        let task: &TaskArgs = match self {
+            Command::Run { task, .. } => task,
+            Command::Fan { task, .. } => task,
+            Command::Fork { task, .. } => task,
+            Command::Reincarnate { task, .. } => task,
+            Command::Send { task, .. } => task,
+            Command::Review { task, .. } => task,
+            Command::Spawn { spawn, .. } => &spawn.task,
+            _ => return None,
+        };
+        task.recipe.as_ref().map(|r| r.name.as_str())
+    }
+}
+
 /// Flags whose combination is checked after clap parses them, producing
 /// [`Flags::Output`]; flattened into a command as [`Checked<Self>`].
 pub trait Flags: Args + FromArgMatches {
@@ -2147,7 +2184,7 @@ impl From<AfterArg> for branchyard::After {
 }
 
 /// `--provider`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderArg {
     /// A process on this host (the default for a new branch)
     Local,
@@ -2155,6 +2192,30 @@ pub enum ProviderArg {
     Microsandbox,
     /// An Agent Substrate actor; needs the --substrate-* endpoints and key
     Substrate,
+    /// The machine an environment recipe makes (`recipe:NAME`)
+    Recipe(String),
+}
+
+/// `local`, `microsandbox`, `substrate` or `recipe:NAME`.
+fn provider_arg(value: &str) -> Result<ProviderArg, String> {
+    match value {
+        "local" => Ok(ProviderArg::Local),
+        "microsandbox" => Ok(ProviderArg::Microsandbox),
+        "substrate" => Ok(ProviderArg::Substrate),
+        other => match other.strip_prefix("recipe:") {
+            Some(name) if branchyard_setup::config::valid_recipe_name(name) => {
+                Ok(ProviderArg::Recipe(name.to_owned()))
+            }
+            Some(name) => Err(format!(
+                "{name:?} is not a recipe name (1 to 64 of a-z, 0-9, '.', '_' and '-', \
+                 starting with a letter or digit)"
+            )),
+            None => Err(format!(
+                "{other:?} is not a provider [possible values: local, microsandbox, substrate, \
+                 recipe:NAME]"
+            )),
+        },
+    }
 }
 
 /// `--check`, the budget, turn and time limits, and stall detection.
@@ -2229,8 +2290,9 @@ pub struct Launch {
     /// Launch this instead of the profile's executable, for development and testing
     #[arg(long, value_name = "CMD", value_parser = command_argv)]
     command: Option<Argv>,
-    /// Where the harness runs (default: local, or the branch's own)
-    #[arg(long, value_name = "PROVIDER")]
+    /// Where the harness runs: local, microsandbox, substrate or recipe:NAME (default: local,
+    /// or the branch's own)
+    #[arg(long, value_name = "PROVIDER", value_parser = provider_arg)]
     provider: Option<ProviderArg>,
     /// Variables to copy into the sandbox, such as API keys; nothing else is
     #[arg(long, value_name = "NAME,NAME,...", value_parser = variable_names)]
@@ -2239,6 +2301,8 @@ pub struct Launch {
     microsandbox: MicrosandboxFlags,
     #[command(flatten)]
     substrate: SubstrateFlags,
+    #[command(flatten)]
+    recipe: RecipeFlags,
     #[command(flatten)]
     lifecycle: LifecycleFlags,
     /// With --remote: only a worker carrying this label runs it (repeatable)
@@ -2256,7 +2320,21 @@ pub struct Launch {
 }
 
 #[derive(Args, Clone, Debug, Default, PartialEq)]
-#[command(next_help_heading = "Sandbox lifecycle (--provider microsandbox or substrate)")]
+#[command(next_help_heading = "Recipe provider (--provider recipe:NAME)")]
+pub struct RecipeFlags {
+    /// Where the worktree is copied on the machine (default:
+    /// /tmp/branchyard/<branch>-<hash>/workspace)
+    #[arg(long, value_name = "PATH")]
+    recipe_workdir: Option<String>,
+    /// The harness's HOME on the machine (default: beside the workdir)
+    #[arg(long, value_name = "PATH")]
+    recipe_home: Option<String>,
+}
+
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(
+    next_help_heading = "Sandbox lifecycle (--provider microsandbox, substrate or recipe:NAME)"
+)]
 pub struct LifecycleFlags {
     /// Between turns: destroy the sandbox (default) or pause it for the next turn
     #[arg(long, value_name = "WHAT", value_parser = keep_sandbox)]
@@ -2389,6 +2467,24 @@ impl Launch {
         task.command = self.command.map(|argv| argv.0);
         let chosen = self.provider;
         let micro = &self.microsandbox;
+        let recipe = matches!(chosen, Some(ProviderArg::Recipe(_)));
+        if !recipe {
+            let given = [
+                ("recipe-workdir", self.recipe.recipe_workdir.is_some()),
+                ("recipe-home", self.recipe.recipe_home.is_some()),
+            ]
+            .into_iter()
+            .find_map(|(flag, given)| given.then_some(flag));
+            if let Some(flag) = given {
+                return Err(format!("--{flag} needs --provider recipe:NAME"));
+            }
+        } else if self.lifecycle.sandbox_snapshots.is_some() {
+            return Err(
+                "--sandbox-snapshots does not apply to a recipe's machine, which has no \
+                 snapshots"
+                    .into(),
+            );
+        }
         if chosen != Some(ProviderArg::Microsandbox) {
             let given = [
                 ("image", micro.image.is_some()),
@@ -2408,12 +2504,14 @@ impl Launch {
             }
         }
         if matches!(chosen, None | Some(ProviderArg::Local)) && self.pass_env.is_some() {
-            return Err("--pass-env needs --provider microsandbox or substrate".into());
+            return Err(
+                "--pass-env needs --provider microsandbox, substrate or recipe:NAME".into(),
+            );
         }
         if matches!(chosen, None | Some(ProviderArg::Local)) {
             if let Some(flag) = self.lifecycle.first_given() {
                 return Err(format!(
-                    "--{flag} needs --provider microsandbox or substrate"
+                    "--{flag} needs --provider microsandbox, substrate or recipe:NAME"
                 ));
             }
         }
@@ -2422,6 +2520,22 @@ impl Launch {
         match chosen {
             None => {}
             Some(ProviderArg::Local) => task.local = true,
+            Some(ProviderArg::Recipe(name)) => {
+                let path = |value: Option<String>, flag: &str| match value {
+                    Some(path) if !path.starts_with('/') => Err(format!(
+                        "--{flag} is a path on the recipe's machine and must be absolute, not \
+                         {path:?}"
+                    )),
+                    other => Ok(other),
+                };
+                task.recipe = Some(RecipeArgs {
+                    name,
+                    workdir: path(self.recipe.recipe_workdir, "recipe-workdir")?,
+                    home: path(self.recipe.recipe_home, "recipe-home")?,
+                    pass_env,
+                    lifecycle,
+                });
+            }
             Some(ProviderArg::Microsandbox) => {
                 let image = self
                     .microsandbox
@@ -3522,6 +3636,7 @@ mod tests {
                 command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
                 sandbox: None,
                 substrate: None,
+                recipe: None,
                 local: false,
                 delegate: None,
                 allow_delegation: false,
@@ -3719,7 +3834,7 @@ mod tests {
             })
         );
         assert!(err("run go --keep-sandbox pause")
-            .contains("--keep-sandbox needs --provider microsandbox or substrate"));
+            .contains("--keep-sandbox needs --provider microsandbox, substrate or recipe:NAME"));
         assert!(
             err("run go --provider microsandbox --image a --keep-sandbox forever")
                 .contains("not pause or destroy")
@@ -3738,10 +3853,10 @@ mod tests {
         assert!(err("run go --provider local --cpus 2")
             .contains("--cpus needs --provider microsandbox"));
         assert!(err("run go --provider local --pass-env A")
-            .contains("--pass-env needs --provider microsandbox or substrate"));
+            .contains("--pass-env needs --provider microsandbox, substrate or recipe:NAME"));
         let docker = err("run go --provider docker");
         assert!(
-            docker.contains("[possible values: local, microsandbox, substrate]"),
+            docker.contains("[possible values: local, microsandbox, substrate, recipe:NAME]"),
             "{docker}"
         );
         assert!(err("run go --provider microsandbox --image a --cpus 0").contains("--cpus"));
@@ -3751,6 +3866,42 @@ mod tests {
             kind("send b go --provider local"),
             ErrorKind::UnknownArgument
         );
+    }
+
+    #[test]
+    fn provider_recipe_names_a_recipe_and_its_paths() {
+        let task = self::task(
+            "run go --provider recipe:devbox --recipe-workdir /srv/work --pass-env TOKEN \
+             --keep-sandbox pause --max-paused 2",
+        );
+        assert_eq!(
+            task.recipe,
+            Some(RecipeArgs {
+                name: "devbox".into(),
+                workdir: Some("/srv/work".into()),
+                home: None,
+                pass_env: vec!["TOKEN".into()],
+                lifecycle: LifecycleArgs {
+                    keep: Some(branchyard::SandboxKeep::Pause),
+                    snapshots: None,
+                    max_paused: Some(2),
+                },
+            })
+        );
+        assert!(task.sandbox.is_none() && task.substrate.is_none() && !task.local);
+        let fan = self::task("fan go --harness codex,claude --provider recipe:lab.box");
+        assert_eq!(fan.recipe.map(|r| r.name), Some("lab.box".into()));
+        assert!(err("run go --provider recipe:").contains("not a recipe name"));
+        assert!(err("run go --provider recipe:Dev").contains("not a recipe name"));
+        assert!(err("run go --recipe-workdir /w").contains("needs --provider recipe:NAME"));
+        assert!(
+            err("run go --provider recipe:devbox --recipe-home home").contains("must be absolute")
+        );
+        assert!(
+            err("run go --provider recipe:devbox --sandbox-snapshots 2").contains("no snapshots")
+        );
+        assert!(err("run go --provider recipe:devbox --image a")
+            .contains("--image needs --provider microsandbox"));
     }
 
     #[test]
