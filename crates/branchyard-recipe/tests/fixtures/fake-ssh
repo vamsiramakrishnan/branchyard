@@ -135,11 +135,18 @@ def master_main(control, persist):
         time.sleep(0.2)
     state = read_state(control)
     if state and state.get("pid") == os.getpid():
-        for forward in state.get("forwards", {}).values():
+        forwards = [forward["pid"] for forward in state.get("forwards", {}).values()]
+        for pid in forwards:
             try:
-                os.kill(forward["pid"], signal.SIGTERM)
+                os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
+        # Like ssh's mux master, exit only once its forwards are closed, so
+        # a client that waited for `-O exit` may forward the same path again.
+        for _ in range(200):
+            if not any(alive(pid) for pid in forwards):
+                break
+            time.sleep(0.02)
         try:
             os.unlink(control)
         except OSError:
@@ -170,6 +177,7 @@ def proxy_main(local, remote, master):
     old = os.umask(0o177)
     server.bind(local)
     os.umask(old)
+    bound = os.stat(local)
     # For the fixture's own test: widen the window between bind and listen.
     time.sleep(float(os.environ.get("FAKE_SSH_LISTEN_DELAY", "0")))
     server.listen(64)
@@ -197,8 +205,12 @@ def proxy_main(local, remote, master):
         for a, b in ((client, upstream), (upstream, client)):
             threading.Thread(target=pump, args=(a, b), daemon=True).start()
     server.close()
+    # Remove the socket only if it is still this proxy's: a later forward
+    # may have bound the same path since.
     try:
-        os.unlink(local)
+        now = os.stat(local)
+        if (now.st_dev, now.st_ino) == (bound.st_dev, bound.st_ino):
+            os.unlink(local)
     except OSError:
         pass
 

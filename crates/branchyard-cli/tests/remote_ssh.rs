@@ -398,3 +398,64 @@ fn the_fake_forward_answers_only_once_its_socket_accepts() {
     assert_eq!(&buf, b"ping");
     assert!(ssh(&["-O", "exit", "host"]).status.success());
 }
+
+/// After `-O exit` returns, the old forward is gone and a new forward of
+/// the same path keeps its socket: the fake once let the old proxy, still
+/// exiting, remove the new one's socket.
+#[test]
+fn a_forward_made_again_after_exit_keeps_its_socket() {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let dir = tempfile::tempdir().unwrap();
+    let dir = fs::canonicalize(dir.path()).unwrap();
+    let (control, local, remote) = (
+        dir.join("ctl"),
+        dir.join("local.sock"),
+        dir.join("remote.sock"),
+    );
+    let _upstream = UnixListener::bind(&remote).unwrap();
+    let ssh = |args: &[&str]| {
+        let out = Command::new("python3")
+            .arg(FAKE_SSH)
+            .args(["-S", control.to_str().unwrap()])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+    };
+    let spec = format!("{}:{}", local.display(), remote.display());
+    ssh(&["-M", "-N", "-f", "host"]);
+    ssh(&["-O", "forward", "-L", &spec, "host"]);
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&control).unwrap()).unwrap();
+    let old = state["forwards"][local.to_str().unwrap()]["pid"]
+        .as_i64()
+        .unwrap();
+    ssh(&["-O", "exit", "host"]);
+    ssh(&["-M", "-N", "-f", "host"]);
+    ssh(&["-O", "forward", "-L", &spec, "host"]);
+    // Wait until the old proxy has certainly exited (it is not our child,
+    // so poll /proc), then the new socket must still be there.
+    let proc = PathBuf::from(format!("/proc/{old}"));
+    let gone = || {
+        fs::read_to_string(proc.join("stat"))
+            .map(|s| {
+                s.rsplit(')')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start()
+                    .starts_with('Z')
+            })
+            .unwrap_or(true)
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !gone() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the old proxy lives on"
+        );
+        std::thread::yield_now();
+    }
+    UnixStream::connect(&local).expect("the new forward keeps its socket");
+    ssh(&["-O", "exit", "host"]);
+}
