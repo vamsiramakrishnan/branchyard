@@ -203,7 +203,7 @@ fn read(path: &Path) -> Result<ProjectConfig, Failure> {
 }
 
 /// Inside a harness running on a branch.
-fn in_harness() -> Option<String> {
+pub(crate) fn in_harness() -> Option<String> {
     std::env::var(branchyard::ENV_BRANCH)
         .ok()
         .filter(|v| !v.is_empty())
@@ -284,7 +284,7 @@ fn trust(resolved: &Resolved) -> Result<(), Failure> {
 
 /// Require that `resolved`'s scripts may run: trusted already, or trusted
 /// now on the terminal.
-fn require_trust(env: &Env, resolved: &Resolved) -> Result<(), Failure> {
+pub(crate) fn require_trust(env: &Env, resolved: &Resolved) -> Result<(), Failure> {
     if resolved.runs_ok() {
         return Ok(());
     }

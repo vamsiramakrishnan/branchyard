@@ -534,3 +534,84 @@ fn a_terminal_is_asked_once_and_a_yes_is_remembered() {
     );
     assert_eq!(repo.branches(), 2);
 }
+
+#[test]
+fn by_env_lists_shows_rebuilds_and_prunes_prepared_environments() {
+    let repo = Repo::new(
+        "[workspace]\nsetup = \"mkdir -p deps && echo lib > deps/lib.txt\"\nprepare = true\n\
+         share = [\"deps\"]\n",
+    );
+    let out = repo.by(&["env", "list"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("No prepared environments yet"),
+        "{}",
+        stdout(&out)
+    );
+    // Rebuilding runs setup: it needs trust.
+    let out = repo.by(&["env", "rebuild"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("by workspace trust"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(repo.by(&["workspace", "trust"]).status.success());
+    let shown = repo.json(&["env", "show", "--json"]);
+    assert_eq!(shown["environment"], Value::Null);
+
+    let out = repo.by(&["env", "rebuild"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("built environment"),
+        "{}",
+        stdout(&out)
+    );
+    let listed = repo.json(&["env", "list", "--json"]);
+    let key = listed["current"].as_str().unwrap().to_owned();
+    assert_eq!(listed["environments"][0]["key"], key.as_str());
+    assert_eq!(listed["environments"][0]["state"], "good");
+    assert_eq!(listed["environments"][0]["built_by"], "by env rebuild");
+    let shown = repo.json(&["env", "show", &key[..8], "--json"]);
+    assert_eq!(shown["produced"], json!(["deps"]));
+    let out = repo.by(&["env", "show"]);
+    assert!(stdout(&out).contains("produced  deps"), "{}", stdout(&out));
+
+    // A new branch starts from it: setup does not run, the directory is
+    // linked.
+    let out = repo.by_agent(&["run", "WRITE x.txt=1", "--name", "a"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let worktree = PathBuf::from(
+        repo.json(&["workspace", "show", "a", "--json"])["worktree"]
+            .as_str()
+            .unwrap(),
+    );
+    let link = fs::read_link(worktree.join("deps")).unwrap();
+    assert!(
+        link.ends_with(format!("environments/{key}/tree/deps")),
+        "{link:?}"
+    );
+    let log = repo.json(&["log", "a", "--json"]);
+    let restored = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["activity"] == "workspace" && e["environment"].is_object())
+        .unwrap_or_else(|| panic!("{log}"));
+    assert_eq!(restored["environment"]["origin"], "restored");
+
+    // Linked: kept, even when named.
+    let out = repo.by(&["env", "prune", &key]);
+    assert!(stdout(&out).contains("linked by a"), "{}", stdout(&out));
+    assert!(repo.by(&["rm", "a"]).status.success());
+    let out = repo.by(&["env", "prune", &key, "--json"]);
+    let pruned: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(pruned["removed"][0][0], key.as_str());
+    assert!(repo.json(&["env", "list", "--json"])["environments"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // Not on a server.
+    let out = repo.by(&["--remote", "http://127.0.0.1:9", "env", "list"]);
+    assert_eq!(out.status.code(), Some(1));
+}

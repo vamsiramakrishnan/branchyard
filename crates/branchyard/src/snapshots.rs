@@ -87,7 +87,8 @@ pub enum SnapshotMethod {
 }
 
 impl SnapshotMethod {
-    fn describe(self) -> &'static str {
+    /// How it reads in a log: `live branch` or `checkpoint`.
+    pub fn describe(self) -> &'static str {
         match self {
             SnapshotMethod::LiveBranch => "live branch",
             SnapshotMethod::Checkpoint => "checkpoint",

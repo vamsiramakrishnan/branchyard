@@ -435,6 +435,18 @@ Examples:
 runs setup before its first turn and teardown when it is removed. Its scripts
 never run until you trust them; see docs/workspace.md.";
 
+const ENV_EXAMPLES: &str = "\
+Examples:
+  by env list
+  by env show
+  by env rebuild
+  by env prune --keep 2 --older-than 7
+
+With prepare = true in [workspace], setup runs once per environment key (the
+setup commands, copy globs and lockfiles) and new branches start from what it
+produced. A failed build never replaces the last good one. See
+docs/environments.md.";
+
 const PR_EXAMPLES: &str = "\
 Examples:
   by pr fix-the-flaky-test                       # push, then open or update the PR
@@ -591,6 +603,15 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: WorkspaceAction,
+    },
+    /// Prepared environments: list, show, rebuild or prune them
+    #[command(display_order = 111, subcommand_required = true, after_help = ENV_EXAMPLES)]
+    Env {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: EnvAction,
     },
     /// Remove a branch's worktree and record
     #[command(display_order = 106)]
@@ -981,6 +1002,32 @@ pub enum WorkspaceAction {
         /// Start it in the background, output to a log file, and return
         #[arg(long)]
         detach: bool,
+    },
+}
+
+/// `by env ...`; see docs/environments.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum EnvAction {
+    /// Every prepared environment and recorded failure, newest first
+    List,
+    /// One environment: its inputs, setup, what it holds (default: the current key)
+    Show {
+        /// A key, or the start of one
+        key: Option<String>,
+    },
+    /// Build the current key's environment now from HEAD; a failure keeps the last good one
+    Rebuild,
+    /// Remove old environments; the newest of each recipe and linked ones stay
+    Prune {
+        /// Only these keys (or starts of keys), even the newest
+        #[arg(value_name = "KEY")]
+        keys: Vec<String>,
+        /// Good environments kept per recipe (default 3)
+        #[arg(long, value_name = "N")]
+        keep: Option<usize>,
+        /// Remove those unused for this many days (default 14)
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u64>,
     },
 }
 
@@ -3377,6 +3424,29 @@ mod tests {
         );
         assert!(err("workspace run a b c").contains("no more were expected"));
         assert!(err("workspace").contains("Usage"));
+    }
+
+    #[test]
+    fn env_actions_parse() {
+        let env = |line: &str| match parse_str(line).unwrap() {
+            Command::Env { json, action } => (json, action),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(env("env list --json"), (true, EnvAction::List));
+        assert_eq!(env("env show"), (false, EnvAction::Show { key: None }));
+        assert_eq!(env("env rebuild"), (false, EnvAction::Rebuild));
+        assert_eq!(
+            env("env prune abc def --keep 1 --older-than 7"),
+            (
+                false,
+                EnvAction::Prune {
+                    keys: vec!["abc".into(), "def".into()],
+                    keep: Some(1),
+                    older_than: Some(7),
+                }
+            )
+        );
+        assert!(err("env").contains("Usage"));
     }
 
     #[test]
