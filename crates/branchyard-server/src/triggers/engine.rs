@@ -37,9 +37,24 @@ use super::{precheck, target, Clock, Schedule, StoredTrigger};
 /// this; the idempotency key keeps that from admitting a second task.
 pub const RUN_LEASE_MS: u64 = (precheck::MAX_TIMEOUT_SECONDS + 60) * 1000;
 
+/// How long a run given back for later waits before any dispatcher fires
+/// it again.
+pub const DEFER_MS: u64 = 30_000;
+
 /// Most scheduled times a claim counts one by one when recording what was
 /// missed; more are reported as at least this many.
 const MAX_MISSED_COUNTED: u64 = 100_000;
+
+/// Why the sink admitted no task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The task was refused: the run failed, and counts toward pausing.
+    Failed(String),
+    /// Not now (the server is stopping, or the registry cannot be read):
+    /// the run stays pending, and any dispatcher may fire it after
+    /// [`DEFER_MS`] (at once after a restart on a data directory).
+    Later(String),
+}
 
 /// A task the sink admitted.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,7 +74,7 @@ pub trait Sink: Send + Sync {
         trigger: &StoredTrigger,
         key: &str,
         request: TaskRequest,
-    ) -> Result<Admitted, String>;
+    ) -> Result<Admitted, Refusal>;
     /// An operation as the registry has it now.
     fn operation(&self, id: &str) -> Option<Operation>;
     /// Whether the operator lets `repo`'s triggers run prechecks.
@@ -278,6 +293,12 @@ impl Engine {
             }
             Some(t) => self.attempt(&t, &mut run),
         }
+        if run.state == RunState::Pending {
+            // Not now: any dispatcher may fire it a little later.
+            let until = self.clock.now() + DEFER_MS;
+            self.store.defer_run(&run.id, fence, until)?;
+            return Ok(run);
+        }
         run.finished_at_ms = Some(self.clock.now());
         let accounted = self.store.finish_run(&run, fence, pause_after)?;
         if let Some(why) = &accounted.paused {
@@ -367,7 +388,8 @@ impl Engine {
                 run.branches = admitted.branches;
                 run.reason = None;
             }
-            Err(e) => fail(run, e),
+            Err(Refusal::Failed(e)) => fail(run, e),
+            Err(Refusal::Later(why)) => run.reason = Some(why),
         }
     }
 
@@ -574,9 +596,12 @@ mod tests {
             t: &StoredTrigger,
             key: &str,
             request: TaskRequest,
-        ) -> Result<Admitted, String> {
+        ) -> Result<Admitted, Refusal> {
             if let Some(why) = self.refuse.lock().unwrap().clone() {
-                return Err(why);
+                return Err(match why.strip_prefix("later: ") {
+                    Some(why) => Refusal::Later(why.to_owned()),
+                    None => Refusal::Failed(why),
+                });
             }
             let id = format!("op:{}:{key}", t.id);
             self.admitted
@@ -867,5 +892,22 @@ mod tests {
         // A delivery recorded for a paused trigger is skipped, not fired.
         *sink.refuse.lock().unwrap() = None;
         assert_eq!(deliver(4).fired[0].state, RunState::SkippedDisabled);
+
+        // A server that is stopping gives a run back rather than failing it.
+        store.set_state(&t.id, true, None, 0, None).unwrap();
+        *sink.refuse.lock().unwrap() = Some("later: shutting_down".into());
+        let mut run = new_run(&t.id, "event:d-5".into(), RunState::Pending, MINUTE);
+        run.event = Some(event(5));
+        store.record(&run).unwrap();
+        let (claimed, fence) = engines[0].claim_pending().unwrap().unwrap();
+        let given_back = engines[0].fire(claimed, fence).unwrap();
+        assert_eq!(given_back.state, RunState::Pending);
+        assert_eq!(store.get(&t.id).unwrap().unwrap().failures, 0);
+        *sink.refuse.lock().unwrap() = None;
+        assert!(engines[0].tick().unwrap().fired.is_empty(), "not at once");
+        clock.store(MINUTE + DEFER_MS + 1, Ordering::SeqCst);
+        let tick = engines[0].tick().unwrap();
+        assert_eq!(tick.fired.len(), 1, "claimable after the deferral");
+        assert_eq!(tick.fired[0].state, RunState::Fired);
     }
 }

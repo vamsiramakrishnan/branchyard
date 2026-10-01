@@ -10,7 +10,7 @@ use branchyard::{Fleet, RouteOptions, TaskKind};
 use branchyard_client::api::{Operation, TaskRequest};
 use tokio::sync::{watch, Notify};
 
-use super::engine::{Admitted, Engine, Sink};
+use super::engine::{Admitted, Engine, Refusal, Sink};
 use super::store::TriggerStore;
 use super::{Settings, StoredTrigger};
 use crate::api::{App, Caller, RepoState};
@@ -76,7 +76,7 @@ impl Sink for AppSink {
         trigger: &StoredTrigger,
         key: &str,
         request: TaskRequest,
-    ) -> Result<Admitted, String> {
+    ) -> Result<Admitted, Refusal> {
         let caller = Caller(trigger.principal.clone());
         let scope = idempotency_scope(trigger);
         // A run fired again after its dispatcher stopped finds the task
@@ -85,14 +85,15 @@ impl Sink for AppSink {
             .app
             .registry
             .by_key(&scope, key, &trigger.tenant)
-            .map_err(|e| e.body.message.clone())?;
+            .map_err(|e| Refusal::Later(e.body.message.clone()))?;
         if let Some(op) = existing {
             return Ok(Admitted {
                 operation: op.id,
                 branches: op.branches,
             });
         }
-        let canonical = serde_json::to_string(&request).map_err(|e| e.to_string())?;
+        let canonical =
+            serde_json::to_string(&request).map_err(|e| Refusal::Failed(e.to_string()))?;
         let idem = Idempotency {
             caller: scope.clone(),
             key: key.to_owned(),
@@ -118,7 +119,12 @@ impl Sink for AppSink {
                         branches: op.branches,
                     });
                 }
-                Err(format!("{}: {}", e.body.code, e.body.message))
+                let why = format!("{}: {}", e.body.code, e.body.message);
+                // A stopping server is not the trigger's failure.
+                match e.body.code.as_str() {
+                    "shutting_down" => Err(Refusal::Later(why)),
+                    _ => Err(Refusal::Failed(why)),
+                }
             }
         }
     }

@@ -99,6 +99,13 @@ pub trait TriggerStore: Send + Sync {
         now_ms: u64,
         until_ms: u64,
     ) -> io::Result<Option<(TriggerRun, i64)>>;
+    /// Hold a claimed, still pending run only until `until_ms` while
+    /// `fence` holds: any dispatcher may claim it after.
+    fn defer_run(&self, run_id: &str, fence: i64, until_ms: u64) -> io::Result<bool>;
+    /// Give back every pending run's claim: only for a store no other
+    /// process dispatches from (a data directory's SQLite, which one
+    /// server holds), whose claims were its predecessor's.
+    fn release_claims(&self) -> io::Result<()>;
     /// Record a claimed run's outcome while `fence` holds. A `failed` run
     /// counts toward `pause_after` failures in a row (0: never pause).
     fn finish_run(&self, run: &TriggerRun, fence: i64, pause_after: u32) -> io::Result<Accounted>;
@@ -640,6 +647,31 @@ impl TriggerStore for SqliteTriggers {
                 )
                 .map_err(sql)?;
             Ok((Some((parse("run", &id, &body)?, attempt + 1)), true))
+        })
+    }
+
+    fn defer_run(&self, run_id: &str, fence: i64, until_ms: u64) -> io::Result<bool> {
+        self.immediate(|tx| {
+            let rows = tx
+                .execute(
+                    "UPDATE trigger_runs SET claimed_until = ?3 \
+                     WHERE id = ?1 AND attempt = ?2 AND state = 'pending'",
+                    rusqlite::params![run_id, fence, i(until_ms)],
+                )
+                .map_err(sql)?;
+            Ok((rows == 1, true))
+        })
+    }
+
+    fn release_claims(&self) -> io::Result<()> {
+        self.immediate(|tx| {
+            tx.execute(
+                "UPDATE trigger_runs SET claimer = NULL, claimed_until = NULL \
+                 WHERE state = 'pending'",
+                [],
+            )
+            .map_err(sql)?;
+            Ok(((), true))
         })
     }
 
@@ -1190,6 +1222,29 @@ impl TriggerStore for PostgresTriggers {
         .transpose()
     }
 
+    fn defer_run(&self, run_id: &str, fence: i64, until_ms: u64) -> io::Result<bool> {
+        let id = run_id.to_owned();
+        self.with(move |c| {
+            let rows = c.execute(
+                "UPDATE by_trigger_runs SET claimed_until = $3 \
+                 WHERE id = $1 AND attempt = $2 AND state = 'pending'",
+                &[&id, &fence, &i(until_ms)],
+            )?;
+            Ok(rows == 1)
+        })
+    }
+
+    fn release_claims(&self) -> io::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE by_trigger_runs SET claimer = NULL, claimed_until = NULL \
+                 WHERE state = 'pending'",
+                &[],
+            )
+            .map(|_| ())
+        })
+    }
+
     fn finish_run(&self, run: &TriggerRun, fence: i64, pause_after: u32) -> io::Result<Accounted> {
         let text = body(run)?;
         let run = run.clone();
@@ -1456,11 +1511,31 @@ pub mod conformance {
             .unwrap()
             .unwrap();
         assert_eq!((taken.id.as_str(), fence), (pending.id.as_str(), 2));
+        // Deferred, it is claimable once the deferral passes, under the
+        // next fence; a stale fence defers nothing.
+        assert!(!store.defer_run(&taken.id, 1, 0).unwrap());
+        assert!(store.defer_run(&taken.id, fence, 96_000).unwrap());
+        assert!(store
+            .claim_run(&repos(), "w3", 95_500, 200_000)
+            .unwrap()
+            .is_none());
+        let (_, fence) = store
+            .claim_run(&repos(), "w3", 96_500, 200_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fence, 3);
+        // A predecessor's claims, released all at once.
+        store.release_claims().unwrap();
+        let (taken, fence) = store
+            .claim_run(&repos(), "w4", 95_000, 200_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fence, 4);
         let mut done = taken.clone();
         done.state = RunState::Fired;
         assert!(!store.finish_run(&done, 1, 3).unwrap().written);
-        assert!(store.finish_run(&done, 2, 3).unwrap().written);
-        assert!(!store.finish_run(&done, 2, 3).unwrap().written, "once only");
+        assert!(store.finish_run(&done, 4, 3).unwrap().written);
+        assert!(!store.finish_run(&done, 4, 3).unwrap().written, "once only");
         // A disabled trigger is never claimed.
         assert!(store
             .set_state(&t.id, false, None, 0, Some(120_000))

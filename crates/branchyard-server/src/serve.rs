@@ -241,9 +241,19 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let grace = config.shutdown_grace;
     let triggers = {
         let config = config.clone();
-        tokio::task::spawn_blocking(move || crate::triggers::store::open(&config))
-            .await
-            .map_err(|e| e.to_string())??
+        tokio::task::spawn_blocking(move || {
+            let store = crate::triggers::store::open(&config)?;
+            // A data directory's store is this server's alone: any claim on
+            // a pending run was its predecessor's.
+            if config.database.is_none() {
+                store
+                    .release_claims()
+                    .map_err(|e| format!("triggers: {e}"))?;
+            }
+            Ok::<_, String>(store)
+        })
+        .await
+        .map_err(|e| e.to_string())??
     };
     let base_url = format!("{}://{addr}", if tls.is_some() { "https" } else { "http" });
     let hub = Arc::new(crate::triggers::dispatch::Hub::new(

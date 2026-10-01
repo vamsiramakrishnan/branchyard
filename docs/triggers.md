@@ -102,7 +102,7 @@ A schedule takes no conditions. A delivery that does not match is recorded as a 
 
 ## The task
 
-A trigger's `task` is a [`TaskRequest`](server.md#requests): `prompt`, `harness` or `harnesses`, `name`, `base`, `budget`, `policy`, `check`, `provision` (secrets by name, `model`, `effort`, `connectors`), `require_labels`, `provider`, and the opt-ins, each held to the server's rules when the trigger is created and again when it fires. Its `prompt` and `name` may hold placeholders:
+A trigger's `task` is a [`TaskRequest`](server.md#requests): `prompt`, `harness` or `harnesses`, `name`, `base`, `budget`, `policy`, `check`, `provision` (secrets by name, `model`, `effort`, `connectors`), `require_labels`, `provider`, and the opt-ins, each held to the server's rules when it fires, and also when the trigger is created through the API (`by trigger add` without `--remote` writes the store directly, so a refusal shows as the first run's `failed`). Its `prompt` and `name` may hold placeholders:
 
 | Placeholder | Value |
 |---|---|
@@ -156,6 +156,7 @@ A run that **failed**, or a fired run whose task's **outcome** was not ok, count
 - **Schedules.** A claim is a compare-and-set on `next_due_ms` (`UPDATE … WHERE id = … AND enabled AND next_due_ms = <what was read>`) in the transaction that records the run, so of any number of dispatchers on one store, one claims each time. Tested with four dispatchers ticking at once on SQLite, four handles racing on PostgreSQL, and two servers on one PostgreSQL database.
 - **Deliveries.** A run's key is unique per trigger, so a redelivered webhook finds the run its first delivery recorded and nothing new happens.
 - **Firing.** A claimed run is held by its dispatcher for 11 minutes (the longest precheck and a margin) under a fence, its attempt number; recording its outcome needs the fence. If the dispatcher dies, another fires the run once the hold expires, and the task's idempotency key — `trigger:<tenant>/<trigger id>` and the run's key, in the operation registry's unique index — makes the second admission return the first's operation instead of starting another. Before admitting, the dispatcher also looks the key up, so a run re-rendered differently (a routed run, a trigger edited in between) still maps to its first task.
+- **Stopping.** A run that cannot be admitted because its server is shutting down is not a failure: it stays pending, held 30 seconds, after which any dispatcher fires it. A server on a data directory releases its predecessor's holds when it starts, so a run left by a crash or a restart fires at once.
 - **Clocks.** Due times and holds use the dispatchers' clocks, not the database's: keep hosts on NTP. Tests inject a clock and never depend on wall-clock timing.
 
 ## Through the API
