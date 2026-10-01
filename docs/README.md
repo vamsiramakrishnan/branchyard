@@ -4,6 +4,7 @@
 |---|---|
 | [Setup](setup.md) | How do I set Branchyard up by interview, in a terminal wizard or through my coding harness, and what do `branchyard.toml` and `by init`'s protocol look like? |
 | [Workspace lifecycle](workspace.md) | How does each new branch's worktree get its `.env`, its install and its own port before the first turn, what cleans up after it, and why does a repository's script never run until I trust it? |
+| [Prepared environments](environments.md) | How does setup run once per lockfile and every new branch start from its result, cloned, linked or branched from a sandbox snapshot, with the last good build when one fails, and how do `by env` and `.worktreeinclude` work? |
 | [Roadmap](roadmap.md) | What comes next, in which order, and what each piece is learned from? |
 | [Connectors](connectors.md) | How does a branch use GitHub, Slack or an internal API through a skill, an SDK and one gateway, without holding a credential? |
 | [Architecture](design.md) | What does the SDK own, where do harnesses run, and how do topology, budgets, storage, recovery, and merging work? |

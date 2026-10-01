@@ -47,6 +47,7 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | `sandbox` | each, Substrate or Microsandbox | the actor's name and atespace, or the Microsandbox sandbox's name, before it is created, resumed or branched | the actor's UID, or whether the sandbox was created | A live actor's work is brought back, then the actor is deleted; the sandbox is destroyed; a kept record naming it is removed. Not when the turn had parked it (below) |
 | `sandbox_park` | each that keeps its sandbox | the sandbox to pause and record | whether it was kept | A kept sandbox stays, for the next turn ([sandbox snapshots](sandbox-snapshots.md#durability)) |
 | `sandbox_snapshot` | each checkpoint of a branch with a kept sandbox | the snapshot to take | its handle, or the error | A pending one's child sandbox is destroyed |
+| `environment` | a turn whose setup builds a prepared environment | the key, the staging directory, the worktree, what setup produced, and for a sandbox the planned snapshot | the key, or the error | The staging directory is removed and a planned snapshot destroyed; the branch's setup runs again ([prepared environments](environments.md#durability)) |
 | `start` | each | command, sandboxed or not, and for a local harness the host and the spawn marker it is started with | pid, process group and start time, or the error | The recorded group is killed if it still matches; on Linux, processes carrying the marker are killed |
 | `submit` | each | the prompt | the harness's turn number | Recorded intent means the prompt may have reached the harness: never submitted again |
 | `turn_end` | each | whether a prompt was submitted | how the turn ended | Finished as the engine would have |
@@ -185,7 +186,7 @@ The server's operation registry moves from `DATA-DIR/operations.jsonl` to `DATA-
 
 The client blocks; a call made on a Tokio runtime's thread, such as the server's, runs on a thread of its own. The connection is reopened when it closes. Connections have no TLS.
 
-The dispatch queue is plain tables, not PGMQ: `by_operation_queue` has the operation's ID, its repository, its work description, and the claim (attempt, worker, host, pid, start time, `lease_until`). PGMQ could replace it; the admission transaction would send the message where it now inserts the row, and a worker would read with a visibility timeout where it now sets `lease_until`.
+The dispatch queue is plain tables, not PGMQ: `by_operation_queue` has the operation's ID, its repository, its work description, the worker labels it requires (`requires`, a `text[]` a claim must contain; [worker labels](server.md#worker-labels)), and the claim (attempt, worker, host, pid, start time, `lease_until`); `by_workers` records each live worker's labels and when it last beat. PGMQ could replace it; the admission transaction would send the message where it now inserts the row, and a worker would read with a visibility timeout where it now sets `lease_until`.
 
 Not built: importing an existing `state.db`, and waking idle workers with `NOTIFY` rather than polling.
 
