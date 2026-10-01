@@ -631,6 +631,9 @@ impl App {
             setup: w.setup.commands(),
             teardown: w.teardown.commands(),
             digest: Some(w.digest()),
+            prepare: w.prepare,
+            inputs: w.inputs.clone(),
+            share: w.share.clone(),
         }))
     }
 }

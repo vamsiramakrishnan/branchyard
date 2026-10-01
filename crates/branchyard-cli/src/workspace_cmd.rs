@@ -127,6 +127,9 @@ impl Resolved {
             setup: self.workspace.setup.commands(),
             teardown: self.workspace.teardown.commands(),
             digest: Some(self.digest.clone()),
+            prepare: self.workspace.prepare,
+            inputs: self.workspace.inputs.clone(),
+            share: self.workspace.share.clone(),
         }
     }
 
@@ -307,7 +310,9 @@ pub fn for_new_branch(env: &Env, root: &Path) -> Result<Option<WorkspaceSpec>, F
         return Ok(None);
     }
     let Some(resolved) = resolve(root)? else {
-        return Ok(None);
+        // `.worktreeinclude` alone: its files are copied, nothing runs.
+        let include = root.join(branchyard_workspace::include::WORKTREE_INCLUDE_FILE);
+        return Ok(include.is_file().then(WorkspaceSpec::default));
     };
     require_trust(env, &resolved)?;
     Ok(Some(resolved.spec()))

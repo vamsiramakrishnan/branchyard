@@ -179,6 +179,11 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     {
         sandbox.push_str(&format!("; {done}"));
     }
+    if let Some(done) =
+        crate::environments::recover_step(yard, step(crate::environments::STEP_ENVIRONMENT))
+    {
+        sandbox.push_str(&format!("; {done}"));
+    }
     let ended = step(STEP_TURN_END).and_then(|s| {
         let end = serde_json::from_value::<End>(s.outcome.clone()?).ok()?;
         let submitted = s.intent.get("submitted").and_then(Value::as_bool)?;

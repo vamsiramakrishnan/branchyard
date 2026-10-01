@@ -101,6 +101,23 @@ pub struct WorkspaceConfig {
     /// --rm`), best-effort.
     #[serde(default, skip_serializing_if = "Script::is_empty")]
     pub teardown: Script,
+    /// Prepared environments (docs/environments.md): run `setup` once per
+    /// environment key (a hash of the setup commands, the copy globs and
+    /// the files `inputs` names) and keep what it produced under
+    /// `.branchyard/environments/`; a new branch with the same key starts
+    /// from it instead of running setup, cloned where the filesystem can.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepare: bool,
+    /// Globs, relative to the repository root, of the files setup reads
+    /// (lockfiles, manifests): their content is part of the environment
+    /// key. Default: the common lockfiles and manifests present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+    /// Directories setup produces that every branch with the same key
+    /// shares, as a symbolic link to the prepared environment, instead of a
+    /// copy of its own (`node_modules`). Literal relative paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub share: Vec<String>,
 }
 
 /// One command, or a list run in order.
@@ -198,6 +215,27 @@ impl WorkspaceConfig {
         for (what, script) in [("setup", &self.setup), ("teardown", &self.teardown)] {
             check_script(script).or_else(|why| fail(what.into(), &why))?;
         }
+        if self.prepare && self.setup.is_empty() {
+            return fail(
+                "prepare".into(),
+                "prepares the environment setup builds, so it needs setup",
+            );
+        }
+        for (what, set) in [("inputs", &self.inputs), ("share", &self.share)] {
+            if !set.is_empty() && !self.prepare {
+                return fail(what.into(), "is only used with prepare = true");
+            }
+        }
+        for pattern in &self.inputs {
+            if let Err(why) = check_copy_glob(pattern) {
+                return fail("inputs".into(), &format!("{pattern:?} {why}"));
+            }
+        }
+        for path in &self.share {
+            if let Err(why) = check_share_path(path) {
+                return fail("share".into(), &format!("{path:?} {why}"));
+            }
+        }
         let mut defaults = Vec::new();
         for (name, run) in &self.run {
             let valid = !name.is_empty()
@@ -282,12 +320,20 @@ impl WorkspaceConfig {
                 )
             })
             .collect();
-        let canonical = serde_json::json!({
+        let mut canonical = serde_json::json!({
             "copy": self.copy,
             "setup": self.setup.commands(),
             "run": run,
             "teardown": self.teardown.commands(),
         });
+        // Only when used, so a section without them keeps the digest it
+        // was trusted with.
+        if self.prepare {
+            canonical["prepare"] = serde_json::json!({
+                "inputs": self.inputs,
+                "share": self.share,
+            });
+        }
         hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
     }
 }
@@ -312,6 +358,35 @@ pub fn check_copy_glob(pattern: &str) -> Result<(), String> {
         return Err("must not reach into .git or .branchyard".into());
     }
     glob::Pattern::new(pattern).map_err(|e| format!("is not a glob: {e}"))?;
+    Ok(())
+}
+
+/// Why a `share` path is refused, if it is: a literal relative path (no
+/// glob) inside the repository, not into `.git` or `.branchyard`.
+pub fn check_share_path(path: &str) -> Result<(), String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.trim().is_empty() {
+        return Err("is empty".into());
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with('~') || trimmed.starts_with('\\') {
+        return Err("must be relative to the repository root".into());
+    }
+    if trimmed.contains(['*', '?', '[', '!']) {
+        return Err("must be a literal path, not a glob".into());
+    }
+    if trimmed
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("must be a plain path inside the repository".into());
+    }
+    if trimmed
+        .split('/')
+        .next()
+        .is_some_and(|first| first == ".git" || first == ".branchyard")
+    {
+        return Err("must not reach into .git or .branchyard".into());
+    }
     Ok(())
 }
 
@@ -1207,6 +1282,15 @@ fn render_workspace(out: &mut String, table: &str, workspace: &WorkspaceConfig) 
     if !workspace.teardown.is_empty() {
         out.push_str(&format!("teardown = {}\n", workspace.teardown.render()));
     }
+    if workspace.prepare {
+        out.push_str("prepare = true\n");
+    }
+    for (key, list) in [("inputs", &workspace.inputs), ("share", &workspace.share)] {
+        if !list.is_empty() {
+            let items: Vec<String> = list.iter().map(|g| toml_string(g)).collect();
+            out.push_str(&format!("{key} = [{}]\n", items.join(", ")));
+        }
+    }
     for (name, run) in &workspace.run {
         out.push_str(&format!("\n[{table}.run.{name}]\n"));
         out.push_str(&format!("command = {}\n", run.command.render()));
@@ -1437,6 +1521,23 @@ command = ["pnpm build", "pnpm worker"]
                 "[projects.\"relative\".workspace]\nsetup = \"x\"",
                 "absolute",
             ),
+            ("[workspace]\nprepare = true", "workspace.prepare"),
+            (
+                "[workspace]\nsetup = \"x\"\nshare = [\"node_modules\"]",
+                "only used with prepare",
+            ),
+            (
+                "[workspace]\nsetup = \"x\"\nprepare = true\nshare = [\"node_*\"]",
+                "literal",
+            ),
+            (
+                "[workspace]\nsetup = \"x\"\nprepare = true\nshare = [\"../x\"]",
+                "workspace.share",
+            ),
+            (
+                "[workspace]\nsetup = \"x\"\nprepare = true\ninputs = [\"/etc/x\"]",
+                "workspace.inputs",
+            ),
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
@@ -1465,6 +1566,31 @@ command = ["pnpm build", "pnpm worker"]
         let mut same = base;
         same.setup = Script::Many(vec!["pnpm install".into()]);
         assert_eq!(same.digest(), digest);
+    }
+
+    #[test]
+    fn a_prepared_workspace_parses_renders_back_and_changes_the_digest_only_when_on() {
+        let text = "[workspace]\nsetup = \"pnpm install\"\nprepare = true\n\
+                    inputs = [\"pnpm-lock.yaml\", \"packages/*/package.json\"]\n\
+                    share = [\"node_modules/\"]\n";
+        let config = parse(text).unwrap();
+        let workspace = config.workspace.clone().unwrap();
+        assert!(workspace.prepare);
+        assert_eq!(workspace.inputs.len(), 2);
+        assert_eq!(
+            parse(&render(&config, "")).unwrap().workspace,
+            config.workspace
+        );
+        let mut off = workspace.clone();
+        off.prepare = false;
+        off.inputs.clear();
+        off.share.clear();
+        let plain = parse("[workspace]\nsetup = \"pnpm install\"").unwrap();
+        assert_eq!(off.digest(), plain.workspace.unwrap().digest());
+        assert_ne!(workspace.digest(), off.digest());
+        let mut shared = workspace.clone();
+        shared.share.push("vendor/bundle".into());
+        assert_ne!(shared.digest(), workspace.digest());
     }
 
     #[test]

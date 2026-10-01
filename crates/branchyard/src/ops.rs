@@ -301,6 +301,14 @@ pub(crate) fn remove(
     }
     let merged = matches!(record.info.status, BranchStatus::Merged { .. });
     let branch = names::validate(name)?;
+    // Links into a prepared environment go first, and only links: what
+    // they point at is shared.
+    if let Some(workspace) = &record.workspace {
+        branchyard_workspace::materialize::remove_links(
+            &record.info.worktree,
+            &workspace.spec.share,
+        );
+    }
     {
         let _lock = git::lock();
         match yard.repo.workspace(&branch).map_err(git::error)? {

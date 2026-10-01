@@ -100,6 +100,18 @@ pub struct WorkspaceSpec {
     /// for display; the engine does not check it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
+    /// Prepared environments (`docs/environments.md`): setup runs once per
+    /// environment key and later branches start from its result.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepare: bool,
+    /// Globs of the files whose content keys the environment; empty for
+    /// [`crate::environments::DEFAULT_INPUTS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+    /// Directories setup produces that branches link to in the prepared
+    /// environment instead of copying (on this host only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub share: Vec<String>,
 }
 
 impl WorkspaceSpec {
@@ -127,6 +139,9 @@ pub(crate) struct WorkspaceState {
     /// copied into its own worktree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced: Vec<String>,
+    /// The prepared environment its setup built or came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 impl WorkspaceState {
@@ -136,6 +151,7 @@ impl WorkspaceState {
             ready: false,
             copied: Vec::new(),
             produced: Vec::new(),
+            environment: None,
         }
     }
 }
@@ -217,6 +233,9 @@ pub struct WorkspaceReport {
     /// snapshot, or a fan whose setup ran once), named here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_from: Option<String>,
+    /// The prepared environment setup built, or that stood in for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<crate::environments::EnvironmentUse>,
 }
 
 impl WorkspaceReport {
@@ -235,6 +254,7 @@ impl WorkspaceReport {
             port,
             ran_in: None,
             inherited_from: None,
+            environment: None,
         }
     }
 
@@ -353,6 +373,8 @@ pub(crate) struct Inherit {
     pub worktree: Option<PathBuf>,
     /// What its setup produced or changed, relative to its worktree.
     pub produced: Vec<String>,
+    /// The prepared environment it is, when it is one.
+    pub environment: Option<crate::environments::EnvironmentUse>,
 }
 
 /// Prepare the worktree of the turn's branch when its workspace is not
@@ -402,6 +424,7 @@ pub(crate) fn prepare(
         "host": proc::host(),
         "sandbox": sandbox,
         "inherited_from": inherit.map(|i| i.from.clone()),
+        "prepare": state.spec.prepare,
     });
     // A pending intent is an earlier attempt of this turn that stopped
     // midway; setup is idempotent, so it runs again.
@@ -413,18 +436,35 @@ pub(crate) fn prepare(
     }
     let copied = copy(&yard.root, &worktree, &state.spec.copy, Some(port));
     let copied_ok = copied.ok;
-    let copied_paths = copied.copied.clone();
-    if !state.spec.copy.is_empty() {
+    let mut copied_paths = copied.copied.clone();
+    if !state.spec.copy.is_empty() || !copied.copied.is_empty() || !copied.refused.is_empty() {
         recorder.record(Activity::Workspace(copied.clone()))?;
     }
     let mut outcome = json!({ "ok": copied_ok, "copied": copied_paths });
     let mut produced = Vec::new();
+    let mut environment = None;
+    let cancel = || {
+        if lost() {
+            return Some("its engine lost the branch's lease".to_owned());
+        }
+        store
+            .backend()
+            .cancel_requested(fence)
+            .ok()
+            .flatten()
+            .map(|by| format!("cancelled by {by}"))
+    };
     let result = if !copied_ok {
         Err(copied.failure())
     } else if let Some(inherit) = inherit {
         let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(port));
         report.inherited_from = Some(inherit.from.clone());
         report.ran_in = Some(RanIn::Sandbox);
+        report.environment = inherit.environment.clone();
+        environment = inherit
+            .environment
+            .as_ref()
+            .map(|e| e.used.clone().unwrap_or_else(|| e.key.clone()));
         if let Some(from) = &inherit.worktree {
             if let Err(error) = replicate(from, &worktree, &inherit.produced, &copied_paths) {
                 report.ok = false;
@@ -448,92 +488,63 @@ pub(crate) fn prepare(
         }
     } else if state.spec.setup.is_empty() {
         Ok(())
-    } else {
+    } else if yard.hub.scripts_denied() {
         let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(port));
-        if yard.hub.scripts_denied() {
-            report.ok = false;
-            report.error = Some(DENIED.to_owned());
-        } else {
-            let cancel = || {
-                if lost() {
-                    return Some("its engine lost the branch's lease".to_owned());
-                }
-                store
-                    .backend()
-                    .cancel_requested(fence)
-                    .ok()
-                    .flatten()
-                    .map(|by| format!("cancelled by {by}"))
-            };
-            // What setup leaves in the worktree, when it can be seen here.
-            let seen = !matches!(runner, Runner::Sandbox { mounted: false, .. });
-            let before =
-                seen.then(|| (untracked(&worktree), fingerprints(&worktree, &copied_paths)));
-            match runner {
-                Runner::Host => {
-                    report.ran_in = Some(RanIn::Host);
-                    let env = variables(yard, &name, &worktree, Some(port));
-                    let on_spawn = |row: &ProcessRow| store.backend().record_process(fence, row);
-                    run_commands(
+        report.ok = false;
+        report.error = Some(DENIED.to_owned());
+        outcome = json!({ "ok": false, "copied": copied_paths, "error": report.error });
+        let reason = report.failure();
+        recorder.record(Activity::Workspace(report))?;
+        Err(reason)
+    } else {
+        let setup = Setup {
+            yard,
+            runner,
+            spec: &state.spec,
+            worktree: &worktree,
+            name: &name,
+            port,
+            marker: &marker,
+            fence,
+            copied: &copied_paths,
+            cancel: &cancel,
+        };
+        let host_environment = state.spec.prepare && matches!(runner, Runner::Host);
+        let mut links = Vec::new();
+        let (report, made, key) = match host_environment {
+            true => prepared(&setup, recorder, &mut links)?,
+            false => {
+                let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(port));
+                let made = setup.run(&mut report)?;
+                // A sandboxed branch's environment is a snapshot of its
+                // sandbox, taken now that setup has run in it.
+                let key = match (&state.spec.prepare, runner) {
+                    (true, Runner::Sandbox { .. }) => crate::environments::after_sandbox_setup(
+                        yard,
+                        record,
+                        fence,
+                        runner,
+                        &made,
                         &mut report,
-                        &state.spec.setup,
-                        &worktree,
-                        &env,
-                        Some(&marker),
-                        SETUP_TIMEOUT,
-                        &on_spawn,
-                        &cancel,
-                    )?;
-                }
-                Runner::Sandbox {
-                    provider,
-                    name: sandbox,
-                    cwd,
-                    ..
-                } => {
-                    report.ran_in = Some(RanIn::Sandbox);
-                    // The root and the port are this host's; the worktree
-                    // is where the sandbox sees it.
-                    let env = vec![
-                        (crate::ENV_BRANCH.to_owned(), name.clone()),
-                        (ENV_WORKTREE.to_owned(), cwd.clone()),
-                        (ENV_PORT.to_owned(), port.to_string()),
-                    ];
-                    run_in_sandbox(
-                        &mut report,
-                        &state.spec.setup,
-                        *provider,
-                        sandbox,
-                        cwd,
-                        &env,
-                        SETUP_TIMEOUT,
-                        &cancel,
-                    );
-                }
+                    ),
+                    _ => None,
+                };
+                (report, made, key)
             }
-            if let Some((before, copies)) = before {
-                let copied: BTreeSet<&String> = copied_paths.iter().collect();
-                let mut paths: BTreeSet<String> = untracked(&worktree)
-                    .into_iter()
-                    .filter(|p| !before.contains(p) && !copied.contains(p))
-                    .collect();
-                // A copied file setup changed (a `.env` it appended to):
-                // an inheritor must get setup's version, not the copy.
-                let after = fingerprints(&worktree, &copied_paths);
-                paths.extend(
-                    copies
-                        .into_iter()
-                        .filter(|(path, print)| after.get(path).is_some_and(|now| now != print))
-                        .map(|(path, _)| path),
-                );
-                produced = paths.into_iter().collect();
+        };
+        for link in links {
+            if !copied_paths.contains(&link) {
+                copied_paths.push(link);
             }
         }
+        produced = made;
+        environment = key;
         outcome = json!({
             "ok": report.ok,
             "copied": copied_paths,
             "exit_code": report.exit_code,
             "error": report.error,
+            "environment": environment,
         });
         let failed = (!report.ok).then(|| report.failure());
         recorder.record(Activity::Workspace(report))?;
@@ -546,12 +557,239 @@ pub(crate) fn prepare(
         workspace.copied = copied_paths;
         workspace.ready = result.is_ok();
         workspace.produced = produced;
+        workspace.environment = environment;
     }
     store.write_fenced(record, fence)?;
     store
         .backend()
         .finish_step(fence, fence.turn, STEP_SETUP, &outcome)?;
     Ok(result)
+}
+
+/// Everything running a branch's setup needs.
+pub(crate) struct Setup<'a> {
+    pub yard: &'a Yard,
+    pub runner: &'a Runner<'a>,
+    pub spec: &'a WorkspaceSpec,
+    pub worktree: &'a Path,
+    pub name: &'a str,
+    pub port: u16,
+    pub marker: &'a str,
+    pub fence: &'a Fence,
+    /// The paths copy placed.
+    pub copied: &'a [String],
+    pub cancel: &'a dyn Fn() -> Option<String>,
+}
+
+impl Setup<'_> {
+    /// Run setup where the runner says, into `report`; returns what it
+    /// produced (when the worktree can be seen here).
+    pub fn run(&self, report: &mut WorkspaceReport) -> Result<Vec<String>, Error> {
+        let store = self.yard.store();
+        let worktree = self.worktree;
+        // What setup leaves in the worktree, when it can be seen here.
+        let seen = !matches!(self.runner, Runner::Sandbox { mounted: false, .. });
+        let before = seen.then(|| (untracked(worktree), fingerprints(worktree, self.copied)));
+        match self.runner {
+            Runner::Host => {
+                report.ran_in = Some(RanIn::Host);
+                let env = variables(self.yard, self.name, worktree, Some(self.port));
+                let on_spawn = |row: &ProcessRow| store.backend().record_process(self.fence, row);
+                run_commands(
+                    report,
+                    &self.spec.setup,
+                    worktree,
+                    &env,
+                    Some(self.marker),
+                    SETUP_TIMEOUT,
+                    &on_spawn,
+                    self.cancel,
+                )?;
+            }
+            Runner::Sandbox {
+                provider,
+                name: sandbox,
+                cwd,
+                ..
+            } => {
+                report.ran_in = Some(RanIn::Sandbox);
+                // The root and the port are this host's; the worktree
+                // is where the sandbox sees it.
+                let env = vec![
+                    (crate::ENV_BRANCH.to_owned(), self.name.to_owned()),
+                    (ENV_WORKTREE.to_owned(), cwd.clone()),
+                    (ENV_PORT.to_owned(), self.port.to_string()),
+                ];
+                run_in_sandbox(
+                    report,
+                    &self.spec.setup,
+                    *provider,
+                    sandbox,
+                    cwd,
+                    &env,
+                    SETUP_TIMEOUT,
+                    self.cancel,
+                );
+            }
+        }
+        let Some((before, copies)) = before else {
+            return Ok(Vec::new());
+        };
+        let copied: BTreeSet<&String> = self.copied.iter().collect();
+        let mut paths: BTreeSet<String> = untracked(worktree)
+            .into_iter()
+            .filter(|p| !before.contains(p) && !copied.contains(p))
+            .collect();
+        // A copied file setup changed (a `.env` it appended to): an
+        // inheritor must get setup's version, not the copy.
+        let after = fingerprints(worktree, self.copied);
+        paths.extend(
+            copies
+                .into_iter()
+                .filter(|(path, print)| after.get(path).is_some_and(|now| now != print))
+                .map(|(path, _)| path),
+        );
+        Ok(paths.into_iter().collect())
+    }
+}
+
+/// Setup on this host with `prepare`: restore the key's environment, or
+/// build it (setup, then capture), or, when the key's build failed, restore
+/// the last good one of its recipe. Returns the report to record, what the
+/// worktree has from setup, and the environment used. Shared paths are
+/// added to `excluded` (they are links into `.branchyard`, and must never
+/// reach a snapshot).
+fn prepared(
+    setup: &Setup<'_>,
+    recorder: &mut Recorder,
+    excluded: &mut Vec<String>,
+) -> Result<(WorkspaceReport, Vec<String>, Option<String>), Error> {
+    use crate::environments::{self as envs, EnvironmentOrigin, Plan};
+    let root = &setup.yard.root;
+    let mut report = WorkspaceReport::new(WorkspacePhase::Setup, Some(setup.port));
+    report.ran_in = Some(RanIn::Host);
+    let started = Instant::now();
+    let restore = |report: &mut WorkspaceReport,
+                   excluded: &mut Vec<String>,
+                   info: &envs::EnvironmentInfo,
+                   mut used: envs::EnvironmentUse| {
+        match envs::restore(root, info, setup.worktree, true) {
+            Ok((method, shared)) => {
+                used.method = method.map(|m| m.as_str().to_owned());
+                used.built_by = Some(info.built_by.clone());
+                for path in &shared {
+                    if !excluded.contains(path) {
+                        excluded.push(path.clone());
+                    }
+                }
+                used.shared = shared;
+                report.environment = Some(used);
+                report.ok = true;
+                Some(info.key.clone())
+            }
+            Err(why) => {
+                report.ok = false;
+                report.error = Some(why);
+                report.environment = Some(used);
+                None
+            }
+        }
+    };
+    let plan = match envs::plan(root, setup.spec, setup.worktree, setup.cancel) {
+        Ok(plan) => plan,
+        Err(why) => {
+            report.ok = false;
+            report.error = Some(why);
+            return Ok((report, Vec::new(), None));
+        }
+    };
+    match plan {
+        Plan::Restore(info) => {
+            let used = envs::new_use(&info.key, EnvironmentOrigin::Restored);
+            let key = restore(&mut report, excluded, &info, used);
+            report.duration_ms = started.elapsed().as_millis() as u64;
+            Ok((report, info.produced.clone(), key))
+        }
+        Plan::LastGood { key, good, reason } => {
+            let mut used = envs::new_use(&key, EnvironmentOrigin::LastGood);
+            used.used = Some(good.key.clone());
+            used.reason = Some(reason);
+            let used_key = restore(&mut report, excluded, &good, used);
+            report.duration_ms = started.elapsed().as_millis() as u64;
+            Ok((report, good.produced.clone(), used_key))
+        }
+        Plan::Build {
+            key,
+            recipe,
+            inputs,
+            lock,
+        } => {
+            let made = setup.run(&mut report)?;
+            if !report.ok {
+                let reason = report.failure();
+                envs::record_failure(
+                    root,
+                    setup.spec,
+                    &key,
+                    &recipe,
+                    envs::HOST,
+                    inputs,
+                    setup.name,
+                    &reason,
+                );
+                drop(lock);
+                // Its own build failed: the last good one of its recipe
+                // stands in, and says so.
+                let Some(good) = envs::last_good(root, &recipe, &key) else {
+                    return Ok((report, made, None));
+                };
+                recorder.record(Activity::Workspace(report))?;
+                envs::clear_failed(setup.worktree, &made, setup.copied);
+                let mut fallback = WorkspaceReport::new(WorkspacePhase::Setup, Some(setup.port));
+                fallback.ran_in = Some(RanIn::Host);
+                let mut used = envs::new_use(&key, EnvironmentOrigin::LastGood);
+                used.used = Some(good.key.clone());
+                used.reason = Some(format!("its own build failed: {reason}"));
+                let used_key = restore(&mut fallback, excluded, &good, used);
+                return Ok((fallback, good.produced.clone(), used_key));
+            }
+            let captured = envs::capture(
+                envs::Capture {
+                    root,
+                    spec: setup.spec,
+                    key: &key,
+                    recipe: &recipe,
+                    place: envs::HOST,
+                    inputs,
+                    branch: setup.name,
+                    worktree: Some(setup.worktree),
+                    produced: &made,
+                    snapshot: None,
+                },
+                Some((&setup.yard.store(), setup.fence)),
+                None,
+            );
+            drop(lock);
+            match captured {
+                Ok(info) => {
+                    let used = envs::new_use(&key, EnvironmentOrigin::Built);
+                    let exit_code = report.exit_code;
+                    let key = restore(&mut report, excluded, &info, used);
+                    report.exit_code = exit_code;
+                    envs::prune_after_build(setup.yard);
+                    Ok((report, info.produced, key))
+                }
+                Err((why, _)) => {
+                    // What setup made is back in the worktree: the branch
+                    // goes on, without an environment for the next one.
+                    let mut used = envs::new_use(&key, EnvironmentOrigin::NotKept);
+                    used.reason = Some(why);
+                    report.environment = Some(used);
+                    Ok((report, made, None))
+                }
+            }
+        }
+    }
 }
 
 /// Every path in `worktree` git does not track, ignored or not, a wholly
@@ -809,6 +1047,25 @@ pub(crate) fn copy(
             collect(&root, &path, &mut found, &mut report.refused);
         }
     }
+    // `.worktreeinclude`: the ignored files and directories it names, as a
+    // copy glob's would be, each refused for the same reasons. An entry it
+    // cannot honour is named, and fails nothing.
+    let included = branchyard_workspace::include::resolve(&root);
+    for rel in &included.paths {
+        let path = root.join(rel);
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            matched_dirs.insert(rel.clone());
+        }
+        collect(&root, &path, &mut found, &mut report.refused);
+    }
+    report
+        .refused
+        .extend(included.skipped.into_iter().map(|why| {
+            format!(
+                "{}: {why}",
+                branchyard_workspace::include::WORKTREE_INCLUDE_FILE
+            )
+        }));
     let tracked = tracked(&root, &found);
     let mut copied = Vec::new();
     for rel in found.into_iter().filter(|rel| !tracked.contains(rel)) {
@@ -974,7 +1231,8 @@ fn copy_one(root: &Path, worktree: &Path, rel: &str) -> Result<(), String> {
     if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink() || m.is_dir()) {
         return Err("the worktree already has a link or directory there".into());
     }
-    fs::copy(&source, &target)
+    let _ = fs::remove_file(&target);
+    branchyard_workspace::materialize::clone_file(&source, &target)
         .map(|_| ())
         .map_err(|e| format!("could not be copied: {e}"))
 }
