@@ -1214,6 +1214,1437 @@
       "title": "GoalRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     },
+    "MapRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The map's name (default: a slug of the prompt). Running a map of\nthis name again skips its items done."
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MapItem"
+          },
+          "description": "The items, each with its id, as `branchyard::parse_map_items` reads\nthem from a file."
+        },
+        "schema": {
+          "description": "The JSON Schema every answer must match (the subset in\n`docs/map.md#schemas`)."
+        },
+        "concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "reduce": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remove_done": {
+          "type": "boolean",
+          "description": "Remove an item's branches once its answer is recorded."
+        },
+        "retry_failed": {
+          "type": "boolean",
+          "description": "Run the items that failed in an earlier run again."
+        },
+        "task": {
+          "$ref": "#/$defs/TaskRequest",
+          "description": "Every branch's options, as a task's; `prompt` is the template, and\n`name`, `harnesses`, `seats`, `plan` and `goal` are refused."
+        }
+      },
+      "required": [
+        "items",
+        "task"
+      ],
+      "description": "`POST /v1/repos/{repo}/maps`: a wide map, run as one operation. See\n`docs/map.md`.",
+      "title": "MapRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MapItem": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The item's `id` field (a string or a whole number) when it has one,\nelse the first 12 hexadecimal digits of the BLAKE3 hash of its\nvalue, with object keys sorted. A rerun recognizes an item by it."
+            },
+            "value": true
+          },
+          "required": [
+            "id",
+            "value"
+          ],
+          "description": "One item of a map: its stable id and its value."
+        },
+        "TaskRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "prompt": {
+              "type": "string"
+            },
+            "harness": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "budget": {
+              "$ref": "#/$defs/BudgetSpec",
+              "default": {}
+            },
+            "policy": {
+              "$ref": "#/$defs/PolicySpec",
+              "default": {
+                "mode": "deny"
+              }
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "isolated": {
+              "type": "boolean",
+              "default": false
+            },
+            "command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Executable replacing the profile's, on the server. Refused unless the\nserver allows client commands."
+            },
+            "delegation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Envelope"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Let the harness delegate within this envelope, like\n[`branchyard::TaskOptions::delegation`]. Refused unless the server\nallows delegation."
+            },
+            "allow_delegation": {
+              "type": "boolean",
+              "description": "Allow the harness's shell commands that run the server's `by` with a\ndelegation subcommand, after the policy's own rules, like\n`by --allow-delegation`. Refused unless the server allows delegation."
+            },
+            "unapproved_tools": {
+              "type": "boolean",
+              "description": "Run a profile whose driver cannot route tool approvals, like\n[`branchyard::TaskOptions::unapproved_tools`]. Refused unless the\nserver allows unapproved tools."
+            },
+            "provider": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Provider"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the harness runs, in [`branchyard::Provider`]'s serde form.\nAnything but `local` is refused unless the server allows that\nprovider. Paths and `pass_env` names are the server's."
+            },
+            "provision": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Provisioning"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
+            },
+            "seats": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Seats"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Make the branch a rig's root, like [`branchyard::TaskOptions::seats`]:\nthe seats its harness may spawn by name, within `delegation`. Refused\nunless the server allows delegation. Each seat's provisioning is\nheld to the same rules as `provision`."
+            },
+            "require_labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+            },
+            "priority": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            },
+            "plan": {
+              "type": "boolean",
+              "description": "Plan first, like `by run --plan`: the first turn runs read-only and\nthe branch waits for `POST .../plan/approve`. See\n`docs/plans-and-goals.md`."
+            },
+            "goal": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoalRequest"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A goal a judge verifies, like `by run --goal`."
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "description": "`POST /v1/repos/{repo}/tasks`. With `harnesses`, runs one branch per\nharness like [`branchyard::TaskBuilder::run_on`]; otherwise one branch."
+        },
+        "BudgetSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "max_turns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Per call, like [`branchyard::Budget::max_duration`]."
+            },
+            "stall_after_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Like [`branchyard::Budget::stall_after`], in seconds."
+            },
+            "stall_action": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StallAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Like [`branchyard::Budget::stall_action`]; ignored without\n`stall_after_seconds`."
+            }
+          },
+          "description": "Limits for a branch; see [`branchyard::Budget`]."
+        },
+        "StallAction": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "notify",
+              "description": "Record [`Activity::Stalled`] and keep running; the branch shows\n`stalled: true` until new activity or the turn ends."
+            },
+            {
+              "type": "string",
+              "const": "interrupt",
+              "description": "Record [`Activity::Stalled`], then interrupt the turn as\n[`BranchStatus::Interrupted`], the same way a cancel does."
+            }
+          ],
+          "description": "What a detected stall does to the turn."
+        },
+        "PolicySpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/PolicyMode",
+              "default": "deny"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RuleSpec"
+              }
+            }
+          },
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+        },
+        "PolicyMode": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny"
+          ],
+          "description": "How requests no rule decides are answered. There is no remote `ask`:\na server has no terminal to ask on."
+        },
+        "RuleSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "Exact tool name, or a `*` suffix wildcard such as `mcp__*`."
+            },
+            "allow": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "tool",
+            "allow"
+          ]
+        },
+        "Envelope": {
+          "type": "object",
+          "properties": {
+            "max_depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Levels of descendants below this branch: 1 allows children but no\ngrandchildren; 0 allows no children."
+            },
+            "max_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Children this branch may have, counting finished ones until they\nare removed."
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            }
+          },
+          "required": [
+            "max_depth",
+            "max_children",
+            "harnesses"
+          ],
+          "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "Provider": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "local"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A local process as your user; no isolation. The default."
+            },
+            {
+              "$ref": "#/$defs/SandboxOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "microsandbox"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A Microsandbox microVM per turn, booted from an image that has the\nharness installed. Needs a build with the `microsandbox` feature and\na Linux host with KVM."
+            },
+            {
+              "$ref": "#/$defs/SubstrateOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "substrate"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            }
+          ],
+          "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
+        },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
+        "SandboxOptions": {
+          "type": "object",
+          "properties": {
+            "image": {
+              "type": "string",
+              "description": "OCI image reference. The harness executable must be installed in it\nand on its `PATH`, or named by an absolute guest path in\n[`TaskOptions::command`]."
+            },
+            "cpus": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint8",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "memory_mib": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
+              "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
+            }
+          },
+          "required": [
+            "image"
+          ],
+          "description": "A sandboxed harness's image, limits and credentials."
+        },
+        "SubstrateOptions": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "description": "The `Control` API, as `https://host:port`, or `http://host:port` on\nloopback or with [`SubstrateOptions::insecure`]."
+            },
+            "router": {
+              "type": "string",
+              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+            },
+            "atespace": {
+              "type": "string",
+              "description": "The atespace actors are created in. Empty means `default`.",
+              "default": ""
+            },
+            "template": {
+              "type": "string",
+              "description": "An actor template that runs `branchyard-bridge` with the public half\nof [`SubstrateOptions::key`], with git and the harness installed."
+            },
+            "key": {
+              "type": "string",
+              "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed in the actor. Empty means `/workspace`.",
+              "default": ""
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` in the actor. Empty means `/branchyard/home`.",
+              "default": ""
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process into the actor, such as\n`ANTHROPIC_API_KEY`. Names are stored with the branch; values are\nnot.",
+              "default": []
+            },
+            "ca": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "PEM certificate authorities for a TLS `Control` API, and for the\nrouter unless [`SubstrateOptions::router_ca`] is set. Unset trusts\nthe public roots bundled at build time.",
+              "default": null
+            },
+            "client_cert": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A PEM client certificate and key for the `Control` API (mutual TLS).",
+              "default": null
+            },
+            "client_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "router_ca": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "PEM certificate authorities for a TLS router.",
+              "default": null
+            },
+            "insecure": {
+              "type": "boolean",
+              "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
+              "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "endpoint",
+            "router",
+            "template",
+            "key"
+          ],
+          "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "Provisioning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secrets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SecretSource"
+              },
+              "description": "Credentials by the name the harness knows them by, such as\n`ANTHROPIC_API_KEY` or `CODEX_AUTH`. Each harness uses the ones its\nprovisioner reads; the rest are reported as unused."
+            },
+            "auth": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "mcp_servers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/McpServerSpec"
+              },
+              "description": "Stdio MCP servers the harness starts, besides Branchyard's own."
+            },
+            "remote_mcp_servers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RemoteMcpSpec"
+              },
+              "description": "HTTP and SSE MCP servers the harness connects to, where it can."
+            },
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Standing instructions, besides Branchyard's delegation skill."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A model name, or a size alias (`small`, `medium`, `large`,\n`extra-large`, or `s`, `m`, `l`, `xl`) where the harness defines one."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "telemetry": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Telemetry"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            }
+          },
+          "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
+        },
+        "SecretSource": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The name the harness knows it by."
+            },
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SecretFrom"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Unset: the variable of the same name, in the environment of the\nprocess that runs the turn (on a server, the server's own table of\nsecrets decides)."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "description": "Where a secret's value comes from."
+        },
+        "SecretFrom": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "var": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "env"
+                }
+              },
+              "required": [
+                "kind",
+                "var"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "file"
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ]
+            }
+          ],
+          "description": "A variable or a file on the host that runs the turn."
+        },
+        "McpServerSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "command": {
+              "type": "string",
+              "description": "Absolute path of the executable, as the harness sees it."
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Stored with the branch like the rest of the request: not for\nsecrets. Use [`McpServerSpec::secret_env`] for those."
+            },
+            "secret_env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Variables set from the task's secrets, by variable and secret name.\nEach turn resolves them with the other secrets; only the names are\nstored."
+            }
+          },
+          "required": [
+            "name",
+            "command"
+          ],
+          "description": "A stdio MCP server, in a form that is stored and sent over the API."
+        },
+        "RemoteMcpSpec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "transport": {
+              "$ref": "#/$defs/RemoteMcpTransport",
+              "description": "`http` (streamable HTTP, the default) or `sse`."
+            },
+            "url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Header name to the name of the secret holding its value."
+            }
+          },
+          "required": [
+            "name",
+            "url"
+          ],
+          "description": "An HTTP or SSE MCP server, in a form that is stored and sent over the\nAPI. Every header's value is one of the task's secrets, named here and\nresolved each turn, so no header value is stored."
+        },
+        "RemoteMcpTransport": {
+          "type": "string",
+          "enum": [
+            "http",
+            "sse"
+          ],
+          "description": "[`RemoteMcpSpec::transport`]."
+        },
+        "Effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "How hard the model reasons, where the harness can be told."
+        },
+        "Telemetry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "`false` turns the harness's export off where it can be told to."
+            },
+            "endpoint": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "OTLP/gRPC collector, as the harness reaches it. Unset:\n[`Telemetry::DEFAULT_ENDPOINT`]."
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "description": "The harness's own OpenTelemetry export."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Seats": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rig": {
+              "type": "string",
+              "description": "The rig's name, for messages."
+            },
+            "seat": {
+              "type": "string",
+              "description": "The seat this branch occupies."
+            },
+            "delegates_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Seats this branch may spawn.",
+              "default": []
+            },
+            "escalates_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Ancestor seats, besides its parent's, this branch's own seat may\n`escalate` to (its seat's `escalates_to`, by name)."
+            },
+            "table": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Seat"
+              },
+              "description": "Every seat below this branch's, by name.",
+              "default": {}
+            }
+          },
+          "required": [
+            "rig",
+            "seat"
+          ],
+          "description": "The seat a branch occupies in a rig and the seats it may fill."
+        },
+        "Seat": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "Harness or profile ID the child runs."
+            },
+            "budget": {
+              "$ref": "#/$defs/ChildBudget",
+              "description": "The child's limits. A spawn may ask for less, never more.",
+              "default": {
+                "max_usd": null,
+                "max_turns": null,
+                "max_minutes": null
+              }
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "The child's merge check; `None` keeps its parent's."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Tool patterns the child is denied, before its parent's policy."
+            },
+            "isolated": {
+              "type": "boolean",
+              "description": "Run the child with a private home even when its parent has none."
+            },
+            "provision": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Provisioning"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What to provision for the child. `None` inherits its parent's, as a\ndelegated child does without a seat."
+            },
+            "delegates_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Seats a child in this seat may spawn in turn."
+            },
+            "escalates_to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Seats above this one in the tree a branch in this seat may\n`escalate` to, besides its parent (which it may always escalate to).\nEach must name an ancestor seat."
+            },
+            "instances": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Children of this seat one parent may have at once, counting finished\nones until they are removed. At least 1.",
+              "default": 1
+            },
+            "bindings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Binding"
+              },
+              "description": "Scratch areas a child in this seat is bound to; see\n`docs/graph.md`. A spawn may add others, never change these."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A child a rig's branch may spawn by name."
+        },
+        "ChildBudget": {
+          "type": "object",
+          "properties": {
+            "max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "max_turns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_minutes": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Per turn."
+            }
+          },
+          "description": "A child's limits as the tools show them."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GoalRequest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "rounds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "judge": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
+        }
+      }
+    },
+    "MapResumeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "retry_failed": {
+          "type": "boolean"
+        }
+      },
+      "description": "`POST /v1/repos/{repo}/maps/{name}/resume`: run a recorded map again\nwith the request that started it.",
+      "title": "MapResumeRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "MapList": {
+      "type": "object",
+      "properties": {
+        "maps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MapSummary"
+          }
+        }
+      },
+      "required": [
+        "maps"
+      ],
+      "description": "`GET /v1/repos/{repo}/maps`.",
+      "title": "MapList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MapSummary": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "done": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "running": {
+              "type": "boolean"
+            },
+            "spent_usd": {
+              "type": "number",
+              "format": "double"
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "updated_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When its last row was written."
+            }
+          },
+          "required": [
+            "name",
+            "prompt",
+            "total",
+            "done",
+            "failed",
+            "pending",
+            "running",
+            "spent_usd",
+            "created_ms",
+            "updated_ms"
+          ],
+          "description": "One line per map, for `by map ls` and `by ls`."
+        }
+      }
+    },
+    "MapReport": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "done": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "pending": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Items with no row yet: not started, running, or interrupted."
+        },
+        "running": {
+          "type": "boolean",
+          "description": "A process is running the map now."
+        },
+        "spent_usd": {
+          "type": "number",
+          "format": "double",
+          "description": "Every recorded row's cost, across runs, and the reduce's."
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The result's fields, for a table: the schema's top-level\nproperties, else `result`."
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MapRow"
+          },
+          "description": "The latest row of each item that has one, in the items' order."
+        },
+        "reduce": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MapReduce"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stopped": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why a run left items pending (the total budget), when it did."
+        }
+      },
+      "required": [
+        "name",
+        "prompt",
+        "total",
+        "done",
+        "failed",
+        "pending",
+        "running",
+        "spent_usd",
+        "columns",
+        "rows"
+      ],
+      "description": "A map's state: its items' rows and progress.",
+      "title": "MapReport",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "MapRow": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MapStatus"
+            },
+            "result": {
+              "description": "The answer: JSON matching the schema, or the reply's text without\none. Only when `ok`."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the last attempt failed. Only when `failed`."
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch that answered, or the last one tried."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Every branch this run of the item used, failovers included, in\norder."
+            },
+            "attempts": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Branches started for the item (failovers not counted)."
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The branches' reported cost, when any reported one."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "attempts",
+            "at_ms"
+          ],
+          "description": "One finished item, as `results.jsonl` records it."
+        },
+        "MapStatus": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ok",
+              "description": "A branch ended ready (or with no changes) with a valid answer."
+            },
+            {
+              "type": "string",
+              "const": "failed",
+              "description": "Every attempt failed."
+            }
+          ],
+          "description": "How an item ended."
+        },
+        "MapReduce": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/MapStatus"
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The reply: the map's summary. Only when `ok`."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "digest": {
+              "type": "string",
+              "description": "The results it was given, hashed: a rerun with the same results\ndoes not reduce again."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "status",
+            "digest",
+            "at_ms"
+          ],
+          "description": "The reduce turn's outcome, as `reduce.json` records it."
+        }
+      }
+    },
     "KnowledgeList": {
       "type": "object",
       "properties": {
@@ -6783,6 +8214,11 @@
           "type": "string",
           "const": "reject_plan",
           "description": "A plan rejected with `POST .../plan/reject`."
+        },
+        {
+          "type": "string",
+          "const": "map",
+          "description": "A wide map started with `POST .../maps` or `.../maps/{name}/resume`."
         }
       ],
       "title": "OperationKind",
@@ -6849,6 +8285,17 @@
             }
           ],
           "description": "A spawned child, inspected once its turn ended."
+        },
+        "map": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MapReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A map's rows and progress once it ended; its `branches` above are\nthe branches that answered or were tried last, where they remain."
         }
       },
       "description": "What a finished operation produced.",
@@ -7411,6 +8858,216 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "MapReport": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "done": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0,
+              "description": "Items with no row yet: not started, running, or interrupted."
+            },
+            "running": {
+              "type": "boolean",
+              "description": "A process is running the map now."
+            },
+            "spent_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "Every recorded row's cost, across runs, and the reduce's."
+            },
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The result's fields, for a table: the schema's top-level\nproperties, else `result`."
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MapRow"
+              },
+              "description": "The latest row of each item that has one, in the items' order."
+            },
+            "reduce": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MapReduce"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "stopped": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a run left items pending (the total budget), when it did."
+            }
+          },
+          "required": [
+            "name",
+            "prompt",
+            "total",
+            "done",
+            "failed",
+            "pending",
+            "running",
+            "spent_usd",
+            "columns",
+            "rows"
+          ],
+          "description": "A map's state: its items' rows and progress."
+        },
+        "MapRow": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MapStatus"
+            },
+            "result": {
+              "description": "The answer: JSON matching the schema, or the reply's text without\none. Only when `ok`."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the last attempt failed. Only when `failed`."
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch that answered, or the last one tried."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Every branch this run of the item used, failovers included, in\norder."
+            },
+            "attempts": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Branches started for the item (failovers not counted)."
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The branches' reported cost, when any reported one."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "attempts",
+            "at_ms"
+          ],
+          "description": "One finished item, as `results.jsonl` records it."
+        },
+        "MapStatus": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ok",
+              "description": "A branch ended ready (or with no changes) with a valid answer."
+            },
+            {
+              "type": "string",
+              "const": "failed",
+              "description": "Every attempt failed."
+            }
+          ],
+          "description": "How an item ended."
+        },
+        "MapReduce": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/MapStatus"
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The reply: the map's summary. Only when `ok`."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "digest": {
+              "type": "string",
+              "description": "The results it was given, hashed: a rerun with the same results\ndoes not reduce again."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "status",
+            "digest",
+            "at_ms"
+          ],
+          "description": "The reduce turn's outcome, as `reduce.json` records it."
         }
       }
     },
@@ -7552,6 +9209,11 @@
               "type": "string",
               "const": "reject_plan",
               "description": "A plan rejected with `POST .../plan/reject`."
+            },
+            {
+              "type": "string",
+              "const": "map",
+              "description": "A wide map started with `POST .../maps` or `.../maps/{name}/resume`."
             }
           ]
         },
@@ -7614,6 +9276,17 @@
                 }
               ],
               "description": "A spawned child, inspected once its turn ended."
+            },
+            "map": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MapReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A map's rows and progress once it ended; its `branches` above are\nthe branches that answered or were tried last, where they remain."
             }
           },
           "description": "What a finished operation produced."
@@ -8174,6 +9847,216 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "MapReport": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "done": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0,
+              "description": "Items with no row yet: not started, running, or interrupted."
+            },
+            "running": {
+              "type": "boolean",
+              "description": "A process is running the map now."
+            },
+            "spent_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "Every recorded row's cost, across runs, and the reduce's."
+            },
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The result's fields, for a table: the schema's top-level\nproperties, else `result`."
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MapRow"
+              },
+              "description": "The latest row of each item that has one, in the items' order."
+            },
+            "reduce": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MapReduce"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "stopped": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a run left items pending (the total budget), when it did."
+            }
+          },
+          "required": [
+            "name",
+            "prompt",
+            "total",
+            "done",
+            "failed",
+            "pending",
+            "running",
+            "spent_usd",
+            "columns",
+            "rows"
+          ],
+          "description": "A map's state: its items' rows and progress."
+        },
+        "MapRow": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MapStatus"
+            },
+            "result": {
+              "description": "The answer: JSON matching the schema, or the reply's text without\none. Only when `ok`."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the last attempt failed. Only when `failed`."
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch that answered, or the last one tried."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Every branch this run of the item used, failovers included, in\norder."
+            },
+            "attempts": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Branches started for the item (failovers not counted)."
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The branches' reported cost, when any reported one."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "attempts",
+            "at_ms"
+          ],
+          "description": "One finished item, as `results.jsonl` records it."
+        },
+        "MapStatus": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ok",
+              "description": "A branch ended ready (or with no changes) with a valid answer."
+            },
+            {
+              "type": "string",
+              "const": "failed",
+              "description": "Every attempt failed."
+            }
+          ],
+          "description": "How an item ended."
+        },
+        "MapReduce": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/MapStatus"
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The reply: the map's summary. Only when `ok`."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "digest": {
+              "type": "string",
+              "description": "The results it was given, hashed: a rerun with the same results\ndoes not reduce again."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "status",
+            "digest",
+            "at_ms"
+          ],
+          "description": "The reduce turn's outcome, as `reduce.json` records it."
         },
         "ErrorBody": {
           "type": "object",
@@ -15946,6 +17829,11 @@
               "type": "string",
               "const": "reject_plan",
               "description": "A plan rejected with `POST .../plan/reject`."
+            },
+            {
+              "type": "string",
+              "const": "map",
+              "description": "A wide map started with `POST .../maps` or `.../maps/{name}/resume`."
             }
           ]
         },
@@ -16008,6 +17896,17 @@
                 }
               ],
               "description": "A spawned child, inspected once its turn ended."
+            },
+            "map": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MapReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A map's rows and progress once it ended; its `branches` above are\nthe branches that answered or were tried last, where they remain."
             }
           },
           "description": "What a finished operation produced."
@@ -16568,6 +18467,216 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "MapReport": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "done": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0,
+              "description": "Items with no row yet: not started, running, or interrupted."
+            },
+            "running": {
+              "type": "boolean",
+              "description": "A process is running the map now."
+            },
+            "spent_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "Every recorded row's cost, across runs, and the reduce's."
+            },
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The result's fields, for a table: the schema's top-level\nproperties, else `result`."
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MapRow"
+              },
+              "description": "The latest row of each item that has one, in the items' order."
+            },
+            "reduce": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MapReduce"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "stopped": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a run left items pending (the total budget), when it did."
+            }
+          },
+          "required": [
+            "name",
+            "prompt",
+            "total",
+            "done",
+            "failed",
+            "pending",
+            "running",
+            "spent_usd",
+            "columns",
+            "rows"
+          ],
+          "description": "A map's state: its items' rows and progress."
+        },
+        "MapRow": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MapStatus"
+            },
+            "result": {
+              "description": "The answer: JSON matching the schema, or the reply's text without\none. Only when `ok`."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the last attempt failed. Only when `failed`."
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch that answered, or the last one tried."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Every branch this run of the item used, failovers included, in\norder."
+            },
+            "attempts": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Branches started for the item (failovers not counted)."
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The branches' reported cost, when any reported one."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "attempts",
+            "at_ms"
+          ],
+          "description": "One finished item, as `results.jsonl` records it."
+        },
+        "MapStatus": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ok",
+              "description": "A branch ended ready (or with no changes) with a valid answer."
+            },
+            {
+              "type": "string",
+              "const": "failed",
+              "description": "Every attempt failed."
+            }
+          ],
+          "description": "How an item ended."
+        },
+        "MapReduce": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/MapStatus"
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The reply: the map's summary. Only when `ok`."
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "digest": {
+              "type": "string",
+              "description": "The results it was given, hashed: a rerun with the same results\ndoes not reduce again."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "status",
+            "digest",
+            "at_ms"
+          ],
+          "description": "The reduce turn's outcome, as `reduce.json` records it."
         },
         "ErrorBody": {
           "type": "object",

@@ -294,7 +294,7 @@ impl App {
     /// admitted, and spend accrues while turns run; being read from
     /// durable branch and artifact state, it needs no recovery of its own
     /// after a restart. See `docs/server.md#quotas`.
-    async fn check_admission_quotas(
+    pub(crate) async fn check_admission_quotas(
         self: &Arc<Self>,
         caller: &Caller,
         policy: &TenantPolicy,
@@ -743,7 +743,9 @@ pub fn router(app: Shared) -> Router {
         // The web companion's page, pairing and push: `crate::companion`.
         .merge(crate::companion::router())
         // Repository knowledge and plan approval: `knowledge_routes`.
-        .merge(crate::knowledge_routes::router());
+        .merge(crate::knowledge_routes::router())
+        // Wide maps: `map_routes`.
+        .merge(crate::map_routes::router());
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))

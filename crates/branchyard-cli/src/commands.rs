@@ -324,7 +324,10 @@ pub fn branch_outcome(info: &BranchInfo) -> Outcome {
 
 /// The repository's `[workspace]` for a command that creates branches,
 /// once its scripts are trusted (docs/workspace.md).
-fn workspace(env: &Env, yard: &Yard) -> Result<Option<branchyard::WorkspaceSpec>, Failure> {
+pub(crate) fn workspace(
+    env: &Env,
+    yard: &Yard,
+) -> Result<Option<branchyard::WorkspaceSpec>, Failure> {
     crate::workspace_cmd::for_new_branch(env, yard.root())
 }
 
@@ -737,10 +740,17 @@ pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
         let list = infos.iter().map(json::branch).collect();
         return print(&json::text(&serde_json::Value::Array(list)));
     }
+    // Recorded maps and their progress follow the branches (docs/map.md).
+    let maps = crate::map_cmd::ls_section(target, env.style()).unwrap_or_default();
     if infos.is_empty() {
-        return print("no branches; start one with: by run \"<prompt>\"\n");
+        return print(&format!(
+            "no branches; start one with: by run \"<prompt>\"\n{maps}"
+        ));
     }
-    print(&render::branch_table(&infos, now(), env.style()))
+    print(&format!(
+        "{}{maps}",
+        render::branch_table(&infos, now(), env.style())
+    ))
 }
 
 /// `by show`, with the merge-readiness line `by pr` and `by pr --watch`
@@ -775,7 +785,17 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
             if refresh {
                 crate::pr::refresh(&yard, branch)?;
             }
-            let branch = yard.branch(branch)?;
+            let branch = match yard.branch(branch) {
+                Ok(branch) => branch,
+                // A map's name shows the map (docs/map.md).
+                Err(error @ branchyard::Error::UnknownBranch(_)) => {
+                    return match crate::map_cmd::show_if_map(env, target, branch, as_json) {
+                        Some(shown) => shown,
+                        None => Err(error.into()),
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            };
             listening = Some(
                 crate::ports::of_yard(&yard)
                     .remove(&branch.info().name)
@@ -797,7 +817,12 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
             Err(error) if error.code() == Some("unknown_branch") => {
                 match remote.repo.operations(Some(branch))?.into_iter().next() {
                     Some(op) => return show_queued(branch, &op, as_json),
-                    None => return Err(error.into()),
+                    None => {
+                        return match crate::map_cmd::show_if_map(env, target, branch, as_json) {
+                            Some(shown) => shown,
+                            None => Err(error.into()),
+                        }
+                    }
                 }
             }
             Err(error) => return Err(error.into()),

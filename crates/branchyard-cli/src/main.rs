@@ -19,6 +19,7 @@ mod gh;
 mod init;
 mod json;
 mod knowledge_cmd;
+mod map_cmd;
 mod notify;
 mod open;
 mod plan_cmd;
@@ -185,6 +186,9 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             &task,
             &commands::FanRoute { attempts, judge },
         ),
+        Command::Map { json, action, map } => {
+            map_cmd::main(env, target, action.as_ref(), &map, json)
+        }
         Command::Judge {
             targets,
             harness,

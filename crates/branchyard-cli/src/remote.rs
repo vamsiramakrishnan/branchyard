@@ -18,9 +18,9 @@ use branchyard::{
     Sent,
 };
 use branchyard_client::api::{
-    BudgetSpec, ErrorBody, ForkRequest, GraphRequest, MergeRequest, Operation, OperationResult,
-    OperationState, PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec, SendRequest,
-    SpawnRequest, TaskRequest,
+    BudgetSpec, ErrorBody, ForkRequest, GraphRequest, MapRequest, MergeRequest, Operation,
+    OperationResult, OperationState, PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec,
+    SendRequest, SpawnRequest, TaskRequest,
 };
 use branchyard_client::{new_key, Client, Repo};
 
@@ -264,6 +264,17 @@ fn result(op: Operation) -> Result<OperationResult, Failure> {
 /// Render the operation's activity as it streams, until the operation has
 /// finished and every entry up to its end cursor has been shown.
 fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operation, Failure> {
+    follow_prefixed(remote, op, console, None)
+}
+
+/// [`follow`], also showing every branch whose name starts with `prefix`:
+/// a map's, which its operation cannot name when it is accepted.
+fn follow_prefixed(
+    remote: &Remote,
+    op: &Operation,
+    console: &Console,
+    prefix: Option<&str>,
+) -> Result<Operation, Failure> {
     let mut branches: HashSet<String> = op.branches.iter().cloned().collect();
     let (tx, rx) = mpsc::channel();
     let stream = remote.repo.stream(Some(op.cursor));
@@ -304,7 +315,8 @@ fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operatio
                             branches.insert(branch.clone());
                         }
                     }
-                    if branches.contains(&entry.branch) {
+                    let prefixed = prefix.is_some_and(|p| entry.branch.starts_with(p));
+                    if prefixed || branches.contains(&entry.branch) {
                         console.event(&BranchEvent {
                             branch: entry.branch,
                             activity: entry.activity,
@@ -524,6 +536,131 @@ pub fn fan(
         .chain(result.descendants.iter())
         .collect();
     commands::fan_summary(env, &infos)
+}
+
+/// `by map --remote`: the items and schema are read here, the map runs as
+/// one operation on the server, and `--out` and `--reduce-out` are
+/// written here from its result.
+pub fn map(env: &Env, remote: &Remote, args: &crate::args::MapArgs, json: bool) -> Outcome {
+    let task: &TaskArgs = &args.task;
+    if crate::fleet_cmd::is_routed(task) || task.kind.is_some() {
+        return Err(crate::fleet_cmd::local_only());
+    }
+    let cwd = std::env::current_dir()?;
+    let items = crate::map_cmd::read_items(args, &cwd)?;
+    let schema = crate::map_cmd::read_schema(args)?;
+    let (policy, notice) = permissions(task)?;
+    let provider = provider(task)?;
+    let prompt = args.prompt.clone().unwrap_or_default();
+    let request = MapRequest {
+        name: task.name.clone(),
+        items,
+        schema,
+        concurrency: args.concurrency,
+        retries: args.retries,
+        total_usd: args.total_usd,
+        reduce: args.reduce.clone(),
+        remove_done: args.rm,
+        retry_failed: args.retry_failed,
+        task: TaskRequest {
+            prompt: prompt.clone(),
+            harness: task.harness.clone(),
+            harnesses: Vec::new(),
+            name: None,
+            base: task.base.clone(),
+            budget: budget(task),
+            policy,
+            check: task.check.clone(),
+            isolated: task.isolated,
+            command: task.command.clone(),
+            delegation: None,
+            allow_delegation: false,
+            unapproved_tools: task.unapproved_tools,
+            provider: provider.clone(),
+            provision: provision(task)?,
+            seats: None,
+            require_labels: task.require_labels.clone(),
+            priority: task.priority,
+            plan: false,
+            goal: None,
+        },
+    };
+    let name = request
+        .name
+        .clone()
+        .unwrap_or_else(|| branchyard::map_default_name(&prompt));
+    let op = remote.repo.submit_map(&request, &new_key())?;
+    announce(remote, notice, provider.as_ref());
+    eprintln!(
+        "by: map {name}: {} item(s), running on the server as {}",
+        request.items.len(),
+        op.id
+    );
+    map_finish(env, remote, &op, &name, args, json)
+}
+
+/// `by map resume --remote`: the server runs the map again with the
+/// request that started it.
+pub fn map_resume(
+    env: &Env,
+    remote: &Remote,
+    name: &str,
+    retry_failed: bool,
+    json: bool,
+) -> Outcome {
+    let op = remote.repo.resume_map(
+        name,
+        &branchyard_client::api::MapResumeRequest { retry_failed },
+        &new_key(),
+    )?;
+    eprintln!("by: map {name}: resumed on the server as {}", op.id);
+    let none = crate::args::MapArgs {
+        prompt: None,
+        items: None,
+        from_command: None,
+        input_format: None,
+        schema: None,
+        out: None,
+        concurrency: None,
+        retries: None,
+        total_usd: None,
+        reduce: None,
+        reduce_out: None,
+        rm: false,
+        retry_failed,
+        task: crate::args::Checked::new(TaskArgs::default()),
+    };
+    map_finish(env, remote, &op, name, &none, json)
+}
+
+fn map_finish(
+    env: &Env,
+    remote: &Remote,
+    op: &Operation,
+    name: &str,
+    args: &crate::args::MapArgs,
+    json: bool,
+) -> Outcome {
+    let console = live_console(env, true, json);
+    let done = follow_prefixed(remote, op, &console, Some(&format!("{name}-")));
+    console.finish();
+    let report = result(done?)?
+        .map
+        .ok_or_else(|| Failure::Message("the server returned no map".into()))?;
+    let out = args.out.as_ref().map(std::path::PathBuf::from);
+    if let Some(out) = &out {
+        crate::map_cmd::write_atomic(out, &crate::map_cmd::results_text(out, &report))?;
+    }
+    if let (Some(path), Some(text)) = (
+        &args.reduce_out,
+        report.reduce.as_ref().and_then(|r| r.text.as_ref()),
+    ) {
+        crate::map_cmd::write_atomic(
+            std::path::Path::new(path),
+            &format!("{}\n", text.trim_end()),
+        )?;
+    }
+    crate::map_cmd::finish(env, &report, out.as_deref(), json)
 }
 
 fn send_request(

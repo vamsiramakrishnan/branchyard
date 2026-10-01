@@ -56,6 +56,8 @@ pub struct Snapshot {
     pub trying: Option<String>,
     /// `by usage`'s one-line summary of the local logins (local only).
     pub usage: Option<String>,
+    /// The maps running or unfinished and their progress (local only).
+    pub maps: Option<String>,
     /// Each branch's listening ports, one line each (local only).
     pub ports: std::collections::BTreeMap<String, Vec<String>>,
 }
@@ -377,6 +379,8 @@ pub struct Model {
     pub trying: Option<String>,
     /// `by usage`'s summary line, shown under the header.
     pub usage: Option<String>,
+    /// The maps' progress, in the header.
+    pub maps: Option<String>,
     /// Each branch's listening ports.
     pub ports: std::collections::BTreeMap<String, Vec<String>>,
 }
@@ -527,6 +531,7 @@ impl Model {
         self.infos = snapshot.infos;
         self.trying = snapshot.trying;
         self.usage = snapshot.usage;
+        self.maps = snapshot.maps;
         self.ports = snapshot.ports;
         if self
             .toast
@@ -1196,6 +1201,12 @@ fn header_line(model: &Model) -> Line<'static> {
     }
     if infos.iter().any(|i| i.cost_usd.is_some()) {
         spans.push(Span::raw(format!(" · {} reported", render::usd(cost))));
+    }
+    if let Some(maps) = &model.maps {
+        spans.push(Span::styled(
+            format!(" · map {maps}"),
+            Style::new().fg(Color::Cyan),
+        ));
     }
     if let Some(usage) = &model.usage {
         spans.push(Span::styled(
@@ -2115,6 +2126,7 @@ mod tests {
             now_ms: 1_130_000,
             trying: None,
             usage: None,
+            maps: None,
             ports: Default::default(),
         }
     }
