@@ -148,6 +148,22 @@
         "null"
       ]
     },
+    "labels": {
+      "description": "The labels this server's worker carries; it claims only operations\nwhose `require_labels` are all among them. See\ndocs/server.md#worker-labels.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "unclaimable_after_seconds": {
+      "description": "How long an operation may wait queued before it says why no live\nworker can claim it. Default 60.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
     "webhooks": {
       "type": "array",
       "items": {

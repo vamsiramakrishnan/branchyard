@@ -260,6 +260,13 @@
             }
           ],
           "description": "Make the branch a rig's root, like [`branchyard::TaskOptions::seats`]:\nthe seats its harness may spawn by name, within `delegation`. Refused\nunless the server allows delegation. Each seat's provisioning is\nheld to the same rules as `provision`."
+        },
+        "require_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
         }
       },
       "required": [
@@ -1129,6 +1136,13 @@
             }
           ],
           "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
+        },
+        "require_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
         }
       },
       "required": [
@@ -1609,6 +1623,13 @@
             }
           ],
           "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
+        },
+        "require_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
         }
       },
       "required": [
@@ -2314,6 +2335,13 @@
             }
           ],
           "description": "Like [`branchyard::TaskOptions::provision`]; a model change here is\nhow a reincarnation changes model. Without one, the old branch's is\nkept."
+        },
+        "require_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
         }
       },
       "description": "`POST /v1/repos/{repo}/branches/{branch}/reincarnate`: a new branch from\n`branch`'s latest candidate, always with a fresh session and a generated\nhandoff brief; see [`branchyard::Branch::reincarnate`].",
@@ -3030,6 +3058,13 @@
           "items": {
             "$ref": "#/$defs/Binding"
           }
+        },
+        "require_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
         }
       },
       "required": [
@@ -4899,6 +4934,20 @@
               "type": "null"
             }
           ]
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Worker labels the operation needs; only a worker carrying all of\nthem claims it."
+        },
+        "waiting": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why a queued operation has not been claimed, once it has waited\nlonger than the server's `unclaimable_after`: no live worker serving\nits repository carries the labels it requires."
         }
       },
       "required": [
@@ -7190,6 +7239,17 @@
                 "null"
               ],
               "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
+            },
+            "environment": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EnvironmentUse"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The prepared environment setup built, or that stood in for it."
             }
           },
           "required": [
@@ -7237,6 +7297,81 @@
             }
           ],
           "description": "Where a workspace phase's commands ran."
+        },
+        "EnvironmentUse": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "origin": {
+              "$ref": "#/$defs/EnvironmentOrigin"
+            },
+            "used": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The environment actually used: `key`, or the last good one's."
+            },
+            "method": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`clone`, `copy` or `link` for a restore on this host (a mix reads\n`copy`); `live_branch` or `checkpoint` for a sandbox."
+            },
+            "built_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "shared": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths linked to the environment rather than copied."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the last good environment was used, or why a built one was not\nkept."
+            }
+          },
+          "required": [
+            "key",
+            "origin"
+          ],
+          "description": "How a branch's setup related to a prepared environment, on its\n`workspace` event ([`crate::WorkspaceReport::environment`])."
+        },
+        "EnvironmentOrigin": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "built",
+              "description": "Its setup ran and built the environment for its key."
+            },
+            {
+              "type": "string",
+              "const": "restored",
+              "description": "Its key's environment was restored; setup did not run."
+            },
+            {
+              "type": "string",
+              "const": "last_good",
+              "description": "Its key's build failed; the newest good environment of the same\nrecipe was restored instead."
+            },
+            {
+              "type": "string",
+              "const": "not_kept",
+              "description": "Its setup ran, and the result was not kept (`reason` says why)."
+            }
+          ],
+          "description": "Where a branch's environment came from."
         },
         "Checkpoint": {
           "type": "object",
@@ -8067,6 +8202,39 @@
                 "method"
               ],
               "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "used": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "environment"
+                }
+              },
+              "required": [
+                "from",
+                "key",
+                "method"
+              ],
+              "description": "Branched from the prepared environment of its key (`key`), or, when\nthat key's build failed, from the last good one (`used`, with\n`reason`). See `docs/environments.md`."
             }
           ],
           "description": "Where a turn's sandbox came from."
@@ -9654,6 +9822,17 @@
                 "null"
               ],
               "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
+            },
+            "environment": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EnvironmentUse"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The prepared environment setup built, or that stood in for it."
             }
           },
           "required": [
@@ -9701,6 +9880,81 @@
             }
           ],
           "description": "Where a workspace phase's commands ran."
+        },
+        "EnvironmentUse": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "origin": {
+              "$ref": "#/$defs/EnvironmentOrigin"
+            },
+            "used": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The environment actually used: `key`, or the last good one's."
+            },
+            "method": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`clone`, `copy` or `link` for a restore on this host (a mix reads\n`copy`); `live_branch` or `checkpoint` for a sandbox."
+            },
+            "built_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "shared": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths linked to the environment rather than copied."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the last good environment was used, or why a built one was not\nkept."
+            }
+          },
+          "required": [
+            "key",
+            "origin"
+          ],
+          "description": "How a branch's setup related to a prepared environment, on its\n`workspace` event ([`crate::WorkspaceReport::environment`])."
+        },
+        "EnvironmentOrigin": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "built",
+              "description": "Its setup ran and built the environment for its key."
+            },
+            {
+              "type": "string",
+              "const": "restored",
+              "description": "Its key's environment was restored; setup did not run."
+            },
+            {
+              "type": "string",
+              "const": "last_good",
+              "description": "Its key's build failed; the newest good environment of the same\nrecipe was restored instead."
+            },
+            {
+              "type": "string",
+              "const": "not_kept",
+              "description": "Its setup ran, and the result was not kept (`reason` says why)."
+            }
+          ],
+          "description": "Where a branch's environment came from."
         },
         "Checkpoint": {
           "type": "object",
@@ -10531,6 +10785,39 @@
                 "method"
               ],
               "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "used": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "environment"
+                }
+              },
+              "required": [
+                "from",
+                "key",
+                "method"
+              ],
+              "description": "Branched from the prepared environment of its key (`key`), or, when\nthat key's build failed, from the last good one (`used`, with\n`reason`). See `docs/environments.md`."
             }
           ],
           "description": "Where a turn's sandbox came from."
@@ -10833,6 +11120,773 @@
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        }
+      }
+    },
+    "OperationList": {
+      "type": "object",
+      "properties": {
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Operation"
+          }
+        }
+      },
+      "required": [
+        "operations"
+      ],
+      "description": "`GET /v1/repos/{repo}/operations[?branch=NAME]`: the caller's tenant's\nqueued and running operations of the repository, oldest first, each\nsaying why it waits when no live worker can claim it.",
+      "title": "OperationList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Operation": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/OperationKind"
+            },
+            "state": {
+              "$ref": "#/$defs/OperationState"
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Branches the operation works on, known when it was accepted. For a\ntask they are the planned names, which agree with the result unless\nanother caller created a branch in between."
+            },
+            "cursor": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Feed position when the operation was accepted: its activity has a\ngreater sequence number."
+            },
+            "end_cursor": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Feed position once the operation finished and its activity was\ningested."
+            },
+            "created_at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "finished_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OperationResult"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ErrorBody"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "requires": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Worker labels the operation needs; only a worker carrying all of\nthem claims it."
+            },
+            "waiting": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a queued operation has not been claimed, once it has waited\nlonger than the server's `unclaimable_after`: no live worker serving\nits repository carries the labels it requires."
+            }
+          },
+          "required": [
+            "id",
+            "repo",
+            "kind",
+            "state",
+            "branches",
+            "cursor",
+            "created_at_ms"
+          ],
+          "description": "A long operation, run in the background. Durable on the server from\nthe moment it is returned."
+        },
+        "OperationKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "task",
+                "send",
+                "fork",
+                "merge"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "spawn",
+              "description": "A child created with `POST .../spawn`."
+            },
+            {
+              "type": "string",
+              "const": "integrate",
+              "description": "A child merged into its parent with `POST .../integrate`."
+            },
+            {
+              "type": "string",
+              "const": "reincarnate",
+              "description": "A branch started with `POST .../reincarnate`."
+            }
+          ]
+        },
+        "OperationState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "running",
+                "succeeded",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "queued",
+              "description": "Accepted and recorded; waiting for a slot."
+            },
+            {
+              "type": "string",
+              "const": "interrupted",
+              "description": "The server stopped before the operation finished. Its branches may\nstill say `running`; see `docs/server.md`."
+            }
+          ]
+        },
+        "OperationResult": {
+          "type": "object",
+          "properties": {
+            "branches": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BranchInfo"
+              },
+              "description": "Branches a task, send or fork ran, in request order."
+            },
+            "merged": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Merged"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "descendants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BranchInfo"
+              },
+              "description": "Every branch the operation's branches delegated to, directly or\nbelow, once they finished: the operation waits for them, as\n`by run` does."
+            },
+            "inspection": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Inspection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A spawned child, inspected once its turn ended."
+            }
+          },
+          "description": "What a finished operation produced."
+        },
+        "BranchInfo": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "git_branch": {
+              "type": "string",
+              "description": "The git branch, `by/<name>`."
+            },
+            "worktree": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Native harness session, once known."
+            },
+            "parent": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Branch this one was forked from, or that delegated it."
+            },
+            "children": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Branches this one delegated to, oldest first. Forks are not\nchildren.",
+              "default": []
+            },
+            "depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Delegation depth: 0 for a branch you started, one more than its\nparent's for a delegated child.",
+              "default": 0
+            },
+            "base": {
+              "type": "string",
+              "description": "The commit the branch started from."
+            },
+            "candidate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CandidateInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/$defs/BranchStatus"
+            },
+            "turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The harness's own cumulative cost estimate for this branch, when it\nreports one. A fork's excludes its parent's."
+            },
+            "created_at": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Seconds since the Unix epoch."
+            },
+            "stalled": {
+              "type": "boolean",
+              "description": "A running turn has had no harness activity for its\n[`Budget::stall_after`] window; see [`Activity::Stalled`]. Always\n`false` once the turn has ended.",
+              "default": false
+            },
+            "superseded_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch [`Branch::reincarnate`] started from this one's latest\ncandidate, with a fresh session and a handoff brief.",
+              "default": null
+            }
+          },
+          "required": [
+            "name",
+            "git_branch",
+            "worktree",
+            "prompt",
+            "harness",
+            "profile",
+            "base",
+            "status",
+            "turns",
+            "created_at"
+          ],
+          "description": "A branch's durable record."
+        },
+        "CandidateInfo": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "files_changed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "insertions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "commit",
+            "files_changed",
+            "insertions",
+            "deletions"
+          ]
+        },
+        "BranchStatus": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "ready"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "no_changes"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed without changing any file."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "interrupted"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "budget_exceeded"
+                }
+              },
+              "required": [
+                "state",
+                "limit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "merged"
+                }
+              },
+              "required": [
+                "state",
+                "target",
+                "commit"
+              ]
+            }
+          ],
+          "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "Merged": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            },
+            "previous": {
+              "type": "string"
+            },
+            "commit": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch",
+            "target",
+            "previous",
+            "commit"
+          ]
+        },
+        "Inspection": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/BranchStatus"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "parent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "children": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "candidate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CandidateInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The branch's own cost estimate; `None` when its harness reports none."
+            },
+            "subtree_cost_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "Its own and its descendants' reported costs. Unreported costs count\nas zero here."
+            },
+            "max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The cost limit its turns run under, when there is one."
+            },
+            "remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What is left of `max_usd` after its own spend and its children's\nreservations: what it can still spend or grant."
+            },
+            "envelope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Envelope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_message": {
+              "type": "string",
+              "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
+            },
+            "seat": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rig seat the branch occupies, if it is in a rig."
+            },
+            "seats": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The seats it may spawn, if it is in a rig."
+            },
+            "stalled": {
+              "type": "boolean",
+              "description": "See [`crate::BranchInfo::stalled`].",
+              "default": false
+            },
+            "graph_revision": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The branch's own graph revision: bumped by each graph proposal it\ncommits and each child it spawns. Omitted while 0."
+            },
+            "depends_on": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Dependency"
+              },
+              "description": "The siblings this branch waits for, or waited for."
+            },
+            "bindings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Binding"
+              },
+              "description": "The scratch areas it is bound to."
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "harness",
+            "profile",
+            "children",
+            "depth",
+            "turns",
+            "subtree_cost_usd",
+            "last_message"
+          ],
+          "description": "A branch as a delegating parent sees it."
+        },
+        "Envelope": {
+          "type": "object",
+          "properties": {
+            "max_depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Levels of descendants below this branch: 1 allows children but no\ngrandchildren; 0 allows no children."
+            },
+            "max_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Children this branch may have, counting finished ones until they\nare removed."
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            }
+          },
+          "required": [
+            "max_depth",
+            "max_children",
+            "harnesses"
+          ],
+          "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "Dependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dependent": {
+              "type": "string"
+            },
+            "prerequisite": {
+              "type": "string"
+            },
+            "after": {
+              "$ref": "#/$defs/After"
+            }
+          },
+          "required": [
+            "dependent",
+            "prerequisite"
+          ],
+          "description": "`dependent` starts only after `prerequisite`; both are children of the\nsame parent."
+        },
+        "After": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "settled",
+              "description": "Its last turn ended `ready` or `no_changes`, or it was merged."
+            },
+            {
+              "type": "string",
+              "const": "integrated",
+              "description": "It was integrated into the parent (`merged` into the parent's git\nbranch), or ended `no_changes`, leaving nothing to integrate."
+            }
+          ],
+          "description": "When a prerequisite counts as done for its dependent."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
+        },
+        "ErrorBody": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "detail": true
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "description": "A structured error. `code` is stable; `message` is for people."
         }
       }
     },
@@ -13616,6 +14670,17 @@
                 "null"
               ],
               "description": "Setup did not run for this branch: it inherited another branch's,\nwith a sandbox branched from that branch's (a fork from a sandbox\nsnapshot, or a fan whose setup ran once), named here."
+            },
+            "environment": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EnvironmentUse"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The prepared environment setup built, or that stood in for it."
             }
           },
           "required": [
@@ -13663,6 +14728,81 @@
             }
           ],
           "description": "Where a workspace phase's commands ran."
+        },
+        "EnvironmentUse": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "origin": {
+              "$ref": "#/$defs/EnvironmentOrigin"
+            },
+            "used": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The environment actually used: `key`, or the last good one's."
+            },
+            "method": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "`clone`, `copy` or `link` for a restore on this host (a mix reads\n`copy`); `live_branch` or `checkpoint` for a sandbox."
+            },
+            "built_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "shared": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths linked to the environment rather than copied."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the last good environment was used, or why a built one was not\nkept."
+            }
+          },
+          "required": [
+            "key",
+            "origin"
+          ],
+          "description": "How a branch's setup related to a prepared environment, on its\n`workspace` event ([`crate::WorkspaceReport::environment`])."
+        },
+        "EnvironmentOrigin": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "built",
+              "description": "Its setup ran and built the environment for its key."
+            },
+            {
+              "type": "string",
+              "const": "restored",
+              "description": "Its key's environment was restored; setup did not run."
+            },
+            {
+              "type": "string",
+              "const": "last_good",
+              "description": "Its key's build failed; the newest good environment of the same\nrecipe was restored instead."
+            },
+            {
+              "type": "string",
+              "const": "not_kept",
+              "description": "Its setup ran, and the result was not kept (`reason` says why)."
+            }
+          ],
+          "description": "Where a branch's environment came from."
         },
         "Checkpoint": {
           "type": "object",
@@ -14493,6 +15633,39 @@
                 "method"
               ],
               "description": "Branched, with its fan's other branches, from one sandbox whose\nsetup ran once, for `branch`'s worktree."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "used": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "method": {
+                  "$ref": "#/$defs/SnapshotMethod"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "type": "string",
+                  "const": "environment"
+                }
+              },
+              "required": [
+                "from",
+                "key",
+                "method"
+              ],
+              "description": "Branched from the prepared environment of its key (`key`), or, when\nthat key's build failed, from the last good one (`used`, with\n`reason`). See `docs/environments.md`."
             }
           ],
           "description": "Where a turn's sandbox came from."

@@ -413,6 +413,24 @@
         "teardown": {
           "$ref": "#/$defs/Script",
           "description": "Run in the worktree when the branch is removed (`by rm`, `by merge\n--rm`), best-effort."
+        },
+        "prepare": {
+          "type": "boolean",
+          "description": "Prepared environments (docs/environments.md): run `setup` once per\nenvironment key (a hash of the setup commands, the copy globs and\nthe files `inputs` names) and keep what it produced under\n`.branchyard/environments/`; a new branch with the same key starts\nfrom it instead of running setup, cloned where the filesystem can."
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Globs, relative to the repository root, of the files setup reads\n(lockfiles, manifests): their content is part of the environment\nkey. Default: the common lockfiles and manifests present."
+        },
+        "share": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Directories setup produces that every branch with the same key\nshares, as a symbolic link to the prepared environment, instead of a\ncopy of its own (`node_modules`). Literal relative paths."
         }
       },
       "description": "A branch's workspace lifecycle: `[workspace]`."
