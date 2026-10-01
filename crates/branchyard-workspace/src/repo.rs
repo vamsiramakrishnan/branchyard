@@ -491,7 +491,15 @@ impl Workspace {
         let scratch = index.with_file_name(format!("branchyard-index-{}", unique_suffix()));
         let _cleanup = RemoveOnDrop(&scratch);
         match fs::copy(&index, &scratch) {
-            Ok(_) => {}
+            // The copy keeps the index's modification time. Git compares
+            // file times in whole seconds and trusts a stat-identical entry
+            // only when the index is newer than the file ("racy git"); a
+            // copy stamped now would make a same-size edit written in the
+            // checkout's second look clean, and the diff would miss it.
+            Ok(_) => fs::File::options()
+                .write(true)
+                .open(&scratch)?
+                .set_modified(fs::metadata(&index)?.modified()?)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }

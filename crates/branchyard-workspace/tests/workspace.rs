@@ -321,6 +321,60 @@ fn create_branch_snapshot_and_diff() {
     assert_eq!(found, ws);
 }
 
+/// A same-size rewrite made in the same second as the checkout, with the
+/// diff taken in a later second, still shows: git compares whole seconds
+/// (racy git), so a stat-identical file is trusted as clean unless the
+/// index it reads is no newer than the file. `diff` and `diffstat` work on a
+/// copy of the index, which must keep the index's own time for that check.
+#[test]
+fn a_same_size_rewrite_in_the_checkout_second_is_diffed() {
+    use std::os::unix::fs::MetadataExt;
+    let fixture = Fixture::new();
+    for attempt in 0.. {
+        // Start just after a second begins, so the checkout and the rewrite
+        // share it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        std::thread::sleep(Duration::from_nanos(
+            1_000_000_000 - u64::from(now.subsec_nanos()),
+        ));
+        let ws = fixture.workspace(&format!("racy{attempt}"));
+        let file = ws.path.join("a.txt");
+        fs::write(&file, "one\nTWO\nthree\n").unwrap();
+        let index = git(
+            &ws.path,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        );
+        let index = fs::metadata(index.trim()).unwrap();
+        let written = fs::metadata(&file).unwrap();
+        if (written.mtime(), written.ctime()) != (index.mtime(), index.mtime()) {
+            // Too slow to share the second; try again.
+            assert!(attempt < 10, "never wrote within the checkout's second");
+            continue;
+        }
+        // The diff runs in a later second than the checkout and the write.
+        let next = Duration::from_secs(written.mtime() as u64 + 1);
+        while std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            < next
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let diff = ws.diff().unwrap();
+        assert!(diff.contains("-two\n+TWO"), "{diff:?}");
+        let stat = ws.diffstat().unwrap();
+        assert_eq!(
+            (stat.files_changed, stat.insertions, stat.deletions),
+            (1, 1, 1)
+        );
+        let candidate = ws.snapshot("racy").unwrap().expect("a candidate");
+        assert_eq!(candidate.stat, stat);
+        return;
+    }
+}
+
 #[test]
 fn snapshot_without_changes_is_none() {
     let fixture = Fixture::new();
