@@ -511,3 +511,135 @@ fn audit_lines_become_connector_call_events_once() {
     assert_eq!(f.yard.ingest_connector_audit().unwrap(), 1);
     assert_eq!(calls(&f).len(), 4);
 }
+
+#[test]
+fn a_sandboxed_turn_is_given_the_gateway_as_the_sandbox_reaches_it() {
+    use branchyard::{Provider, SandboxOptions};
+    let f = Fixture::new();
+    let fake = std::sync::Arc::new(branchyard_sandbox::fake::FakeProvider::plain(
+        Box::new(branchyard_runtime::LocalProvider::new()),
+        f.dir.join("fake-provider"),
+    ));
+    f.yard.use_sandbox_provider(fake);
+    let packager = Arc::new(FakePackager {
+        bundles: vec!["github"],
+        ..FakePackager::default()
+    });
+    let sandboxed = |name: &str| TaskOptions {
+        provider: Some(Provider::Microsandbox(SandboxOptions {
+            image: "registry.example/harness:1".into(),
+            ..SandboxOptions::default()
+        })),
+        isolated: false,
+        name: Some(name.into()),
+        ..granted(&f, &["github"])
+    };
+    // No address a sandbox reaches the gateway at: the turn fails, naming
+    // the setting.
+    f.yard
+        .use_connectors(Gateway::local(&f.yard, URL, packager.clone()).unwrap());
+    let branch = f
+        .task("SH echo url=$ANVIL_GATEWAY_URL")
+        .options(sandboxed("nowhere"))
+        .run()
+        .unwrap();
+    match &branch.info().status {
+        BranchStatus::Failed { reason } => assert!(reason.contains("sandbox_gateway"), "{reason}"),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    // With one, the harness gets it and the token file as it sees its home.
+    let mut gateway = Gateway::local(&f.yard, URL, packager).unwrap();
+    gateway.sandbox_url = Some("http://192.168.127.1:8931/mcp".into());
+    f.yard.use_connectors(gateway);
+    let branch = f
+        .task("SH echo url=$ANVIL_GATEWAY_URL file=$ANVIL_GATEWAY_TOKEN_FILE")
+        .options(sandboxed("boxed"))
+        .run()
+        .unwrap();
+    let events = branch.events().unwrap();
+    let said = text(&events);
+    let given = after(&said, "url=");
+    assert!(
+        given.starts_with("http://192.168.127.1:8931/mcp file="),
+        "{given}"
+    );
+    // The guest's `/branchyard/home`, which the fake provider runs at its
+    // host directory.
+    assert!(given.ends_with("/.branchyard/gateway-token"), "{given}");
+    // The token's audience is still the gateway's canonical URL.
+    let home = PathBuf::from(stored_record(&f.root, "boxed")["home"].as_str().unwrap());
+    assert!(home
+        .join(".branchyard/connectors/github/SKILL.md")
+        .is_file());
+}
+
+#[test]
+fn a_seats_grant_is_narrowed_to_its_parents_too() {
+    use branchyard::{ChildBudget, Seat, Seats};
+    let f = Fixture::new();
+    gateway(&f, &["github", "linear"]);
+    let seat = |grants: &[&str]| Seat {
+        harness: "gemini-cli".into(),
+        budget: ChildBudget::default(),
+        check: None,
+        deny: Vec::new(),
+        isolated: false,
+        provision: Some(Provisioning {
+            connectors: grants
+                .iter()
+                .map(|g| GrantEntry::parse(g).unwrap())
+                .collect(),
+            ..Provisioning::default()
+        }),
+        delegates_to: Vec::new(),
+        escalates_to: Vec::new(),
+        instances: 2,
+        bindings: Vec::new(),
+    };
+    let seats = Seats {
+        rig: "team".into(),
+        seat: "lead".into(),
+        delegates_to: vec!["writer".into(), "none".into(), "outsider".into()],
+        escalates_to: Vec::new(),
+        table: [
+            ("writer".to_owned(), seat(&["github:write+confirm"])),
+            ("none".to_owned(), seat(&[])),
+            ("outsider".to_owned(), seat(&["linear:read"])),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let options = TaskOptions {
+        delegation: Some(seats.envelope()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        seats: Some(seats),
+        ..granted(&f, &["github:read"])
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("lead")
+        .run()
+        .unwrap();
+    let lead = root.delegate(options).unwrap();
+    let by_seat = |seat: &str, name: &str| Spawn {
+        seat: Some(seat.into()),
+        name: Some(name.into()),
+        ..Spawn::new("say hi")
+    };
+    lead.spawn(by_seat("writer", "w")).unwrap();
+    // A seat without connectors gets none, not its parent's.
+    lead.spawn(by_seat("none", "n")).unwrap();
+    denied(lead.spawn(by_seat("outsider", "o")), "linear:read");
+    // A spawn's own ask still narrows within the seat's parent.
+    lead.spawn(Spawn {
+        connectors: Some(vec![GrantEntry::parse("github:read:issues.*").unwrap()]),
+        ..by_seat("writer", "w2")
+    })
+    .unwrap();
+    root.wait_subtree().unwrap();
+    assert_eq!(child_grant(&f, "w"), ["github:read"]);
+    assert!(child_grant(&f, "n").is_empty());
+    assert_eq!(child_grant(&f, "w2"), ["github:read:issues.*"]);
+}
