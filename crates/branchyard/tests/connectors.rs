@@ -161,7 +161,7 @@ fn a_granted_turn_gets_packages_an_index_and_a_signed_token() {
     assert_eq!(
         claims["by_grants"],
         serde_json::json!([{"connector": "github", "operations": ["issues.*"],
-                            "mode": "read", "confirm": "deny"}])
+                            "mode": "read"}])
     );
     let (iat, exp) = (
         claims["iat"].as_u64().unwrap(),

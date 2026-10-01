@@ -356,6 +356,7 @@ def spawn(
     depends_on: Optional[List[str]] = None,
     after: Optional[str] = None,
     bindings: Optional[Dict[str, str]] = None,
+    connectors: Optional[List[str]] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
@@ -367,6 +368,11 @@ def spawn(
     waiting and starts once each has settled, or, with
     `after="integrated"`, once you integrated each. `bindings` maps scratch
     area names to "read_only" or "exclusive_write". See docs/graph.md.
+
+    `connectors` are the child's connector grants, as `--connector` takes
+    them ("github:read", "github:write:issues.*"); they are narrowed to
+    yours, and one you hold nothing of is refused. Unset, the child has
+    your grant (or its seat's). See docs/connectors.md.
     """
     options = {
         "--seat": seat,
@@ -386,6 +392,8 @@ def spawn(
     for flag, value in options.items():
         if value is not None:
             flags += [flag, str(value)]
+    for grant in connectors or []:
+        flags += ["--connector", grant]
     for scratch, access in (bindings or {}).items():
         flags += ["--bind", f"{scratch}:{access}"]
     return _make(Spawned, _run(["spawn", *flags, "--", prompt]))

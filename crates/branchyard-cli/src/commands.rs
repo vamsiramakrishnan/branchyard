@@ -127,10 +127,14 @@ pub fn open() -> Result<Yard, Failure> {
 }
 
 fn open_yard() -> Result<Yard, branchyard::Error> {
-    match std::env::var_os(branchyard::ENV_ROOT).filter(|v| !v.is_empty()) {
+    let yard = match std::env::var_os(branchyard::ENV_ROOT).filter(|v| !v.is_empty()) {
         Some(root) => Yard::open(root),
         None => Yard::open("."),
-    }
+    }?;
+    // `[connectors]`: the gateway its branches' turns are given.
+    crate::gateway_cmd::configure(&yard)
+        .map_err(|e| branchyard::Error::Unsupported(format!("[connectors]: {e}")))?;
+    Ok(yard)
 }
 
 fn now() -> u64 {
@@ -228,6 +232,7 @@ impl Live {
             provision: provision(task)?,
             seats: None,
             workspace: None,
+            actor: None,
         })
     }
 
@@ -718,7 +723,12 @@ pub fn log(env: &Env, target: &Target, branch: &str, as_json: bool, follow: bool
         return log_follow(env, target, branch, as_json);
     }
     let events = match target {
-        Target::Local => open()?.branch(branch)?.events()?,
+        Target::Local => {
+            let yard = open()?;
+            // The gateway's newest calls, if it has written any.
+            let _ = yard.ingest_connector_audit();
+            yard.branch(branch)?.events()?
+        }
         Target::Remote(remote) => remote.repo.events(branch, 0)?.events,
     };
     if as_json {
@@ -737,9 +747,13 @@ const FOLLOW_POLL: Duration = Duration::from_millis(500);
 /// Message text still streaming is held back until the stream pauses, so
 /// a reply is not cut into many stamped pieces.
 fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
-    let local = match target {
-        Target::Local => Some(open()?.branch(branch)?),
+    let yard = match target {
+        Target::Local => Some(open()?),
         Target::Remote(_) => None,
+    };
+    let local = match &yard {
+        Some(yard) => Some(yard.branch(branch)?),
+        None => None,
     };
     let mut cursor = 0u64;
     let mut held: Vec<RecordedEvent> = Vec::new();
@@ -747,6 +761,10 @@ fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcom
     loop {
         let (events, next) = match (&local, target) {
             (Some(branch), _) => {
+                // The gateway's newest calls, as connector_call events.
+                if let Some(yard) = &yard {
+                    let _ = yard.ingest_connector_audit();
+                }
                 let page = branch.wait_for_events(cursor, 500, FOLLOW_POLL)?;
                 (page.events, page.next_cursor)
             }
@@ -956,6 +974,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         depends_on: args.depends_on.clone(),
         after: args.after,
         bindings: args.bindings.clone(),
+        connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
         ..Spawn::default()
     };
     if let Some(delegate) = harness_delegate(json)? {

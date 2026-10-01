@@ -162,6 +162,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             env,
             secrets,
             unused_secrets,
+            connectors,
         } => json!({
             "activity": "provisioned",
             "auth": auth,
@@ -169,6 +170,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "env": env,
             "secrets": secrets,
             "unused_secrets": unused_secrets,
+            "connectors": connectors,
         }),
         Activity::Steered { id, by, text } => json!({
             "activity": "steered",
@@ -226,6 +228,10 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             value["activity"] = json!("workspace");
             value
         }
+        Activity::ConnectorCall(call) => json!({
+            "activity": "connector_call",
+            "connector_call": call,
+        }),
         Activity::Sandbox(event) => json!({
             "activity": "sandbox",
             "sandbox": event,

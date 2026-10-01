@@ -704,6 +704,13 @@
                   "type": "null"
                 }
               ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -876,6 +883,62 @@
             "enabled"
           ],
           "description": "The harness's own OpenTelemetry export."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Seats": {
           "type": "object",
@@ -1339,6 +1402,13 @@
                   "type": "null"
                 }
               ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -1511,6 +1581,62 @@
             "enabled"
           ],
           "description": "The harness's own OpenTelemetry export."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         }
       }
     },
@@ -2053,6 +2179,13 @@
                   "type": "null"
                 }
               ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -2225,6 +2358,62 @@
             "enabled"
           ],
           "description": "The harness's own OpenTelemetry export."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         }
       }
     },
@@ -2755,6 +2944,13 @@
                   "type": "null"
                 }
               ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -2927,6 +3123,62 @@
             "enabled"
           ],
           "description": "The harness's own OpenTelemetry export."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         }
       }
     },
@@ -3030,6 +3282,16 @@
           "items": {
             "$ref": "#/$defs/Binding"
           }
+        },
+        "connectors": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/GrantEntry"
+          },
+          "description": "The child's connector grant, like [`branchyard::Spawn::connectors`]:\nnarrowed to its parent's; unset is its seat's or its parent's."
         }
       },
       "required": [
@@ -3191,6 +3453,62 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         }
       }
     },
@@ -3328,6 +3646,16 @@
                     "$ref": "#/$defs/Binding"
                   }
                 },
+                "connectors": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "$ref": "#/$defs/GrantEntry"
+                  },
+                  "description": "The child's connector grant, narrowed to its parent's; unset\ninherits the parent's (or its seat's). See `docs/connectors.md`."
+                },
                 "kind": {
                   "type": "string",
                   "const": "spawn"
@@ -3464,6 +3792,62 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "GrantEntry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connector": {
+              "type": "string",
+              "description": "The bundle id the gateway serves, such as `github`."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
+              "default": [
+                "*"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/GrantMode",
+              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
+              "default": "read"
+            },
+            "confirm": {
+              "$ref": "#/$defs/Confirm",
+              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+            }
+          },
+          "required": [
+            "connector"
+          ],
+          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "PolicySpec": {
           "type": "object",
@@ -5830,6 +6214,13 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "connectors": {
+                      "description": "Connectors granted for the turn, whose packages and index were\nplaced in the home and whose gateway token was written there\n(never shown); see `docs/connectors.md`.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
@@ -6109,6 +6500,19 @@
               ],
               "additionalProperties": false,
               "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector_call": {
+                  "$ref": "#/$defs/ConnectorCall"
+                }
+              },
+              "required": [
+                "connector_call"
+              ],
+              "additionalProperties": false,
+              "description": "A call the harness made through the connector gateway, from the\ngateway's audit log: allowed, denied, or refused for want of\nconfirmation. See `docs/connectors.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -8070,6 +8474,93 @@
             }
           ],
           "description": "Where a turn's sandbox came from."
+        },
+        "ConnectorCall": {
+          "type": "object",
+          "properties": {
+            "connector": {
+              "type": "string"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "decision": {
+              "type": "string",
+              "description": "`allowed`, `denied` or `confirmation_required`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turn": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The token's `by_turn`."
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The token's `sub`."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it was refused, as the gateway's error code (such as\n`policy_denied`), when it was."
+            },
+            "grant": {
+              "description": "The grant entry that allowed it."
+            },
+            "upstream_status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "latency_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The grant rule that decided a refusal (such as\n`policy/grant_denied`), when one did."
+            },
+            "input_hash": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A hash of the redacted input (`sha256:<hex>`)."
+            },
+            "time": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The line's own time, as written."
+            }
+          },
+          "required": [
+            "connector",
+            "operation",
+            "decision"
+          ],
+          "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
         }
       }
     },
@@ -8294,6 +8785,13 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "connectors": {
+                      "description": "Connectors granted for the turn, whose packages and index were\nplaced in the home and whose gateway token was written there\n(never shown); see `docs/connectors.md`.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
@@ -8573,6 +9071,19 @@
               ],
               "additionalProperties": false,
               "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector_call": {
+                  "$ref": "#/$defs/ConnectorCall"
+                }
+              },
+              "required": [
+                "connector_call"
+              ],
+              "additionalProperties": false,
+              "description": "A call the harness made through the connector gateway, from the\ngateway's audit log: allowed, denied, or refused for want of\nconfirmation. See `docs/connectors.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -10534,6 +11045,93 @@
             }
           ],
           "description": "Where a turn's sandbox came from."
+        },
+        "ConnectorCall": {
+          "type": "object",
+          "properties": {
+            "connector": {
+              "type": "string"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "decision": {
+              "type": "string",
+              "description": "`allowed`, `denied` or `confirmation_required`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turn": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The token's `by_turn`."
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The token's `sub`."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it was refused, as the gateway's error code (such as\n`policy_denied`), when it was."
+            },
+            "grant": {
+              "description": "The grant entry that allowed it."
+            },
+            "upstream_status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "latency_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The grant rule that decided a refusal (such as\n`policy/grant_denied`), when one did."
+            },
+            "input_hash": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A hash of the redacted input (`sha256:<hex>`)."
+            },
+            "time": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The line's own time, as written."
+            }
+          },
+          "required": [
+            "connector",
+            "operation",
+            "decision"
+          ],
+          "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
         }
       }
     },
@@ -12256,6 +12854,13 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "connectors": {
+                      "description": "Connectors granted for the turn, whose packages and index were\nplaced in the home and whose gateway token was written there\n(never shown); see `docs/connectors.md`.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
@@ -12535,6 +13140,19 @@
               ],
               "additionalProperties": false,
               "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector_call": {
+                  "$ref": "#/$defs/ConnectorCall"
+                }
+              },
+              "required": [
+                "connector_call"
+              ],
+              "additionalProperties": false,
+              "description": "A call the harness made through the connector gateway, from the\ngateway's audit log: allowed, denied, or refused for want of\nconfirmation. See `docs/connectors.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -14496,6 +15114,93 @@
             }
           ],
           "description": "Where a turn's sandbox came from."
+        },
+        "ConnectorCall": {
+          "type": "object",
+          "properties": {
+            "connector": {
+              "type": "string"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "decision": {
+              "type": "string",
+              "description": "`allowed`, `denied` or `confirmation_required`."
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turn": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The token's `by_turn`."
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The token's `sub`."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it was refused, as the gateway's error code (such as\n`policy_denied`), when it was."
+            },
+            "grant": {
+              "description": "The grant entry that allowed it."
+            },
+            "upstream_status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "latency_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The grant rule that decided a refusal (such as\n`policy/grant_denied`), when one did."
+            },
+            "input_hash": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A hash of the redacted input (`sha256:<hex>`)."
+            },
+            "time": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The line's own time, as written."
+            }
+          },
+          "required": [
+            "connector",
+            "operation",
+            "decision"
+          ],
+          "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
         }
       }
     },

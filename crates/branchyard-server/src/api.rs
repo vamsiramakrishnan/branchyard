@@ -487,6 +487,14 @@ impl App {
                 }
             }
         }
+        if !spec.connectors.is_empty() && self.config.connectors.is_none() {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "connectors_not_configured",
+                "this server has no connector gateway; its operator can configure one under \
+                 connectors (docs/connectors.md)",
+            ));
+        }
         if !spec.mcp_servers.is_empty() && !self.config.allow_client_commands {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
@@ -723,6 +731,7 @@ pub fn router(app: Shared) -> Router {
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        .route("/.well-known/jwks.json", get(jwks))
         .merge(v1)
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
         .method_not_allowed_fallback(|| async {
@@ -778,6 +787,20 @@ pub fn router(app: Shared) -> Router {
         .with_state(app)
 }
 
+/// `GET /.well-known/jwks.json`: the public keys the connector gateway
+/// verifies this server's tokens against; `404` without connectors.
+async fn jwks(State(app): State<Shared>) -> Response {
+    if app.config.connectors.is_none() {
+        return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route").into_response();
+    }
+    let app = app.clone();
+    match tokio::task::spawn_blocking(move || crate::connectors::jwks(&app.config)).await {
+        Ok(Ok(set)) => axum::Json(set).into_response(),
+        Ok(Err(e)) => ApiError::internal(e).into_response(),
+        Err(e) => ApiError::internal(e.to_string()).into_response(),
+    }
+}
+
 /// The request ID assigned by [`request_id`], read back by the
 /// [`TraceLayer`] span above and echoed on the response.
 #[derive(Clone)]
@@ -812,7 +835,8 @@ async fn request_id(mut request: Request, next: Next) -> Response {
 /// routes cannot be probed anonymously. Every read (`GET`, `HEAD`) needs
 /// the `read` scope, checked here once so no handler can forget it.
 async fn authenticate(State(app): State<Shared>, mut request: Request, next: Next) -> Response {
-    if request.uri().path() == "/healthz" {
+    // The connector gateway's verification keys are public.
+    if matches!(request.uri().path(), "/healthz" | "/.well-known/jwks.json") {
         return next.run(request).await;
     }
     let header = request

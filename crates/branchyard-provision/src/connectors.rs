@@ -40,8 +40,9 @@ pub struct GrantEntry {
     /// mutations.
     #[serde(default)]
     pub mode: GrantMode,
-    /// Whether a mutation that AIR says needs confirmation may run.
-    #[serde(default)]
+    /// Whether a mutation that AIR says needs confirmation may run. On the
+    /// wire only `"allow"` is written; its absence is `deny`.
+    #[serde(default, skip_serializing_if = "Confirm::is_deny")]
     pub confirm: Confirm,
     /// One of the person's connected accounts for the connector; unset is
     /// their default.
@@ -71,6 +72,12 @@ pub enum Confirm {
     #[default]
     Deny,
     Allow,
+}
+
+impl Confirm {
+    fn is_deny(&self) -> bool {
+        *self == Confirm::Deny
+    }
 }
 
 impl GrantEntry {
@@ -145,12 +152,12 @@ impl GrantEntry {
                 && op.len() <= 200
                 && op.bytes().all(|b| {
                     b.is_ascii_alphanumeric()
-                        || matches!(b, b'_' | b'-' | b'.' | b'*' | b'/' | b':')
+                        || matches!(b, b'_' | b'-' | b'.' | b'*' | b'?' | b'/' | b':')
                 });
             if !ok {
                 return Err(format!(
                     "connector {}: operation {op:?} may hold only letters, digits, '_', '-', \
-                     '.', '/', ':' and '*'",
+                     '.', '/', ':', '*' and '?'",
                     self.connector
                 ));
             }
@@ -198,28 +205,50 @@ impl fmt::Display for GrantEntry {
     }
 }
 
-/// A connector id: a bundle's workspace-relative path, such as `github`
-/// or `shipping/v2`. Letters, digits, `_`, `-`, `.` and `/`, starting with
-/// a letter or digit, with no empty, `.` or `..` component.
+/// A connector id: the id the gateway serves a bundle under, its
+/// workspace-relative path folded as Anvil's fleet folds it
+/// ([`fold_connector`]): 1 to 64 letters, digits, `_` and `-`, such as
+/// `github` or `shipping_v2`.
 pub fn check_connector(id: &str) -> Result<(), String> {
-    let ok = id.len() <= 128
-        && id.starts_with(|c: char| c.is_ascii_alphanumeric())
+    let ok = !id.is_empty()
+        && id.len() <= 64
         && id
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
-        && id
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != "..");
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
     match ok {
         true => Ok(()),
         false => Err(format!(
-            "{id:?} is not a connector id (a bundle's path: letters, digits, '_', '-', '.' and '/')"
+            "{id:?} is not a connector id (1 to 64 letters, digits, '_' and '-')"
         )),
     }
 }
 
+/// A bundle's workspace-relative path as a connector id: every run of
+/// characters other than letters, digits, `_` and `-` becomes one `_`, and
+/// leading and trailing `_` go, as Anvil's fleet prefixes do
+/// (`shipping/v2` is `shipping_v2`).
+pub fn fold_connector(path: &str) -> String {
+    let mut out = String::new();
+    let mut folding = false;
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            out.push(c);
+            folding = false;
+        } else if !folding {
+            out.push('_');
+            folding = true;
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    match trimmed.is_empty() {
+        true => "bundle".to_owned(),
+        false => trimmed.to_owned(),
+    }
+}
+
 /// Whether `glob` matches `text`: `*` matches any run of characters,
-/// dots included; everything else matches itself.
+/// dots included, `?` any one; everything else matches itself (Anvil's
+/// rule).
 pub fn glob_match(glob: &str, text: &str) -> bool {
     let (g, t) = (glob.as_bytes(), text.as_bytes());
     let (mut gi, mut ti) = (0, 0);
@@ -228,7 +257,7 @@ pub fn glob_match(glob: &str, text: &str) -> bool {
         if gi < g.len() && g[gi] == b'*' {
             star = Some((gi, ti));
             gi += 1;
-        } else if gi < g.len() && g[gi] == t[ti] {
+        } else if gi < g.len() && (g[gi] == t[ti] || g[gi] == b'?') {
             gi += 1;
             ti += 1;
         } else if let Some((sg, st)) = star {
@@ -246,7 +275,8 @@ pub fn glob_match(glob: &str, text: &str) -> bool {
 /// but not complete: when it cannot tell, it says no, so a narrowing built
 /// on it is never wider than both sides.
 pub fn glob_covers(outer: &str, inner: &str) -> bool {
-    if !inner.contains('*') {
+    let wild = |c: char| c == '*' || c == '?';
+    if !inner.contains(wild) {
         return glob_match(outer, inner);
     }
     if outer == inner || outer.bytes().all(|b| b == b'*') {
@@ -254,8 +284,8 @@ pub fn glob_covers(outer: &str, inner: &str) -> bool {
     }
     // `issues.*` covers `issues.comments.*`: a prefix and one trailing star.
     match outer.strip_suffix('*') {
-        Some(prefix) if !prefix.contains('*') => {
-            let literal = &inner[..inner.find('*').unwrap_or(inner.len())];
+        Some(prefix) if !prefix.contains(wild) => {
+            let literal = &inner[..inner.find(wild).unwrap_or(inner.len())];
             literal.starts_with(prefix)
         }
         _ => false,
@@ -387,7 +417,10 @@ mod tests {
         assert_eq!(full.confirm, Confirm::Allow);
         assert_eq!(full.operations, ["issues.*", "pulls.list"]);
         assert_eq!(GrantEntry::parse(&full.to_string()).unwrap(), full);
-        assert_eq!(e("shipping/v2:write").connector, "shipping/v2");
+        assert_eq!(e("shipping_v2:write").connector, "shipping_v2");
+        assert_eq!(fold_connector("shipping/v2"), "shipping_v2");
+        assert_eq!(fold_connector("/a.b//c-d/"), "a_b_c-d");
+        assert_eq!(fold_connector("///"), "bundle");
         for bad in [
             "",
             "github:admin",
@@ -397,6 +430,8 @@ mod tests {
             "github@:read",
             "gi thub",
             "/abs",
+            "shipping/v2",
+            "a.b",
         ] {
             assert!(GrantEntry::parse(bad).is_err(), "{bad:?} parsed");
         }
@@ -410,9 +445,12 @@ mod tests {
             json,
             serde_json::json!({
                 "connector": "github", "operations": ["issues.*", "pulls.list"],
-                "mode": "read", "confirm": "deny", "account": "work"
+                "mode": "read", "account": "work"
             })
         );
+        // Only "allow" is written, as the gateway reads it.
+        let allow = serde_json::to_value(e("github:write+confirm")).unwrap();
+        assert_eq!(allow["confirm"], "allow");
         let minimal: GrantEntry = serde_json::from_str(r#"{"connector":"github"}"#).unwrap();
         assert_eq!(minimal, GrantEntry::read("github"));
         assert!(serde_json::from_str::<GrantEntry>(r#"{"connector":"g","extra":1}"#).is_err());
@@ -425,6 +463,10 @@ mod tests {
         assert!(!glob_match("issues.*", "pulls.list"));
         assert!(glob_match("*.list", "pulls.list"));
         assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(glob_match("issues.?et", "issues.get"));
+        assert!(!glob_match("issues.?et", "issues.gget"));
+        assert!(glob_covers("issues.*", "issues.?et"));
+        assert!(!glob_covers("issues.?et", "issues.*"));
         assert!(!glob_match("a*b*c", "axxbyy"));
         assert!(glob_covers("*", "issues.*"));
         assert!(glob_covers("issues.*", "issues.comments.*"));

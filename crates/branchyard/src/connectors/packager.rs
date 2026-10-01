@@ -11,7 +11,8 @@ use std::process::{Command, Stdio};
 /// `air.json`, named by its path under the bundle root (the connector id).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bundle {
-    /// The connector id: the bundle's path under the root, with `/`.
+    /// The connector id: the bundle's path under the root, folded as the
+    /// fleet folds it (`shipping/v2` is `shipping_v2`).
     pub id: String,
     pub path: PathBuf,
     /// The bundle's content hash (BLAKE3 of its files, hex), which keys the
@@ -116,13 +117,14 @@ pub fn discover(root: &Path) -> Result<Vec<Bundle>, String> {
 
 fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<Bundle>) -> Result<(), String> {
     if dir != root && (dir.join("air.yaml").is_file() || dir.join("air.json").is_file()) {
-        let id = dir
+        let rel = dir
             .strip_prefix(root)
             .map_err(|e| e.to_string())?
             .components()
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join("/");
+        let id = branchyard_provision::connectors::fold_connector(&rel);
         if branchyard_provision::connectors::check_connector(&id).is_ok() {
             out.push(Bundle {
                 hash: hash_dir(dir)?,
@@ -229,7 +231,7 @@ mod tests {
         mk(".hidden", "air.yaml", "skipped");
         let found = discover(root.path()).unwrap();
         let ids: Vec<&str> = found.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids, ["github", "shipping/v2"]);
+        assert_eq!(ids, ["github", "shipping_v2"]);
         let before = found[0].hash.clone();
         mk("github", "air.yaml", "service: github2");
         assert_ne!(discover(root.path()).unwrap()[0].hash, before);

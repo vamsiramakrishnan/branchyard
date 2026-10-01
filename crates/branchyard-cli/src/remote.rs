@@ -570,6 +570,7 @@ pub fn spawn(
         depends_on: args.depends_on.clone(),
         after: args.after,
         bindings: args.bindings.clone(),
+        connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
     };
     let op = remote
         .repo

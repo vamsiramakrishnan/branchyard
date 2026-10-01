@@ -387,6 +387,38 @@ pub struct Config {
     pub webhooks: Vec<WebhookConfig>,
     /// Allow a webhook's `http://` URL off loopback. Only from the flag.
     pub webhook_insecure: bool,
+    /// The connector gateway its branches' turns are given, and whether
+    /// this server runs it; see `docs/connectors.md`. `None`: off.
+    pub connectors: Option<ConnectorsConfig>,
+}
+
+/// `connectors` in the configuration file: the connector gateway.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectorsConfig {
+    /// The gateway's canonical `/mcp` URL: every token's audience.
+    pub gateway: String,
+    /// The gateway as a sandboxed harness reaches it.
+    pub sandbox_gateway: Option<String>,
+    /// Every token's issuer. Default: this server's URL.
+    pub issuer: Option<String>,
+    /// The signing key file (a private JWKS, made if missing). Default:
+    /// `<data_dir>/gateway/key`.
+    pub signing_key: Option<PathBuf>,
+    /// The gateway's audit log, read into `connector_call` events.
+    /// Default: `<data_dir>/gateway/audit.jsonl`.
+    pub audit_file: Option<PathBuf>,
+    /// The bundle root the gateway serves.
+    pub bundles: PathBuf,
+    /// Anvil's command and leading arguments. Default `["anvil"]`.
+    pub anvil: Vec<String>,
+    /// Run the gateway beside the server, supervised.
+    pub run_gateway: bool,
+    /// The address the gateway listens on when run here, when not
+    /// loopback.
+    pub listen: Option<String>,
+    /// The gateway's vault key file. Default: `<data_dir>/gateway/vault.key`,
+    /// made if missing.
+    pub vault_key: Option<PathBuf>,
 }
 
 impl Config {
@@ -422,6 +454,7 @@ impl Config {
             log_requests: true,
             webhooks: Vec::new(),
             webhook_insecure: false,
+            connectors: None,
         }
     }
 
@@ -464,6 +497,18 @@ impl Config {
     pub fn validate(&self) -> Result<Option<String>, String> {
         if self.repos.is_empty() {
             return Err("no repositories to serve".into());
+        }
+        if let Some(c) = &self.connectors {
+            for url in std::iter::once(&c.gateway).chain(&c.sandbox_gateway) {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err(format!(
+                        "connectors: {url:?} is not an http:// or https:// URL"
+                    ));
+                }
+            }
+            if c.anvil.is_empty() {
+                return Err("connectors.anvil names no command".into());
+            }
         }
         if self.tokens.is_empty() && self.credentials.is_empty() && !self.worker_only {
             return Err("no tokens or credentials configured; every request needs one".into());
@@ -704,6 +749,42 @@ pub(crate) struct FileConfig {
     webhooks: Vec<FileWebhook>,
     #[serde(default)]
     webhook_insecure: bool,
+    /// The connector gateway (docs/connectors.md): where it is, which
+    /// bundles it serves, and whether this server runs it.
+    connectors: Option<FileConnectors>,
+}
+
+/// `connectors`: the connector gateway; see `docs/connectors.md`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileConnectors {
+    /// The gateway's canonical `/mcp` URL, such as
+    /// `http://127.0.0.1:8931/mcp`: every token's audience.
+    gateway: String,
+    /// The gateway as a sandboxed harness reaches it.
+    sandbox_gateway: Option<String>,
+    /// Every token's issuer. Default: this server's URL.
+    issuer: Option<String>,
+    /// The signing key, a private JSON Web Key Set made if missing.
+    /// Default: `<data_dir>/gateway/key`. Its public keys are served at
+    /// `GET /.well-known/jwks.json`.
+    signing_key: Option<PathBuf>,
+    /// The gateway's audit log. Default: `<data_dir>/gateway/audit.jsonl`.
+    audit_file: Option<PathBuf>,
+    /// The bundle root the gateway serves.
+    bundles: PathBuf,
+    /// Anvil's command and leading arguments. Default `["anvil"]`.
+    anvil: Option<Vec<String>>,
+    /// Run the gateway beside the server, supervised. Default false.
+    #[serde(default)]
+    run_gateway: bool,
+    /// The address the gateway listens on when run here, when not
+    /// loopback.
+    listen: Option<String>,
+    /// The gateway's vault key (a 0600 file of 64 hex characters).
+    /// Default: `<data_dir>/gateway/vault.key`, made if missing.
+    vault_key: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -814,6 +895,7 @@ pub struct Partial {
     pub database: Option<String>,
     pub webhooks: Vec<WebhookConfig>,
     pub webhook_insecure: bool,
+    pub connectors: Option<ConnectorsConfig>,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -1016,6 +1098,18 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             })
             .collect::<Result<_, String>>()?,
         webhook_insecure: file.webhook_insecure,
+        connectors: file.connectors.map(|c| ConnectorsConfig {
+            gateway: c.gateway,
+            sandbox_gateway: c.sandbox_gateway,
+            issuer: c.issuer,
+            signing_key: c.signing_key.map(resolve),
+            audit_file: c.audit_file.map(resolve),
+            bundles: resolve(c.bundles),
+            anvil: c.anvil.unwrap_or_else(|| vec!["anvil".to_owned()]),
+            run_gateway: c.run_gateway,
+            listen: c.listen,
+            vault_key: c.vault_key.map(resolve),
+        }),
         warnings,
     })
 }

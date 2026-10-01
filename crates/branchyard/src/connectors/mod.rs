@@ -15,6 +15,7 @@
 //! [`ingest`] records each line of its audit log on the branch it names as
 //! an [`Activity::ConnectorCall`](crate::Activity::ConnectorCall).
 
+pub mod gateway;
 pub mod keys;
 pub mod packager;
 
@@ -25,7 +26,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub use branchyard_provision::connectors::{Confirm, GrantEntry, GrantMode};
+pub use branchyard_provision::connectors::{
+    check_connector, describe, fold_connector, intersect, narrow, Confirm, GrantEntry, GrantMode,
+};
 use branchyard_provision::EnvVar;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -209,7 +212,11 @@ pub struct ConnectorCall {
     pub upstream_status: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
-    /// A hash of the redacted input.
+    /// The grant rule that decided a refusal (such as
+    /// `policy/grant_denied`), when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// A hash of the redacted input (`sha256:<hex>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_hash: Option<String>,
     /// The line's own time, as written.
@@ -271,12 +278,6 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// The directory a connector's package goes in, under `connectors/`: its
-/// id with `/` as `_`, as Anvil's fleet prefixes are.
-pub fn package_dir_name(id: &str) -> String {
-    id.replace('/', "_")
 }
 
 /// Prepare the turn's connectors: `None` when the branch has no grant.
@@ -343,7 +344,7 @@ pub(crate) fn prepare(
         fs::create_dir_all(&staged).map_err(|e| format!("create {}: {e}", staged.display()))?;
         for bundle in &bundles {
             let package = cached_package(gateway.packager.as_ref(), &cache, bundle)?;
-            packager::copy_tree(&package, &staged.join(package_dir_name(&bundle.id)))?;
+            packager::copy_tree(&package, &staged.join(&bundle.id))?;
         }
         let grants = staged.join(".grants.json");
         let text = serde_json::to_string_pretty(&grant).map_err(|e| e.to_string())?;
@@ -621,7 +622,7 @@ fn parse_line(line: &str, scope: Option<&str>) -> Option<(String, u64, Connector
         account: text(&["account"]),
         turn: text(&["by_turn"]).or_else(|| number(&["by_turn"]).map(|n| n.to_string())),
         subject: text(&["sub"]),
-        reason: text(&["reason", "code", "error_code"]).or_else(|| {
+        reason: text(&["error_code", "reason", "code"]).or_else(|| {
             value
                 .get("error")
                 .and_then(|e| e.get("code").and_then(Value::as_str).or(e.as_str()))
@@ -634,7 +635,8 @@ fn parse_line(line: &str, scope: Option<&str>) -> Option<(String, u64, Connector
             .cloned(),
         upstream_status: number(&["upstream_status", "status"]),
         latency_ms: number(&["latency_ms"]).map(|n| n.max(0) as u64),
-        input_hash: text(&["input_hash"]),
+        rule: text(&["rule"]),
+        input_hash: text(&["input_sha256", "input_hash"]),
         time,
     };
     Some((branch, at_ms, call))

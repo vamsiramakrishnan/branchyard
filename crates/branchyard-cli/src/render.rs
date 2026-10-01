@@ -349,10 +349,14 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             env,
             secrets,
             unused_secrets,
+            connectors,
         } => {
             let mut parts = Vec::new();
             if let Some(auth) = auth {
                 parts.push(format!("auth {auth}"));
+            }
+            if !connectors.is_empty() {
+                parts.push(format!("connectors {}", connectors.join(", ")));
             }
             if !files.is_empty() {
                 parts.push(format!("wrote {}", files.join(", ")));
@@ -403,6 +407,13 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
         ),
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
         Activity::Workspace(report) => workspace_line(report, style),
+        Activity::ConnectorCall(call) => style.paint(
+            match call.decision.as_str() {
+                "allowed" => Tone::Cyan,
+                _ => Tone::Yellow,
+            },
+            &format!("connector: {}", call.describe()),
+        ),
         Activity::Sandbox(event) => style.paint(
             match event.as_ref() {
                 branchyard::SandboxEvent::Started {

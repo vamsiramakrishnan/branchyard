@@ -47,6 +47,8 @@ pub struct Running {
     /// share.
     _lock: Option<branchyard::DirLock>,
     worker: bool,
+    /// The connector gateway run beside the server, stopped with it.
+    _gateway: Option<branchyard::connectors::gateway::Supervisor>,
 }
 
 /// How a shutdown went.
@@ -204,6 +206,10 @@ pub async fn start(config: Config) -> Result<Running, String> {
         tokio::task::spawn_blocking(move || open_state(&config))
     };
     let (repos, registry) = setup.await.map_err(|e| e.to_string())??;
+    let gateway = match worker_or_not(&config) {
+        true => None,
+        false => crate::connectors::start(&config)?,
+    };
     let worker = config.worker_only;
     let listener = match worker {
         true => None,
@@ -269,7 +275,13 @@ pub async fn start(config: Config) -> Result<Running, String> {
         webhooks,
         _lock: lock,
         worker,
+        _gateway: gateway,
     })
+}
+
+/// A worker runs operations only; the gateway runs beside a server.
+fn worker_or_not(config: &Config) -> bool {
+    config.worker_only
 }
 
 /// One delivery task per (repository, configured webhook), sharing a store
@@ -319,6 +331,9 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         // see docs/workspace.md.
         if !config.allow_workspace_scripts.allows(name) {
             yard.deny_workspace_scripts();
+        }
+        if let Some(gateway) = crate::connectors::gateway_for(config, name) {
+            yard.use_connectors(gateway);
         }
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
@@ -437,6 +452,10 @@ async fn poll(
                     ),
                     Err(e) => tracing::error!(error = %e, "resuming graphs"),
                 }
+            }
+            // The gateway's newest calls, as connector_call events.
+            if let Err(e) = yard.ingest_connector_audit() {
+                tracing::warn!(error = %e, "reading the connector gateway's audit log");
             }
             (feed.sync(), recovered)
         })

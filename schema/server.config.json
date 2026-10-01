@@ -157,6 +157,17 @@
     "webhook_insecure": {
       "type": "boolean",
       "default": false
+    },
+    "connectors": {
+      "description": "The connector gateway (docs/connectors.md): where it is, which\nbundles it serves, and whether this server runs it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileConnectors"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -362,6 +373,82 @@
       "additionalProperties": false,
       "required": [
         "url"
+      ]
+    },
+    "FileConnectors": {
+      "description": "`connectors`: the connector gateway; see `docs/connectors.md`.",
+      "type": "object",
+      "properties": {
+        "gateway": {
+          "description": "The gateway's canonical `/mcp` URL, such as\n`http://127.0.0.1:8931/mcp`: every token's audience.",
+          "type": "string"
+        },
+        "sandbox_gateway": {
+          "description": "The gateway as a sandboxed harness reaches it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issuer": {
+          "description": "Every token's issuer. Default: this server's URL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signing_key": {
+          "description": "The signing key, a private JSON Web Key Set made if missing.\nDefault: `<data_dir>/gateway/key`. Its public keys are served at\n`GET /.well-known/jwks.json`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "audit_file": {
+          "description": "The gateway's audit log. Default: `<data_dir>/gateway/audit.jsonl`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bundles": {
+          "description": "The bundle root the gateway serves.",
+          "type": "string"
+        },
+        "anvil": {
+          "description": "Anvil's command and leading arguments. Default `[\"anvil\"]`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "run_gateway": {
+          "description": "Run the gateway beside the server, supervised. Default false.",
+          "type": "boolean",
+          "default": false
+        },
+        "listen": {
+          "description": "The address the gateway listens on when run here, when not\nloopback.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vault_key": {
+          "description": "The gateway's vault key (a 0600 file of 64 hex characters).\nDefault: `<data_dir>/gateway/vault.key`, made if missing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gateway",
+        "bundles"
       ]
     }
   }

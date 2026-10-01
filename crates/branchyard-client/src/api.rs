@@ -383,6 +383,10 @@ pub struct SpawnRequest {
     pub after: After,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    /// The child's connector grant, like [`branchyard::Spawn::connectors`]:
+    /// narrowed to its parent's; unset is its seat's or its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connectors: Option<Vec<branchyard::connectors::GrantEntry>>,
 }
 
 fn is_settled(after: &After) -> bool {

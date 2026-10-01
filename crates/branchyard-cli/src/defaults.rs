@@ -230,11 +230,25 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         }
         None => None,
     };
+    // Default grants, only where they can be placed and only when the
+    // flags gave none.
+    let grants = match private_home {
+        true => config
+            .connectors
+            .grant_entries()
+            .map_err(|e| e.to_string())?,
+        false => Vec::new(),
+    };
+    let flag_grants = task
+        .provision
+        .as_ref()
+        .is_some_and(|p| !p.connectors.is_empty());
     let wanted = d.model.is_some()
         || effort.is_some()
         || d.auth.is_some()
         || !secrets.is_empty()
-        || !mcp.is_empty();
+        || !mcp.is_empty()
+        || (!grants.is_empty() && !flag_grants);
     if wanted {
         let spec = task.provision.get_or_insert_with(Default::default);
         if spec.model.is_none() {
@@ -255,6 +269,9 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
             if !spec.mcp_servers.iter().any(|s| s.name == server.name) {
                 spec.mcp_servers.push(server);
             }
+        }
+        if spec.connectors.is_empty() {
+            spec.connectors = grants;
         }
     }
     Ok(())
@@ -313,6 +330,47 @@ config = "/srv/server.json"
         assert_eq!(spec.secrets.len(), 1);
         assert_eq!(spec.secrets[0].name, "OPENAI_API_KEY");
         assert_eq!(spec.mcp_servers[0].name, "docs");
+    }
+
+    #[test]
+    fn default_grants_go_only_to_a_new_private_branch_without_its_own() {
+        let config = config(
+            "[connectors]\ngateway = \"http://127.0.0.1:8931/mcp\"\ngrants = [\"github:read\"]\n",
+        );
+        let grants = |task: &TaskArgs| -> Vec<String> {
+            task.provision
+                .as_ref()
+                .map(|p| p.connectors.iter().map(|g| g.to_string()).collect())
+                .unwrap_or_default()
+        };
+        let mut isolated = TaskArgs {
+            isolated: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut isolated, Scope::NewBranch).unwrap();
+        assert_eq!(grants(&isolated), ["github:read"]);
+        // Not isolated: nowhere to place them.
+        let mut shared = TaskArgs::default();
+        apply_task(&config, &mut shared, Scope::NewBranch).unwrap();
+        assert!(grants(&shared).is_empty());
+        // The flags win, whole.
+        let mut own = TaskArgs {
+            isolated: true,
+            provision: Some(branchyard::Provisioning {
+                connectors: vec![branchyard::connectors::GrantEntry::parse("linear").unwrap()],
+                ..Default::default()
+            }),
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut own, Scope::NewBranch).unwrap();
+        assert_eq!(grants(&own), ["linear:read"]);
+        // A send keeps the branch's.
+        let mut send = TaskArgs {
+            isolated: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut send, Scope::Continue).unwrap();
+        assert!(grants(&send).is_empty());
     }
 
     #[test]

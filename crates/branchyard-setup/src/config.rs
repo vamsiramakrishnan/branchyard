@@ -78,6 +78,70 @@ pub struct ProjectConfig {
     /// that repository's own `[workspace]` for you.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub projects: BTreeMap<String, ProjectOverride>,
+    /// The connector gateway (docs/connectors.md): where it is, which
+    /// bundles it serves, how `by gateway` runs it, and the grants a new
+    /// branch gets when `--connector` names none.
+    #[serde(default, skip_serializing_if = "Connectors::is_empty")]
+    pub connectors: Connectors,
+}
+
+/// `[connectors]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Connectors {
+    /// The gateway's canonical `/mcp` URL, such as
+    /// `http://127.0.0.1:8931/mcp`: every token's audience, and what a
+    /// harness on this machine is given. Without it, connectors are off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    /// The same gateway as a sandboxed harness reaches it: a host address a
+    /// Microsandbox guest routes to, or Substrate's routed ingress. Without
+    /// it, a sandboxed branch with a grant fails its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_gateway: Option<String>,
+    /// The bundle root the gateway serves (`anvil serve mcp <root>
+    /// --fleet`): every directory under it with an `air.yaml` or
+    /// `air.json` is a connector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundles: Option<String>,
+    /// Anvil's command line (default `anvil`), such as
+    /// `"node /opt/anvil/packages/cli/dist/bin-anvil.js"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anvil: Option<String>,
+    /// The address `by gateway start` listens on (default: the gateway
+    /// URL's loopback host); `0.0.0.0` for sandboxes to reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    /// The gateway's vault key, a 0600 file of 32 bytes in 64 hex
+    /// characters (default `.branchyard/gateway/vault.key`, made on first
+    /// start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_key: Option<String>,
+    /// Grants for a new branch (`by run`, `by fan`) when `--connector`
+    /// gives none, in its form: `"github:read"`,
+    /// `"github@work:write:issues.*"`. Applied only to isolated or
+    /// sandboxed branches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<String>,
+}
+
+impl Connectors {
+    pub fn is_empty(&self) -> bool {
+        self == &Connectors::default()
+    }
+
+    /// The default grants, parsed.
+    pub fn grant_entries(
+        &self,
+    ) -> Result<Vec<branchyard_provision::connectors::GrantEntry>, ConfigError> {
+        self.grants
+            .iter()
+            .map(|g| {
+                branchyard_provision::connectors::GrantEntry::parse(g)
+                    .map_err(|e| ConfigError(format!("connectors.grants: {e}")))
+            })
+            .collect()
+    }
 }
 
 /// A branch's workspace lifecycle: `[workspace]`.
@@ -696,6 +760,42 @@ impl ProjectConfig {
                 workspace.check(&format!("projects.{root:?}.workspace"))?;
             }
         }
+        for (key, url) in [
+            ("connectors.gateway", &self.connectors.gateway),
+            (
+                "connectors.sandbox_gateway",
+                &self.connectors.sandbox_gateway,
+            ),
+        ] {
+            if let Some(url) = url {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return fail(
+                        key,
+                        format!("must be an http:// or https:// URL, not {url:?}"),
+                    );
+                }
+            }
+        }
+        for (key, value) in [
+            ("connectors.bundles", &self.connectors.bundles),
+            ("connectors.anvil", &self.connectors.anvil),
+            ("connectors.listen", &self.connectors.listen),
+            ("connectors.vault_key", &self.connectors.vault_key),
+        ] {
+            if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+                return fail(key, "must not be empty".into());
+            }
+        }
+        if let Some(anvil) = &self.connectors.anvil {
+            split_words(anvil).map_err(|e| ConfigError(format!("connectors.anvil: {e}")))?;
+        }
+        self.connectors.grant_entries()?;
+        if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {
+            return fail(
+                "connectors.grants",
+                "grants need a gateway; set connectors.gateway".into(),
+            );
+        }
         if let Some(sandbox) = &self.microsandbox {
             if sandbox.image.trim().is_empty() {
                 return fail("microsandbox.image", "must not be empty".into());
@@ -751,6 +851,8 @@ impl ProjectConfig {
         resolve(&mut self.remote.ca_file);
         resolve(&mut self.serve.config);
         resolve(&mut self.defaults.instructions);
+        resolve(&mut self.connectors.bundles);
+        resolve(&mut self.connectors.vault_key);
         for source in self.secrets.values_mut() {
             if let Some(path) = source.strip_prefix('@') {
                 *source = format!("@{}", resolve_path(path, dir, home).display());
@@ -1173,6 +1275,29 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
             out.push_str(&format!("terminal = {}\n", toml_string(name)));
         }
     }
+    let c = &config.connectors;
+    if !c.is_empty() {
+        out.push_str(
+            "\n# The connector gateway (Anvil) and default grants; see docs/connectors.md.\n\
+             [connectors]\n",
+        );
+        for (key, value) in [
+            ("gateway", &c.gateway),
+            ("sandbox_gateway", &c.sandbox_gateway),
+            ("bundles", &c.bundles),
+            ("anvil", &c.anvil),
+            ("listen", &c.listen),
+            ("vault_key", &c.vault_key),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!("{key} = {}\n", toml_string(value)));
+            }
+        }
+        if !c.grants.is_empty() {
+            let grants: Vec<String> = c.grants.iter().map(|g| toml_string(g)).collect();
+            out.push_str(&format!("grants = [{}]\n", grants.join(", ")));
+        }
+    }
     if let Some(workspace) = &config.workspace {
         out.push_str(
             "\n# What each new branch's worktree gets before its first turn, and what runs when\n\
@@ -1249,6 +1374,12 @@ pass_env = ["OPENAI_API_KEY"]
 [notify]
 desktop = true
 terminal = "osc777"
+[connectors]
+gateway = "http://127.0.0.1:8931/mcp"
+sandbox_gateway = "http://192.168.127.1:8931/mcp"
+bundles = "connectors"
+anvil = "node /opt/anvil/bin-anvil.js"
+grants = ["github:read", "linear@work:write:issues.*"]
 "#;
 
     #[test]
@@ -1262,6 +1393,36 @@ terminal = "osc777"
         let rendered = render(&config, "test");
         assert!(rendered.starts_with("#:schema https://"), "{rendered}");
         assert_eq!(parse(&rendered).unwrap(), config);
+    }
+
+    #[test]
+    fn connectors_are_checked_with_the_flags_parser() {
+        let config = parse(FULL).unwrap();
+        let grants = config.connectors.grant_entries().unwrap();
+        assert_eq!(grants[1].to_string(), "linear@work:write:issues.*");
+        assert_eq!(
+            config.flatten()["connectors.gateway"],
+            "http://127.0.0.1:8931/mcp"
+        );
+        for (text, needle) in [
+            (
+                "[connectors]\ngateway = \"127.0.0.1:8931\"\n",
+                "connectors.gateway",
+            ),
+            (
+                "[connectors]\ngateway = \"http://h/mcp\"\ngrants = [\"github:admin\"]\n",
+                "connectors.grants",
+            ),
+            ("[connectors]\ngrants = [\"github\"]\n", "need a gateway"),
+            (
+                "[connectors]\ngateway = \"http://h/mcp\"\nbundles = \" \"\n",
+                "connectors.bundles",
+            ),
+            ("[connectors]\ngatway = \"http://h/mcp\"\n", "gatway"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
     }
 
     #[test]

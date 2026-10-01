@@ -9,6 +9,7 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod gateway_cmd;
 mod gh;
 mod init;
 mod json;
@@ -286,6 +287,10 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             json,
         } => commands::inbox(target, as_branch, unread, json),
         Command::Rig { json, action } => commands::rig(env, target, &action.into_args(json)),
+        Command::Gateway { json, action } => gateway_cmd::main(target, &action, json),
+        Command::Connect { connector, account } => {
+            gateway_cmd::connect(target, &connector, account.as_deref())
+        }
         Command::Artifact {
             branch,
             json,
