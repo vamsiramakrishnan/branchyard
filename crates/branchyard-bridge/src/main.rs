@@ -50,7 +50,8 @@ Serve execs and file transfers for the host.
 
 The verifying key is read from $BRANCHYARD_BRIDGE_KEY. Prints `listening ADDR`
 once bound. SIGTERM is forwarded to the execs, which are killed after 10
-seconds; then the bridge exits.";
+seconds; once their last output and exit statuses are sent (up to 2 seconds
+more), the bridge exits.";
 
 #[derive(Args, Debug)]
 struct ServeArgs {
