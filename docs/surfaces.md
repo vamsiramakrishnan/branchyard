@@ -40,6 +40,7 @@ Surfaces:
 | Rewind to a checkpoint | `Branch::rewind` | `rewind --to N` | no: needs an API operation; refused with a message | no | no | no: not a delegation operation |
 | Try a branch in this checkout | `Yard::try_on`, `try_off`, `try_status`, `try_recover` | `try`, `try --off`, `try --status` | no: the server's checkout is not yours; refused | no | no | no |
 | Compare attempts | `Yard::compare`, `fan_branches`, `diff_between`; `compare_attempt`, `mark_unique`, `diff_files` | `compare` | yes, but not `--check` or `--diff` | from branches, events and diffs | the same | no |
+| Watch and act from a phone ([companion](companion.md)) | n/a | `serve --app`, `serve token new --link` | n/a | `/app/`, the same API under the caller's scopes | `Client::me` | no |
 
 ## Task options
 

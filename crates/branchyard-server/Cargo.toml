@@ -53,6 +53,11 @@ branchyard-setup = { version = "0.0.1", path = "../branchyard-setup" }
 jiff = "0.2"
 # A trigger precheck's process group, stopped on a timeout.
 rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+# The web companion's pairing secrets, VAPID signing and Web Push
+# encryption (docs/companion.md); both already in Cargo.lock (ring via
+# rustls).
+ring = "0.17"
+base64 = "0.22"
 
 [dev-dependencies]
 blake3 = "1"

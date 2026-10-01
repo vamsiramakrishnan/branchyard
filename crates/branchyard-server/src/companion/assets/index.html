@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#1f6f4a">
+<title>Branchyard</title>
+<link rel="stylesheet" href="app.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<script src="app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="#/"><img src="icon.svg" alt="" width="22" height="22"> Branchyard</a>
+  <label class="repo-pick" id="repo-pick" hidden>
+    <span class="visually-hidden">Repository</span>
+    <select id="repo"></select>
+  </label>
+  <span id="live" class="live" data-state="off" role="status" aria-live="polite">offline</span>
+</header>
+<nav id="nav" class="nav" aria-label="Sections" hidden>
+  <a href="#/" data-route="branches">Branches</a>
+  <a href="#/inbox" data-route="inbox">Inbox <span id="inbox-count" class="count" hidden></span></a>
+  <a href="#/triggers" data-route="triggers">Triggers</a>
+  <a href="#/queue" data-route="queue">Queue</a>
+  <a href="#/settings" data-route="settings">Settings</a>
+</nav>
+<main id="main" tabindex="-1">
+  <p class="muted">Loading…</p>
+</main>
+<div id="toasts" class="toasts" role="log" aria-live="polite" aria-label="Notifications"></div>
+<dialog id="confirm" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">Are you sure?</h2>
+  <p id="confirm-text"></p>
+  <div class="row">
+    <button type="button" class="secondary" id="confirm-cancel">Cancel</button>
+    <button type="button" id="confirm-ok">Confirm</button>
+  </div>
+</dialog>
+<noscript><p>The Branchyard companion needs JavaScript.</p></noscript>
+</body>
+</html>

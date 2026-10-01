@@ -229,6 +229,17 @@
           "type": "null"
         }
       ]
+    },
+    "app": {
+      "description": "The web companion at /app/ (docs/companion.md): `true`, or its\nsettings. Off by default.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileApp"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -551,6 +562,61 @@
             "string",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FileApp": {
+      "description": "`app`: `true`/`false`, or the companion's settings (which turn it on\nunless `enabled` is false).",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/FileAppSettings"
+        }
+      ]
+    },
+    "FileAppSettings": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Default true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "push": {
+          "description": "Send Web Push notifications to subscribed browsers. Default true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "vapid_key": {
+          "description": "The VAPID private key, made if missing. Default:\n`<data_dir>/companion/vapid.pk8`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "push_subject": {
+          "description": "The VAPID contact, `mailto:` or `https:`. Default: `public_url` when\nhttps, else mailto:branchyard@localhost.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "push_services": {
+          "description": "Push service hosts subscriptions may name (`host` or `*.suffix`).\nDefault: FCM, Mozilla, Windows and Apple push services.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

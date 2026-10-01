@@ -55,6 +55,48 @@ enum TokenCommand {
     /// Generate a bearer token and the hashed credential to configure for it
     #[command(long_about = TOKEN_NEW_ABOUT)]
     New(TokenNew),
+    /// Paired tokens and unredeemed pairing links (see docs/companion.md)
+    List(TokenList),
+    /// Revoke a paired token, or an unredeemed pairing link, by name
+    Revoke(TokenRevoke),
+}
+
+/// Which server's companion state a token command reads: its
+/// configuration, data directory or database, as `by serve` would find it.
+#[derive(Args, Debug, Default)]
+struct ServerPlace {
+    /// The server's JSON configuration
+    #[arg(short, long, value_name = "FILE", help_heading = "Server")]
+    config: Option<PathBuf>,
+    /// The server's data directory (default: as the configuration or by serve has it)
+    #[arg(long, value_name = "DIR", help_heading = "Server")]
+    data_dir: Option<PathBuf>,
+    /// The server's PostgreSQL database
+    #[arg(long, value_name = "URL", help_heading = "Server")]
+    database: Option<String>,
+}
+
+impl ServerPlace {
+    fn given(&self) -> bool {
+        self.config.is_some() || self.data_dir.is_some() || self.database.is_some()
+    }
+}
+
+#[derive(Args, Debug)]
+struct TokenList {
+    #[command(flatten)]
+    place: ServerPlace,
+}
+
+#[derive(Args, Debug)]
+struct TokenRevoke {
+    /// The paired token's name, as `token list` shows it
+    name: String,
+    /// Only the one in this tenant
+    #[arg(long)]
+    tenant: Option<String>,
+    #[command(flatten)]
+    place: ServerPlace,
 }
 
 #[derive(Args, Debug)]
@@ -72,6 +114,25 @@ struct TokenNew {
     /// whatever its tenant allows)
     #[arg(long = "repo", value_name = "R,...", value_parser = names)]
     repos: Option<Names>,
+    /// Print a one-time pairing link (and a QR code) for the web companion instead: opened
+    /// once, it gets a token with these scopes that expires after --ttl
+    #[arg(long, help_heading = "Pairing")]
+    link: bool,
+    /// With --link: how long the paired token lasts, such as 15m, 8h or 7d (default 24h)
+    #[arg(long, value_name = "DURATION", value_parser = crate::companion::link::duration, help_heading = "Pairing")]
+    ttl: Option<Duration>,
+    /// With --link: how long the link may be opened, once (default 10m, at most 1h)
+    #[arg(long, value_name = "DURATION", value_parser = crate::companion::link::duration, help_heading = "Pairing")]
+    code_ttl: Option<Duration>,
+    /// With --link: the server's URL as the phone reaches it (default: public_url, else
+    /// http(s)://<listen>)
+    #[arg(long, value_name = "URL", help_heading = "Pairing")]
+    public_url: Option<String>,
+    /// With --link: do not draw the QR code
+    #[arg(long, help_heading = "Pairing")]
+    no_qr: bool,
+    #[command(flatten)]
+    place: ServerPlace,
 }
 
 /// A comma-separated list, trimmed, without empty entries.
@@ -89,6 +150,19 @@ fn names(text: &str) -> Result<Names, String> {
 }
 
 fn token_new(args: TokenNew, program: &str) -> ExitCode {
+    if !args.link
+        && (args.ttl.is_some()
+            || args.code_ttl.is_some()
+            || args.public_url.is_some()
+            || args.no_qr
+            || args.place.given())
+    {
+        eprintln!(
+            "{program}: --ttl, --code-ttl, --public-url, --no-qr and the server's place go \
+             with --link"
+        );
+        return ExitCode::from(2);
+    }
     let scopes = match args.scopes {
         Some(Names(scopes)) => scopes,
         None => SCOPES.iter().map(|s| s.to_string()).collect(),
@@ -98,6 +172,26 @@ fn token_new(args: TokenNew, program: &str) -> ExitCode {
             eprintln!("{program}: --scopes: {error}");
             return ExitCode::FAILURE;
         }
+    }
+    if args.link {
+        let config = match place_config(&args.place) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("{program}: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let request = crate::companion::link::LinkRequest {
+            name: args.name,
+            tenant: args.tenant,
+            scopes,
+            repos: args.repos.map(|Names(repos)| repos),
+            ttl: args.ttl,
+            code_ttl: args.code_ttl,
+            public_url: args.public_url,
+            qr: !args.no_qr,
+        };
+        return crate::companion::link::new_link(&config, request, program);
     }
     let name = args
         .name
@@ -120,6 +214,19 @@ fn token_new(args: TokenNew, program: &str) -> ExitCode {
         "{program}: add the object above to your configuration's top-level 'credentials' array"
     );
     ExitCode::SUCCESS
+}
+
+/// The configuration a token command's `place` names, built as `--check`
+/// builds it (nothing written).
+fn place_config(place: &ServerPlace) -> Result<Config, String> {
+    let flags = Flags {
+        config: place.config.clone(),
+        data_dir: place.data_dir.clone(),
+        database: place.database.clone(),
+        check: true,
+        ..Flags::default()
+    };
+    build(flags).map(|(config, _)| config)
 }
 
 /// A fresh random bearer token or secret, as `token new` and a default
@@ -273,6 +380,10 @@ struct Flags {
     /// Let every served repository's triggers run a precheck command before firing
     #[arg(long, help_heading = "Triggers")]
     allow_trigger_prechecks: bool,
+    /// Serve the web companion at /app/: pairing links and Web Push (see
+    /// docs/companion.md)
+    #[arg(long, help_heading = "Companion")]
+    app: bool,
     /// Do not log requests
     #[arg(short, long)]
     quiet: bool,
@@ -455,10 +566,20 @@ fn webhooks(matches: &ArgMatches, flags: &Flags) -> Result<Vec<FlagWebhook>, Str
 pub fn names_config(args: &[String]) -> bool {
     let argv = std::iter::once("branchyard-server".to_owned()).chain(args.iter().cloned());
     match Cli::command().try_get_matches_from(argv) {
-        Ok(matches) => {
-            matches.subcommand().is_some()
-                || matches.value_source("config") == Some(clap::parser::ValueSource::CommandLine)
-        }
+        Ok(matches) => match matches.subcommand() {
+            // `token list`, `token revoke` and `token new --link` read the
+            // server's state: they take `[serve] config` (appended after
+            // them) unless they name their own place.
+            Some(("token", token)) => match token.subcommand() {
+                Some(("new", new)) if !new.get_flag("link") => true,
+                Some((_, sub)) => ["config", "data_dir", "database"]
+                    .iter()
+                    .any(|id| sub.value_source(id) == Some(clap::parser::ValueSource::CommandLine)),
+                None => true,
+            },
+            Some(_) => true,
+            None => matches.value_source("config") == Some(clap::parser::ValueSource::CommandLine),
+        },
         Err(_) => true,
     }
 }
@@ -689,6 +810,8 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.webhook_insecure = partial.webhook_insecure || flags.webhook_insecure;
     config.connectors = partial.connectors;
     config.triggers.public_url = flags.public_url.or(partial.public_url);
+    config.app = partial.app.unwrap_or_default();
+    config.app.enabled |= flags.app;
     config.triggers.allow_prechecks = match flags.allow_trigger_prechecks {
         true => config::WorkspaceScripts::All,
         false => partial.allow_trigger_prechecks,
@@ -792,6 +915,35 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
             command: Some(ServerCommand::Token(TokenCommand::New(args))),
             ..
         }) => return token_new(args, program),
+        Ok(Cli {
+            command: Some(ServerCommand::Token(TokenCommand::List(args))),
+            ..
+        }) => {
+            return match place_config(&args.place) {
+                Ok(config) => crate::companion::link::list(&config, program),
+                Err(error) => {
+                    eprintln!("{program}: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Ok(Cli {
+            command: Some(ServerCommand::Token(TokenCommand::Revoke(args))),
+            ..
+        }) => {
+            return match place_config(&args.place) {
+                Ok(config) => crate::companion::link::revoke(
+                    &config,
+                    &args.name,
+                    args.tenant.as_deref(),
+                    program,
+                ),
+                Err(error) => {
+                    eprintln!("{program}: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(cli) => cli.flags,
         // Help and --version come this way too, to stdout with exit 0;
         // usage errors go to stderr with exit 2.

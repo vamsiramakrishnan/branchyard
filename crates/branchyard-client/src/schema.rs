@@ -18,6 +18,7 @@ use schemars::{schema_for, Schema};
 use serde_json::{Map, Value};
 
 use crate::api;
+use crate::companion;
 use crate::storage_api;
 use crate::triggers;
 
@@ -116,6 +117,14 @@ pub fn contract() -> Value {
     entry::<triggers::FireAck>("FireAck", &mut types);
     entry::<triggers::TriggerRemoved>("TriggerRemoved", &mut types);
     entry::<triggers::TriggerToggle>("TriggerToggle", &mut types);
+    entry::<companion::PairRequest>("PairRequest", &mut types);
+    entry::<companion::Paired>("Paired", &mut types);
+    entry::<companion::Me>("Me", &mut types);
+    entry::<companion::PushInfo>("PushInfo", &mut types);
+    entry::<companion::PushSubscribe>("PushSubscribe", &mut types);
+    entry::<companion::PushUnsubscribe>("PushUnsubscribe", &mut types);
+    entry::<companion::PushResult>("PushResult", &mut types);
+    entry::<companion::PushTest>("PushTest", &mut types);
     Value::Object(Map::from_iter([
         (
             "schema".to_owned(),

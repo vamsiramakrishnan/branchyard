@@ -14,6 +14,15 @@ impl Credentials {
         Credentials { credentials }
     }
 
+    /// The principal of the configured credential whose token hashes to
+    /// `token_sha256`: for a push subscription bound to that credential.
+    pub fn principal_for_hash(&self, token_sha256: &str) -> Option<&Principal> {
+        self.credentials
+            .iter()
+            .find(|c| constant_time_eq(c.token_sha256.as_bytes(), token_sha256.as_bytes()))
+            .map(|c| &c.principal)
+    }
+
     /// The principal an `Authorization` header's bearer token verifies as.
     pub fn verify(&self, header: Option<&str>) -> Option<&Principal> {
         let presented = header?.strip_prefix("Bearer ")?.trim();

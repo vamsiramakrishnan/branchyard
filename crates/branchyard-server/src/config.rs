@@ -94,7 +94,7 @@ pub fn check_scope_name(name: &str) -> Result<(), String> {
     }
 }
 
-fn check_principal(principal: &Principal) -> Result<(), String> {
+pub(crate) fn check_principal(principal: &Principal) -> Result<(), String> {
     if principal.name.is_empty() || principal.name.len() > 128 {
         return Err(format!(
             "principal {:?} is not a usable subject name",
@@ -422,6 +422,91 @@ pub struct Config {
     /// repositories' triggers may run prechecks, the dispatcher's tick and
     /// clock. See `docs/triggers.md`.
     pub triggers: crate::triggers::Settings,
+    /// The web companion at `/app/`, pairing links and Web Push; off by
+    /// default. See `docs/companion.md`.
+    pub app: AppConfig,
+}
+
+/// Push services a subscription may name by default: Chrome's (FCM),
+/// Firefox's (Mozilla autopush), Edge's (WNS) and Safari's (Apple).
+pub const DEFAULT_PUSH_SERVICES: &[&str] = &[
+    "fcm.googleapis.com",
+    "*.push.services.mozilla.com",
+    "*.notify.windows.com",
+    "*.push.apple.com",
+];
+
+/// `app` in the configuration file, `--app` on the command line: the web
+/// companion. See `docs/companion.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppConfig {
+    /// Serve the page at `/app/`, accept pairing codes and paired tokens.
+    pub enabled: bool,
+    /// Send Web Push notifications to subscribed browsers.
+    pub push: bool,
+    /// The VAPID private key (PKCS#8, made if missing). Default:
+    /// `<data_dir>/companion/vapid.pk8`. Servers sharing a database that
+    /// all send push need the same key.
+    pub vapid_key: Option<PathBuf>,
+    /// The VAPID `sub`: a `mailto:` or `https:` contact for push services.
+    /// Default: `public_url` when it is `https://`, else
+    /// `mailto:branchyard@localhost`.
+    pub push_subject: Option<String>,
+    /// Hosts subscriptions may name (`host` or `*.suffix`).
+    pub push_services: Vec<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> AppConfig {
+        AppConfig {
+            enabled: false,
+            push: true,
+            vapid_key: None,
+            push_subject: None,
+            push_services: DEFAULT_PUSH_SERVICES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn vapid_key_path(&self, data_dir: &Path) -> PathBuf {
+        self.vapid_key
+            .clone()
+            .unwrap_or_else(|| data_dir.join("companion").join("vapid.pk8"))
+    }
+
+    /// The VAPID subject for `config`.
+    pub fn subject(&self, config: &Config) -> String {
+        if let Some(subject) = &self.push_subject {
+            return subject.clone();
+        }
+        match &config.triggers.public_url {
+            Some(url) if url.starts_with("https://") => url.clone(),
+            _ => "mailto:branchyard@localhost".into(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(subject) = &self.push_subject {
+            if !(subject.starts_with("mailto:") || subject.starts_with("https://")) {
+                return Err(format!(
+                    "app.push_subject: {subject:?} is not a mailto: or https: URL"
+                ));
+            }
+        }
+        for service in &self.push_services {
+            let host = service.strip_prefix("*.").unwrap_or(service);
+            if host.is_empty() || host.contains(['/', ' ', '*', '@']) {
+                return Err(format!(
+                    "app.push_services: {service:?} is not a host name or *.suffix"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `connectors` in the configuration file: the connector gateway.
@@ -494,6 +579,7 @@ impl Config {
             metrics: None,
             observability: None,
             triggers: crate::triggers::Settings::default(),
+            app: AppConfig::default(),
         }
     }
 
@@ -564,6 +650,7 @@ impl Config {
                 return Err("connectors.anvil names no command".into());
             }
         }
+        self.app.validate()?;
         if self.tokens.is_empty() && self.credentials.is_empty() && !self.worker_only {
             return Err("no tokens or credentials configured; every request needs one".into());
         }
@@ -917,6 +1004,38 @@ pub(crate) struct FileConfig {
     /// firing: `true` for every repository, or a list of repository names.
     /// Off by default; see docs/triggers.md.
     allow_trigger_prechecks: Option<FileWorkspaceScripts>,
+    /// The web companion at /app/ (docs/companion.md): `true`, or its
+    /// settings. Off by default.
+    app: Option<FileApp>,
+}
+
+/// `app`: `true`/`false`, or the companion's settings (which turn it on
+/// unless `enabled` is false).
+#[derive(Deserialize)]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum FileApp {
+    On(bool),
+    Settings(FileAppSettings),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileAppSettings {
+    /// Default true.
+    enabled: Option<bool>,
+    /// Send Web Push notifications to subscribed browsers. Default true.
+    push: Option<bool>,
+    /// The VAPID private key, made if missing. Default:
+    /// `<data_dir>/companion/vapid.pk8`.
+    vapid_key: Option<PathBuf>,
+    /// The VAPID contact, `mailto:` or `https:`. Default: `public_url` when
+    /// https, else mailto:branchyard@localhost.
+    push_subject: Option<String>,
+    /// Push service hosts subscriptions may name (`host` or `*.suffix`).
+    /// Default: FCM, Mozilla, Windows and Apple push services.
+    push_services: Option<Vec<String>>,
 }
 
 /// `metrics`: Prometheus metrics at `/metrics`; see docs/observability.md.
@@ -1089,6 +1208,8 @@ pub struct Partial {
     pub metrics: Option<MetricsConfig>,
     pub public_url: Option<String>,
     pub allow_trigger_prechecks: WorkspaceScripts,
+    /// `app`, when the file sets it.
+    pub app: Option<AppConfig>,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -1349,6 +1470,22 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         }),
         public_url: file.public_url,
         allow_trigger_prechecks: scripts(file.allow_trigger_prechecks),
+        app: file.app.map(|app| match app {
+            FileApp::On(enabled) => AppConfig {
+                enabled,
+                ..AppConfig::default()
+            },
+            FileApp::Settings(s) => {
+                let default = AppConfig::default();
+                AppConfig {
+                    enabled: s.enabled.unwrap_or(true),
+                    push: s.push.unwrap_or(default.push),
+                    vapid_key: s.vapid_key.map(&resolve),
+                    push_subject: s.push_subject,
+                    push_services: s.push_services.unwrap_or(default.push_services),
+                }
+            }
+        }),
         warnings,
     })
 }

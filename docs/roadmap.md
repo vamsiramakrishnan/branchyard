@@ -32,3 +32,5 @@ Triggers and schedules (cron, GitHub, Slack, Linear, email; a precheck, a test r
 ## Wave 3
 
 A web and phone companion on the server's event stream; `by --remote ssh://`; environment recipes (repo scripts that create a VM); repository knowledge that learns from sessions, adopted after review; plan approval and goals a judge verifies; prebuilt binaries and an image with harnesses.
+
+**Companion: done** (1 October 2026, hermetic tests and headless Chromium only; not yet on a real phone or a real push service). `by serve --app` serves a single embedded page at `/app/` over the existing API and event stream, under a strict Content Security Policy, with the bearer token in the tab's `sessionStorage`; `by serve token new --link` prints a one-time pairing link and a QR code that turn into a scoped token that expires and that `token revoke` ends at once; Web Push (VAPID, RFC 8291 encryption with `ring`) notifies a phone of what `by watch` notifies about ([companion](companion.md)).

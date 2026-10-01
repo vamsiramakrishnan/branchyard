@@ -59,6 +59,9 @@ pub struct App {
     /// Triggers and schedules: their store, settings and the dispatcher's
     /// wake-up; see `crate::triggers`.
     pub triggers: Arc<crate::triggers::dispatch::Hub>,
+    /// The web companion, when the operator turned it on; see
+    /// `crate::companion`.
+    pub companion: Option<Arc<crate::companion::Companion>>,
 }
 
 #[derive(Clone)]
@@ -736,7 +739,9 @@ pub fn router(app: Shared) -> Router {
         // work on this router (inbox messages, branch lifecycle).
         .merge(crate::storage_routes::router())
         // Triggers, and their signed webhook endpoint: `crate::triggers`.
-        .merge(crate::triggers::routes::router());
+        .merge(crate::triggers::routes::router())
+        // The web companion's page, pairing and push: `crate::companion`.
+        .merge(crate::companion::router());
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -941,19 +946,30 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
     if request.method() == Method::POST && crate::triggers::routes::is_fire(request.uri().path()) {
         return next.run(request).await;
     }
+    // The companion's page and its pairing-code redemption, when it is on.
+    if crate::companion::is_public(&app, request.method(), request.uri().path()) {
+        return next.run(request).await;
+    }
     let header = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    match app.credentials.verify(header) {
-        Some(principal) => {
+    // A configured credential, else (with the companion on) a paired token.
+    let verified = match app.credentials.verify(header) {
+        Some(principal) => Some((principal.clone(), crate::companion::configured(header))),
+        None => crate::companion::verify_paired(&app, header).await,
+    };
+    match verified {
+        Some((principal, verified)) => {
             let read = matches!(*request.method(), Method::GET | Method::HEAD);
             if read && !principal.allows("read") {
                 return scope_required("read").into_response();
             }
-            let caller = Caller(principal.clone());
+            let caller = Caller(principal);
             request.extensions_mut().insert(caller);
-            next.run(request).await
+            request.extensions_mut().insert(verified.clone());
+            let response = next.run(request).await;
+            crate::companion::bound(&app, &verified, response)
         }
         None => ApiError::unauthorized().into_response(),
     }

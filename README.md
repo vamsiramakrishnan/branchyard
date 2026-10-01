@@ -209,6 +209,8 @@ Commands that run a turn start detached (their output goes to `.branchyard/watch
 
 `by log --follow <branch>` prints a branch's events as they are recorded. In [Herdr](https://github.com/herdrdev/herdr), the [Branchyard plugin](plugins/herdr/README.md) follows a server's event stream and gives each branch a tab running `by log --follow`, with the branch's state in Herdr's agent sidebar (`working`, `blocked` on a waiting permission request, `idle` with what happened) and actions to merge, cancel or send to the focused branch. It is tested against a fake `herdr`, not yet against Herdr itself.
 
+On a phone, `by serve --app` serves the [web companion](docs/companion.md) at `/app/`: the branch list live over the event stream, a branch's events, checkpoints, diff and merge readiness, and send, steer, cancel, merge, fork, answering questions and escalations, and switching triggers on and off, each an ordinary API call under the token's scopes. `by serve token new --link --scopes read,run` prints a one-time pairing link and a QR code for it; opened on the phone, it becomes a token that expires and that `by serve token revoke` ends at once. With push on, the phone is notified of what `by watch` notifies about, by Web Push.
+
 ## Checkpoints, try and compare
 
 Every turn leaves a checkpoint, `refs/branchyard/<branch>/<incarnation>/turn-N`, listed by `by show` and `by log`. `by fork <branch> --at N` starts a new branch from any of them; `by rewind <branch> --to N` resets the branch itself (confirmed, journaled, and undone by rewinding forward, since later checkpoints stay). The harness's own session continues only where it ended; otherwise the next turn starts fresh with a summary of the turns before, and says so. `by try <branch>` applies a branch's changes to your clean checkout, where your dev server runs, and `by try --off` restores it byte for byte. After a `by fan`, `by compare --fan <name>` puts the attempts side by side (status, turns, cost, tokens, time, check, diff stats, unique files), `--diff A B` compares two, and `--pick <branch> --discard-others` merges one and removes the rest. See [checkpoints](docs/checkpoints.md).
@@ -397,6 +399,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Pull requests](docs/pull-requests.md): `by run --issue` (GitHub, Linear, Jira, GitLab), `--pr`, `by pr`, `by pr --watch`, merge readiness and `by open`.
 - [Usage and adopting sessions](docs/usage.md): quota meters per login, the guard and the router, and `by adopt`.
 - [Distribution](docs/distribution.md): installing the skill for Claude Code and Codex, and reproducible plugin/SDK archives.
+- [Web companion](docs/companion.md): the page at `/app/`, pairing links, its security model and Web Push.
 - [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
 

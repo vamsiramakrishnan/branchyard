@@ -26374,6 +26374,299 @@
       "description": "`POST /v1/triggers/{t}/enable` and `/disable`: no fields.",
       "title": "TriggerToggle",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "PairRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "device": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A label for the device, such as its browser; shown by `token list`."
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "description": "`POST /app/pair`: redeem a one-time pairing code (from the fragment of\nthe link `by serve token new --link` prints) for a token.",
+      "title": "PairRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "Paired": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "me": {
+          "$ref": "#/$defs/Me"
+        }
+      },
+      "required": [
+        "token",
+        "me"
+      ],
+      "description": "The answer to a redeemed pairing code. `token` is shown once; the\nserver keeps only its hash.",
+      "title": "Paired",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Me": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The subject name: a configured credential's, or a paired token's."
+            },
+            "tenant": {
+              "type": "string"
+            },
+            "scopes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "repos": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Its own repository allowlist, when it has one narrower than its\ntenant's."
+            },
+            "kind": {
+              "type": "string",
+              "description": "`configured` (from the server's configuration) or `paired` (from a\npairing link, revocable with `by serve token revoke`)."
+            },
+            "expires_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When a paired token stops working, in milliseconds since the epoch."
+            }
+          },
+          "required": [
+            "name",
+            "tenant",
+            "scopes",
+            "kind"
+          ],
+          "description": "`GET /v1/app/me`: the principal the caller's token verifies as."
+        }
+      }
+    },
+    "Me": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The subject name: a configured credential's, or a paired token's."
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "repos": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Its own repository allowlist, when it has one narrower than its\ntenant's."
+        },
+        "kind": {
+          "type": "string",
+          "description": "`configured` (from the server's configuration) or `paired` (from a\npairing link, revocable with `by serve token revoke`)."
+        },
+        "expires_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "When a paired token stops working, in milliseconds since the epoch."
+        }
+      },
+      "required": [
+        "name",
+        "tenant",
+        "scopes",
+        "kind"
+      ],
+      "description": "`GET /v1/app/me`: the principal the caller's token verifies as.",
+      "title": "Me",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "PushInfo": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "public_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The VAPID public key (an uncompressed P-256 point, base64url without\npadding): the browser's `applicationServerKey`."
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Push service hosts subscriptions may name."
+        },
+        "subscriptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The caller's subscriptions' endpoints."
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What a notification can be about."
+        }
+      },
+      "required": [
+        "enabled",
+        "services",
+        "subscriptions",
+        "kinds"
+      ],
+      "description": "`GET /v1/app/push`: whether this server sends Web Push notifications,\nthe key a browser subscribes with, and the caller's subscriptions.",
+      "title": "PushInfo",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "PushSubscribe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "keys": {
+          "$ref": "#/$defs/PushKeys"
+        },
+        "expirationTime": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Accepted and ignored: `PushSubscription.toJSON()` includes it."
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Which kinds (see [`PushInfo::kinds`]); empty means all."
+        }
+      },
+      "required": [
+        "endpoint",
+        "keys"
+      ],
+      "description": "`POST /v1/app/push/subscriptions`: notify this browser.",
+      "title": "PushSubscribe",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "PushKeys": {
+          "type": "object",
+          "properties": {
+            "p256dh": {
+              "type": "string",
+              "description": "The browser's P-256 public key, base64url."
+            },
+            "auth": {
+              "type": "string",
+              "description": "The 16-byte authentication secret, base64url."
+            }
+          },
+          "required": [
+            "p256dh",
+            "auth"
+          ],
+          "description": "A browser's `PushSubscription.toJSON()`'s `keys`."
+        }
+      }
+    },
+    "PushUnsubscribe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "description": "`DELETE /v1/app/push/subscriptions`: stop notifying this endpoint.",
+      "title": "PushUnsubscribe",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "PushResult": {
+      "type": "object",
+      "properties": {
+        "subscriptions": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Subscriptions of the caller now."
+        },
+        "delivered": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Notifications a push service accepted (for a test push).",
+          "default": 0
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Why some were not, one line each."
+        }
+      },
+      "required": [
+        "subscriptions"
+      ],
+      "description": "The answer to a subscription change or a test push.",
+      "title": "PushResult",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "PushTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`POST /v1/app/push/test`: no fields.",
+      "title": "PushTest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   }
 }

@@ -24,6 +24,7 @@
 | [Surfaces](surfaces.md) | Which operations and options work in the SDK, `by`, `by --remote`, the HTTP API, the Rust client and delegation, and which are refused where? |
 | [Triggers and schedules](triggers.md) | How does a task start on a cron schedule, at an interval, or from a signed GitHub, Slack, Linear or generic webhook, with conditions, a precheck, a test run and a pause after repeated failures, and why does nothing fire twice? |
 | [Server and remote mode](server.md) | How do I run `by serve`, call its HTTP API, and drive it with `by --remote`? What is durable, and what is not isolated? |
+| [Web companion](companion.md) | How do I watch and steer branches from a phone with `by serve --app`, pair it with a link and a QR code, get push notifications, and why is it safe? |
 | [Distribution](distribution.md) | How do I install the Branchyard skill for Claude Code or Codex, or build reproducible plugin, skill and SDK archives? |
 | [Deploying `by serve`](deploy.md) | How do I run the server in a container or behind PostgreSQL with compose, and check a host is ready to? |
 | [Driver qualification](qualification/README.md) | Which driver profiles passed live protocol qualification, and what did it find? |
