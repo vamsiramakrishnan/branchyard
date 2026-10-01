@@ -49,6 +49,7 @@ pub mod http;
 pub mod schema;
 pub mod sse;
 pub mod storage_api;
+pub mod triggers;
 
 use std::fmt;
 use std::io::BufReader;

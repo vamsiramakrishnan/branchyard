@@ -75,6 +75,7 @@ pub mod ops;
 pub mod serve;
 pub mod storage_routes;
 pub mod store;
+pub mod triggers;
 pub mod webhook;
 pub mod work;
 

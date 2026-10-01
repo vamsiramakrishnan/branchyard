@@ -397,6 +397,10 @@ pub struct Config {
     /// The connector gateway its branches' turns are given, and whether
     /// this server runs it; see `docs/connectors.md`. `None`: off.
     pub connectors: Option<ConnectorsConfig>,
+    /// Triggers and schedules: the public URL in webhook URLs, which
+    /// repositories' triggers may run prechecks, the dispatcher's tick and
+    /// clock. See `docs/triggers.md`.
+    pub triggers: crate::triggers::Settings,
 }
 
 /// `connectors` in the configuration file: the connector gateway.
@@ -464,6 +468,7 @@ impl Config {
             webhooks: Vec::new(),
             webhook_insecure: false,
             connectors: None,
+            triggers: crate::triggers::Settings::default(),
         }
     }
 
@@ -524,6 +529,24 @@ impl Config {
         }
         for (name, _) in &self.repos {
             check_repo_name(name)?;
+        }
+        if let Some(url) = &self.triggers.public_url {
+            if !(url.starts_with("https://") || url.starts_with("http://"))
+                || url.contains(char::is_whitespace)
+            {
+                return Err(format!(
+                    "public_url: {url:?} is not an http:// or https:// URL"
+                ));
+            }
+        }
+        if let WorkspaceScripts::Repos(allowed) = &self.triggers.allow_prechecks {
+            for name in allowed {
+                if !self.repos.iter().any(|(n, _)| n == name) {
+                    return Err(format!(
+                        "allow_trigger_prechecks names {name}, which this server does not serve"
+                    ));
+                }
+            }
         }
         if let WorkspaceScripts::Repos(allowed) = &self.allow_workspace_scripts {
             for name in allowed {
@@ -775,6 +798,14 @@ pub(crate) struct FileConfig {
     /// The connector gateway (docs/connectors.md): where it is, which
     /// bundles it serves, and whether this server runs it.
     connectors: Option<FileConnectors>,
+    /// This server's URL as webhook senders reach it (behind a proxy, its
+    /// public address): the base of each event trigger's webhook URL.
+    /// Default: http(s)://<listen>. See docs/triggers.md.
+    public_url: Option<String>,
+    /// Let triggers of served repositories run a precheck command before
+    /// firing: `true` for every repository, or a list of repository names.
+    /// Off by default; see docs/triggers.md.
+    allow_trigger_prechecks: Option<FileWorkspaceScripts>,
 }
 
 /// `connectors`: the connector gateway; see `docs/connectors.md`.
@@ -921,6 +952,8 @@ pub struct Partial {
     pub webhooks: Vec<WebhookConfig>,
     pub webhook_insecure: bool,
     pub connectors: Option<ConnectorsConfig>,
+    pub public_url: Option<String>,
+    pub allow_trigger_prechecks: WorkspaceScripts,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -1083,13 +1116,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         allow_delegation: file.allow_delegation,
         by_path: file.by_path.map(resolve),
         allow_unapproved_tools: file.allow_unapproved_tools,
-        allow_workspace_scripts: match file.allow_workspace_scripts {
-            None | Some(FileWorkspaceScripts::All(false)) => WorkspaceScripts::Denied,
-            Some(FileWorkspaceScripts::All(true)) => WorkspaceScripts::All,
-            Some(FileWorkspaceScripts::Repos(repos)) => {
-                WorkspaceScripts::Repos(repos.into_iter().collect())
-            }
-        },
+        allow_workspace_scripts: scripts(file.allow_workspace_scripts),
         secrets: file
             .secrets
             .into_iter()
@@ -1142,8 +1169,21 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             listen: c.listen,
             vault_key: c.vault_key.map(resolve),
         }),
+        public_url: file.public_url,
+        allow_trigger_prechecks: scripts(file.allow_trigger_prechecks),
         warnings,
     })
+}
+
+/// `true`, `false` or repository names, as the operator wrote them.
+fn scripts(written: Option<FileWorkspaceScripts>) -> WorkspaceScripts {
+    match written {
+        None | Some(FileWorkspaceScripts::All(false)) => WorkspaceScripts::Denied,
+        Some(FileWorkspaceScripts::All(true)) => WorkspaceScripts::All,
+        Some(FileWorkspaceScripts::Repos(repos)) => {
+            WorkspaceScripts::Repos(repos.into_iter().collect())
+        }
+    }
 }
 
 /// `NAME`, `NAME=VAR` or `NAME=@FILE`, always with its source: a bare

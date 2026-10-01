@@ -223,7 +223,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         Some(listener) => listener.local_addr().map_err(|e| e.to_string())?,
         None => config.listen,
     };
-    let pollers = repos
+    let mut pollers: Vec<tokio::task::JoinHandle<()>> = repos
         .values()
         .map(|repo| {
             tokio::spawn(poll(
@@ -239,6 +239,18 @@ pub async fn start(config: Config) -> Result<Running, String> {
         false => start_webhooks(&config, &repos, shutdown_rx.clone())?,
     };
     let grace = config.shutdown_grace;
+    let triggers = {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || crate::triggers::store::open(&config))
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    let base_url = format!("{}://{addr}", if tls.is_some() { "https" } else { "http" });
+    let hub = Arc::new(crate::triggers::dispatch::Hub::new(
+        triggers,
+        config.triggers.clone(),
+        base_url,
+    ));
     let app = Arc::new(App {
         repos,
         registry: registry.clone(),
@@ -246,10 +258,18 @@ pub async fn start(config: Config) -> Result<Running, String> {
         config,
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),
+        triggers: hub,
     });
     registry
         .start(Arc::new(crate::work::AppExecutor(app.clone())))
         .map_err(|e| format!("could not start the operation dispatcher: {e}"))?;
+    // Triggers fire wherever a dispatcher runs: this server or worker.
+    if app.config.triggers.dispatch {
+        pollers.push(crate::triggers::dispatch::spawn(
+            app.clone(),
+            shutdown_rx.clone(),
+        ));
+    }
     let accept = match listener {
         Some(listener) => {
             let router = api::router(app);

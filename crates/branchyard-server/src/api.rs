@@ -56,6 +56,9 @@ pub struct App {
     /// areas): quick, synchronous calls, unlike the operation registry's
     /// durable one for long operations. See `storage_routes`.
     pub storage_idem: crate::storage_routes::StorageIdem,
+    /// Triggers and schedules: their store, settings and the dispatcher's
+    /// wake-up; see `crate::triggers`.
+    pub triggers: Arc<crate::triggers::dispatch::Hub>,
 }
 
 #[derive(Clone)]
@@ -731,7 +734,9 @@ pub fn router(app: Shared) -> Router {
         // Artifacts and scratch areas: see `storage_routes`, kept separate
         // so this feature's routes are easy to merge alongside unrelated
         // work on this router (inbox messages, branch lifecycle).
-        .merge(crate::storage_routes::router());
+        .merge(crate::storage_routes::router())
+        // Triggers, and their signed webhook endpoint: `crate::triggers`.
+        .merge(crate::triggers::routes::router());
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -843,6 +848,11 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
     if matches!(request.uri().path(), "/healthz" | "/.well-known/jwks.json") {
         return next.run(request).await;
     }
+    // A trigger's webhook is authenticated by its own signature, which
+    // its handler checks against the trigger's secret.
+    if request.method() == Method::POST && crate::triggers::routes::is_fire(request.uri().path()) {
+        return next.run(request).await;
+    }
     let header = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -913,7 +923,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 }
 
 /// FNV-1a, 64-bit: a stable fingerprint, not a security boundary.
-fn fingerprint(text: &str) -> String {
+pub(crate) fn fingerprint(text: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.bytes() {
         hash ^= u64::from(byte);
@@ -1163,12 +1173,26 @@ async fn post_task(
     let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
     let route = format!("POST /v1/repos/{}/tasks", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(response) = replayed(&app, &caller, idem.as_ref()).await? {
-        return Ok(response);
+    let (op, replayed) = admit_task(&app, &repo, &caller, idem, request).await?;
+    Ok(operation_response(op, replayed))
+}
+
+/// Admit a task on `repo` for `caller`, or return the operation `idem`
+/// already names (`true`): what `POST .../tasks` does, and what a firing
+/// trigger does as the principal that created it.
+pub(crate) async fn admit_task(
+    app: &Shared,
+    repo: &RepoState,
+    caller: &Caller,
+    idem: Option<Idempotency>,
+    request: TaskRequest,
+) -> Result<(Operation, bool), ApiError> {
+    if let Some(op) = replayed_operation(app, caller, idem.as_ref()).await? {
+        return Ok((op, true));
     }
-    let policy = app.tenant_policy(&caller);
-    app.check_admission_quotas(&caller, &policy).await?;
-    let options = work::task_options(&app, &repo, &request)?;
+    let policy = app.tenant_policy(caller);
+    app.check_admission_quotas(caller, &policy).await?;
+    let options = work::task_options(app, repo, &request)?;
     let planned = {
         let (yard, prompt, harnesses) = (
             repo.yard.clone(),
@@ -1182,7 +1206,12 @@ async fn post_task(
         .await?
         {
             Ok(planned) => planned,
-            Err(e) => return replay_or(&app, &caller, idem.as_ref(), error::sdk(&e)).await,
+            Err(e) => {
+                return match replayed_operation(app, caller, idem.as_ref()).await? {
+                    Some(op) => Ok((op, true)),
+                    None => Err(error::sdk(&e)),
+                }
+            }
         }
     };
     let cursor = sync_feed(&repo.feed).await?;
@@ -1195,10 +1224,26 @@ async fn post_task(
         cursor,
         idempotency: idem,
         principal: caller.0.clone(),
-        quota: app.admission_quota(&caller, &policy),
+        quota: app.admission_quota(caller, &policy),
         requires: required_labels(&request.require_labels)?,
     };
-    admit(&app, new, Work::Task { request }).await
+    let value = Work::Task { request }.to_value()?;
+    let registry = app.registry.clone();
+    blocking(move || registry.submit(new, value)).await?
+}
+
+/// The operation a request's idempotency key already names, if any.
+async fn replayed_operation(
+    app: &Shared,
+    caller: &Caller,
+    idem: Option<&Idempotency>,
+) -> Result<Option<Operation>, ApiError> {
+    let Some(idem) = idem.cloned() else {
+        return Ok(None);
+    };
+    let registry = app.registry.clone();
+    let tenant = caller.tenant().to_owned();
+    blocking(move || registry.replay(&idem, &tenant)).await?
 }
 
 /// The branch's record, or `unknown_branch`.
