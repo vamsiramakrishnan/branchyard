@@ -163,6 +163,9 @@ fn a_granted_turn_gets_packages_an_index_and_a_signed_token() {
         serde_json::json!([{"connector": "github", "operations": ["issues.*"],
                             "mode": "read"}])
     );
+    // A turn's token is never a connect token: the gateway refuses it at
+    // its connect routes.
+    assert!(claims.get("by_purpose").is_none(), "{claims}");
     let (iat, exp) = (
         claims["iat"].as_u64().unwrap(),
         claims["exp"].as_u64().unwrap(),
@@ -228,6 +231,44 @@ fn a_granted_turn_gets_packages_an_index_and_a_signed_token() {
         1,
         "cached by bundle hash"
     );
+}
+
+#[test]
+fn a_connect_token_names_the_person_for_the_connect_routes_only() {
+    let f = Fixture::new();
+    let gw = Gateway::local(&f.yard, URL, Arc::new(FakePackager::default())).unwrap();
+    // Asked for an hour, it still lives at most ten minutes.
+    let token = gw
+        .connect_token(None, Duration::from_secs(3600))
+        .expect("a connect token");
+    let claims = connectors::keys::verify(&jwks(&f), &token).expect("a valid token");
+    assert_eq!(claims["by_purpose"], "connect");
+    assert_eq!(claims["by_purpose"], connectors::keys::CONNECT_PURPOSE);
+    assert_eq!(claims["by_grants"], serde_json::json!([]));
+    assert_eq!(claims["by_branch"], "");
+    assert_eq!(claims["by_turn"], "");
+    assert_eq!(claims["aud"], URL);
+    assert!(claims["sub"].as_str().unwrap().starts_with("local:"));
+    let (iat, exp) = (
+        claims["iat"].as_u64().unwrap(),
+        claims["exp"].as_u64().unwrap(),
+    );
+    assert!(
+        exp > iat && exp - iat <= connectors::CONNECT_TTL.as_secs(),
+        "{claims}"
+    );
+    let named = gw
+        .connect_token(Some("local:ada"), Duration::from_secs(60))
+        .unwrap();
+    let named = connectors::keys::verify(&jwks(&f), &named).unwrap();
+    assert_eq!(named["sub"], "local:ada");
+    // A person's granted token (a call Branchyard makes as them) is a tool
+    // caller, not a connect token.
+    let granted = gw
+        .person_token_granted(vec![GrantEntry::read("github")], Duration::from_secs(60))
+        .unwrap();
+    let granted = connectors::keys::verify(&jwks(&f), &granted).unwrap();
+    assert!(granted.get("by_purpose").is_none(), "{granted}");
 }
 
 #[test]

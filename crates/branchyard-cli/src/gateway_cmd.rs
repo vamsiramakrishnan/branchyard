@@ -358,8 +358,9 @@ fn status(yard: &Yard, dir: &Path, as_json: bool) -> Outcome {
 }
 
 /// `by connect <connector> [--account NAME] [--api-key-stdin] [--open]`:
-/// `anvil connect <bundles> <connector>` as the person, with a short-lived
-/// token that names them and grants nothing. The gateway answers with an
+/// `anvil connect <bundles> <connector>` as the person, with their connect
+/// token (`by_purpose: "connect"`, ten minutes, no grant), the only token the
+/// gateway's connect routes take. The gateway answers with an
 /// authorization URL, or takes a key from stdin.
 pub fn connect(
     target: &Target,
@@ -372,7 +373,7 @@ pub fn connect(
     connectors::check_connector(connector).map_err(Failure::Message)?;
     let yard = commands::open()?;
     let (config, gw) = require(&yard)?;
-    let token = gw.person_token(None, Duration::from_secs(600))?;
+    let token = gw.connect_token(None, connectors::CONNECT_TTL)?;
     let dir = connectors::local_dir(yard.root());
     let file = dir.join(format!("connect-{}.token", std::process::id()));
     write_private(&file, token.as_bytes())?;

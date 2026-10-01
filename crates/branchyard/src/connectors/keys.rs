@@ -26,6 +26,11 @@ use serde_json::{json, Value};
 use super::GrantEntry;
 use crate::Error;
 
+/// The `by_purpose` of a connect token: the person's own token for the
+/// gateway's connect routes, which take nothing else and which a turn token
+/// (no `by_purpose`) is refused at.
+pub const CONNECT_PURPOSE: &str = "connect";
+
 /// A token's claims, as `docs/connectors.md` lists them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claims {
@@ -39,6 +44,9 @@ pub struct Claims {
     pub by_branch: String,
     pub by_turn: String,
     pub by_grants: Vec<GrantEntry>,
+    /// [`CONNECT_PURPOSE`] on a connect token; absent on a turn's token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_purpose: Option<String>,
 }
 
 /// One Ed25519 key: its id and 32-byte seed.
@@ -347,6 +355,7 @@ mod tests {
             by_branch: "b".into(),
             by_turn: "1".into(),
             by_grants: vec![GrantEntry::read("github")],
+            by_purpose: None,
         }
     }
 

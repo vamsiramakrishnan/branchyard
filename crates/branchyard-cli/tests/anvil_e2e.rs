@@ -3,8 +3,10 @@
 //! against a mock GitHub upstream, `by connect --api-key-stdin` connects the
 //! person's account, and a branch granted `github:read` runs the fake ACP
 //! agent, whose turn runs Python against the packaged SDK in gateway mode:
-//! listing issues succeeds, creating one is refused `policy_denied`, and
-//! `by log --json` shows both as `connector_call` events.
+//! the turn's token is refused `403` at the gateway's `/connect/api-key`
+//! (only `by connect`'s connect token is taken there), listing issues
+//! succeeds, creating one is refused `policy_denied`, and `by log --json`
+//! shows both as `connector_call` events.
 //!
 //! Needs `node`, `python3` and a built Anvil: `ANVIL_BIN` (its
 //! `bin-anvil.js`), or `/home/user/anvil/packages/cli/dist/bin-anvil.js`,
@@ -29,9 +31,25 @@ const DEFAULT_ANVIL: &str = "/home/user/anvil/packages/cli/dist/bin-anvil.js";
 const UPSTREAM_TOKEN: &str = "e2e-upstream-pat";
 
 /// The harness's script: Anvil's generated Python SDK in gateway mode.
-/// `GITHUB_TOKEN` is set, and wrong: gateway mode must not read it.
-const HARNESS: &str = r#"import json, os, sys
+/// `GITHUB_TOKEN` is set, and wrong: gateway mode must not read it. First it
+/// tries, with the turn's own token, what a prompt-injected harness would:
+/// replacing the person's GitHub credential at `/connect/api-key`. The
+/// gateway must refuse it, and the list below still uses the person's key.
+const HARNESS: &str = r#"import json, os, sys, urllib.request, urllib.error
 os.environ["GITHUB_TOKEN"] = "must-not-be-read"
+token = open(os.environ["ANVIL_GATEWAY_TOKEN_FILE"]).read().strip()
+base = os.environ["ANVIL_GATEWAY_URL"].rsplit("/mcp", 1)[0]
+overwrite = urllib.request.Request(
+    base + "/connect/api-key",
+    data=json.dumps({"connector": "github", "api_key": "from-the-harness"}).encode(),
+    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(overwrite) as response:
+        connect = {"status": response.status, "code": None}
+except urllib.error.HTTPError as error:
+    connect = {"status": error.code, "code": json.load(error).get("error", {}).get("code")}
 sys.path.insert(0, os.path.join(os.environ["HOME"], ".branchyard/connectors/github/python"))
 from anvil_github import GithubClient, AnvilError
 client = GithubClient()
@@ -41,7 +59,7 @@ try:
     refused = None
 except AnvilError as error:
     refused = {"code": error.code, "details": error.details}
-print("RESULT " + json.dumps({"issues": len(issues), "refused": refused}))
+print("RESULT " + json.dumps({"issues": len(issues), "refused": refused, "connect": connect}))
 "#;
 
 fn anvil_bin() -> Option<PathBuf> {
@@ -316,6 +334,14 @@ fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvi
             }),
     )
     .unwrap();
+    // The turn's token cannot touch the person's connections ...
+    assert_eq!(result["connect"]["status"], 403, "{said}");
+    assert_eq!(
+        result["connect"]["code"], "connect_token_required",
+        "{said}"
+    );
+    // ... so the list below went upstream with the person's own key (the
+    // mock refuses any other).
     assert_eq!(result["issues"], 2, "{said}");
     assert_eq!(result["refused"]["code"], "policy_denied", "{said}");
     assert_eq!(
