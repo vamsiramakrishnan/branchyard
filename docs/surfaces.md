@@ -530,3 +530,26 @@ A branch's harness reaches only the hosts its policy allows, through an allowlis
 | `PolicyPreset` (`PresetRules`, `EDIT_TOOLS`, `SHELL_TOOLS`, `WEB_TOOLS`) | none: rigs refused `permission_policy` | `--permissions read-only\|edit-worktree\|full` wherever `--yes` is; `[defaults] permissions` takes the presets; `policy.preset` in a request (`PolicySpec::preset`); a seat's `permission_policy` in a rig (a top-level one is refused); `plan::read_only` is the `read-only` preset |
 | `RigPlan`'s `root.policy` | `default`, `deny`, `allow`, `delegation_commands` | adds `preset` when a seat names one; the rules include its expansion |
 | `[network]` and `[defaults] permissions` in `branchyard.toml`; `network` and `permission_policy` on a rig seat | none; `ask` or `yes` | in `schema/branchyard.config.json` and `schema/rig.json` |
+
+## Added with the wide map
+
+See [wide map](map.md), which has the full surface table for the server.
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Run a map | `Yard::map(MapSpec, &MapOptions)` → `MapReport`; `MapProgress` per item | `map PROMPT --items FILE\|--from-command CMD\|stdin [--schema F] [--out F] ...` | the same; routing refused | `POST /v1/repos/{repo}/maps` (`MapRequest`) → `Operation` of kind `map` | `Repo::submit_map` | no |
+| Resume a map | `Yard::map_spec`, then `Yard::map` | `map resume NAME [--retry-failed]` (the recorded command line and items) | the server's recorded request | `POST .../maps/{name}/resume` (`MapResumeRequest`) | `Repo::resume_map` | no |
+| List, show, forget | `Yard::maps`, `map_report`, `remove_map` | `map ls\|show NAME\|rm NAME`; `ls` adds a `maps` section; `show NAME` shows a map when no branch has the name; `watch`'s header | the same (no `watch` line) | `GET .../maps`, `GET\|DELETE .../maps/{name}` | `Repo::maps`, `map`, `remove_map` | no |
+| Items, templates, answers, tables | `parse_map_items`, `ItemFormat`, `MapItem`, `map_item_id`, `check_map_template`, `render_map_prompt`, `parse_map_answer`, `JsonSchema`, `map_rows_csv`, `map_rows_jsonl`, `map_item_prompt`, `map_follow_up_prompt`, `map_reduce_prompt`, `check_map_spec`, `map_default_name` | n/a | n/a | n/a | n/a | no |
+
+| Surface | Before | Now |
+|---|---|---|
+| `.branchyard/maps/<name>/` | none | `map.json`, `results.jsonl`, `reduce.json`, `lock` |
+| `OperationKind` | through `reject_plan` | adds `map` |
+| `OperationResult` | `branches`, `merged`, `descendants`, `inspection` | adds `map` (`MapReport`) |
+| `MapRequest`, `MapResumeRequest`, `MapList`, `MapReport` | none | in `schema/contract.json` |
+| `by ls` (text) | branches | then `maps`, when there are any; `--json` unchanged |
+| `by show NAME` | a branch | also a map, when no branch has the name |
+| `by watch` | header with usage | adds `map NAME x of n done, ...` for running and unfinished maps, locally |
+| `judge::message`, `goal::send_options` | private | crate-visible, reused by the map |
+

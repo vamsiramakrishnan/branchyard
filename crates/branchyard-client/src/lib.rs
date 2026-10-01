@@ -63,7 +63,7 @@ use backon::{BackoffBuilder, BlockingRetryable, ExponentialBackoff, ExponentialB
 
 use branchyard::{
     ArtifactRef, Asked, BranchInfo, Children, EventPage, Graph, GraphApplied, HarnessInfo, Inbox,
-    Inspection, Message, ScratchArea, ScratchLock, Steer,
+    Inspection, MapReport, MapSummary, Message, ScratchArea, ScratchLock, Steer,
 };
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
@@ -72,8 +72,8 @@ use serde::Serialize;
 use api::{
     AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, Diff,
     ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest,
-    MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest,
-    SpawnRequest, SteerRequest, TaskRequest, TextRequest,
+    MapList, MapRequest, MapResumeRequest, MergeRequest, Operation, ReincarnateRequest, Removed,
+    RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest, TaskRequest, TextRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -461,6 +461,43 @@ impl Repo {
     /// Start a task. Returns once the server has durably accepted it.
     pub fn submit_task(&self, request: &TaskRequest, key: &str) -> Result<Operation, Error> {
         self.client.post(&self.path("/tasks"), request, key)
+    }
+
+    /// Start a wide map. Returns once the server has durably accepted it.
+    pub fn submit_map(&self, request: &MapRequest, key: &str) -> Result<Operation, Error> {
+        self.client.post(&self.path("/maps"), request, key)
+    }
+
+    /// Run a recorded map again with the request that started it.
+    pub fn resume_map(
+        &self,
+        name: &str,
+        request: &MapResumeRequest,
+        key: &str,
+    ) -> Result<Operation, Error> {
+        self.client.post(
+            &self.path(&format!("/maps/{}/resume", encode(name))),
+            request,
+            key,
+        )
+    }
+
+    /// The repository's recorded maps.
+    pub fn maps(&self) -> Result<Vec<MapSummary>, Error> {
+        Ok(self.client.get::<MapList>(&self.path("/maps"))?.maps)
+    }
+
+    /// A recorded map's rows and progress.
+    pub fn map(&self, name: &str) -> Result<MapReport, Error> {
+        self.client
+            .get(&self.path(&format!("/maps/{}", encode(name))))
+    }
+
+    /// Forget a map's record; its branches stay.
+    pub fn remove_map(&self, name: &str) -> Result<(), Error> {
+        self.client
+            .delete::<Removed>(&self.path(&format!("/maps/{}", encode(name))))
+            .map(|_| ())
     }
 
     pub fn send(&self, branch: &str, request: &SendRequest, key: &str) -> Result<Operation, Error> {

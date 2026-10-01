@@ -607,6 +607,21 @@ Examples:
 default when there is a [fleet] and no --harness); --judge then scores the
 attempts and proposes one. See docs/fleet.md.";
 
+const MAP_EXAMPLES: &str = "\
+Examples:
+  by map \"Find the license and stars of {{item.repo}}\" --items repos.csv \\
+      --schema answer.schema.json --out results.csv --concurrency 8 --yes
+  git ls-files '*.md' | by map \"Fix spelling in {{item}}\" --rm --yes
+  by map \"Summarize issue {{item.number}}\" --from-command \"gh issue list --json number\" \\
+      --input-format json --reduce \"Group these by theme\" --yes
+  by map resume find-the-license-and-stars-of-item-repo
+  by map show find-the-license-and-stars-of-item-repo
+
+Each item runs on its own branch, <map>-<item id>. With --schema, each branch
+must end its reply with JSON matching the schema; an invalid answer gets one
+follow-up turn. Running the same command again (or by map resume) skips the
+items done. See docs/map.md.";
+
 const JUDGE_EXAMPLES: &str = "\
 Examples:
   by judge speed-up-the-parser                  # a fan's branches
@@ -865,6 +880,22 @@ pub enum Command {
         judge: bool,
         #[command(flatten)]
         task: Checked<FanFlags>,
+    },
+    /// Run one prompt over every item of a list, each on its own branch, and collect the answers
+    #[command(
+        display_order = 101,
+        after_help = MAP_EXAMPLES,
+        args_conflicts_with_subcommands = true,
+        subcommand_negates_reqs = true
+    )]
+    Map {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<MapAction>,
+        #[command(flatten)]
+        map: MapArgs,
     },
     /// Continue a branch's session with another prompt
     #[command(display_order = 102, after_help = SEND_EXAMPLES)]
@@ -2858,6 +2889,129 @@ impl Flags for FanFlags {
     }
 }
 
+/// `by map`'s actions besides running one.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum MapAction {
+    /// Run a recorded map again with its command line and items, skipping the items done
+    Resume {
+        name: String,
+        /// Run the items that failed again too
+        #[arg(long)]
+        retry_failed: bool,
+    },
+    /// The recorded maps and their progress
+    Ls,
+    /// A map's progress, its items' results and its reduce
+    Show { name: String },
+    /// Forget a map's record (its branches stay; remove them with by rm)
+    Rm { name: String },
+}
+
+/// `by map`'s run: the prompt template, where the items come from, the
+/// answer's schema, the results, and the branches' options.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct MapArgs {
+    /// The prompt template: {{item}}, {{item.FIELD}} (a path such as {{item.a.0.b}}), {{id}},
+    /// {{index}} and {{map}} are replaced for each item
+    #[arg(required = true)]
+    pub prompt: Option<String>,
+    /// Read the items from this file (- for standard input): JSON lines, a JSON array, CSV with a
+    /// header, or one item per line, by its extension (default: standard input)
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub items: Option<String>,
+    /// Read the items from this shell command's output, run in the repository as you
+    #[arg(long, value_name = "CMD", conflicts_with = "items", value_parser = non_blank)]
+    pub from_command: Option<String>,
+    /// How the items are written: jsonl, json, csv or lines (default: the file's extension, else
+    /// guessed from the first character: [ for json, { for jsonl, else lines)
+    #[arg(long, value_name = "FORMAT", value_parser = item_format)]
+    pub input_format: Option<branchyard::ItemFormat>,
+    /// Each branch must answer with JSON matching this JSON Schema (a subset; see docs/map.md);
+    /// without one, an item's result is its last reply's text
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub schema: Option<String>,
+    /// Write the results here as each item ends: CSV for a .csv file, else JSON lines
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub out: Option<String>,
+    /// Branches running at once (default 4)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64))]
+    pub concurrency: Option<u32>,
+    /// New branches an item gets after its first fails (default 1)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(0..=10))]
+    pub retries: Option<u32>,
+    /// Stop starting items once the map has cost X dollars, across runs (per branch, use
+    /// --budget-usd)
+    #[arg(long, value_name = "X", value_parser = usd)]
+    pub total_usd: Option<f64>,
+    /// Then one more branch, given every result, answers this prompt: the map's summary
+    #[arg(long, value_name = "PROMPT", value_parser = non_blank)]
+    pub reduce: Option<String>,
+    /// Write the reduce's answer to this file too
+    #[arg(long, value_name = "FILE", requires = "reduce", value_hint = ValueHint::FilePath)]
+    pub reduce_out: Option<String>,
+    /// Remove an item's branches once its answer is recorded (failed items' branches are kept)
+    #[arg(long)]
+    pub rm: bool,
+    /// Run the items that failed in an earlier run again
+    #[arg(long)]
+    pub retry_failed: bool,
+    #[command(flatten)]
+    pub task: Checked<MapFlags>,
+}
+
+fn item_format(text: &str) -> Result<branchyard::ItemFormat, String> {
+    text.parse().map_err(|e: branchyard::Error| match e {
+        branchyard::Error::Unsupported(why) => why,
+        other => other.to_string(),
+    })
+}
+
+/// `by map`'s branch options: `run`'s, without an issue, a pull request,
+/// delegation, a plan or a goal.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct MapFlags {
+    /// Harness or profile ID (default: claude-code, or routed when there is a [fleet])
+    #[arg(long, value_name = "ID")]
+    harness: Option<String>,
+    /// The map's name, which its branches' names start with (default: a slug of the prompt)
+    #[arg(short, long)]
+    name: Option<String>,
+    /// Base revision of every branch (default: HEAD)
+    #[arg(short, long, value_name = "REV")]
+    base: Option<String>,
+    #[command(flatten)]
+    route: RouteFlags,
+    #[command(flatten)]
+    limits: Limits,
+    #[command(flatten)]
+    perms: Perms,
+    #[command(flatten)]
+    launch: Launch,
+    #[command(flatten)]
+    provision: Provision,
+}
+
+impl Flags for MapFlags {
+    type Output = TaskArgs;
+    fn check(self) -> Result<TaskArgs, String> {
+        RunFlags {
+            harness: self.harness,
+            route: self.route,
+            issue: None,
+            pr: None,
+            name: self.name,
+            base: self.base,
+            limits: self.limits,
+            perms: self.perms,
+            launch: self.launch,
+            delegation: Delegation::default(),
+            provision: self.provision,
+            plan_goal: PlanGoal::default(),
+        }
+        .check()
+    }
+}
+
 /// `by send`'s task options: the branch keeps its harness, workspace and
 /// provider.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
@@ -3624,6 +3778,57 @@ mod tests {
     #[test]
     fn the_command_tree_is_consistent() {
         command().debug_assert();
+    }
+
+    #[test]
+    fn map_runs_a_prompt_or_takes_an_action() {
+        let Command::Map {
+            action: None,
+            map,
+            json: false,
+        } = parse_str(
+            "map 'look at {{item.repo}}' --items r.csv --schema s.json --out o.csv \
+             --concurrency 8 --retries 2 --total-usd 5 --reduce 'sum up' --rm -n look \
+             --harness codex --budget-usd 1 --yes",
+        )
+        .unwrap()
+        else {
+            panic!("not a map run");
+        };
+        assert_eq!(map.prompt.as_deref(), Some("look at {{item.repo}}"));
+        assert_eq!(map.items.as_deref(), Some("r.csv"));
+        assert_eq!(map.concurrency, Some(8));
+        assert_eq!(map.retries, Some(2));
+        assert_eq!(map.total_usd, Some(5.0));
+        assert!(map.rm);
+        let task = map.task.clone().into_inner();
+        assert_eq!(task.name.as_deref(), Some("look"));
+        assert_eq!(task.harness.as_deref(), Some("codex"));
+        assert_eq!(task.budget_usd, Some(1.0));
+        assert_eq!(task.permissions, Permissions::Yes);
+        assert!(matches!(
+            parse_str("map resume look --retry-failed --json").unwrap(),
+            Command::Map {
+                action: Some(MapAction::Resume {
+                    retry_failed: true,
+                    ..
+                }),
+                json: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_str("map ls").unwrap(),
+            Command::Map {
+                action: Some(MapAction::Ls),
+                ..
+            }
+        ));
+        assert_eq!(kind("map"), ErrorKind::MissingRequiredArgument);
+        assert_eq!(kind("map x --concurrency 0"), ErrorKind::ValueValidation);
+        assert!(err("map x --items a --from-command b").contains("cannot be used with"));
+        assert!(err("map x --reduce-out f").contains("--reduce"));
+        assert!(err("map x --input-format xml").contains("not an item format"));
     }
 
     #[test]

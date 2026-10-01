@@ -113,7 +113,7 @@ impl Judge for HarnessJudge {
 }
 
 /// Every message delta of the last turn, whole.
-fn message(events: &[RecordedEvent]) -> String {
+pub(crate) fn message(events: &[RecordedEvent]) -> String {
     let start = events
         .iter()
         .rposition(|e| matches!(e.activity, Activity::Prompt(_)))

@@ -112,9 +112,12 @@ mod goal;
 mod graph;
 mod harness;
 mod inbox;
+mod json_schema;
 mod judge;
 mod knowledge;
 mod lock;
+mod map;
+mod map_input;
 mod names;
 mod ops;
 #[cfg(feature = "postgres")]
@@ -193,6 +196,7 @@ pub use graph::{
     GraphProposal, SpawnSpec, MAX_EDITS,
 };
 pub use inbox::{DeliveryHook, SteerDelivery};
+pub use json_schema::JsonSchema;
 pub use judge::{
     deterministic_scores, harness_judge, parse_verdict, prompt as judge_prompt, HarnessJudge,
     Judge, JudgeOptions, JudgedBy, Judgement, Scored, Verdict,
@@ -202,6 +206,19 @@ pub use knowledge::{
     KnowledgeEdit, KnowledgeEntry, KnowledgeScope, KnowledgeSettings, KnowledgeSource,
     KnowledgeStatus, NewKnowledge, DEFAULT_BUDGET_TOKENS as KNOWLEDGE_DEFAULT_BUDGET_TOKENS,
     TEXT_MAX as KNOWLEDGE_TEXT_MAX,
+};
+pub use map::{
+    check_spec as check_map_spec, default_name as map_default_name,
+    follow_up_prompt as map_follow_up_prompt, item_prompt as map_item_prompt,
+    reduce_prompt as map_reduce_prompt, rows_csv as map_rows_csv, rows_jsonl as map_rows_jsonl,
+    MapOptions, MapProgress, MapReduce, MapReport, MapRow, MapSpec, MapStatus, MapSummary,
+    ProgressFn as MapProgressFn, DEFAULT_CONCURRENCY as MAP_DEFAULT_CONCURRENCY,
+    DEFAULT_RETRIES as MAP_DEFAULT_RETRIES, MAX_CONCURRENCY as MAP_MAX_CONCURRENCY,
+};
+pub use map_input::{
+    check_template as check_map_template, item_id as map_item_id, parse_answer as parse_map_answer,
+    parse_items as parse_map_items, render as render_map_prompt, ItemFormat, MapItem,
+    TemplateContext,
 };
 pub use plan::{
     approved_prompt, from_events as plan_from_events, parse_tasks as parse_plan_tasks,
@@ -701,6 +718,35 @@ impl Yard {
     /// `docs/fleet.md`.
     pub fn judge(&self, branches: &[String], options: &JudgeOptions) -> Result<Judgement, Error> {
         judge::judge(self, branches, options)
+    }
+
+    /// Run a wide map: `spec.prompt` over every item of `spec.items`, each
+    /// on its own branch, at most `spec.concurrency` at once, each answer
+    /// checked against `spec.schema`, then the reduce turn. Recorded in
+    /// `.branchyard/maps/<name>/`; running it again skips the items done.
+    /// See `docs/map.md`.
+    pub fn map(&self, spec: MapSpec, options: &MapOptions) -> Result<MapReport, Error> {
+        map::run(self, spec, options)
+    }
+
+    /// Every recorded map, oldest first.
+    pub fn maps(&self) -> Result<Vec<MapSummary>, Error> {
+        map::list(self)
+    }
+
+    /// A recorded map's rows and progress.
+    pub fn map_report(&self, name: &str) -> Result<MapReport, Error> {
+        map::report(self, name)
+    }
+
+    /// A recorded map's spec, with its items, for running it again.
+    pub fn map_spec(&self, name: &str) -> Result<MapSpec, Error> {
+        map::spec(self, name)
+    }
+
+    /// Forget a map's record; its branches stay. Refused while it runs.
+    pub fn remove_map(&self, name: &str) -> Result<(), Error> {
+        map::remove(self, name)
     }
 
     /// How this yard (and its clones) learns and uses repository

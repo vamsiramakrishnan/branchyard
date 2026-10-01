@@ -597,7 +597,7 @@ pub(crate) fn pursue(yard: &Yard, branch: Branch, options: &TaskOptions) -> Resu
 }
 
 /// A follow-up's options: the run's, as a send takes them.
-fn send_options(options: &TaskOptions) -> TaskOptions {
+pub(crate) fn send_options(options: &TaskOptions) -> TaskOptions {
     TaskOptions {
         name: None,
         base: None,

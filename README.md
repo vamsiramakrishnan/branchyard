@@ -162,6 +162,8 @@ Routing and judging ([fleet](docs/fleet.md)): `by run|fan [--auto] [--kind KIND]
 
 Plans and goals ([plans and goals](docs/plans-and-goals.md)): `by run|fan --plan` (and `[fleet.<kind>] plan = true`), `by plan show|approve [--edit [--editor E] | --file FILE]|reject [--reason TEXT] [--replan] BRANCH [--json]`, `by spawn --plan`; `by run|fan --goal TEXT [--goal-rounds N] [--goal-judge ID [--goal-judge-command CMD]]` (and `[fleet.<kind>] goal_judge`). Repository knowledge ([knowledge](docs/knowledge.md)): `by knowledge list [--status S|--all]|show ID|review|adopt ID...|reject ID... [--reason T]|edit ID [--text T] [--path GLOB] [--kind K]|add TEXT [--path GLOB] [--kind K] [--propose]|rm ID|distill BRANCH [--harness ID [--command CMD]|--deterministic]|export [--out FILE]`, each with `--json`, and `[knowledge]` in `branchyard.toml`. All work locally and with `--remote`.
 
+Wide map ([map](docs/map.md)): `by map PROMPT [--items FILE | --from-command CMD] [--input-format jsonl|json|csv|lines] [--schema FILE] [--out FILE] [--concurrency N] [--retries N] [--total-usd X] [--reduce PROMPT [--reduce-out FILE]] [--rm] [--retry-failed] [-n NAME]` with `run`'s harness, routing, limits and permissions flags; `by map resume NAME [--retry-failed]|ls|show NAME|rm NAME [--json]`. Locally and with `--remote` (routing local only).
+
 Queue and observability ([observability](docs/observability.md)): `--priority N` (-10 to 10) on `run`, `fan`, `send`, `fork`, `reincarnate` and `spawn` with `--remote`; `by stats [--json]` summarizes branches, turn outcomes and durations, tool and connector calls and cost from the store, and with `--remote` the server's queue by priority.
 
 Connectors ([connectors](docs/connectors.md)): `--connector CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]]` (repeatable) on `run`, `fan`, `send`, `fork` and `spawn`; `by gateway start [--foreground]|stop|status|rotate-key [--keep N]|jwks [--json]`; `by connect CONNECTOR [--account NAME] [--api-key-stdin] [--open]`.
@@ -435,6 +437,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Repository knowledge](docs/knowledge.md): entries proposed from branches, adopted after review, given to matching harnesses.
 - [Plans and goals](docs/plans-and-goals.md): read-only plans approved before execution, and goals a judge verifies.
 - [Egress policy](docs/egress.md): the hosts a branch may reach, through an allowlisting proxy, enforced in a network namespace on Linux; and permission presets.
+- [Wide map](docs/map.md): one prompt over every item of a list, a branch each, answers checked against a JSON schema and collected into a table.
 - [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
 

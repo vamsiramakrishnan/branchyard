@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use branchyard::{
     Activity, After, Binding, BranchInfo, Budget, Envelope, GraphEdit, HarnessInfo, Inspection,
-    Merged, Policy, Provider, Provisioning, RecordedEvent, Seats, StallAction,
+    MapItem, MapReport, MapSummary, Merged, Policy, Provider, Provisioning, RecordedEvent, Seats,
+    StallAction,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -260,6 +261,59 @@ pub struct GoalRequest {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// `POST /v1/repos/{repo}/maps`: a wide map, run as one operation. See
+/// `docs/map.md`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MapRequest {
+    /// The map's name (default: a slug of the prompt). Running a map of
+    /// this name again skips its items done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The items, each with its id, as `branchyard::parse_map_items` reads
+    /// them from a file.
+    pub items: Vec<MapItem>,
+    /// The JSON Schema every answer must match (the subset in
+    /// `docs/map.md#schemas`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce: Option<String>,
+    /// Remove an item's branches once its answer is recorded.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove_done: bool,
+    /// Run the items that failed in an earlier run again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retry_failed: bool,
+    /// Every branch's options, as a task's; `prompt` is the template, and
+    /// `name`, `harnesses`, `seats`, `plan` and `goal` are refused.
+    pub task: TaskRequest,
+}
+
+/// `POST /v1/repos/{repo}/maps/{name}/resume`: run a recorded map again
+/// with the request that started it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MapResumeRequest {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retry_failed: bool,
+}
+
+/// `GET /v1/repos/{repo}/maps`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapList {
+    pub maps: Vec<MapSummary>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/send`.
@@ -592,6 +646,8 @@ pub enum OperationKind {
     ApprovePlan,
     /// A plan rejected with `POST .../plan/reject`.
     RejectPlan,
+    /// A wide map started with `POST .../maps` or `.../maps/{name}/resume`.
+    Map,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -634,6 +690,10 @@ pub struct OperationResult {
     /// A spawned child, inspected once its turn ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection: Option<Inspection>,
+    /// A map's rows and progress once it ended; its `branches` above are
+    /// the branches that answered or were tried last, where they remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<MapReport>,
 }
 
 /// A long operation, run in the background. Durable on the server from

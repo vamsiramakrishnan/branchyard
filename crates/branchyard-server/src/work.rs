@@ -18,8 +18,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use branchyard::{Branch, Spawn, TaskOptions, Yard};
 use branchyard_client::api::{
-    ErrorBody, ForkRequest, OperationKind, OperationResult, ReincarnateRequest, SendRequest,
-    SpawnRequest, TaskRequest,
+    ErrorBody, ForkRequest, MapRequest, OperationKind, OperationResult, ReincarnateRequest,
+    SendRequest, SpawnRequest, TaskRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -73,6 +73,9 @@ pub enum Work {
         branch: String,
         request: branchyard_client::knowledge_api::PlanRejectRequest,
     },
+    /// `POST /v1/repos/{repo}/maps` or `.../maps/{name}/resume`, with the
+    /// items a resume takes from the recorded map.
+    Map { request: MapRequest },
 }
 
 impl Work {
@@ -87,6 +90,7 @@ impl Work {
             Work::Integrate { .. } => OperationKind::Integrate,
             Work::ApprovePlan { .. } => OperationKind::ApprovePlan,
             Work::RejectPlan { .. } => OperationKind::RejectPlan,
+            Work::Map { .. } => OperationKind::Map,
         }
     }
 
@@ -224,6 +228,34 @@ impl Work {
                 )
                 .and_then(|b| finished(vec![b]))
                 .map_err(sdk)
+            }
+            Work::Map { request } => {
+                let spec = map_spec(&request).map_err(api)?;
+                let options = branchyard::MapOptions {
+                    task: TaskOptions {
+                        actor: actor.clone(),
+                        trace_parent: trace_parent.clone(),
+                        ..task_options(app, repo, &request.task).map_err(api)?
+                    },
+                    retry_failed: request.retry_failed,
+                    ..branchyard::MapOptions::default()
+                };
+                let report = yard.map(spec, &options).map_err(sdk)?;
+                // The branches that answered, or were tried last, where
+                // they remain.
+                let branches = report
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.branch.as_deref())
+                    .chain(report.reduce.as_ref().and_then(|r| r.branch.as_deref()))
+                    .filter_map(|name| yard.branch(name).ok())
+                    .map(|b| b.info().clone())
+                    .collect();
+                Ok(OperationResult {
+                    branches,
+                    map: Some(report),
+                    ..OperationResult::default()
+                })
             }
             Work::Integrate { branch, parent } => {
                 let run = || {
@@ -428,6 +460,52 @@ pub(crate) fn finished(branches: Vec<Branch>) -> Result<OperationResult, branchy
         descendants,
         ..OperationResult::default()
     })
+}
+
+/// The map a request describes, checked as running it would check it, or
+/// why this server refuses it. Its `launch` is the request without its
+/// items (the spec keeps them), for `.../maps/{name}/resume`.
+pub(crate) fn map_spec(request: &MapRequest) -> Result<branchyard::MapSpec, ApiError> {
+    let task = &request.task;
+    for (given, what) in [
+        (task.name.is_some(), "task.name (the map's name is name)"),
+        (
+            !task.harnesses.is_empty(),
+            "task.harnesses (a map runs each item on one branch)",
+        ),
+        (task.seats.is_some(), "task.seats"),
+        (task.plan, "task.plan"),
+        (task.goal.is_some(), "task.goal"),
+    ] {
+        if given {
+            return Err(ApiError::bad_request(format!("a map takes no {what}")));
+        }
+    }
+    if request.items.is_empty() {
+        return Err(ApiError::bad_request("the map has no items"));
+    }
+    let name = request
+        .name
+        .clone()
+        .unwrap_or_else(|| branchyard::map_default_name(&task.prompt));
+    let mut spec = branchyard::MapSpec::new(name, task.prompt.clone(), request.items.clone());
+    spec.schema = request.schema.clone();
+    spec.concurrency = request
+        .concurrency
+        .unwrap_or(branchyard::MAP_DEFAULT_CONCURRENCY);
+    spec.retries = request.retries.unwrap_or(branchyard::MAP_DEFAULT_RETRIES);
+    spec.total_usd = request.total_usd;
+    spec.reduce = request.reduce.clone();
+    spec.remove_done = request.remove_done;
+    branchyard::check_map_spec(&spec).map_err(|e| crate::error::sdk(&e))?;
+    let launch = MapRequest {
+        items: Vec::new(),
+        retry_failed: false,
+        ..request.clone()
+    };
+    spec.launch = serde_json::to_value(&launch)
+        .map_err(|e| ApiError::internal(format!("could not record the map's request: {e}")))?;
+    Ok(spec)
 }
 
 /// A task's options, or why this server refuses it.

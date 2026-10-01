@@ -73,6 +73,7 @@ pub mod error;
 pub mod feed;
 pub mod knowledge_routes;
 pub mod logging;
+pub mod map_routes;
 pub mod metrics;
 pub mod observe;
 pub mod ops;

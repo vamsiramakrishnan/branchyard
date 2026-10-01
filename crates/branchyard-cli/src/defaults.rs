@@ -13,7 +13,7 @@
 //! detected by the server's own parser (`value_source`), which knows
 //! `-c FILE` and `--config=FILE` alike.
 //!
-//! - New branches (`run`, `fan`) take every default: harness, model,
+//! - New branches (`run`, `fan`, `map`) take every default: harness, model,
 //!   effort, auth, limits, check, permissions, isolation, provider,
 //!   instructions, MCP servers, the `[network]` policy, and secrets when
 //!   the branch has a private home (isolated or sandboxed).
@@ -67,6 +67,10 @@ pub fn apply(
             return Ok((globals, command));
         }
         Command::Run { task, .. } => apply_task(&config, task, Scope::NewBranch)?,
+        // A map's branches are new branches; its other actions take nothing.
+        Command::Map {
+            action: None, map, ..
+        } => apply_task(&config, &mut map.task, Scope::NewBranch)?,
         Command::Fan {
             task, harnesses, ..
         } => {

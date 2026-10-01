@@ -97,6 +97,20 @@ impl DirLock {
     }
 }
 
+/// Whether a process holds `dir`'s lock now. Takes and drops the lock for
+/// an instant when it is free, without writing to the file; a process
+/// acquiring it at that instant retries within its [`WAIT`].
+pub(crate) fn is_held(dir: &Path) -> bool {
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("lock"))
+    else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(TryLockError::WouldBlock))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

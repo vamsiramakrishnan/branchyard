@@ -680,12 +680,17 @@ struct Extras {
     usage_at: Option<std::time::Instant>,
     ports: std::collections::BTreeMap<String, Vec<String>>,
     ports_at: Option<std::time::Instant>,
+    /// The maps running or unfinished, one line (docs/map.md).
+    maps: Option<String>,
+    maps_at: Option<std::time::Instant>,
 }
 
 /// How often the usage meters are read again.
 const USAGE_EVERY: Duration = Duration::from_secs(60);
 /// How often the listening ports are scanned again.
 const PORTS_EVERY: Duration = Duration::from_secs(5);
+/// How often the maps' progress is read again.
+const MAPS_EVERY: Duration = Duration::from_secs(2);
 
 impl Extras {
     fn refresh(&mut self, source: &Source) {
@@ -706,6 +711,10 @@ impl Extras {
             let logins = crate::usage::meter(&config, &vars, crate::usage::now_ms());
             self.usage = crate::usage::header(&logins);
             self.usage_at = Some(std::time::Instant::now());
+        }
+        if stale(self.maps_at, MAPS_EVERY) {
+            self.maps = crate::map_cmd::watch_line(yard);
+            self.maps_at = Some(std::time::Instant::now());
         }
         if stale(self.ports_at, PORTS_EVERY) {
             self.ports = crate::ports::of_yard(yard)
@@ -916,6 +925,7 @@ impl tui::Effects for Cockpit {
             now_ms: now_ms(),
             trying: self.source.trying(),
             usage: self.extras.usage.clone(),
+            maps: self.extras.maps.clone(),
             ports: self.extras.ports.clone(),
         })
     }
