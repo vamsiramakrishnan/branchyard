@@ -816,12 +816,19 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         }
         // Its plan and goal, when it has them (docs/plans-and-goals.md).
         crate::plan_cmd::show_json(&info.name, &events, &mut value);
+        // How its last turn's network policy was applied (docs/egress.md).
+        if let Some((summary, _)) = egress_summary(&events) {
+            value["egress"] = summary;
+        }
         return print(&json::text(&value));
     }
     let mut extra: Vec<(&str, String)> = line
         .map(|line| ("merge readiness", line))
         .into_iter()
         .collect();
+    if let Some((_, text)) = egress_summary(&events) {
+        extra.push(("egress", text));
+    }
     if let Some(listening) = listening.filter(|l| !l.is_empty()) {
         extra.push(("listening", crate::ports::lines(&listening).join("; ")));
     }
@@ -832,6 +839,58 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         env.style(),
     ));
     print(&text)
+}
+
+/// How the branch's last turn with a network policy applied it, and what
+/// its proxy decided in that turn: as JSON and as one line. `None` when no
+/// turn had one.
+pub(crate) fn egress_summary(
+    events: &[branchyard::RecordedEvent],
+) -> Option<(serde_json::Value, String)> {
+    use branchyard::EgressActivity;
+    let at = events.iter().rposition(|e| {
+        matches!(&e.activity, Activity::Egress(egress)
+            if matches!(egress.as_ref(), EgressActivity::Applied { .. }))
+    })?;
+    let Activity::Egress(applied) = &events[at].activity else {
+        return None;
+    };
+    let EgressActivity::Applied {
+        policy,
+        allow,
+        enforcement,
+        reason,
+    } = applied.as_ref()
+    else {
+        return None;
+    };
+    let (mut allowed, mut denied) = (0, 0);
+    for event in &events[at + 1..] {
+        if let Activity::Egress(egress) = &event.activity {
+            if let EgressActivity::Decision { allowed: yes, .. } = egress.as_ref() {
+                match yes {
+                    true => allowed += 1,
+                    false => denied += 1,
+                }
+            }
+        }
+    }
+    let mut text = format!(
+        "{} ({policy}); {allowed} allowed, {denied} denied",
+        enforcement.as_str()
+    );
+    if let Some(reason) = reason {
+        text.push_str(&format!("; not enforced: {reason}"));
+    }
+    let value = serde_json::json!({
+        "policy": policy,
+        "allow": allow,
+        "enforcement": enforcement,
+        "reason": reason,
+        "allowed": allowed,
+        "denied": denied,
+    });
+    Some((value, text))
 }
 
 pub fn diff(env: &Env, target: &Target, branch: &str) -> Outcome {

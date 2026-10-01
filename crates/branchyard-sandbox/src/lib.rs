@@ -101,6 +101,9 @@ pub enum Operation {
     LiveBranch,
     /// Release a checkpoint the provider holds.
     Release,
+    /// Run a process whose only network is a loopback listener handed to
+    /// the caller, such as an egress proxy's.
+    Egress,
 }
 
 impl fmt::Display for Operation {
@@ -116,6 +119,7 @@ impl fmt::Display for Operation {
             Operation::Resume => "resume",
             Operation::LiveBranch => "live branch",
             Operation::Release => "release a checkpoint",
+            Operation::Egress => "confine egress",
         })
     }
 }
@@ -137,6 +141,12 @@ pub struct Capabilities {
     /// branched into new sandboxes that keep its memory and processes, with
     /// their own mounts, while the source keeps its state.
     pub live_branch: bool,
+    /// [`SandboxProvider::exec_confined`]: a process can be started with no
+    /// network but one loopback listener, whose connections the caller
+    /// accepts and forwards (Branchyard's egress proxy). Without it, a
+    /// branch's egress policy is not enforced in this provider's sandboxes;
+    /// see `docs/egress.md`.
+    pub egress: bool,
 }
 
 /// An optional sandbox-level operation, as the engine chooses by it.
@@ -198,6 +208,7 @@ pub struct Requirements {
     pub share: bool,
     pub pause: bool,
     pub live_branch: bool,
+    pub egress: bool,
 }
 
 /// One requirement a provider cannot meet.
@@ -241,6 +252,7 @@ pub fn admit(required: &Requirements, offered: &Capabilities) -> Result<(), Vec<
             required.live_branch,
             offered.live_branch,
         ),
+        (Operation::Egress, required.egress, offered.egress),
     ] {
         if needed && !available {
             missing.push(Unsupported {

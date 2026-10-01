@@ -94,6 +94,8 @@ A seat:
 | `model`, `effort`, `auth`, `telemetry` | As `--model`, `--effort` (`low` … `xhigh` or 0-100), `--auth`, `--telemetry` | `Provisioning` |
 | `secrets` | Names only, such as `["OPENAI_API_KEY"]`. Locally each is read from the variable of that name; on a server, from the operator's table | `Provisioning::secrets` |
 | `mcp` | `{ NAME = "/absolute/command args" }`, as `--mcp NAME=COMMAND` | `Provisioning::mcp_servers` |
+| `network` | The hosts the seat's harness may reach ([egress](egress.md)): `"open"`, `"none"`, or `{ allow = ["github.com", "*.npmjs.org:443"], enforce = "required" }`. Unset: its parent's when it is spawned. Within its parent seat's, checked at plan time, and narrowed again at spawn | `Provisioning::network` |
+| `permission_policy` | A [permission preset](egress.md#permission-presets): `read-only`, `edit-worktree` or `full`. On the root seat its rules follow the seat's own `policy` (whose `default` wins); on a child seat it adds its denials only | The root's `Policy`; a child's denials |
 | `connectors` | Connector grants, as `--connector` takes them: `["github:read", "github:write:issues.*"]` ([connectors](connectors.md#grants)). Needs `isolated` on the seat or above; a child seat's must be within its parent seat's, checked at plan time, and a spawn narrows it to the parent branch's grant again. A child seat without `connectors` gets none | `Provisioning::connectors` |
 | `isolated` | A private home; a child of an isolated seat is isolated too. Secrets and connectors need it on the seat or above | `isolated` |
 | `budget` | `{max_usd, max_turns, max_minutes}`; `max_minutes` is per turn | The root's `budget`; a child's limits |
@@ -124,7 +126,8 @@ Planning checks, before anything starts:
 - The root is a seat; every `delegates_to` names a seat other than the root and itself; no seat is below two parents; every seat is reachable from the root, so there is no cycle.
 - Every harness is in the registry. A seat whose profile cannot route permission requests (Antigravity, Pi, Amp) is listed, and `rig run` refuses it without `--allow-unapproved-tools`.
 - Under a parent with a cost limit, every child seat has one, and the children's limits times their instances fit in it. A child's turns and minutes are at most its parent's.
-- A child seat's policy only adds denials: `default`, `allow` and `delegation_commands` are refused on it.
+- A child seat's policy only adds denials: `default`, `allow` and `delegation_commands` are refused on it, and its `permission_policy` contributes its denials only.
+- A seat's `network` is within the policy it would inherit from its parent seat: each rule covered by one of the parent's, and `open` refused under a restricted parent.
 - Secrets have a private home: `isolated` on the seat or above it.
 - `escalates_to` names a seat, and one that is an ancestor of the seat that declares it, beyond its own parent (always allowed, so redundant there); the root seat, having no ancestor, may not declare it at all.
 
@@ -162,7 +165,7 @@ A branch in a rig spawns only by seat, and only the seats its own seat delegates
 | `start = "eager"` | The root starts alone and fills seats with `by spawn --seat` |
 | `restore_policy = "relaunch_fresh"`, `"checkpoint_only"` | A send resumes the branch's own session or fails; Branchyard never substitutes a fresh one |
 | `continuity_policy` | No conversation is rebuilt from briefs |
-| `permission_policy` | Presets are not implemented; the root's `policy` is explicit rules |
+| `permission_policy` at the top level | A preset belongs to a seat: set `seats.<name>.permission_policy` |
 | `policy.default = "yolo"` or anything but `allow`, `deny`, `ask` | Branchyard answers every request and never bypasses permissions |
 | `startup.actions`, `delivery_hint` | Every startup file is standing instructions; the prompt you give is the first message, and drivers refuse slash commands |
 | `culture_file`, `services`, `managed_blocks` | Not Branchyard's; put shared guidance in `startup.files` |

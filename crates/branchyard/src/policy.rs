@@ -1,7 +1,9 @@
-//! Deciding one permission request.
+//! Deciding one permission request, and the named permission presets.
 
+use std::fmt;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{DecisionSource, Fallback, PermissionDecision, PermissionRequest, Policy, Rule};
@@ -42,6 +44,138 @@ pub(crate) fn decide(
             Fallback::Deny => (deny(), DecisionSource::Default),
             Fallback::Ask(ask) => (ask(branch, request), DecisionSource::Asked),
         },
+    }
+}
+
+/// Tools that change files, by the names the harnesses give them.
+pub const EDIT_TOOLS: &[&str] = &[
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "fileChange",
+    "write_file",
+    "replace",
+];
+
+/// Tools that run commands.
+pub const SHELL_TOOLS: &[&str] = &[
+    "Bash",
+    "BashOutput",
+    "KillBash",
+    "KillShell",
+    "commandExecution",
+    "run_shell_command",
+    "shell",
+    "exec_command",
+];
+
+/// Tools that fetch from or search the web.
+pub const WEB_TOOLS: &[&str] = &["WebFetch", "WebSearch", "web_fetch", "google_web_search"];
+
+/// A named permission policy that stands for explicit rules: usable
+/// wherever explicit rules are (`by run --permissions`, a rig seat's
+/// `permission_policy`, a server request's `policy.preset`,
+/// `[defaults] permissions`). See `docs/egress.md#permission-presets`.
+///
+/// Rules match tool names only: a preset says which tools may run, not
+/// what they touch.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyPreset {
+    /// Read and search; edits, commands and the web denied. The policy a
+    /// planning turn runs under ([`crate::read_only_policy`]).
+    ReadOnly,
+    /// Read, search and edit files; commands and the web denied.
+    EditWorktree,
+    /// Everything allowed, as `--yes`.
+    Full,
+}
+
+/// A preset's rules: denials first, then allowances, then the default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresetRules {
+    pub default_allow: bool,
+    pub deny: Vec<&'static str>,
+    pub allow: Vec<&'static str>,
+}
+
+impl PolicyPreset {
+    pub const ALL: [PolicyPreset; 3] = [
+        PolicyPreset::ReadOnly,
+        PolicyPreset::EditWorktree,
+        PolicyPreset::Full,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            PolicyPreset::ReadOnly => "read-only",
+            PolicyPreset::EditWorktree => "edit-worktree",
+            PolicyPreset::Full => "full",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<PolicyPreset, String> {
+        PolicyPreset::ALL
+            .into_iter()
+            .find(|p| p.name() == text)
+            .ok_or_else(|| {
+                format!(
+                    "{text:?} is not a permission preset; use {}",
+                    PolicyPreset::ALL.map(|p| p.name()).join(", ")
+                )
+            })
+    }
+
+    /// One line for people.
+    pub fn summary(&self) -> &'static str {
+        match self {
+            PolicyPreset::ReadOnly => "read and search; edits, commands and the web denied",
+            PolicyPreset::EditWorktree => {
+                "read, search and edit files; commands and the web denied"
+            }
+            PolicyPreset::Full => "every tool allowed",
+        }
+    }
+
+    /// The explicit rules this preset stands for.
+    pub fn rules(&self) -> PresetRules {
+        let tools = |lists: &[&[&'static str]]| lists.concat();
+        match self {
+            PolicyPreset::ReadOnly => PresetRules {
+                default_allow: false,
+                deny: tools(&[EDIT_TOOLS, SHELL_TOOLS, WEB_TOOLS]),
+                allow: tools(&[crate::READ_ONLY_TOOLS]),
+            },
+            PolicyPreset::EditWorktree => PresetRules {
+                default_allow: false,
+                deny: tools(&[SHELL_TOOLS, WEB_TOOLS]),
+                allow: tools(&[crate::READ_ONLY_TOOLS, EDIT_TOOLS]),
+            },
+            PolicyPreset::Full => PresetRules {
+                default_allow: true,
+                deny: Vec::new(),
+                allow: Vec::new(),
+            },
+        }
+    }
+
+    /// The policy: the denials, then the allowances, then the default.
+    pub fn policy(&self) -> Policy {
+        let rules = self.rules();
+        let base = match rules.default_allow {
+            true => Policy::allow_all(),
+            false => Policy::deny_all(),
+        };
+        let policy = rules.deny.iter().fold(base, |p, tool| p.deny(*tool));
+        rules.allow.iter().fold(policy, |p, tool| p.allow(*tool))
+    }
+}
+
+impl fmt::Display for PolicyPreset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -154,6 +288,50 @@ mod tests {
             tool: tool.into(),
             input: serde_json::Value::Null,
         }
+    }
+
+    #[test]
+    fn presets_expand_to_explicit_rules() {
+        let decide = |preset: PolicyPreset, tool: &str| {
+            matches!(
+                preset.policy().decide("b", &request(tool)),
+                PermissionDecision::Allow
+            )
+        };
+        for tool in ["Read", "Grep", "read_file"] {
+            assert!(decide(PolicyPreset::ReadOnly, tool), "{tool}");
+            assert!(decide(PolicyPreset::EditWorktree, tool), "{tool}");
+        }
+        for tool in ["Edit", "Write", "fileChange", "write_file"] {
+            assert!(!decide(PolicyPreset::ReadOnly, tool), "{tool}");
+            assert!(decide(PolicyPreset::EditWorktree, tool), "{tool}");
+        }
+        for tool in ["Bash", "commandExecution", "WebFetch", "mcp__anything"] {
+            assert!(!decide(PolicyPreset::ReadOnly, tool), "{tool}");
+            assert!(!decide(PolicyPreset::EditWorktree, tool), "{tool}");
+        }
+        for tool in ["Bash", "Edit", "mcp__anything"] {
+            assert!(decide(PolicyPreset::Full, tool), "{tool}");
+        }
+        // Read-only allows what a planning turn may do, and no more.
+        for tool in ["Read", "Edit", "Bash", "Glob", "TodoWrite", "other"] {
+            assert_eq!(
+                decide(PolicyPreset::ReadOnly, tool),
+                matches!(
+                    crate::read_only_policy().decide("b", &request(tool)),
+                    PermissionDecision::Allow
+                ),
+                "{tool}"
+            );
+        }
+        // Names round-trip, in serde too.
+        for preset in PolicyPreset::ALL {
+            assert_eq!(PolicyPreset::parse(preset.name()), Ok(preset));
+            let json = serde_json::to_string(&preset).unwrap();
+            assert_eq!(json, format!("\"{}\"", preset.name()));
+        }
+        let error = PolicyPreset::parse("builtin:yolo").unwrap_err();
+        assert!(error.contains("read-only, edit-worktree, full"), "{error}");
     }
 
     #[test]

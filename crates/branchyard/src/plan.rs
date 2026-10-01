@@ -44,11 +44,10 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 /// The policy every planning turn runs under: [`READ_ONLY_TOOLS`]
-/// allowed, every other request (writes, edits, commands) denied.
+/// allowed, every other request (writes, edits, commands) denied: the
+/// `read-only` permission preset ([`crate::PolicyPreset::ReadOnly`]).
 pub fn read_only() -> Policy {
-    READ_ONLY_TOOLS
-        .iter()
-        .fold(Policy::deny_all(), |policy, tool| policy.allow(*tool))
+    crate::PolicyPreset::ReadOnly.policy()
 }
 
 /// Where a branch's plan is.

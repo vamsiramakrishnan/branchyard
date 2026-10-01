@@ -455,6 +455,23 @@ pub trait SandboxProvider: Send + Sync {
             .collect()
     }
 
+    /// Start `spec.argv` like [`SandboxProvider::exec`], but with no network
+    /// except a TCP listener on `127.0.0.1:port` inside the process's own
+    /// network namespace (or the provider's equivalent), which is returned
+    /// for the caller to accept connections on: the process reaches nothing
+    /// else, and the caller decides what each connection may reach.
+    /// Declared by [`Capabilities::egress`]; a provider that cannot confine
+    /// a process refuses rather than run it unconfined.
+    fn exec_confined(
+        &self,
+        name: &str,
+        spec: &ExecSpec,
+        port: u16,
+    ) -> Result<(Box<dyn Process>, std::net::TcpListener), ProviderError> {
+        let _ = (name, spec, port);
+        Err(ProviderError::unsupported(Operation::Egress))
+    }
+
     /// Release what the provider holds for `checkpoint`. Releasing one that
     /// is already gone is not an error.
     fn release_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ProviderError> {

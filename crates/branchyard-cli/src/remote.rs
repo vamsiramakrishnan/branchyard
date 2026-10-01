@@ -144,6 +144,7 @@ fn permissions(task: &TaskArgs) -> Result<(PolicySpec, Option<&'static str>), Fa
              pass --yes, or leave requests denied"
                 .into(),
         )),
+        Permissions::Preset(preset) => Ok((PolicySpec::preset(preset), None)),
         Permissions::Unset => Ok((PolicySpec::default(), Some(REMOTE_DENY_NOTICE))),
     }
 }
@@ -821,7 +822,11 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
             max_seconds: root.budget.max_minutes.map(|m| m * 60.0),
             ..BudgetSpec::default()
         },
-        policy: PolicySpec { mode, rules },
+        policy: PolicySpec {
+            mode,
+            rules,
+            preset: None,
+        },
         check: root.check.clone(),
         isolated: root.isolated,
         command: args.command.clone(),

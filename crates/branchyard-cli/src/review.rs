@@ -407,6 +407,9 @@ fn detach(target: &Target, branch: &str, text: &str, task: &TaskArgs, draft: &Pa
         Permissions::Ask => {
             command.arg("--ask");
         }
+        Permissions::Preset(preset) => {
+            command.args(["--permissions", preset.name()]);
+        }
         Permissions::Unset => {}
     }
     if let Some(argv) = &task.command {

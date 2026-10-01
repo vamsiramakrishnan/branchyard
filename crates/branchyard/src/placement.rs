@@ -244,6 +244,9 @@ pub(crate) struct Placement {
     cwd: String,
     kind: Kind,
     started: Option<SandboxEvent>,
+    /// The turn's egress proxy, kept until the harness is gone; a
+    /// confined local harness is started in its own network namespace.
+    egress: Option<crate::egress::Egress>,
 }
 
 enum Kind {
@@ -355,6 +358,7 @@ impl Placement {
                     cwd: record.info.worktree.display().to_string(),
                     kind: Kind::Local(harness::environment(record.home.as_deref())),
                     started: None,
+                    egress: None,
                 })
             }
             Some(Provider::Substrate(options)) => {
@@ -420,6 +424,7 @@ impl Placement {
                 sandbox: acquired.name.clone(),
                 origin: acquired.origin,
             }),
+            egress: None,
             kind: Kind::Sandbox {
                 provider,
                 name: acquired.name,
@@ -560,6 +565,7 @@ impl Placement {
                 sandbox: name,
                 origin: acquired.origin,
             }),
+            egress: None,
             kind: Kind::Substrate(actor),
         })
     }
@@ -623,9 +629,35 @@ impl Placement {
         self.cwd.clone()
     }
 
+    /// Apply the turn's egress: its variables now, and, for a confined
+    /// local harness, its network namespace when [`Placement::start`]
+    /// starts it.
+    pub fn egress(&mut self, egress: crate::egress::Egress) {
+        for (name, value) in egress.env() {
+            self.set_env(name, value);
+        }
+        self.egress = Some(egress);
+    }
+
     pub fn start(&self, driver: Box<dyn Driver>, open: Open) -> Result<Session, RuntimeError> {
         match &self.kind {
-            Kind::Local(env) => Session::start(driver, open, env, None),
+            Kind::Local(env) => match self.egress.as_ref().filter(|e| e.confined()) {
+                Some(egress) => {
+                    let (session, listener) = Session::start_confined(
+                        driver,
+                        open,
+                        env,
+                        None,
+                        crate::egress::CONFINED_PORT,
+                    )?;
+                    egress.serve(listener).map_err(|source| RuntimeError::Io {
+                        context: "the egress proxy",
+                        source,
+                    })?;
+                    Ok(session)
+                }
+                None => Session::start(driver, open, env, None),
+            },
             Kind::Sandbox {
                 provider,
                 name,

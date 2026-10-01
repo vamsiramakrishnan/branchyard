@@ -89,6 +89,11 @@ pub struct ProjectConfig {
     /// branch gets when `--connector` names none.
     #[serde(default, skip_serializing_if = "Connectors::is_empty")]
     pub connectors: Connectors,
+    /// The hosts a new branch's harness may reach (docs/egress.md), when
+    /// `--network` gives none: an allowlist enforced through Branchyard's
+    /// egress proxy. Unset: open.
+    #[serde(default, skip_serializing_if = "NetworkConfig::is_empty")]
+    pub network: NetworkConfig,
     /// Quota meters per login (`by usage`, docs/usage.md): what `by run`
     /// and `by fan` do when a candidate's login is near its 5-hour or
     /// weekly limit, and named logins to meter.
@@ -617,6 +622,57 @@ impl Connectors {
     }
 }
 
+/// `[network]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkConfig {
+    /// HOST[:PORT] rules a new branch's harness may reach, such as
+    /// `"github.com"` or `"*.npmjs.org:443"`; `[]` allows nothing. Unset:
+    /// every host (open). A connector grant adds the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    /// `best_effort` (the default): where the policy cannot be enforced,
+    /// run with the proxy's variables and say so. `required`: refuse to
+    /// run there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce: Option<NetworkEnforceMode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkEnforceMode {
+    BestEffort,
+    Required,
+}
+
+impl NetworkConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &NetworkConfig::default()
+    }
+
+    /// The policy it describes, checked with the flag's parser; `None`
+    /// when it describes none.
+    pub fn policy(&self) -> Result<Option<branchyard_provision::network::Network>, ConfigError> {
+        use branchyard_provision::network::{Enforce, Network};
+        let enforce = match self.enforce {
+            None | Some(NetworkEnforceMode::BestEffort) => Enforce::BestEffort,
+            Some(NetworkEnforceMode::Required) => Enforce::Required,
+        };
+        let Some(allow) = &self.allow else {
+            return match self.enforce {
+                Some(NetworkEnforceMode::Required) => Err(ConfigError(
+                    "network.enforce: an open network has nothing to enforce; give network.allow"
+                        .into(),
+                )),
+                _ => Ok(None),
+            };
+        };
+        Network::from_rules(allow, enforce)
+            .map(Some)
+            .map_err(|e| ConfigError(format!("network.allow: {e}")))
+    }
+}
+
 /// A branch's workspace lifecycle: `[workspace]`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1003,8 +1059,9 @@ pub struct Defaults {
     #[schemars(range(min = 0.0))]
     pub max_minutes: Option<f64>,
     /// How tool permission requests are answered: `ask` on the terminal,
-    /// or `yes` to allow each one. Unset: decided by whether a terminal is
-    /// attached.
+    /// `yes` to allow each one, or a preset (`read-only`, `edit-worktree`,
+    /// `full`; docs/egress.md#permission-presets). Unset: decided by
+    /// whether a terminal is attached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionsMode>,
     /// A scrubbed environment and a private HOME for the harness.
@@ -1028,12 +1085,32 @@ impl Defaults {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum PermissionsMode {
     /// Ask on the terminal for each request (`--ask`).
     Ask,
     /// Allow every request (`--yes`).
     Yes,
+    /// The `read-only` preset: read and search; edits, commands and the
+    /// web denied (`--permissions read-only`).
+    ReadOnly,
+    /// The `edit-worktree` preset: read, search and edit files; commands
+    /// and the web denied.
+    EditWorktree,
+    /// The `full` preset: every request allowed, as `yes`.
+    Full,
+}
+
+impl PermissionsMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PermissionsMode::Ask => "ask",
+            PermissionsMode::Yes => "yes",
+            PermissionsMode::ReadOnly => "read-only",
+            PermissionsMode::EditWorktree => "edit-worktree",
+            PermissionsMode::Full => "full",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1374,6 +1451,7 @@ impl ProjectConfig {
             split_words(anvil).map_err(|e| ConfigError(format!("connectors.anvil: {e}")))?;
         }
         self.connectors.grant_entries()?;
+        self.network.policy()?;
         if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {
             return fail(
                 "connectors.grants",
@@ -1811,12 +1889,7 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
         line("max_minutes", d.max_minutes.map(toml_number));
         line(
             "permissions",
-            d.permissions.map(|p| {
-                toml_string(match p {
-                    PermissionsMode::Ask => "ask",
-                    PermissionsMode::Yes => "yes",
-                })
-            }),
+            d.permissions.map(|p| toml_string(p.as_str())),
         );
         line("isolated", d.isolated.map(|b| b.to_string()));
         line("check", d.check.as_deref().map(toml_string));
@@ -1931,6 +2004,23 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
         if !c.grants.is_empty() {
             let grants: Vec<String> = c.grants.iter().map(|g| toml_string(g)).collect();
             out.push_str(&format!("grants = [{}]\n", grants.join(", ")));
+        }
+    }
+    let n = &config.network;
+    if !n.is_empty() {
+        out.push_str(
+            "\n# The hosts a new branch's harness may reach; see docs/egress.md.\n[network]\n",
+        );
+        if let Some(allow) = &n.allow {
+            let rules: Vec<String> = allow.iter().map(|r| toml_string(r)).collect();
+            out.push_str(&format!("allow = [{}]\n", rules.join(", ")));
+        }
+        if let Some(enforce) = n.enforce {
+            let name = match enforce {
+                NetworkEnforceMode::BestEffort => "best_effort",
+                NetworkEnforceMode::Required => "required",
+            };
+            out.push_str(&format!("enforce = {}\n", toml_string(name)));
         }
     }
     if let Some(workspace) = &config.workspace {
@@ -2057,6 +2147,46 @@ grants = ["github:read", "linear@work:write:issues.*"]
         let rendered = render(&config, "test");
         assert!(rendered.starts_with("#:schema https://"), "{rendered}");
         assert_eq!(parse(&rendered).unwrap(), config);
+    }
+
+    #[test]
+    fn network_and_permission_presets_are_checked_and_render_back() {
+        let text = "version = 1\n\n[defaults]\npermissions = \"edit-worktree\"\n\n[network]\n\
+                    allow = [\"github.com\", \"*.npmjs.org:443\"]\nenforce = \"required\"\n";
+        let config = parse(text).unwrap();
+        assert_eq!(
+            config.defaults.permissions,
+            Some(PermissionsMode::EditWorktree)
+        );
+        let network = config.network.policy().unwrap().unwrap();
+        assert_eq!(
+            network.to_string(),
+            "github.com, *.npmjs.org:443 (required)"
+        );
+        assert_eq!(parse(&render(&config, "test")).unwrap(), config);
+        assert_eq!(
+            parse("[network]\nallow = []\n")
+                .unwrap()
+                .network
+                .policy()
+                .unwrap(),
+            Some(branchyard_provision::network::Network::none())
+        );
+        assert_eq!(
+            parse("version = 1\n").unwrap().network.policy().unwrap(),
+            None
+        );
+        for (text, needle) in [
+            ("[network]\nallow = [\"https://x.com\"]\n", "network.allow"),
+            ("[network]\nallow = [\"*\"]\n", "network.allow"),
+            ("[network]\nenforce = \"required\"\n", "nothing to enforce"),
+            ("[network]\nenforce = \"always\"\n", "best_effort"),
+            ("[network]\nports = [1]\n", "ports"),
+            ("[defaults]\npermissions = \"yolo\"\n", "edit-worktree"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
     }
 
     #[test]

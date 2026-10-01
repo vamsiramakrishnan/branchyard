@@ -490,6 +490,21 @@ fn run(
     if let Some(parent) = &turn.options.trace_parent {
         placement.set_env(crate::ENV_TRACEPARENT, parent);
     }
+    // The branch's network policy: its proxy's variables last, so nothing
+    // above replaces them, and its namespace when the harness starts. The
+    // proxy lives with the placement, after the harness is gone.
+    let gateway = connectors.as_ref().map(|c| c.gateway_url.as_str());
+    match crate::egress::prepare(turn.yard, record, gateway) {
+        Ok(None) => {}
+        Ok(Some(egress)) => {
+            recorder.record(egress.applied())?;
+            placement.egress(egress);
+        }
+        Err(reason) => {
+            driven.end = End::failed(format!("could not apply the network policy: {reason}"));
+            return Ok(driven);
+        }
+    }
     // A per-turn MCP file lives until this function returns, after the
     // harness is gone.
     let _turn_file = provisioned.turn_file;

@@ -62,6 +62,8 @@ pub enum Permissions {
     Yes,
     /// `--ask`: prompt on the terminal.
     Ask,
+    /// `--permissions PRESET`: a named preset's rules.
+    Preset(branchyard::PolicyPreset),
     /// Neither flag: decided by whether a terminal is attached.
     #[default]
     Unset,
@@ -2202,6 +2204,15 @@ pub struct Perms {
     /// Ask on the terminal for each tool permission request
     #[arg(long)]
     ask: bool,
+    /// Answer tool permission requests by a named preset: read-only, edit-worktree, or full
+    /// (as --yes); see docs/egress.md#permission-presets
+    #[arg(
+        long,
+        value_name = "PRESET",
+        value_parser = branchyard::PolicyPreset::parse,
+        conflicts_with_all = ["yes", "ask"]
+    )]
+    permissions: Option<branchyard::PolicyPreset>,
     /// Run a profile that does not route tool permission requests to Branchyard (Antigravity,
     /// Pi, Amp); its tools run under the harness's own configuration
     #[arg(long)]
@@ -2210,10 +2221,11 @@ pub struct Perms {
 
 impl Perms {
     fn apply(self, task: &mut TaskArgs) {
-        task.permissions = match (self.yes, self.ask) {
-            (true, _) => Permissions::Yes,
-            (false, true) => Permissions::Ask,
-            (false, false) => Permissions::Unset,
+        task.permissions = match (self.yes, self.ask, self.permissions) {
+            (true, _, _) => Permissions::Yes,
+            (false, true, _) => Permissions::Ask,
+            (false, false, Some(preset)) => Permissions::Preset(preset),
+            (false, false, None) => Permissions::Unset,
         };
         task.unapproved_tools = self.allow_unapproved_tools;
     }
@@ -2528,6 +2540,14 @@ pub struct Provision {
     /// 'github:write:issues.*'; only into its private home (--isolated or a sandbox). Repeatable
     #[arg(long = "connector", value_name = "GRANT", value_parser = branchyard::connectors::GrantEntry::parse)]
     connectors: Vec<branchyard::connectors::GrantEntry>,
+    /// The hosts the harness may reach (docs/egress.md): open, none, or HOST[:PORT] rules
+    /// separated by commas, such as 'github.com,*.npmjs.org:443'
+    #[arg(long, value_name = "open|none|HOSTS", value_parser = branchyard::Network::parse_flag)]
+    network: Option<branchyard::Network>,
+    /// Refuse to run where the network policy cannot be enforced (required), or run with the
+    /// proxy's variables only and say so (best-effort, the default)
+    #[arg(long, value_name = "MODE", value_parser = branchyard::NetworkEnforce::parse, requires = "network")]
+    network_enforce: Option<branchyard::NetworkEnforce>,
 }
 
 impl Provision {
@@ -2540,6 +2560,9 @@ impl Provision {
             effort: self.effort,
             telemetry: self.telemetry,
             connectors: self.connectors,
+            network: self
+                .network
+                .map(|n| n.with_enforce(self.network_enforce.unwrap_or_default())),
             ..branchyard::Provisioning::default()
         };
         task.provision = (!spec.is_empty() || self.instructions.is_some()).then_some(spec);
@@ -3601,6 +3624,61 @@ mod tests {
             ErrorKind::ArgumentConflict
         );
         assert!(err("run go --model a --model b").contains("cannot be used multiple times"));
+    }
+
+    #[test]
+    fn network_and_permission_preset_flags_parse() {
+        for line in [
+            "run go --network 'github.com,*.npmjs.org:443' --network-enforce required",
+            "fan go --harness a,b --network 'github.com,*.npmjs.org:443' --network-enforce required",
+            "fork b go --network 'github.com,*.npmjs.org:443' --network-enforce required",
+            "send b go --network 'github.com,*.npmjs.org:443' --network-enforce required",
+        ] {
+            let spec = task(line).provision.unwrap_or_else(|| panic!("{line}"));
+            assert_eq!(
+                spec.network.unwrap().to_string(),
+                "github.com, *.npmjs.org:443 (required)",
+                "{line}"
+            );
+        }
+        let none = task("run go --network none").provision.unwrap();
+        assert_eq!(none.network, Some(branchyard::Network::none()));
+        for (line, error) in [
+            ("run go --network https://x.com", "not a URL"),
+            ("run go --network '*'", "\"open\""),
+            ("run go --network-enforce required", "--network"),
+            (
+                "run go --network none --network-enforce always",
+                "best_effort",
+            ),
+            (
+                "run go --permissions yolo",
+                "read-only, edit-worktree, full",
+            ),
+            ("run go --permissions full --yes", "cannot be used with"),
+        ] {
+            assert!(err(line).contains(error), "{line}: {}", err(line));
+        }
+        for (line, preset) in [
+            (
+                "run go --permissions read-only",
+                branchyard::PolicyPreset::ReadOnly,
+            ),
+            (
+                "send b go --permissions edit-worktree",
+                branchyard::PolicyPreset::EditWorktree,
+            ),
+            (
+                "fan go --harness a,b --permissions full",
+                branchyard::PolicyPreset::Full,
+            ),
+        ] {
+            assert_eq!(
+                task(line).permissions,
+                Permissions::Preset(preset),
+                "{line}"
+            );
+        }
     }
 
     #[test]

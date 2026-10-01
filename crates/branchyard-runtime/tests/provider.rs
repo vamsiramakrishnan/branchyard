@@ -51,6 +51,7 @@ conformance!(
     teardown_names_survivors,
     drop_tears_down,
     stop_ends_processes,
+    egress_confinement,
 );
 
 /// The local provider, except that the background child of
