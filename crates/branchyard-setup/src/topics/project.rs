@@ -768,6 +768,55 @@ mod tests {
         assert!(!state.answers.contains_key("workspace") || state.answers["workspace"].is_null());
     }
 
+    #[test]
+    fn a_workspace_is_imported_from_another_tools_configuration() {
+        let mut probe = FakeProbe::typical();
+        for file in ["package.json", "pnpm-lock.yaml", ".env"] {
+            probe.files.insert(file.into(), String::new());
+        }
+        probe.files.insert(
+            ".emdash.json".into(),
+            r#"{"preservePatterns": [".env.local"], "shellSetup": "nvm use",
+                "scripts": {"setup": "pnpm install && pnpm build", "run": "PORT=$EMDASH_PORT pnpm dev"}}"#
+                .into(),
+        );
+        // Superset gives teardown, which emdash's file does not; its setup
+        // loses to emdash's, which comes first.
+        probe.files.insert(
+            ".superset/config.json".into(),
+            r#"{"setup": ["bun install"], "teardown": ["docker compose down"]}"#.into(),
+        );
+        probe
+            .files
+            .insert(".conductor/settings.toml".into(), "[scripts\n".into());
+        let facts = Facts::gather(&probe);
+        let w = &facts.workspace;
+        assert_eq!(w.setup, ["pnpm install && pnpm build"]);
+        assert_eq!(w.run.as_deref(), Some("PORT=$BRANCHYARD_PORT pnpm dev"));
+        assert_eq!(w.teardown, ["docker compose down"]);
+        assert_eq!(w.copy, [".env", ".env.local"]);
+        assert!(w
+            .found
+            .ends_with(&[".emdash.json".into(), ".superset/config.json".into()]));
+        assert_eq!(w.notes.len(), 2, "{:?}", w.notes);
+        assert!(w.notes[0].starts_with(".emdash.json: shellSetup is not imported"));
+        assert!(w.notes[1].starts_with(".conductor/settings.toml was not imported:"));
+        let lines = facts.lines();
+        assert!(lines.iter().any(|l| l.label == "Not imported"), "{lines:?}");
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        let plan = plan(&facts, &state.answers, &probe);
+        let parsed = config::parse(&plan_body(&facts, &state.answers, &probe)).unwrap();
+        let workspace = parsed.workspace.unwrap();
+        assert_eq!(workspace.setup.commands(), ["pnpm install && pnpm build"]);
+        assert_eq!(workspace.copy, [".env", ".env.local"]);
+        assert_eq!(
+            workspace.run_script(None).unwrap().1,
+            ["PORT=$BRANCHYARD_PORT pnpm dev"]
+        );
+        assert_eq!(workspace.teardown.commands(), ["docker compose down"]);
+        assert!(plan.valid);
+    }
+
     fn plan_body(facts: &Facts, answers: &Answers, probe: &FakeProbe) -> String {
         plan(facts, answers, probe).files[0]
             .content
