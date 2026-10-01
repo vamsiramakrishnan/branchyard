@@ -198,6 +198,11 @@ impl Live {
     }
 
     fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
+        if !task.require_labels.is_empty() {
+            return Err(Failure::Message(
+                "--require-label chooses among a server's workers: use it with --remote".into(),
+            ));
+        }
         let console = self.console.clone();
         let exe = std::env::current_exe().ok();
         let policy = match (&exe, task.allow_delegation) {
@@ -602,6 +607,28 @@ pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
 
 /// `by show`, with the merge-readiness line `by pr` and `by pr --watch`
 /// recorded; `refresh` asks GitHub first (local mode).
+/// `by show` of a branch a queued operation will create.
+fn show_queued(branch: &str, op: &branchyard_client::api::Operation, as_json: bool) -> Outcome {
+    if as_json {
+        let value = serde_json::json!({ "branch": branch, "operation": op });
+        return print(&json::text(&value));
+    }
+    let word = |value: serde_json::Value| value.as_str().unwrap_or_default().to_owned();
+    let mut text = format!(
+        "branch    {branch} (not created yet)\noperation {} ({}, {})\n",
+        op.id,
+        word(serde_json::to_value(op.kind).unwrap_or_default()),
+        word(serde_json::to_value(op.state).unwrap_or_default()),
+    );
+    if !op.requires.is_empty() {
+        text.push_str(&format!("requires  {}\n", op.requires.join(", ")));
+    }
+    if let Some(waiting) = &op.waiting {
+        text.push_str(&format!("waiting   {waiting}\n"));
+    }
+    print(&text)
+}
+
 pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bool) -> Outcome {
     let (info, events) = match target {
         Target::Local => {
@@ -619,10 +646,18 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
                     .into(),
             )))
         }
-        Target::Remote(remote) => (
-            remote.repo.branch(branch)?,
-            remote.repo.events(branch, 0)?.events,
-        ),
+        Target::Remote(remote) => match remote.repo.branch(branch) {
+            Ok(info) => (info, remote.repo.events(branch, 0)?.events),
+            // Not created yet: an operation that will create it may be
+            // queued, and say why no worker has claimed it.
+            Err(error) if error.code() == Some("unknown_branch") => {
+                match remote.repo.operations(Some(branch))?.into_iter().next() {
+                    Some(op) => return show_queued(branch, &op, as_json),
+                    None => return Err(error.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        },
     };
     let checkpoints = crate::attempts::checkpoints(target, &info)?;
     let (readiness, line) = crate::pr::show_readiness(&info, &events, env.style());

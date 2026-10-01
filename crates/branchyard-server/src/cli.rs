@@ -216,6 +216,14 @@ struct Flags {
     /// webhooks (what by worker does)
     #[arg(long, help_heading = "Operations")]
     worker: bool,
+    /// A label this worker carries (repeatable): it claims only operations whose
+    /// require_labels are all among its labels (replaces the configuration's labels)
+    #[arg(long = "label", value_name = "LABEL", help_heading = "Operations")]
+    labels: Vec<String>,
+    /// Say why a queued operation no live worker can claim waits, after this long
+    /// (default: 60)
+    #[arg(long, value_name = "SECS", value_parser = grace, help_heading = "Operations")]
+    unclaimable_after: Option<Duration>,
     /// Largest artifact a publish may upload (default: 268435456)
     #[arg(long, value_name = "N", value_parser = artifact_bytes, help_heading = "Operations")]
     max_artifact_bytes: Option<u64>,
@@ -575,6 +583,16 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         config.operation_lease = lease;
     }
     config.worker_only = flags.worker;
+    config.labels = match flags.labels.is_empty() {
+        true => partial.labels,
+        false => flags.labels,
+    };
+    config.labels.sort();
+    config.labels.dedup();
+    config.unclaimable_after = flags
+        .unclaimable_after
+        .or(partial.unclaimable_after)
+        .unwrap_or(config.unclaimable_after);
     config.shutdown_grace = flags
         .shutdown_grace
         .or(partial.shutdown_grace)
@@ -833,10 +851,12 @@ mod tests {
              --harness-command gemini-cli=/bin/agent --max-running 2 --shutdown-grace 1.5 \
              --allow-provider substrate --allow-provider=microsandbox,local --allow-delegation \
              --by-path /opt/by --allow-unapproved-tools --database postgres://u@h/d \
-             --worker --operation-lease 2.5",
+             --worker --operation-lease 2.5 --label gpu --label=linux --unclaimable-after 5",
         ))
         .unwrap();
         assert!(flags.worker);
+        assert_eq!(flags.labels, ["gpu", "linux"]);
+        assert_eq!(flags.unclaimable_after, Some(Duration::from_secs(5)));
         assert_eq!(flags.operation_lease, Some(Duration::from_millis(2500)));
         assert_eq!(
             flags.allow_providers,

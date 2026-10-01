@@ -836,3 +836,165 @@ impl InspectState for FakeProvider {
             .map(|(_, state)| state)
     }
 }
+
+/// `[workspace] prepare` on a sandboxed branch: setup runs once in a
+/// sandbox, which is snapshotted (a paused live branch) as the key's
+/// prepared environment; the next branch's sandbox branches from it with
+/// setup's work inside and outside the worktree, and runs no setup. A
+/// build that fails is recorded, and later branches start from the last
+/// good environment, saying so. Pruning releases the snapshot.
+#[test]
+fn a_prepared_environment_is_a_snapshot_later_sandboxes_branch_from() {
+    let f = Fixture::new();
+    fs::write(f.root.join(".gitignore"), "deps/\n").unwrap();
+    fs::write(f.root.join("pnpm-lock.yaml"), "v1").unwrap();
+    f.git(&["add", "."]);
+    f.git(&["commit", "-q", "-m", "lockfile"]);
+    let fake = fake(&f, true);
+    let log = f.dir.join("setups.log");
+    let setup = format!(
+        "echo run >> {log}; if grep -q broken pnpm-lock.yaml; then exit 7; fi; \
+         printf installed > \"$BY_FAKE_ROOTFS/toolchain\" && mkdir -p deps && \
+         printf lib > deps/lib.txt",
+        log = log.display()
+    );
+    let options = TaskOptions {
+        workspace: Some(WorkspaceSpec {
+            setup: vec![setup],
+            prepare: true,
+            ..WorkspaceSpec::default()
+        }),
+        ..sandboxed(&f, SandboxKeep::Destroy, Some(0))
+    };
+    let runs = || fs::read_to_string(&log).unwrap_or_default().lines().count();
+    let read = "SH cat \"$BY_FAKE_ROOTFS/toolchain\" deps/lib.txt";
+    let a = f
+        .yard
+        .task(read)
+        .options(options.clone())
+        .name("a")
+        .run()
+        .unwrap();
+    assert!(last_text(&a).contains("installedlib"), "{}", last_text(&a));
+    assert_eq!(runs(), 1);
+    let envs = f.yard.environments();
+    assert_eq!(envs.len(), 1, "{envs:?}");
+    let snapshot = envs[0].snapshot.clone().unwrap();
+    assert_eq!(snapshot.method, SnapshotMethod::LiveBranch);
+    assert_eq!(envs[0].produced, ["deps"]);
+    assert!(
+        envs[0].place.starts_with("microsandbox"),
+        "{}",
+        envs[0].place
+    );
+    assert!(paused(&fake).contains(&snapshot.handle));
+
+    let b = f
+        .yard
+        .task(read)
+        .options(options.clone())
+        .name("b")
+        .run()
+        .unwrap();
+    assert_eq!(runs(), 1, "setup ran again");
+    assert!(last_text(&b).contains("installedlib"), "{}", last_text(&b));
+    assert_eq!(
+        origins(&b),
+        [SandboxOrigin::Environment {
+            key: envs[0].key.clone(),
+            used: None,
+            method: SnapshotMethod::LiveBranch,
+            reason: None,
+        }]
+    );
+    let setup_report = b
+        .events()
+        .unwrap()
+        .iter()
+        .find_map(|e| match &e.activity {
+            Activity::Workspace(r) if r.phase == WorkspacePhase::Setup => Some(r.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(setup_report.commands.is_empty());
+    assert_eq!(
+        setup_report.environment.unwrap().origin,
+        branchyard::EnvironmentOrigin::Restored
+    );
+
+    // A lockfile that breaks setup: that branch fails, the failure is
+    // recorded, and the next branch starts from the last good build.
+    fs::write(f.root.join("pnpm-lock.yaml"), "broken").unwrap();
+    f.git(&["commit", "-q", "-am", "broken"]);
+    let c = f
+        .yard
+        .task(read)
+        .options(options.clone())
+        .name("c")
+        .run()
+        .unwrap();
+    assert!(
+        matches!(c.info().status, BranchStatus::Failed { .. }),
+        "{:?}",
+        c.info().status
+    );
+    assert_eq!(runs(), 2);
+    let d = f
+        .yard
+        .task(read)
+        .options(options.clone())
+        .name("d")
+        .run()
+        .unwrap();
+    assert_eq!(runs(), 2);
+    assert!(last_text(&d).contains("installedlib"), "{}", last_text(&d));
+    let origin = origins(&d).pop().unwrap();
+    let SandboxOrigin::Environment { used, reason, .. } = origin else {
+        panic!("{origin:?}");
+    };
+    assert_eq!(used.as_deref(), Some(envs[0].key.as_str()));
+    assert!(reason.unwrap().contains("by env rebuild"));
+
+    // Pruning it releases the snapshot.
+    let pruned = f.yard.prune_environments(
+        1,
+        std::time::Duration::from_secs(3600),
+        std::slice::from_ref(&envs[0].key),
+    );
+    assert_eq!(pruned.removed.len(), 1, "{pruned:?}");
+    assert!(!paused(&fake).contains(&snapshot.handle));
+}
+
+#[test]
+fn a_provider_that_cannot_live_branch_keeps_no_prepared_environment() {
+    let f = Fixture::new();
+    fake(&f, false);
+    let options = TaskOptions {
+        workspace: Some(WorkspaceSpec {
+            setup: vec!["mkdir -p deps".into()],
+            prepare: true,
+            ..WorkspaceSpec::default()
+        }),
+        ..sandboxed(&f, SandboxKeep::Destroy, Some(0))
+    };
+    let a = f
+        .yard
+        .task("WRITE a.txt=1")
+        .options(options)
+        .name("a")
+        .run()
+        .unwrap();
+    assert_eq!(a.info().status, BranchStatus::Ready);
+    let used = a
+        .events()
+        .unwrap()
+        .iter()
+        .find_map(|e| match &e.activity {
+            Activity::Workspace(r) if r.phase == WorkspacePhase::Setup => r.environment.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(used.origin, branchyard::EnvironmentOrigin::NotKept);
+    assert!(used.reason.unwrap().contains("can't branch"));
+    assert!(f.yard.environments().is_empty());
+}

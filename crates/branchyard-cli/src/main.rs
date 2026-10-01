@@ -9,6 +9,7 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod env_cmd;
 mod gh;
 mod init;
 mod json;
@@ -234,6 +235,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             commands::merge(target, &branch, into.as_deref(), rm)
         }
         Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
+        Command::Env { json, action } => env_cmd::main(env, target, &action, json),
         Command::Rm {
             branch,
             keep_credentials,

@@ -127,6 +127,9 @@ impl Resolved {
             setup: self.workspace.setup.commands(),
             teardown: self.workspace.teardown.commands(),
             digest: Some(self.digest.clone()),
+            prepare: self.workspace.prepare,
+            inputs: self.workspace.inputs.clone(),
+            share: self.workspace.share.clone(),
         }
     }
 
@@ -200,7 +203,7 @@ fn read(path: &Path) -> Result<ProjectConfig, Failure> {
 }
 
 /// Inside a harness running on a branch.
-fn in_harness() -> Option<String> {
+pub(crate) fn in_harness() -> Option<String> {
     std::env::var(branchyard::ENV_BRANCH)
         .ok()
         .filter(|v| !v.is_empty())
@@ -281,7 +284,7 @@ fn trust(resolved: &Resolved) -> Result<(), Failure> {
 
 /// Require that `resolved`'s scripts may run: trusted already, or trusted
 /// now on the terminal.
-fn require_trust(env: &Env, resolved: &Resolved) -> Result<(), Failure> {
+pub(crate) fn require_trust(env: &Env, resolved: &Resolved) -> Result<(), Failure> {
     if resolved.runs_ok() {
         return Ok(());
     }
@@ -307,7 +310,9 @@ pub fn for_new_branch(env: &Env, root: &Path) -> Result<Option<WorkspaceSpec>, F
         return Ok(None);
     }
     let Some(resolved) = resolve(root)? else {
-        return Ok(None);
+        // `.worktreeinclude` alone: its files are copied, nothing runs.
+        let include = root.join(branchyard_workspace::include::WORKTREE_INCLUDE_FILE);
+        return Ok(include.is_file().then(WorkspaceSpec::default));
     };
     require_trust(env, &resolved)?;
     Ok(Some(resolved.spec()))

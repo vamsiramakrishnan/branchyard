@@ -216,6 +216,7 @@ fn admit_only(url: &str, request: TaskRequest, key: &str) -> Operation {
                 principal: Principal::default_for("tester"),
                 creates: Vec::new(),
                 quota: AdmissionQuota::default(),
+                requires: Vec::new(),
             },
             Work::Task { request }.to_value().unwrap(),
         )
@@ -360,8 +361,8 @@ fn an_expired_claim_is_taken_over_and_a_started_operation_is_not_run_again() {
     };
     let lease = Duration::from_millis(500);
     let repos = ["app".to_owned()];
-    let first = store.claim(&ghost, &repos, lease).unwrap().unwrap();
-    let second = store.claim(&ghost, &repos, lease).unwrap().unwrap();
+    let first = store.claim(&ghost, &repos, &[], lease).unwrap().unwrap();
+    let second = store.claim(&ghost, &repos, &[], lease).unwrap().unwrap();
     assert_eq!(first.operation.operation.id, unstarted.id);
     assert_eq!(second.operation.operation.id, started.id);
     let mut running = second.operation.clone();
@@ -574,6 +575,8 @@ fn stored(id: &str, tenant: &str, lock: &str, creates: &[&str]) -> StoredOperati
             finished_at_ms: None,
             result: None,
             error: None,
+            requires: Vec::new(),
+            waiting: None,
         },
         idempotency: Some(Idempotency {
             caller: format!("{tenant}/ci"),
@@ -691,6 +694,7 @@ fn a_worker_runs_another_tenants_operation_as_its_principal_without_leaking_it()
                 principal: acme,
                 creates: vec!["acme-work".into()],
                 quota: AdmissionQuota::default(),
+                requires: Vec::new(),
             },
             Work::Task {
                 request: task("WRITE w.txt=acme", "acme-work"),
@@ -789,6 +793,7 @@ fn admit(url: &str, work: Work, branches: &[&str], locks: &[&str]) -> Operation 
                 principal: Principal::default_for("tester"),
                 creates: owned(branches),
                 quota: AdmissionQuota::default(),
+                requires: Vec::new(),
             },
             work.to_value().unwrap(),
         )
@@ -1001,4 +1006,26 @@ fn servers_and_a_worker_resuming_graphs_on_one_database_start_a_dependent_once()
     assert_eq!(repo.branch("second").unwrap().turns, 1);
     assert_eq!(prompts(&b.client(), "second"), 1);
     drop(worker);
+}
+
+/// The worker-label conformance on PostgreSQL (two workers racing for
+/// labeled work through `FOR UPDATE SKIP LOCKED`), on a queue created
+/// before the `requires` column existed.
+#[test]
+fn worker_labels_conform_on_postgres() {
+    let Some(url) = database() else { return };
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(
+            "CREATE TABLE by_operations (id TEXT PRIMARY KEY, \
+                 seq BIGINT GENERATED ALWAYS AS IDENTITY, body TEXT NOT NULL); \
+             CREATE TABLE by_operation_queue (id TEXT PRIMARY KEY REFERENCES by_operations (id), \
+                 seq BIGINT GENERATED ALWAYS AS IDENTITY, repo TEXT NOT NULL, work TEXT NOT NULL, \
+                 attempt BIGINT NOT NULL DEFAULT 0, worker TEXT, host TEXT, pid BIGINT, \
+                 start TEXT, lease_until TIMESTAMPTZ)",
+        )
+        .unwrap();
+    drop(client);
+    let store = PostgresStore::open(&url).unwrap();
+    branchyard_server::store::check_labels(&store, "pg");
 }

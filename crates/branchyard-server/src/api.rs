@@ -631,6 +631,9 @@ impl App {
             setup: w.setup.commands(),
             teardown: w.teardown.commands(),
             digest: Some(w.digest()),
+            prepare: w.prepare,
+            inputs: w.inputs.clone(),
+            share: w.share.clone(),
         }))
     }
 }
@@ -647,6 +650,7 @@ pub fn router(app: Shared) -> Router {
         .route("/v1/operations/{id}", get(operation))
         .route("/v1/repos/{repo}/tasks", axum::routing::post(post_task))
         .route("/v1/repos/{repo}/branches", get(branches))
+        .route("/v1/repos/{repo}/operations", get(repo_operations))
         .route(
             "/v1/repos/{repo}/branches/{branch}",
             get(branch).delete(delete_branch),
@@ -1096,6 +1100,20 @@ async fn admit(app: &Shared, new: NewOperation, work: Work) -> Result<Response, 
     Ok(operation_response(op, replayed))
 }
 
+/// The worker labels a request requires, checked, sorted and once each.
+fn required_labels(labels: &[String]) -> Result<Vec<String>, ApiError> {
+    if let Some(bad) = labels.iter().find(|l| !crate::store::valid_label(l)) {
+        return Err(ApiError::bad_request(format!(
+            "require_labels: {bad:?} is not a label (1 to 63 of a-z, 0-9, '.', '_' and '-', \
+             starting with a letter or digit)"
+        )));
+    }
+    let mut labels = labels.to_vec();
+    labels.sort();
+    labels.dedup();
+    Ok(labels)
+}
+
 /// The operation a request's idempotency key already names, if any.
 async fn replayed(
     app: &Shared,
@@ -1154,6 +1172,7 @@ async fn post_task(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
     };
     admit(&app, new, Work::Task { request }).await
 }
@@ -1197,6 +1216,7 @@ async fn post_send(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
     };
     admit(&app, new, Work::Send { branch, request }).await
 }
@@ -1236,6 +1256,7 @@ async fn post_fork(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
     };
     admit(&app, new, Work::Fork { branch, request }).await
 }
@@ -1275,6 +1296,7 @@ async fn post_reincarnate(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
     };
     admit(&app, new, Work::Reincarnate { branch, request }).await
 }
@@ -1328,6 +1350,7 @@ async fn post_merge(
         principal: caller.0.clone(),
         creates: Vec::new(),
         quota: AdmissionQuota::default(),
+        requires: Vec::new(),
     };
     admit(&app, new, Work::Merge { branch, target }).await
 }
@@ -1440,6 +1463,7 @@ async fn post_spawn(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
     };
     admit(
         &app,
@@ -1486,6 +1510,7 @@ async fn post_integrate(
         principal: caller.0.clone(),
         creates: Vec::new(),
         quota: AdmissionQuota::default(),
+        requires: Vec::new(),
     };
     admit(&app, new, Work::Integrate { branch, parent }).await
 }
@@ -1719,6 +1744,34 @@ async fn branches(
         .await?
         .map_err(|e| error::sdk(&e))?;
     Ok(Json(BranchList { branches }))
+}
+
+/// `GET /v1/repos/{repo}/operations[?branch=NAME]`: the caller's tenant's
+/// unfinished operations of the repository, each saying why it waits when
+/// no live worker can claim it.
+async fn repo_operations(
+    State(app): State<Shared>,
+    Path(repo): Path<String>,
+    Extension(caller): Extension<Caller>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<branchyard_client::api::OperationList>, ApiError> {
+    let name = app.authorized_repo(&caller, &repo, "read")?.name.clone();
+    let branch = query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("branch="))
+        .map(percent_decode);
+    let registry = app.registry.clone();
+    let tenant = caller.tenant().to_owned();
+    let unfinished = blocking(move || registry.unfinished(&tenant)).await??;
+    let operations = unfinished
+        .into_iter()
+        .map(|stored| app.registry.describe(stored.operation))
+        .filter(|op| op.repo == name)
+        .filter(|op| branch.as_ref().is_none_or(|b| op.branches.contains(b)))
+        .collect();
+    Ok(Json(branchyard_client::api::OperationList { operations }))
 }
 
 async fn branch(

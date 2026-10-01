@@ -427,6 +427,20 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     else {
         return;
     };
+    // A prepared environment of the fan's key already holds its setup:
+    // every branch branches from it instead.
+    let prepared = options.workspace.as_ref().and_then(|w| {
+        let key = turns[0]
+            .0
+            .record
+            .provider
+            .as_ref()
+            .map(crate::snapshots::provider_key)?;
+        crate::environments::for_sandbox(&yard.root, w, &turns[0].0.record.info.worktree, &key)
+    });
+    if prepared.is_some() {
+        return;
+    }
     let capabilities = provider.capabilities();
     if !capabilities.has(branchyard_sandbox::LIVE_BRANCH) {
         return fresh(
@@ -536,6 +550,7 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
             from: first.clone(),
             worktree: Some(source.0.record.info.worktree.clone()),
             produced: produced.clone(),
+            environment: None,
         };
         let runner = crate::workspace::Runner::Sandbox {
             provider: provider.as_ref(),

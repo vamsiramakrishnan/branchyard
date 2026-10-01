@@ -227,6 +227,17 @@ pub(crate) enum SandboxPlan {
     Fresh(String),
 }
 
+/// The prepared environment a branch whose setup has not run starts its
+/// sandbox from, on provider `key`.
+fn environment(
+    yard: &Yard,
+    record: &Record,
+    key: &str,
+) -> Option<crate::environments::SandboxEnvironment> {
+    let workspace = record.workspace.as_ref().filter(|w| !w.ready)?;
+    crate::environments::for_sandbox(&yard.root, &workspace.spec, &record.info.worktree, key)
+}
+
 /// A turn's harness location. A sandbox is destroyed, or parked, by
 /// [`Placement::release`]; destroyed on drop otherwise.
 pub(crate) struct Placement {
@@ -379,6 +390,7 @@ impl Placement {
             }
             SandboxPlan::Default => {
                 let store = yard.store();
+                let environment = environment(yard, record, &key);
                 snapshots::acquire(
                     &store,
                     record,
@@ -386,6 +398,7 @@ impl Placement {
                     provider.as_ref(),
                     &key,
                     &spec,
+                    environment.as_ref(),
                     &journal,
                 )
                 .inspect_err(|_| {
@@ -458,7 +471,17 @@ impl Placement {
                     .map_err(|e| format!("could not create actor {}: {e}", spec.name))
             }),
             SandboxPlan::Default => {
-                snapshots::acquire(&store, record, fence, &provider, &key, &spec, &journal)
+                let environment = environment(yard, record, &key);
+                snapshots::acquire(
+                    &store,
+                    record,
+                    fence,
+                    &provider,
+                    &key,
+                    &spec,
+                    environment.as_ref(),
+                    &journal,
+                )
             }
         };
         let name = acquired

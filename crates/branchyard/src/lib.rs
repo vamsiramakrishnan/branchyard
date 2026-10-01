@@ -102,6 +102,7 @@ mod compare;
 mod conformance;
 mod delegation;
 mod engine;
+mod environments;
 mod git;
 mod graph;
 mod harness;
@@ -156,6 +157,12 @@ pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, 
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
+};
+pub use environments::{
+    EnvironmentBuild, EnvironmentInfo, EnvironmentInput, EnvironmentOrigin, EnvironmentSnapshot,
+    EnvironmentState, EnvironmentUse, Pruned as EnvironmentsPruned,
+    DEFAULT_INPUTS as ENVIRONMENT_DEFAULT_INPUTS, DEFAULT_KEEP as ENVIRONMENT_DEFAULT_KEEP,
+    DEFAULT_MAX_AGE as ENVIRONMENT_DEFAULT_MAX_AGE,
 };
 pub use graph::{
     Access, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphEdit, GraphNode,
@@ -450,6 +457,41 @@ impl Yard {
             copied: workspace::excluded(&record),
             port,
         })
+    }
+
+    /// The prepared environments under `.branchyard/environments/`, and
+    /// the builds recorded as failed, newest built first. See
+    /// `docs/environments.md`.
+    pub fn environments(&self) -> Vec<EnvironmentInfo> {
+        environments::list(&self.root)
+    }
+
+    /// The environment key `spec` has on this host for the repository's
+    /// checkout at its root, as a branch created from it now would.
+    pub fn environment_key(&self, spec: &WorkspaceSpec) -> String {
+        environments::current_key(&self.root, spec)
+    }
+
+    /// Build `spec`'s environment on this host now, from `HEAD`, in a
+    /// temporary worktree, replacing the key's environment only when setup
+    /// succeeds; a failure is recorded and the last good build stays. The
+    /// caller decides whether `spec`'s scripts may run, as for
+    /// [`TaskOptions::workspace`].
+    pub fn rebuild_environment(&self, spec: &WorkspaceSpec) -> Result<EnvironmentBuild, Error> {
+        environments::rebuild(self, spec)
+    }
+
+    /// Remove environments beyond the newest `keep` of each recipe or unused
+    /// for longer than `max_age`, and old failures; never the newest good
+    /// one of a recipe, nor one a branch links into. With `only`, just those
+    /// keys.
+    pub fn prune_environments(
+        &self,
+        keep: usize,
+        max_age: Duration,
+        only: &[String],
+    ) -> environments::Pruned {
+        environments::prune(self, keep, max_age, only)
     }
 
     /// The variables `branch`'s scripts and harness get:

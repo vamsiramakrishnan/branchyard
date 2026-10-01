@@ -1539,3 +1539,93 @@ fn compare_works_remotely_and_local_only_commands_say_so() {
         );
     }
 }
+
+#[test]
+fn work_requiring_a_label_no_worker_carries_says_why_in_by_show() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &[
+            "--allow-client-commands",
+            "--label",
+            "linux",
+            "--unclaimable-after",
+            "0",
+        ],
+    );
+    let args = with_agent(&[
+        "run",
+        "WRITE x.txt=1",
+        "--name",
+        "on-gpu",
+        "--require-label",
+        "gpu",
+        "--yes",
+    ]);
+    let running = command(BY, &dir.0)
+        .arg("--remote")
+        .arg(&server.url)
+        .arg("--token-file")
+        .arg(&server.token_file)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(dir.0.join("run.err")).unwrap())
+        .spawn()
+        .unwrap();
+    let mut running = Killed(running);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let shown = loop {
+        let out = server.by(&dir.0, &["show", "on-gpu"]);
+        let shown = text(&out.stdout);
+        if shown.contains("waiting") {
+            break shown;
+        }
+        assert!(Instant::now() < deadline, "never said why: {shown}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(shown.contains("not created yet"), "{shown}");
+    assert!(shown.contains("requires  gpu"), "{shown}");
+    assert!(shown.contains("no live worker carries"), "{shown}");
+    let json: Value =
+        serde_json::from_slice(&server.by(&dir.0, &["show", "on-gpu", "--json"]).stdout).unwrap();
+    assert_eq!(json["operation"]["requires"][0], "gpu");
+    assert_eq!(json["operation"]["state"], "queued");
+    // The waiting `by run` says so on its standard error.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !fs::read_to_string(dir.0.join("run.err"))
+        .unwrap_or_default()
+        .contains("is still queued: no live worker carries")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "{}",
+            fs::read_to_string(dir.0.join("run.err")).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(running.0.try_wait().unwrap().is_none());
+    drop(running);
+    // Locally there are no workers to choose among.
+    let local = command(BY, &there)
+        .args(with_agent(&["run", "x", "--require-label", "gpu"]))
+        .output()
+        .unwrap();
+    assert_eq!(local.status.code(), Some(1));
+    assert!(
+        text(&local.stderr).contains("use it with --remote"),
+        "{}",
+        text(&local.stderr)
+    );
+}
+
+/// A child killed when dropped.
+struct Killed(Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}

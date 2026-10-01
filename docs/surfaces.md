@@ -295,6 +295,24 @@ A sandboxed branch can keep its sandbox between turns and branch new sandboxes f
 | `SandboxProvider::pause`, `resume`, `branch_live`, `release_checkpoint`; `Capabilities::pause`, `live_branch`, `has`; `Feature`, `LIVE_BRANCH`, `PAUSE`, `FULL_SNAPSHOT`; `SandboxSpec::persist`; `SandboxState::Paused`; `branchyard_sandbox::fake` | none | the provider contract's sandbox-level branching, defaults `Unsupported` |
 | `sandboxes` table (SQLite), `by_sandboxes` (PostgreSQL) | none | kept sandboxes and snapshots per branch, deleted with it ([durability](durability.md)) |
 
+## Added with prepared environments and worker labels
+
+See [prepared environments](environments.md) and [worker labels](server.md#worker-labels). Sandbox environments are unqualified on every real provider.
+
+| Surface | Before | Now |
+|---|---|---|
+| `[workspace] prepare`, `inputs`, `share`; `WorkspaceSpec::prepare`, `inputs`, `share` | setup in every new worktree | setup once per environment key; later branches restore it (clone, copy, or a link for `share`), or branch their sandbox from its snapshot; the last good build when one fails |
+| `.worktreeinclude` | ignored | its ignored literal paths copied into every new worktree with a workspace; `by` gives a branch an empty workspace when the file exists without `[workspace]` |
+| `WorkspaceReport::environment` (`EnvironmentUse`), `SandboxOrigin::Environment` | none | how setup related to a prepared environment: `built`, `restored`, `last_good`, `not_kept`, with the key used, method and reason; in `schema/contract.json` |
+| `Yard::environments`, `environment_key`, `rebuild_environment`, `prune_environments` | none | SDK only |
+| `by env list`, `show [KEY]`, `rebuild`, `prune [KEY...] [--keep N] [--older-than DAYS]` | none | local only; refused with `--remote` (a server's environments are on its host); `rebuild` needs trust and never runs in a harness |
+| `require_labels` on task, send, fork, reincarnate and spawn requests; `Operation::requires`, `waiting` | none | only a worker carrying every label claims the operation; `waiting` says why one waits once `unclaimable_after` passes |
+| `GET /v1/repos/{repo}/operations?branch=B`, `Repo::operations` (`OperationList`) | none | the caller's tenant's unfinished operations of a repository |
+| `--require-label` on `by run`, `fan`, `send`, `fork`, `reincarnate` | none | with `--remote`; refused locally |
+| `by serve`/`by worker`/`branchyard-server` `--label`, `--unclaimable-after`; `labels`, `unclaimable_after_seconds` in the configuration | none | the worker's labels; how long before an unclaimable operation says why |
+| `by show BRANCH --remote` for a branch not created yet | `unknown_branch` | the queued operation that will create it, with `requires` and `waiting` |
+| `workers` (SQLite), `by_workers` (PostgreSQL); `requires` on the queue | none | live workers with their labels; each queue row's required labels |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |

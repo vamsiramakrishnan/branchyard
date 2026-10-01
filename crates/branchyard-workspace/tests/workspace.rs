@@ -817,3 +817,37 @@ fn push_sends_exactly_the_commit_to_a_remote_branch() {
         ));
     }
 }
+
+#[test]
+fn worktreeinclude_names_only_ignored_literal_paths_that_exist() {
+    use branchyard_workspace::include;
+    let f = Fixture::new();
+    let root = f.root();
+    fs::write(
+        root.join(".gitignore"),
+        "*.log\n.env\nnode_modules/\n.vscode/\n",
+    )
+    .unwrap();
+    git(&root, &["add", ".gitignore"]);
+    git(&root, &["commit", "-q", "-m", "ignore"]);
+    fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join(".vscode/settings.json"), "{}").unwrap();
+    fs::create_dir_all(root.join("node_modules")).unwrap();
+    fs::write(root.join("notes.txt"), "untracked, not ignored").unwrap();
+    fs::write(
+        root.join(include::WORKTREE_INCLUDE_FILE),
+        "# carried\n.env\n.vscode/\nnode_modules\na.txt\nnotes.txt\n*.log\n../escape\nmissing\n",
+    )
+    .unwrap();
+    let included = include::resolve(&root);
+    assert_eq!(included.paths, [".env", ".vscode", "node_modules"]);
+    let skipped = included.skipped.join("\n");
+    for named in ["a.txt", "notes.txt", "*.log", "../escape"] {
+        assert!(skipped.contains(named), "{named} not in {skipped}");
+    }
+    assert!(!skipped.contains("missing"), "{skipped}");
+    // No file, nothing.
+    fs::remove_file(root.join(include::WORKTREE_INCLUDE_FILE)).unwrap();
+    assert_eq!(include::resolve(&root), include::Included::default());
+}

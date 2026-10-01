@@ -15,6 +15,8 @@ Two products whose main offer was running coding CLIs in worktrees (Terragon, an
 | Prepared environments | `[workspace]` setup runs once per setup hash; new worktrees start from the prepared copy (reflinks, shared ignored directories, `.worktreeinclude`), sandboxes from a prepared snapshot, falling back to the last good build; workers carry labels | Cursor builds, Devin snapshots, Codex environments, Orca's worktree sharing |
 | Ports | `by review` (comment on diff lines, send once); `by pr --watch` resolves the threads it addressed; about 40 harness CLIs in the registry; config imported from emdash, Orca, Superset and Conductor; a starting catalog of connectors | Orca, emdash |
 
+**Status, 1 October 2026.** Prepared environments are implemented: `[workspace] prepare` runs setup once per environment key, new worktrees restore it by clone or copy, link `share` directories, honour `.worktreeinclude` (ported from Orca), sandboxes branch from a prepared snapshot, failed builds fall back to the last good one, and `by env` manages them; workers carry labels and claim only work whose labels they carry. Tested hermetically; the clone path, macOS and every real sandbox provider are unqualified ([environments](environments.md), [worker labels](server.md#worker-labels)).
+
 ## Wave 2
 
 Triggers and schedules (cron, GitHub, Slack, Linear, email; a precheck, a test run, pause after repeated failures); priority and fair share in the queue; quota meters per login; Linear, Jira and GitLab issues; listening ports per branch; `by adopt` for existing Claude and Codex sessions; metrics and traces for Branchyard itself.

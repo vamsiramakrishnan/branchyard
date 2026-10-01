@@ -46,6 +46,8 @@ Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped
 | `--secret NAME[=VAR\|=@FILE]` | A secret requests may name in `provision.secrets`, read from this server's variable `NAME` or `VAR`, or from `FILE`, at each turn; repeatable. See [provisioning](provisioning.md#through-a-server) |
 | `--database URL` | Keep branch state, operations, their queue and branch locks in PostgreSQL (`postgres://user@host/db`) instead of SQLite; several servers may share it. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
 | `--worker` | Only run operations queued in `--database`: no listener, no webhooks. `by worker` is `by serve --worker`; see [several servers](#several-servers-on-one-database) |
+| `--label LABEL` | A label this process's worker carries (repeatable; replaces the configuration's `labels`): it claims only operations whose `require_labels` are all among its labels. See [worker labels](#worker-labels) |
+| `--unclaimable-after SECS` | How long an operation that requires labels may wait queued before it says why no live worker can claim it (`waiting`). Default 60 |
 | `--max-artifact-bytes N` | Largest artifact a `POST .../artifacts` upload may publish, in bytes. Default 268435456 (256 MiB) |
 | `--max-running N` | Operations this process runs at once; more wait queued. Default 8 |
 | `--operation-lease SECS` | How long a claim on a queued operation lasts without renewal before another worker takes it over; renewed every third of it. Default 30 |
@@ -87,7 +89,9 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "allow_unapproved_tools": false,
   "allow_workspace_scripts": ["app"],
   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
-  "database": "postgres://branchyard@db.internal/branchyard"
+  "database": "postgres://branchyard@db.internal/branchyard",
+  "labels": ["linux", "gpu"],
+  "unclaimable_after_seconds": 60
 }
 ```
 
@@ -152,6 +156,7 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/tasks` | Run a task on one branch, or one branch per harness | `202` operation |
 | `GET /v1/repos/{repo}/branches` | Every branch, oldest first | `{"branches": [BranchInfo]}` |
 | `GET /v1/repos/{repo}/branches/{b}` | One branch | `BranchInfo` |
+| `GET /v1/repos/{repo}/operations?branch=B` | The caller's tenant's queued and running operations of the repository, oldest first, or only those working on `B` (one that will create it included), each with `requires` and, when no live worker can claim it, `waiting` | `{"operations": [operation]}` |
 | `POST /v1/repos/{repo}/branches/{b}/send` | Continue its session with another prompt | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/fork` | New branch from its candidate | `202` operation |
 | `POST /v1/repos/{repo}/branches/{b}/reincarnate` | New branch from its candidate, always a fresh session, with a generated handoff brief | `202` operation |
@@ -237,7 +242,7 @@ Task, send, fork, reincarnate, merge, spawn and integrate are long operations. T
   "branches": ["flaky"], "cursor": 41, "created_at_ms": 1790000000000 }
 ```
 
-`kind` is `task`, `send`, `fork`, `reincarnate`, `merge`, `spawn` or `integrate`. `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
+`kind` is `task`, `send`, `fork`, `reincarnate`, `merge`, `spawn` or `integrate`. An operation whose request named `require_labels` carries them as `requires` (sorted, once each), and, once it has waited queued longer than `unclaimable_after` and no live worker serving its repository carries them all, `waiting` says why ([worker labels](#worker-labels)). `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
 
 `branches` are the names planned at acceptance. `cursor` is the feed position at acceptance and `end_cursor` the position once the operation's activity was ingested: to watch one operation, stream from `cursor` until the operation finishes and the stream reaches `end_cursor`, keeping entries for its branches. That is what `by --remote … run` does.
 
@@ -410,6 +415,21 @@ Limits:
 - **Webhooks** are delivered by every server that configures them, each from the shared cursor: configure them on one.
 - **Throughput.** Each server uses one database connection for its registry; claims poll rather than `LISTEN`.
 - **No automatic failover of a running turn.** A turn whose server died is recovered as interrupted, never resumed elsewhere.
+
+### Worker labels
+
+Workers differ: one has a GPU, one runs on Linux with KVM for Microsandbox, one sits next to a large cache. A worker carries **labels**, and an operation may **require** labels; a worker claims only operations whose required labels it all carries:
+
+```sh
+by worker --database "$DB" --repo app=/srv/app --label gpu --label linux
+by run --remote https://by.internal "train the model" --require-label gpu
+```
+
+- **Where labels come from.** `--label` (repeatable) on `by serve`, `by worker` or `branchyard-server`, or `labels` in the configuration file; the flags replace the file's. A server without labels claims only operations that require none. A label is 1 to 63 of `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or digit.
+- **Where requirements come from.** `require_labels` in a task (one branch or a fan), send, fork, reincarnate or spawn request, and `--require-label` on `by run`, `fan`, `send`, `fork` and `reincarnate` with `--remote` (in local mode the flag is refused: there are no workers to choose among). Admission checks them (`400 invalid_request` for a malformed one) and records them on the operation and its queue row. A merge or integration requires none.
+- **Claims.** The claim's query takes the oldest claimable row whose required labels are a subset of the worker's: on SQLite every element of the row's JSON array must be among the worker's; on PostgreSQL `requires <@ $labels` inside the same `FOR UPDATE SKIP LOCKED` subquery, so two workers racing still never claim one row. Queue rows from before the column existed require nothing.
+- **Liveness and why it waits.** Each dispatcher records its worker (id, host, pid, labels, repositories) every 5 seconds in a `workers` table (`by_workers` on PostgreSQL) and deletes its row at shutdown; a worker unseen for 15 seconds is not counted. An operation that requires labels and has waited longer than `unclaimable_after` (default 60 s) is reported, on every read (`GET /v1/operations/{id}`, `?idempotency_key=`, `GET /v1/repos/{repo}/operations`), with `waiting`: `no live worker carries the labels it requires (gpu, linux); live workers serving app: w_… on host [linux]`. Nothing is written: as soon as a worker with the labels beats, the reason goes away, and that worker claims it. A waiting `by run --remote` prints it once on standard error; `by show BRANCH --remote` for a branch that does not exist yet shows the queued operation that will create it, with `requires` and `waiting`.
+- **Not yet.** A rig seat or a fleet entry cannot carry labels of its own: a seat's spawn through the API takes the spawn request's `require_labels`, and a fleet routes through whatever request it makes. Labels route among workers; they are not an authorization boundary (any principal may require any label), and they do not reserve capacity.
 
 What it is not yet:
 
