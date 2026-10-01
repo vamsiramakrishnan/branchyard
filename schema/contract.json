@@ -1726,9 +1726,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -1754,6 +1765,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -1827,6 +1858,20 @@
                 "kind"
               ],
               "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
             }
           ],
           "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
@@ -2019,6 +2064,84 @@
           ],
           "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
         },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
+        },
         "Provisioning": {
           "type": "object",
           "additionalProperties": false,
@@ -2091,6 +2214,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -2319,6 +2453,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "Seats": {
           "type": "object",
