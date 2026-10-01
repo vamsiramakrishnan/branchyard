@@ -98,7 +98,7 @@ When a turn of a top-level branch ends, when it merges, and when it is judged, i
 | `failed` | failed, stopped at a limit, or changed nothing | 0 |
 | `interrupted` | interrupted or cancelled | not counted |
 
-A candidate's successes are the sum of its credits and its failures the sum of one minus each. The store is the `outcomes` table in SQLite and `by_outcomes` in PostgreSQL (scoped by the repository like every other table), behind `OutcomeBackend`, with the same conformance test on both.
+A candidate's successes are the sum of its credits and its failures the sum of one minus each. The store is the `outcomes` table in SQLite and `by_outcomes` in PostgreSQL (scoped by the repository like every other table), behind `OutcomeBackend`, with the same conformance test on both. A row is committed as an event append is, without a synchronous commit of its own: it is statistics derived from the branch, and the next turn or merge rewrites it.
 
 `by fleet stats [--kind K] [--json]` prints them per kind and candidate: runs, merged, judged best, ready, failed, interrupted, the posterior mean success `P(OK)` = (1 + successes) / (2 + successes + failures), and mean cost, time, turns and score. `Yard::outcomes` and `branchyard::fleet_stats` give the same in the SDK.
 

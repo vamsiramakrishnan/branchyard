@@ -2651,7 +2651,9 @@ fn outcome_record(c: OutcomeColumns) -> Result<crate::fleet::OutcomeRecord, Erro
 
 impl crate::fleet::OutcomeBackend for Sqlite {
     fn put_outcome(&self, row: &crate::fleet::OutcomeRecord) -> Result<(), Error> {
-        self.tx(true, |tx| {
+        // Statistics derived from branches, not a branch's state: committed
+        // as event appends are, without a sync of its own.
+        self.tx(false, |tx| {
             tx.execute(
                 &format!(
                     "INSERT OR REPLACE INTO outcomes ({OUTCOME_COLUMNS}) \

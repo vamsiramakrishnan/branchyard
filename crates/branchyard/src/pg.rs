@@ -2594,7 +2594,9 @@ fn outcome_row(r: &Row) -> Result<crate::fleet::OutcomeRecord, Error> {
 
 impl crate::fleet::OutcomeBackend for Postgres {
     fn put_outcome(&self, row: &crate::fleet::OutcomeRecord) -> Result<(), Error> {
-        self.tx(true, |tx| {
+        // Statistics derived from branches, not a branch's state: committed
+        // as event appends are, without a sync of its own.
+        self.tx(false, |tx| {
             tx.execute(
                 &format!(
                     "INSERT INTO by_outcomes (repo, {OUTCOME_COLUMNS}) \
