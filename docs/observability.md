@@ -42,8 +42,14 @@ The format is Prometheus text exposition 0.0.4 (`text/plain; version=0.0.4`), wr
 | `branchyard_webhook_deliveries_total` | counter | `result` (`delivered`, `retried`, `dead_lettered`) | Webhook delivery attempts |
 | `branchyard_workers_live` | gauge | | Workers that recorded themselves alive in the last 15 seconds |
 | `branchyard_worker_last_seen_seconds` | gauge | `worker`, `host` | Seconds since each live worker's last beat |
+| `branchyard_pool_slots` | gauge | `repo`, `state` (`ready`, `filling`, `claimed`) | [Warm pool](pools.md) slots of each served repository whose workspace has a pool, on this host, read at scrape time |
+| `branchyard_pool_claims_total` | counter | `repo`, `result` (`hit`, `miss`) | New branches of tasks this process ran whose workspace has a pool: took a ready slot, or found none |
+| `branchyard_pool_slots_made_total` | counter | `repo`, `result` (`made`, `failed`) | Slots this process's keepers made, and fills that stopped on an error |
+| `branchyard_pool_fill_seconds` | histogram | `repo` | Time a keeper took to make one slot (worktree and environment) |
+| `branchyard_pool_slots_discarded_total` | counter | `repo` | Slots a keeper removed: stale, or left by a stopped process |
+| `branchyard_start_seconds` | histogram | `pool` (`hit`, `miss`, `none`) | Start latency of a task's new branches: from the operation's admission to the harness's first prompt, by whether the worktree came from a warm pool |
 
-Histogram buckets are 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800 and 3600 seconds.
+Histogram buckets are 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800 and 3600 seconds, except `branchyard_start_seconds`: 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300 and 1800 seconds.
 
 **Counters and gauges on several servers.** Counters count what the process that serves them did. Each operation is admitted by one server and claimed, run and finished by one worker, so on several servers and workers sharing a database, sum counters across them. Gauges read at scrape time from the store (`branchyard_operations`, queue depth and age, live workers) describe the shared database, so every server reports the same values: take one, or `max`, not the sum.
 
@@ -102,13 +108,14 @@ connectors 8 calls (allowed 7, denied 1)
 cost      $4.12 (claude-code $3.00, codex $1.12)
 ```
 
-Locally it reads the repository's store: branches by status, turns and cost by harness from their records, and outcomes, turn durations, tool calls and connector calls from the event store. With `--remote` it reads the server's branches (turns and cost, not the event store) and adds the queue: the caller's tenant's queued operations of the repository by priority, those running, and how long the oldest has waited. `--json` prints the same as an object (`branches`, `turns`, `cost_usd`, `outcomes`, `turn_seconds`, `tool_calls`, `connector_calls`, `queue`).
+Locally it reads the repository's store: branches by status, turns and cost by harness from their records, and outcomes, turn durations, tool calls and connector calls from the event store. When branches used a [warm pool](pools.md), it adds `pool` (hits, misses, and locally the ready slots of the pool's size and how long they took to make) and `start` lines (from a branch being asked for to its first prompt, of hits and of misses). With `--remote` it reads the server's branches (turns and cost, not the event store) and adds the queue: the caller's tenant's queued operations of the repository by priority, those running, and how long the oldest has waited. `--json` prints the same as an object (`branches`, `turns`, `cost_usd`, `outcomes`, `turn_seconds`, `tool_calls`, `connector_calls`, `queue`, `pool`).
 
 ## Tests
 
-- `crates/branchyard-server/src/metrics.rs` (2): every family's `HELP` and `TYPE`, counters, histograms (cumulative buckets, `+Inf`, sum and count), queue gauges and label escaping, checked with a parser of the exposition format written independently of the encoder; number formatting.
+- `crates/branchyard-server/src/metrics.rs` (3): the warm pool's gauges, counters and fill histogram; every family's `HELP` and `TYPE`, counters, histograms (cumulative buckets, `+Inf`, sum and count), queue gauges and label escaping, checked with a parser of the exposition format written independently of the encoder; number formatting.
 - `crates/branchyard-server/src/telemetry.rs` (6): `traceparent` round trip and malformed headers; the protobuf encoding's field numbers checked byte by byte; the JSON mapping; the standard variables; the batching tracer; and a real export over HTTP, in both encodings, to a stand-in collector on loopback.
-- `crates/branchyard-server/src/observe.rs` (2): turns, tools and connector calls from recorded events into metrics and spans (a tool lasting until the next event, an engine-ended turn, another operation's branch ignored); cost as each branch's growth.
+- `crates/branchyard-server/src/observe.rs` (3): a task's new branches' start latency by pool use, and hits and misses; turns, tools and connector calls from recorded events into metrics and spans (a tool lasting until the next event, an engine-ended turn, another operation's branch ignored); cost as each branch's growth.
 - `crates/branchyard-server/tests/observability.rs` (3, over real HTTP with the fake ACP agent): priority checked, capped and inherited; `/metrics` off by default, `401`/`403`, the metrics token reading nothing else, the counters after a task, and the separate listener; an operation traced from an incoming `traceparent` through admission, claim and run to its turn, with the harness seeing the operation's span as `TRACEPARENT`.
 - `crates/branchyard-server/tests/webhook.rs`: a delivery carries the operation's `traceparent`, and deliveries are counted.
-- `crates/branchyard-cli/src/stats_cmd.rs` (1) and `crates/branchyard-cli/tests/remote.rs` (1): the summary's arithmetic and rendering; `--priority` reaching the server's queue, `by --remote stats` showing it, and `by stats` locally.
+- `crates/branchyard-server/tests/pools.rs` (1): the pool metrics over real HTTP after a miss and a hit.
+- `crates/branchyard-cli/src/stats_cmd.rs` (2, one for pool hits, misses and start latency) and `crates/branchyard-cli/tests/remote.rs` (1): the summary's arithmetic and rendering; `--priority` reaching the server's queue, `by --remote stats` showing it, and `by stats` locally.

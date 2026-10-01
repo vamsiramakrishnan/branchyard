@@ -26,8 +26,7 @@ fn setup_report(events: &[RecordedEvent]) -> WorkspaceReport {
             Activity::Workspace(report) => Some(report.clone()),
             _ => None,
         })
-        .filter(|r| r.phase == branchyard::WorkspacePhase::Setup)
-        .last()
+        .rfind(|r| r.phase == branchyard::WorkspacePhase::Setup)
         .expect("a setup report")
 }
 
@@ -238,7 +237,9 @@ fn shared_directories_in_a_slot_stay_links_for_the_branch() {
         .is_symlink());
     // The environment a slot links into is not pruned.
     let key = slot.environment.clone().unwrap();
-    let pruned = f.yard.prune_environments(0, Duration::ZERO, &[key.clone()]);
+    let pruned = f
+        .yard
+        .prune_environments(0, Duration::ZERO, std::slice::from_ref(&key));
     assert!(pruned.removed.is_empty(), "{pruned:?}");
     assert!(pruned.kept[0].1.contains("pool slot"), "{pruned:?}");
 
@@ -349,7 +350,7 @@ fn a_keeper_refills_after_a_claim_without_holding_it_up() {
         let now = ready(&f, &spec);
         now.len() == 1 && now[0] != first
     });
-    drop(keeper);
+    keeper.stop();
     let fills = fills.lock().unwrap();
     let made: usize = fills.iter().map(|f| f.made.len()).sum();
     assert_eq!(made, 2, "{fills:?}");
@@ -573,7 +574,7 @@ fn a_claim_whose_process_stopped_is_reclaimed_not_handed_out_again() {
         .into_iter()
         .map(|s| s.id)
         .collect();
-    assert_eq!(left, [kept.id.clone()]);
+    assert_eq!(left, std::slice::from_ref(&kept.id));
     assert!(!claimed.path.exists());
     // The ready one is still claimable, once.
     let a = yard

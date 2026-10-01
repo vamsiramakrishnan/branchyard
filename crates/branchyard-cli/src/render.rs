@@ -283,6 +283,18 @@ pub fn workspace_line(report: &branchyard::WorkspaceReport, style: Style) -> Str
             )
         }
     };
+    if let Some(pool) = &report.pool {
+        let reason = pool.reason.as_deref().unwrap_or("no ready slot");
+        match &pool.slot {
+            Some(slot) => {
+                line.push_str(&format!("; worktree from warm pool slot {slot}"));
+                if let Some(how) = &pool.reason {
+                    line.push_str(&format!(" ({how})"));
+                }
+            }
+            None => line.push_str(&format!("; no warm pool slot ({reason})")),
+        }
+    }
     let tone = match report.ok {
         true => Tone::Dim,
         false => Tone::Red,

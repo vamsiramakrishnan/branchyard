@@ -580,7 +580,7 @@ impl Yard {
     }
 
     /// Discard `spec`'s stale slots and make new ones until its pool has
-    /// `size` ready, unless another process is filling. A slot whose
+    /// `size` ready, after any other process filling it. A slot whose
     /// environment key has none built runs setup to build it: the caller
     /// decides whether `spec`'s scripts may run, as for
     /// [`TaskOptions::workspace`].
@@ -597,7 +597,8 @@ impl Yard {
     /// Keep the pool `spec` returns (read again each time) filled from a
     /// thread of its own: at once, whenever a branch in this process claims
     /// a slot or finds none, and otherwise every `every`. `on_fill` sees
-    /// each fill. Stops when the keeper is dropped.
+    /// each fill. Stops when the keeper is dropped (without waiting for a
+    /// fill under way) or stopped ([`PoolKeeper::stop`], which waits).
     pub fn keep_pool(
         &self,
         spec: impl Fn() -> Option<WorkspaceSpec> + Send + 'static,

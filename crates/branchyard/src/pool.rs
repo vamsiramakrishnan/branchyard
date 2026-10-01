@@ -28,7 +28,8 @@
 //!   created as before. Claims never fill: refilling is the keeper's.
 //! - **Filling.** [`fill`] (`by env pool fill`, or a [`PoolKeeper`] in `by
 //!   serve` and `by worker`) discards stale slots and makes new ones until
-//!   `size` are ready, one process at a time (an advisory lock). A slot's
+//!   `size` are ready, one process at a time (an advisory lock; a second
+//!   filler waits for the first). A slot's
 //!   environment comes from the key's prepared environment, or is built in
 //!   the slot when the key has none (setup runs there, as `by env rebuild`
 //!   would). A key whose build failed is not retried by a pool.
@@ -263,7 +264,8 @@ pub struct PoolFill {
     /// Why the fill stopped short, when it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Why nothing was done: another process is filling.
+    /// Why nothing was done: another process was still filling after
+    /// setup's timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
 }
@@ -698,6 +700,7 @@ pub(crate) fn take(yard: &Yard, record: &Record, base: &str) -> Result<Taken, St
         .filter(|r| r.state == SlotState::Ready && r.recipe == wanted)
         .collect();
     if ready.is_empty() {
+        wake(root);
         return Err("no ready slot".into());
     }
     // At the base first; then the rest, oldest first.
@@ -762,20 +765,10 @@ pub(crate) fn settle(yard: &Yard, taken: &Taken) {
     wake(&yard.root);
 }
 
-/// The claim failed after the slot was taken: leave it to be removed.
+/// The claim failed after the slot was taken (the branch's worktree is
+/// made without it): remove what is left of the slot, and its row.
 pub(crate) fn abandon(yard: &Yard, taken: &Taken) {
-    let left = SlotRow {
-        host: String::new(),
-        pid: 0,
-        start: String::new(),
-        ..taken.row.clone()
-    };
-    if Path::new(&taken.row.path).exists() {
-        discard(yard, &left);
-    } else {
-        let _ = yard.store().pool().update_slot(&left, SlotState::Claimed);
-        let _ = yard.store().pool().delete_slot(&taken.row.id);
-    }
+    discard(yard, &taken.row);
     wake(&yard.root);
 }
 
@@ -821,9 +814,9 @@ pub(crate) fn slots(yard: &Yard) -> Result<Vec<PoolSlot>, Error> {
 }
 
 /// Discard stale slots and make new ones until `spec`'s pool has `size`
-/// ready, one filler per checkout at a time. Runs setup in a slot when its
-/// environment key has none built (the caller decides whether `spec`'s
-/// scripts may run).
+/// ready, one filler per checkout at a time (a second waits for the
+/// first). Runs setup in a slot when its environment key has none built
+/// (the caller decides whether `spec`'s scripts may run).
 pub(crate) fn fill(yard: &Yard, spec: &WorkspaceSpec) -> Result<PoolFill, Error> {
     let Some(pool) = spec.pool.clone() else {
         return Err(Error::State("[workspace] has no pool".into()));
@@ -833,10 +826,14 @@ pub(crate) fn fill(yard: &Yard, spec: &WorkspaceSpec) -> Result<PoolFill, Error>
         size: pool.size.min(MAX_SIZE),
         ..PoolFill::default()
     };
-    let Some(_lock) = FillLock::try_take(root).map_err(Error::State)? else {
-        report.skipped = Some("another process is filling the pool".into());
-        report.ready = status(yard, spec)?.ready();
-        return Ok(report);
+    // Another filler finishes first; this one then finds the pool full.
+    let _lock = match FillLock::take(root) {
+        Ok(lock) => lock,
+        Err(why) => {
+            report.skipped = Some(why);
+            report.ready = status(yard, spec)?.ready();
+            return Ok(report);
+        }
     };
     report.reclaimed = reclaim(yard);
     let base_rev = pool.base.as_deref().unwrap_or("HEAD");
@@ -1048,7 +1045,9 @@ pub(crate) fn drain(yard: &Yard) -> Result<PoolDrained, Error> {
 
 /// Keeps a repository's pool filled from a thread of its own: fills at
 /// once, again whenever a branch in this process claims a slot (or finds
-/// none), and otherwise every `every`. Stops when dropped.
+/// none), and otherwise every `every`. Dropped, it stops without waiting:
+/// a fill under way finishes on its own thread. [`PoolKeeper::stop`]
+/// waits for it.
 pub struct PoolKeeper {
     stop: Arc<AtomicBool>,
     root: PathBuf,
@@ -1103,17 +1102,28 @@ impl PoolKeeper {
     }
 }
 
-impl Drop for PoolKeeper {
-    fn drop(&mut self) {
+impl PoolKeeper {
+    /// Stop, and wait for a fill under way to finish.
+    pub fn stop(mut self) {
+        self.signal_stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+
+    fn signal_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         let signal = signal(&self.root);
         // Under the lock, so the keeper is either waiting (and woken) or
         // will see the flag before it waits.
         drop(signal.claims.lock().unwrap_or_else(|e| e.into_inner()));
         signal.changed.notify_all();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+    }
+}
+
+impl Drop for PoolKeeper {
+    fn drop(&mut self) {
+        self.signal_stop();
     }
 }
 

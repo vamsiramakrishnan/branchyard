@@ -91,7 +91,7 @@ A fresh worktree has no `.env`, no dependencies and no dev server. `[workspace]`
 
 A repository can also say how to make a machine to work on: `[recipes.NAME]` names scripts that create, suspend, resume and destroy a VM (or a container) and print how to reach it, trusted like `[workspace]`; `by recipe check NAME` runs its doctor and a create, exec, suspend, resume and destroy, through a sandbox provider that runs commands there over ssh ([recipes](docs/recipes.md), ported from Orca).
 
-With `prepare = true`, setup runs once per environment key (the setup commands, copy globs and lockfiles) and every later branch with that key starts from what it produced: cloned where the filesystem can, linked for `share` directories such as `node_modules`, or, in a sandbox, branched from a snapshot of a sandbox setup ran in. A failed build never replaces the last good one, and branches that fall back say so. A `.worktreeinclude` file is honoured. `by env list|show|rebuild|prune` manages them. See [prepared environments](docs/environments.md).
+With `prepare = true`, setup runs once per environment key (the setup commands, copy globs and lockfiles) and every later branch with that key starts from what it produced: cloned where the filesystem can, linked for `share` directories such as `node_modules`, or, in a sandbox, branched from a snapshot of a sandbox setup ran in. A failed build never replaces the last good one, and branches that fall back say so. A `.worktreeinclude` file is honoured. `by env list|show|rebuild|prune` manages them. See [prepared environments](docs/environments.md). With `[workspace.pool]`, worktrees wait ready with the environment in place, so a new branch starts without waiting for either; `by serve` and `by worker` refill them, `by env pool fill|status|drain` manages them locally. See [warm pools](docs/pools.md).
 
 ```toml
 [workspace]
@@ -156,7 +156,7 @@ Pull requests: `by pr BRANCH [--git-remote NAME] [--head BRANCH] [--base BRANCH]
 
 Triggers ([triggers](docs/triggers.md)): `by trigger add NAME (--cron EXPR [--tz ZONE] | --every DURATION | --on github|slack|linear|generic) --prompt TEXT [--if FIELD=VALUE]... [--precheck CMD] [--harness H | --auto [--kind K]] [--branch-name TEMPLATE] [--pause-after N] [--catch-up DURATION] [--secret-file FILE]`, `by trigger list|show|test [--event FILE] [--precheck]|enable|disable|rm|runs [--limit N]|secret [--secret-file FILE] NAME`, each with `--json`, locally and with `--remote`.
 
-`by workspace show [BRANCH]|trust|untrust|run [BRANCH] [NAME...] [--detach]|ports [BRANCH]|browse [BRANCH] [--port N] [--print]|kill [BRANCH] [--port N] [--yes] [--json]` manages a repository's [workspace](docs/workspace.md) scripts, runs them (several at once with `--detach`, each with its own port), and finds, opens and stops what each branch listens on. `by usage [--json]` meters the local logins and `by adopt [--list] [SESSION] [--name N] [--harness ID] [--no-diff] [--json]` adopts their sessions ([usage](docs/usage.md)). `by env list|show [KEY]|rebuild|prune [KEY...] [--keep N] [--older-than DAYS]` manages its [prepared environments](docs/environments.md).
+`by workspace show [BRANCH]|trust|untrust|run [BRANCH] [NAME...] [--detach]|ports [BRANCH]|browse [BRANCH] [--port N] [--print]|kill [BRANCH] [--port N] [--yes] [--json]` manages a repository's [workspace](docs/workspace.md) scripts, runs them (several at once with `--detach`, each with its own port), and finds, opens and stops what each branch listens on. `by usage [--json]` meters the local logins and `by adopt [--list] [SESSION] [--name N] [--harness ID] [--no-diff] [--json]` adopts their sessions ([usage](docs/usage.md)). `by env list|show [KEY]|rebuild|prune [KEY...] [--keep N] [--older-than DAYS]` manages its [prepared environments](docs/environments.md), and `by env pool status|fill|drain` its [warm pool](docs/pools.md).
 
 Routing and judging ([fleet](docs/fleet.md)): `by run|fan [--auto] [--kind KIND] [--seed N]`, `by fan --auto [--attempts N] [--judge]`, `by judge <FAN|BRANCH...> [--harness ID [--command CMD] | --deterministic] [--rubric TEXT] [--pick [--into T] [--discard-others] [--yes]] [--json]`, `by fleet stats [--kind KIND]|route PROMPT [--kind KIND] [--attempts N] [--seed N] [--json]`; local mode only.
 
@@ -432,6 +432,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Web companion](docs/companion.md): the page at `/app/`, pairing links, its security model and Web Push.
 - [Repository knowledge](docs/knowledge.md): entries proposed from branches, adopted after review, given to matching harnesses.
 - [Plans and goals](docs/plans-and-goals.md): read-only plans approved before execution, and goals a judge verifies.
+- [Warm pools](docs/pools.md): ready worktrees with the prepared environment in place, taken by new branches and refilled by the server.
 - [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
 
