@@ -94,7 +94,8 @@ A seat:
 | `model`, `effort`, `auth`, `telemetry` | As `--model`, `--effort` (`low` … `xhigh` or 0-100), `--auth`, `--telemetry` | `Provisioning` |
 | `secrets` | Names only, such as `["OPENAI_API_KEY"]`. Locally each is read from the variable of that name; on a server, from the operator's table | `Provisioning::secrets` |
 | `mcp` | `{ NAME = "/absolute/command args" }`, as `--mcp NAME=COMMAND` | `Provisioning::mcp_servers` |
-| `isolated` | A private home; a child of an isolated seat is isolated too. Secrets need it on the seat or above | `isolated` |
+| `connectors` | Connector grants, as `--connector` takes them: `["github:read", "github:write:issues.*"]` ([connectors](connectors.md#grants)). Needs `isolated` on the seat or above; a child seat's must be within its parent seat's, checked at plan time, and a spawn narrows it to the parent branch's grant again. A child seat without `connectors` gets none | `Provisioning::connectors` |
+| `isolated` | A private home; a child of an isolated seat is isolated too. Secrets and connectors need it on the seat or above | `isolated` |
 | `budget` | `{max_usd, max_turns, max_minutes}`; `max_minutes` is per turn | The root's `budget`; a child's limits |
 | `check` | `"cargo test"` (split like `--check`) or `["cargo", "test"]`. A child without one keeps its parent's | `check` |
 | `policy` | The root's: `default` (`allow`, `deny` or `ask`; default `deny`), `deny`, `allow`, `delegation_commands`. A child's: `deny` only | The root's `Policy`; a child's denials |

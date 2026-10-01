@@ -32,7 +32,7 @@ pub trait Packager: Send + Sync + std::fmt::Debug {
     fn index(&self, grants: &Path, bundles: &[Bundle], out: &Path) -> Result<(), String>;
 }
 
-/// Anvil's CLI: `anvil package harness <bundle> --out <dir>` and
+/// Anvil's CLI: `anvil package harness <bundle> --out <dir> --connector <id>` and
 /// `anvil connectors index --grants <file> --out INDEX.md <bundle...>`,
 /// over the bundles found under `root`.
 #[derive(Clone, Debug)]
@@ -79,8 +79,17 @@ impl Packager for AnvilPackager {
     }
 
     fn package(&self, bundle: &Bundle, out: &Path) -> Result<(), String> {
-        let (bundle, out) = (bundle.path.display().to_string(), out.display().to_string());
-        self.run(&["package", "harness", &bundle, "--out", &out])
+        let (path, out) = (bundle.path.display().to_string(), out.display().to_string());
+        // The connector id is the folded bundle path, as the fleet serves it.
+        self.run(&[
+            "package",
+            "harness",
+            &path,
+            "--out",
+            &out,
+            "--connector",
+            &bundle.id,
+        ])
     }
 
     fn index(&self, grants: &Path, bundles: &[Bundle], out: &Path) -> Result<(), String> {

@@ -61,7 +61,7 @@ Inside a delegating harness, each command acts as the harness's branch, on its d
 
 | Command | Inside a harness | Outside a harness |
 |---|---|---|
-| `by spawn "<prompt>" [--seat S] [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--depends-on A,B [--after integrated]] [--bind SCRATCH:ACCESS] [--wait]` | Creates a child of this branch and returns once it has started (or, with `--depends-on`, once it is created waiting); `--wait` waits for its turn to end | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
+| `by spawn "<prompt>" [--seat S] [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--depends-on A,B [--after integrated]] [--bind SCRATCH:ACCESS] [--connector GRANT] [--wait]` | Creates a child of this branch and returns once it has started (or, with `--depends-on`, once it is created waiting); `--wait` waits for its turn to end | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
 | `by inspect [<branch>]` | This branch, or a descendant | Any branch |
 | `by events [<branch>] [--cursor N] [--limit N]` | Same | Any branch |
 | `by send <branch> "<prompt>"` | Starts a descendant's next turn and returns | Runs the turn in the foreground, as before |
@@ -182,6 +182,7 @@ A message sits *pending* until it is acknowledged. Acknowledging it (marking it 
 | Cost | A child's `max_usd` must fit in what its parent has left: the parent's limit minus its own spend minus every other child's reservation. A child reserves its whole limit, or what its subtree has spent if that is more. A parent with a cost limit must give each child one. The parent's own turns stop once its spend plus its children's reservations reach its limit. |
 | Turns and duration | A child's are at most its parent's, and default to them. |
 | Permissions | A child runs under its parent's policy with the parent's added denials first (`--deny`). Nothing a child asks for widens it. |
+| Connectors | A child's grant is its parent's, its seat's or its own ask, intersected with its parent's ([below](#connectors)). |
 
 A child's limits and denials are stored with it and bound every later turn, whoever sends it.
 
@@ -190,6 +191,17 @@ Branchyard also ships an opt-in permission rule, `Policy::allow_delegation_comma
 ## Seats
 
 A branch started from a [rig](rigs.md) (`by rig run`, or `TaskOptions::seats`) spawns only by seat: `by spawn --seat NAME`, `branchyard.spawn(..., seat=NAME)`, `Spawn::seat`, or the MCP tool's `seat`, and only the seats its own seat `delegates_to`. The seat fixes the child's harness, check, isolation and instructions and sets limits and denials the request may only narrow; the envelope above still bounds everything. A branch outside a rig cannot name a seat. See [rigs](rigs.md#spawning-by-seat).
+
+## Connectors
+
+A child's connector grant ([connectors](connectors.md)) is only ever narrower than its parent's. It is what the spawn asks for (`by spawn --connector GRANT`, repeatable; `Spawn::connectors`; the MCP `spawn` tool's and a graph proposal's `connectors`; `branchyard.spawn(..., connectors=[...])`), else its seat's `connectors` (a seat that names none gives none), else its parent's grant, and it is always intersected with the parent's: each entry keeps only the operations, mode, confirmation and account both allow. An entry the parent allows nothing of is refused as `denied`, naming it and the parent's grant. A later send that gives a child a new grant is narrowed the same way. The gateway enforces whatever grant a turn's token carries; the narrowing is Branchyard's.
+
+| Parent | Asked | Child |
+|---|---|---|
+| `github:write:issues.*`, `linear:read` | nothing | the same |
+| the same | `github:write+confirm`, `linear:write` | `github:write:issues.*`, `linear:read` |
+| the same | `github:read:issues.list` | `github:read:issues.list` |
+| the same | `slack:read` or `github:read:pulls.*` | refused |
 
 ## Authority and its limits
 
