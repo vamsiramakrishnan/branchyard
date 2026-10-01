@@ -1718,3 +1718,68 @@ fn priority_reaches_the_queue_and_by_stats_summarizes_it() {
     let bad = local(&there, &["run", "x", "--priority", "11"]);
     assert_eq!(bad.status.code(), Some(2), "{}", text(&bad.stderr));
 }
+
+#[test]
+fn plan_and_knowledge_commands_work_against_a_server() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let by = |args: &[&str]| -> Output {
+        let args = with_agent(args);
+        server.by(&dir.0, &args.iter().map(String::as_str).collect::<Vec<_>>())
+    };
+    let ok_json = |args: &[&str]| -> Value {
+        let out = by(args);
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    // A planned run waits on the server; its plan is shown and approved
+    // with an edit made here, in this machine's editor.
+    let out = by(&[
+        "run",
+        "Mark it PERMISSION WRITE marker.txt=x",
+        "--name",
+        "planned",
+        "--plan",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let plan = ok_json(&["plan", "show", "planned", "--json"]);
+    assert_eq!(plan["phase"], "awaiting", "{plan}");
+    let editor = "sh -c 'printf \"WRITE edited.txt=1\" > \"$0\"'";
+    let approved = ok_json(&[
+        "plan", "approve", "planned", "--edit", "--editor", editor, "--yes", "--json",
+    ]);
+    assert_eq!(approved["status"]["state"], "ready", "{approved}");
+    let show = ok_json(&["show", "planned", "--json"]);
+    assert_eq!(show["plan"]["phase"], "approved", "{show}");
+
+    // Knowledge: added and adopted as the server's caller, then given to
+    // the server's next task.
+    let added = ok_json(&["knowledge", "add", "Keep commits small.", "--json"]);
+    assert_eq!(added["status"], "adopted", "{added}");
+    let proposed = ok_json(&[
+        "knowledge",
+        "add",
+        "Notes are dated.",
+        "--propose",
+        "--json",
+    ]);
+    let id = proposed["id"].as_u64().unwrap().to_string();
+    let list = ok_json(&["knowledge", "list", "--status", "proposed", "--json"]);
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    ok_json(&["knowledge", "adopt", &id, "--json"]);
+    let markdown = text(&by(&["knowledge", "export"]).stdout);
+    assert!(markdown.contains("Notes are dated."), "{markdown}");
+    let out = by(&["run", "SHOW_INSTRUCTIONS", "--name", "told", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let log = text(&by(&["log", "told"]).stdout);
+    assert!(
+        log.contains(&format!("knowledge #{}, #{id}", added["id"])),
+        "{log}"
+    );
+    // A harness distiller runs only where its harness does.
+    let refused = by(&["knowledge", "distill", "told", "--harness", "gemini-cli"]);
+    assert!(!refused.status.success());
+}
