@@ -151,7 +151,7 @@ mod postgres {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let mut client = postgres::Client::connect(&base, postgres::NoTls).unwrap();
+        let mut client = ::postgres::Client::connect(&base, ::postgres::NoTls).unwrap();
         client
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"

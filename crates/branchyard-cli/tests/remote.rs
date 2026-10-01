@@ -136,6 +136,9 @@ impl Served {
             "--quiet",
             "--shutdown-grace",
             "5",
+            // Never this machine's real harnesses or usage files; the
+            // inventory is tested in tests/harnesses.rs with fakes.
+            "--no-inventory",
         ]);
         serve.arg("--data-dir").arg(&data);
         for (name, root) in repos {
