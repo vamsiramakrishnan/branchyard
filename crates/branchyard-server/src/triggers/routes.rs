@@ -1,7 +1,10 @@
 //! `/v1/triggers`: create, list, show, enable, disable, test and remove
 //! triggers, read their runs, set a webhook secret; and
 //! `POST /v1/triggers/{id}/fire`, where webhook senders deliver, which is
-//! authenticated by the trigger's own signature instead of a bearer token.
+//! authenticated by the trigger's own signature instead of a bearer token
+//! (and `POST /v1/triggers/{id}/fire/{token}`, for an inbound-mail provider
+//! that signs nothing and cannot send a password: the token is the
+//! trigger's secret).
 //!
 //! A trigger belongs to the tenant of the principal that created it and is
 //! visible only to that tenant's principals who may reach its repository;
@@ -19,6 +22,7 @@ use branchyard_client::triggers::{
     TriggerRun, TriggerRuns, TriggerSpec, TriggerTest, TriggerTestRequest, TriggerToggle, When,
 };
 
+use super::email;
 use super::events::{self, Delivery};
 use super::store::Recorded;
 use super::{engine::Engine, Schedule, StoredTrigger};
@@ -35,14 +39,21 @@ pub(crate) fn router() -> Router<Shared> {
         .route("/v1/triggers/{t}/test", post(test))
         .route("/v1/triggers/{t}/runs", get(runs))
         .route("/v1/triggers/{t}/fire", post(fire))
+        .route("/v1/triggers/{t}/fire/{token}", post(fire_with_token))
 }
 
 /// Whether `path` is a trigger's webhook endpoint, which takes no bearer
-/// token.
+/// token: `/v1/triggers/{id}/fire`, or with one more segment.
 pub fn is_fire(path: &str) -> bool {
-    path.strip_prefix("/v1/triggers/")
-        .and_then(|rest| rest.strip_suffix("/fire"))
-        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+    let Some(rest) = path.strip_prefix("/v1/triggers/") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        [id, "fire"] => !id.is_empty(),
+        [id, "fire", token] => !id.is_empty() && !token.is_empty(),
+        _ => false,
+    }
 }
 
 fn unknown(key: &str) -> ApiError {
@@ -495,6 +506,27 @@ async fn fire(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    deliver(app, id, None, headers, body).await
+}
+
+/// `POST /v1/triggers/{id}/fire/{token}`: the same, for an email source
+/// whose URL carries the secret (or `json`, Mailgun's JSON form).
+async fn fire_with_token(
+    State(app): State<Shared>,
+    Path((id, token)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    deliver(app, id, Some(token), headers, body).await
+}
+
+async fn deliver(
+    app: Shared,
+    id: String,
+    token: Option<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
     if body.len() > app.config.max_body_bytes {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -529,18 +561,32 @@ async fn fire(
             .map(str::to_owned)
     };
     let now = app.triggers.settings.clock.now();
-    let delivery = events::receive(
-        source,
-        &header,
-        &body,
-        &secret,
-        now,
-        trigger.spec.policy.replay_window_seconds,
-    )
-    .map_err(|r| match r.code {
+    let window = trigger.spec.policy.replay_window_seconds;
+    let answer = |r: events::Refused| match r.code {
         "invalid_request" => ApiError::bad_request(r.message),
         code => refused(code, r.message),
-    })?;
+    };
+    let (delivery, nonce) = match (source.is_email(), &token) {
+        (true, _) => {
+            let received = email::receive(
+                source,
+                &header,
+                &body,
+                &secret,
+                token.as_deref(),
+                now,
+                window,
+            )
+            .map_err(answer)?;
+            (received.delivery, received.nonce)
+        }
+        // Only an email source's URL has a segment after /fire.
+        (false, Some(_)) => return Err(unknown(&id)),
+        (false, None) => (
+            events::receive(source, &header, &body, &secret, now, window).map_err(answer)?,
+            None,
+        ),
+    };
     let event = match delivery {
         Delivery::Challenge(challenge) => {
             return Ok(Json(serde_json::json!({ "challenge": challenge })).into_response())
@@ -554,6 +600,16 @@ async fn fire(
         }
         Delivery::Event(event) => *event,
     };
+    // An email from a sender the trigger does not allow is recorded
+    // nowhere. It is answered 200, not refused, so that the provider does
+    // not retry it for days.
+    if let Err(why) = super::sender_allowed(&trigger.spec.conditions, &event) {
+        return Ok(Json(FireAck {
+            ignored: Some(why),
+            ..FireAck::default()
+        })
+        .into_response());
+    }
     if !trigger.enabled {
         return Ok(Json(FireAck {
             ignored: Some(match &trigger.paused_reason {
@@ -581,6 +637,22 @@ async fn fire(
         outcome: None,
         finished_at_ms: None,
     };
+    // A one-time token (Mailgun's form `token`) is spent for this event:
+    // carrying another body, it is a replay.
+    if let Some(nonce) = nonce {
+        let store = app.triggers.store.clone();
+        let (trigger_id, key) = (trigger.id.clone(), run.key.clone());
+        let expires = now.saturating_add(window.saturating_mul(2000));
+        let first = blocking(move || store.claim_nonce(&trigger_id, &nonce, &key, now, expires))
+            .await?
+            .map_err(store_error)?;
+        if first != run.key {
+            return Err(refused(
+                "stale_delivery",
+                "this delivery's token was already used for another message",
+            ));
+        }
+    }
     if let Err(why) = super::matches(&trigger.spec.conditions, run.event.as_ref().expect("set")) {
         run.state = RunState::SkippedCondition;
         run.reason = Some(format!("the conditions do not match: {why}"));
@@ -629,7 +701,9 @@ mod tests {
         assert!(!is_fire("/v1/triggers//fire"));
         assert!(!is_fire("/v1/triggers/a/b/fire"));
         assert!(!is_fire("/v1/triggers/trg_abc"));
-        assert!(!is_fire("/v1/triggers/trg_abc/fire/x"));
+        assert!(is_fire("/v1/triggers/trg_abc/fire/x"));
+        assert!(!is_fire("/v1/triggers/trg_abc/fire/"));
+        assert!(!is_fire("/v1/triggers/trg_abc/fire/x/y"));
         assert!(!is_fire("/v1/repos/app/fire"));
     }
 }

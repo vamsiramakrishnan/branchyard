@@ -100,10 +100,12 @@ pub struct AddArgs {
     /// Fire every DURATION (30m, 2h, 1d; at least a minute)
     #[arg(long, value_name = "DURATION", value_parser = duration, help_heading = "When")]
     pub every: Option<Duration>,
-    /// Fire on webhooks from github, slack, linear or generic
+    /// Fire on webhooks from github, slack, linear or generic, or on email through postmark,
+    /// mailgun or sendgrid (which need --if sender=...)
     #[arg(long, value_name = "SOURCE", help_heading = "When")]
     pub on: Option<EventSource>,
     /// Only events whose FIELD matches: kind, repo, label, author, branch, text (contains);
+    /// for email also sender and recipient (an address or @domain) and subject (contains);
     /// repeatable, all must hold, the same field twice is either
     #[arg(long = "if", value_name = "FIELD=VALUE", help_heading = "When")]
     pub conditions: Vec<String>,
@@ -234,9 +236,13 @@ fn spec(args: &AddArgs, repo: &str) -> Result<TriggerSpec, Failure> {
             "author" => conditions.author.push(value),
             "branch" => conditions.branch.push(value),
             "text" | "text_contains" => conditions.text_contains.push(value),
+            "sender" | "from" => conditions.sender.push(value),
+            "recipient" | "to" => conditions.recipient.push(value),
+            "subject" | "subject_contains" => conditions.subject_contains.push(value),
             other => {
                 return Err(Failure::Message(format!(
-                    "--if {other}=...: use kind, repo, label, author, branch or text"
+                    "--if {other}=...: use kind, repo, label, author, branch, text, or for an \
+                     email sender, recipient or subject"
                 )))
             }
         }
@@ -393,6 +399,9 @@ fn show_one(t: &Trigger, json: bool) -> Outcome {
             ("author", &c.author),
             ("branch", &c.branch),
             ("text", &c.text_contains),
+            ("sender", &c.sender),
+            ("recipient", &c.recipient),
+            ("subject", &c.subject_contains),
         ] {
             if !values.is_empty() {
                 parts.push(format!("{field}={}", values.join("|")));
@@ -547,6 +556,18 @@ fn show_created(created: &TriggerCreated, json: bool, local: bool) -> Outcome {
         out.push_str(&format!(
             "webhook secret (shown once; give it to the sender): {secret}\n"
         ));
+        // Postmark and SendGrid sign nothing: the secret goes in the URL,
+        // as a Basic password or as its last segment.
+        if let (When::Event { source }, Some(url)) = (&t.when, &t.webhook_url) {
+            if matches!(source, EventSource::Postmark | EventSource::Sendgrid) {
+                out.push_str(&format!(
+                    "{} signs nothing: give it the URL with the secret as a Basic password \
+                     (https://branchyard:SECRET@host/...) or as its last segment: \
+                     {url}/{secret}\n",
+                    source.as_str()
+                ));
+            }
+        }
     }
     if local {
         out.push_str(
@@ -926,5 +947,21 @@ mod tests {
         let mut bad = args.clone();
         bad.conditions = vec!["colour=red".into()];
         assert!(spec(&bad, "app").is_err());
+        let mut mail = args.clone();
+        mail.on = Some(EventSource::Mailgun);
+        mail.conditions = vec![
+            "sender=@partner.example".into(),
+            "from=alice@example.com".into(),
+            "to=agent@by.example".into(),
+            "subject=[agent]".into(),
+        ];
+        let s = spec(&mail, "app").unwrap();
+        assert_eq!(
+            s.conditions.sender,
+            ["@partner.example", "alice@example.com"]
+        );
+        assert_eq!(s.conditions.recipient, ["agent@by.example"]);
+        assert_eq!(s.conditions.subject_contains, ["[agent]"]);
+        assert_eq!("sendgrid".parse::<EventSource>(), Ok(EventSource::Sendgrid));
     }
 }

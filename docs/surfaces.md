@@ -465,7 +465,7 @@ Tasks started on a schedule or by a signed webhook; see [triggers](triggers.md).
 | Its connection and server | n/a | `remote ssh status`, `remote ssh stop` | the same, with `--remote ssh://…` naming it | n/a | n/a | no |
 | List, show, trust and untrust recipes | `branchyard_setup::config::RecipeConfig` | `recipe list`, `show`, `trust`, `untrust` | no: a recipe runs on the machine that has the repository; refused | n/a | n/a | no: a harness can never trust |
 | Check a recipe (doctor, then create, exec, suspend, resume, destroy) | `branchyard_recipe::{static_checks, run, RecipeProvider}` | `recipe check [--no-smoke]` | no; refused | n/a | n/a | no |
-| A sandbox on a recipe's machine | `RecipeProvider` (`SandboxProvider`: exec; pause when the recipe has suspend and resume) | not yet (`--provider recipe:NAME` is not wired) | no | no | no | no |
+| A sandbox on a recipe's machine | `RecipeProvider` (`SandboxProvider`: exec; pause when the recipe has suspend and resume) | `--provider recipe:NAME` (see [closing gaps](#added-with-closing-gaps)) | no | no | no | no |
 
 | Surface | Before | Now |
 |---|---|---|
@@ -474,6 +474,29 @@ Tasks started on a schedule or by a signed webhook; see [triggers](triggers.md).
 | `[recipes.NAME]` in `branchyard.toml` and the user file | none | `create`, `suspend`, `resume`, `destroy`, `doctor`, `description`, `timeout_seconds`; in `schema/branchyard.config.json` |
 | Trust file | `[workspace]` digests by repository root | also recipe digests, keyed `<root>#recipe:<name>` |
 | Releases | none | `release.yml` on a `v*` tag: static Linux and macOS archives, `SHA256SUMS`, attestations, a draft release, the image with harnesses; `install.sh`; a Homebrew template ([distribution](distribution.md#prebuilt-binaries)) |
+
+## Added with closing gaps
+
+A branch runs on an [environment recipe's](recipes.md#running-a-branch-on-a-recipes-machine) machine, and [email](triggers.md#email) is a trigger source.
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Run a branch's turns on a recipe's machine | `Provider::Recipe(RecipeOptions)` | `run`, `fan`, `spawn`, `send`, `fork`, `reincarnate` with `--provider recipe:NAME [--recipe-workdir PATH] [--recipe-home PATH] [--pass-env …] [--keep-sandbox pause] [--max-paused N]`; refused while untrusted | no: refused before connecting; a recipe runs where the repository is | no: `403 provider_not_allowed` for a `recipe` provider in any request | the `Provider` type carries it, and the server refuses it | no: a harness cannot use a recipe |
+| Recover or remove a branch on a recipe's machine | `Yard::recover`, `Yard::remove` | any command that opens the branch; `rm` | no | no | no | no |
+| Copy a worktree and home to and from any exec-capable sandbox | `branchyard_substrate::transfer::{Guest, Exec}` | n/a | n/a | n/a | n/a | n/a |
+| An email trigger | `EventSource::{Postmark, Mailgun, Sendgrid}`; `Conditions::{sender, recipient, subject_contains}`; `TriggerEvent::email` (`EmailMessage`, `EmailAttachment`) | `trigger add --on postmark\|mailgun\|sendgrid --if sender=… [--if to=…] [--if subject=…]`; `trigger test --event FILE` | the same | `POST /v1/triggers` (refused without a sender allowlist) | `create_trigger` | no |
+| An inbound-mail delivery | n/a | n/a | n/a | `POST /v1/triggers/{id}/fire` (Basic password or Mailgun's signature) and `POST /v1/triggers/{id}/fire/{token}` (the secret as the last segment, or `json` for Mailgun); no bearer token | n/a | no |
+
+| Surface | Before | Now |
+|---|---|---|
+| `--provider` | `local`, `microsandbox`, `substrate` | also `recipe:NAME`, with `--recipe-workdir` and `--recipe-home`; `--pass-env`, `--keep-sandbox` and `--max-paused` apply to it |
+| `[defaults]` in `branchyard.toml` | `provider = "local" \| "microsandbox"` | also `provider = "recipe"` with `recipe = "NAME"`; in `schema/branchyard.config.json` |
+| `Provider` in `schema/contract.json` | `local`, `microsandbox`, `substrate` | also `recipe` (`RecipeOptions`), which a server refuses |
+| `allow_providers` in a server's configuration | any provider name it knows | `"recipe"` refused with the reason |
+| `EventSource`, `Conditions`, `TriggerEvent` in `schema/contract.json` | four sources; six condition fields | also `postmark`, `mailgun`, `sendgrid`; `sender`, `recipient`, `subject_contains`; `email` |
+| Template placeholders | `event.*` of the normalized event | also `event.from`, `to`, `cc`, `subject`, `message_id`, `attachments` |
+| Webhook endpoint | `POST /v1/triggers/{id}/fire` | also `…/fire/{token}`; the bearer-token exemption covers both |
+| Trigger store | `triggers`, `trigger_runs` (`by_` on PostgreSQL) | also `trigger_nonces` / `by_trigger_nonces`, made like the others (catalog first, each step alone under the advisory lock) |
 
 ## Added with knowledge, plans and goals
 

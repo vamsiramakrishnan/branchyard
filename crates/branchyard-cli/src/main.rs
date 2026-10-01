@@ -154,6 +154,12 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         } => return catalog_cmd::connectors(env, json),
         _ => {}
     }
+    if let (Some(_), Some(recipe)) = (&globals.remote, command.recipe()) {
+        return Err(Failure::Message(format!(
+            "--provider recipe:{recipe} runs on the machine that has the repository: a server \
+             does not run environment recipes (docs/recipes.md). Run it without --remote"
+        )));
+    }
     let target = match &globals.remote {
         Some(_) => Target::Remote(Box::new(remote::Remote::connect(globals)?)),
         None if globals.token_file.is_some() || globals.repo.is_some() => {

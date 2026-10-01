@@ -118,6 +118,16 @@ pub struct ProjectConfig {
     pub knowledge: KnowledgeConfig,
 }
 
+/// Orca's rule for a recipe's name: 1 to 64 lowercase letters, digits,
+/// dots, underscores or hyphens, starting with a letter or digit.
+pub fn valid_recipe_name(name: &str) -> bool {
+    name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
 /// One `[recipes.NAME]`, after Orca's `environmentRecipes` entries: shell
 /// commands run in the repository root. `create` and `resume` print one
 /// JSON object saying how to reach the machine; `suspend`, `resume` and
@@ -170,12 +180,7 @@ impl RecipeConfig {
     /// digit, and a `create` command.
     pub fn check(&self, name: &str) -> Result<(), ConfigError> {
         let key = format!("recipes.{name}");
-        let named = name.len() <= 64
-            && name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-            && name.chars().all(|c| {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
-            });
-        if !named {
+        if !valid_recipe_name(name) {
             return Err(ConfigError(format!(
                 "{key}: use 1-64 lowercase letters, numbers, dots, underscores or hyphens, \
                  starting with a letter or number"
@@ -1073,6 +1078,9 @@ pub struct Defaults {
     /// Where the harness runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderKind>,
+    /// With `provider = "recipe"`: which `[recipes.NAME]` (docs/recipes.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
     /// A file of standing instructions for the harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -1121,6 +1129,9 @@ pub enum ProviderKind {
     /// A microVM per turn; needs `[microsandbox]` and a build with the
     /// `microsandbox` feature.
     Microsandbox,
+    /// The machine an environment recipe makes (`--provider recipe:NAME`);
+    /// `defaults.recipe` names it.
+    Recipe,
 }
 
 /// A Branchyard server to run commands against.
@@ -1334,6 +1345,25 @@ impl ProjectConfig {
             {
                 return fail("defaults.check", "needs a command".into());
             }
+        }
+        match (d.provider, &d.recipe) {
+            (Some(ProviderKind::Recipe), None) => {
+                return fail(
+                    "defaults.recipe",
+                    "provider = \"recipe\" needs recipe = \"NAME\", naming a [recipes.NAME]".into(),
+                )
+            }
+            (Some(ProviderKind::Recipe), Some(name)) if !valid_recipe_name(name) => {
+                return fail("defaults.recipe", format!("{name:?} is not a recipe name"))
+            }
+            (Some(ProviderKind::Recipe), Some(_)) => {}
+            (_, Some(_)) => {
+                return fail(
+                    "defaults.recipe",
+                    "names the recipe for provider = \"recipe\"; set that too".into(),
+                )
+            }
+            _ => {}
         }
         if d.provider == Some(ProviderKind::Microsandbox) && self.microsandbox.is_none() {
             return fail(
@@ -1899,9 +1929,11 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
                 toml_string(match p {
                     ProviderKind::Local => "local",
                     ProviderKind::Microsandbox => "microsandbox",
+                    ProviderKind::Recipe => "recipe",
                 })
             }),
         );
+        line("recipe", d.recipe.as_deref().map(toml_string));
         line("instructions", d.instructions.as_deref().map(toml_string));
     }
     if !config.secrets.is_empty() {

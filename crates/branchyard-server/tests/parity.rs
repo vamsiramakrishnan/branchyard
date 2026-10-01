@@ -4,7 +4,9 @@
 
 mod common;
 
-use branchyard::{BranchStatus, Envelope, Provider, SubstrateOptions, TaskOptions, Yard};
+use branchyard::{
+    BranchStatus, Envelope, Provider, RecipeOptions, SubstrateOptions, TaskOptions, Yard,
+};
 use branchyard_client::api::{
     BudgetSpec, ForkRequest, OperationKind, OperationState, PolicySpec, SendRequest, SpawnRequest,
     TaskRequest,
@@ -50,6 +52,24 @@ fn opt_ins_are_refused_unless_the_operator_allows_them() {
     );
     assert_eq!((status, code.as_str()), (403, "provider_not_allowed"));
     assert!(message.contains("--allow-provider substrate"), "{message}");
+    // A recipe's commands come in the request: never run, whatever the
+    // operator allows (docs/recipes.md).
+    let (status, code, message) = refused(
+        &client,
+        &TaskRequest {
+            provider: Some(Provider::Recipe(RecipeOptions {
+                name: "devbox".into(),
+                create: "touch /tmp/never-run".into(),
+                ..RecipeOptions::default()
+            })),
+            ..task("x", "vm")
+        },
+    );
+    assert_eq!((status, code.as_str()), (403, "provider_not_allowed"));
+    assert!(
+        message.contains("a server does not run environment recipes"),
+        "{message}"
+    );
     for (request, code) in [
         (
             TaskRequest {

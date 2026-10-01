@@ -5,7 +5,8 @@
 //! A trigger is a durable server object that creates an ordinary task
 //! when it fires: on a cron schedule, at an interval, or when a signed
 //! webhook from GitHub, Slack, Linear or any JSON sender arrives at its
-//! own URL. Its task is a [`TaskRequest`] whose prompt (and branch name)
+//! own URL, or an email arrives through an inbound-mail provider's
+//! webhook (Postmark, Mailgun, SendGrid). Its task is a [`TaskRequest`] whose prompt (and branch name)
 //! may hold `{{event.*}}` placeholders.
 
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,18 @@ pub enum EventSource {
     Linear,
     /// `X-Branchyard-Signature: sha256=<hex>` over any JSON object.
     Generic,
+    /// Postmark's inbound webhook (JSON): HTTP Basic authentication with
+    /// the trigger's secret as the password, or the secret as the URL's
+    /// last segment; Postmark signs nothing.
+    Postmark,
+    /// Mailgun's route forwarding (a form, or JSON to a URL ending in
+    /// `json`): HMAC-SHA256 with the webhook signing key over the
+    /// timestamp and token (form) or the timestamp and body (JSON).
+    Mailgun,
+    /// SendGrid's Inbound Parse (multipart form): HTTP Basic
+    /// authentication or the secret as the URL's last segment, as for
+    /// Postmark.
+    Sendgrid,
 }
 
 impl EventSource {
@@ -74,7 +87,18 @@ impl EventSource {
             EventSource::Slack => "slack",
             EventSource::Linear => "linear",
             EventSource::Generic => "generic",
+            EventSource::Postmark => "postmark",
+            EventSource::Mailgun => "mailgun",
+            EventSource::Sendgrid => "sendgrid",
         }
+    }
+
+    /// Whether its deliveries are emails, which need a sender allowlist.
+    pub fn is_email(self) -> bool {
+        matches!(
+            self,
+            EventSource::Postmark | EventSource::Mailgun | EventSource::Sendgrid
+        )
     }
 }
 
@@ -87,8 +111,12 @@ impl std::str::FromStr for EventSource {
             "slack" => Ok(EventSource::Slack),
             "linear" => Ok(EventSource::Linear),
             "generic" => Ok(EventSource::Generic),
+            "postmark" => Ok(EventSource::Postmark),
+            "mailgun" => Ok(EventSource::Mailgun),
+            "sendgrid" => Ok(EventSource::Sendgrid),
             other => Err(format!(
-                "{other:?} is not an event source; use github, slack, linear or generic"
+                "{other:?} is not an event source; use github, slack, linear, generic, postmark, \
+                 mailgun or sendgrid"
             )),
         }
     }
@@ -123,6 +151,18 @@ pub struct Conditions {
     /// mention.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text_contains: Vec<String>,
+    /// Email only, and required there: the senders allowed, each an exact
+    /// address (`alice@example.com`) or a domain (`@example.com`), ignoring
+    /// case. A delivery from anyone else is refused, and recorded nowhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sender: Vec<String>,
+    /// Email only: one of the message's recipients (To, Cc or the
+    /// envelope's), as an address or a `@domain`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recipient: Vec<String>,
+    /// Email only: text the subject contains, ignoring case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subject_contains: Vec<String>,
 }
 
 impl Conditions {
@@ -329,14 +369,16 @@ pub struct TriggerTestRequest {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TriggerEvent {
-    /// `github`, `slack`, `linear` or `generic`.
+    /// `github`, `slack`, `linear`, `generic`, `postmark`, `mailgun` or
+    /// `sendgrid`.
     pub source: String,
     /// Such as `issues.opened`, `issue_comment.created`,
     /// `pull_request.synchronize`, `check_suite.failure`, `app_mention`,
-    /// `issue.create`.
+    /// `issue.create`, `email.received`.
     pub kind: String,
     /// The event's ID, from the signed bytes only: Slack's `event_id`, a
-    /// generic body's `id`, else a hash of the body. With the trigger's,
+    /// generic body's `id`, an email's `Message-ID`, else a hash of the
+    /// body. With the trigger's,
     /// the key that keeps a redelivery from firing twice.
     pub id: String,
     /// The sender's delivery ID header (`X-GitHub-Delivery`,
@@ -362,9 +404,71 @@ pub struct TriggerEvent {
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
-    /// The delivery's body as sent.
+    /// An email's message, read from the provider's delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<EmailMessage>,
+    /// The delivery's body as sent; for an email, the [`EmailMessage`]
+    /// with its text instead (never attachments' contents or HTML).
     #[serde(default)]
     pub payload: Value,
+}
+
+/// An inbound email, as an email trigger reads it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EmailMessage {
+    /// The From address, lowercased.
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_name: Option<String>,
+    /// To addresses, lowercased.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cc: Vec<String>,
+    /// Where the provider delivered it (the envelope's recipients), when it
+    /// says.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub envelope_to: Vec<String>,
+    #[serde(default)]
+    pub subject: String,
+    /// The `Message-ID` header, without its angle brackets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// The plain text body, or the HTML body with its markup removed; at
+    /// most 64 KiB.
+    #[serde(default)]
+    pub text: String,
+    /// Whether `text` was cut.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_truncated: bool,
+    /// What the attachments are; never their contents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<EmailAttachment>,
+    /// The provider's SPF verdict (`pass`, `fail`, `softfail`, ...), when
+    /// it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spf: Option<String>,
+    /// The provider's DKIM verdict, when it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dkim: Option<String>,
+    /// The provider flagged it as spam.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spam: bool,
+}
+
+/// One attachment's metadata.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailAttachment {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_type: String,
+    /// In bytes, when the provider says or it can be measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 /// What a precheck did; Orca's `AutomationPrecheckResult`.

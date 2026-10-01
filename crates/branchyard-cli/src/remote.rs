@@ -120,7 +120,14 @@ pub const REMOTE_DENY_NOTICE: &str = "remote mode cannot ask, so tool permission
 /// `--pass-env` names are the server's: a Substrate key is not made
 /// absolute here, since a relative path would name a file on this machine.
 fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
-    let mut provider = commands::provider(task);
+    if let Some(recipe) = &task.recipe {
+        return Err(Failure::Message(format!(
+            "--provider recipe:{} runs on the machine that has the repository: a server does not \
+             run environment recipes (docs/recipes.md). Run it without --remote",
+            recipe.name
+        )));
+    }
+    let mut provider = commands::provider(task)?;
     if let (Some(Provider::Substrate(options)), Some(args)) = (&mut provider, &task.substrate) {
         options.key = args.key.clone().into();
         if !options.key.is_absolute() {
@@ -176,6 +183,12 @@ fn announce(remote: &Remote, notice: Option<&str>, provider: Option<&Provider>) 
              (unqualified), reached from the server",
             remote.label(),
             options.template
+        ),
+        // Refused before anything is sent (see `provider`).
+        Some(Provider::Recipe(options)) => eprintln!(
+            "by: remote mode on {}: recipe {} is not run by a server",
+            remote.label(),
+            options.name
         ),
     }
     if let Some(notice) = notice {

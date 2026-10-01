@@ -1145,6 +1145,11 @@ pub enum Provider {
     /// Branchyard bridge and has the harness installed. Unqualified: see
     /// `docs/substrate.md`.
     Substrate(SubstrateOptions),
+    /// A machine an environment recipe's scripts make, per turn (or kept
+    /// paused between turns when the recipe can suspend and resume),
+    /// reached over ssh or the recipe's exec command; the worktree and the
+    /// private home are copied in and back. See `docs/recipes.md`.
+    Recipe(RecipeOptions),
 }
 
 /// A sandboxed harness's image, limits and credentials.
@@ -1273,6 +1278,80 @@ impl SubstrateOptions {
         match self.home.is_empty() {
             true => placement::HOME,
             false => &self.home,
+        }
+    }
+}
+
+/// An environment recipe a branch's harness runs on, as it was trusted when
+/// the branch was given it: its commands are stored with the branch, so
+/// every later turn, its recovery and its removal run what was trusted,
+/// not what the configuration says by then. Resolved and trust-checked by
+/// the caller (`by run --provider recipe:NAME`); see `docs/recipes.md`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RecipeOptions {
+    /// The recipe's name, `[recipes.NAME]`.
+    pub name: String,
+    /// Prints the new machine's result (`create`).
+    pub create: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+    /// As written: `"none"` disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destroy: Option<String>,
+    /// Per script; unset: 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    /// The SHA-256 of the commands that were trusted, for messages.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub digest: String,
+    /// Where the worktree is placed on the machine. Empty means
+    /// `/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this
+    /// repository's branch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workdir: String,
+    /// The harness's `HOME` on the machine. Empty means the same directory's
+    /// `home`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub home: String,
+    /// Variables copied by name from this process to the machine. Names
+    /// are stored with the branch; values are not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pass_env: Vec<String>,
+    /// Destroy the machine when a turn ends (the default), or suspend it
+    /// for the next turn; pausing needs both `suspend` and `resume`.
+    #[serde(default, skip_serializing_if = "SandboxKeep::is_destroy")]
+    pub keep: SandboxKeep,
+    /// At most this many kept machines of this recipe in the repository;
+    /// parking one more destroys the least recently used. Unset: 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_paused: Option<u32>,
+}
+
+impl RecipeOptions {
+    /// The default directory on the machine for `worktree`'s branch
+    /// `branch`: `/tmp/branchyard/<branch>-<8 hex of the worktree path>`.
+    fn base(branch: &str, worktree: &std::path::Path) -> String {
+        let hash = blake3::hash(worktree.as_os_str().as_encoded_bytes());
+        format!("/tmp/branchyard/{branch}-{}", &hash.to_hex().as_str()[..8])
+    }
+
+    /// [`RecipeOptions::workdir`], defaulted for the branch whose worktree
+    /// is `worktree`.
+    pub fn workdir(&self, branch: &str, worktree: &std::path::Path) -> String {
+        match self.workdir.is_empty() {
+            true => format!("{}/workspace", RecipeOptions::base(branch, worktree)),
+            false => self.workdir.clone(),
+        }
+    }
+
+    /// [`RecipeOptions::home`], defaulted likewise.
+    pub fn home(&self, branch: &str, worktree: &std::path::Path) -> String {
+        match self.home.is_empty() {
+            true => format!("{}/home", RecipeOptions::base(branch, worktree)),
+            false => self.home.clone(),
         }
     }
 }

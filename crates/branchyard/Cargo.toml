@@ -25,6 +25,7 @@ branchyard-microsandbox = { path = "../branchyard-microsandbox" }
 branchyard-provision = { path = "../branchyard-provision" }
 branchyard-runtime = { path = "../branchyard-runtime" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
+branchyard-recipe = { path = "../branchyard-recipe" }
 branchyard-substrate = { path = "../branchyard-substrate" }
 branchyard-workspace = { path = "../branchyard-workspace" }
 serde = { version = "1", features = ["derive"] }

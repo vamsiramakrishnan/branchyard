@@ -898,6 +898,11 @@ pub const PROVIDERS: &[&str] = &["local", "microsandbox", "substrate"];
 pub fn check_provider_name(name: &str) -> Result<(), String> {
     match PROVIDERS.contains(&name) {
         true => Ok(()),
+        false if name == "recipe" => Err(
+            "\"recipe\" cannot be allowed: a server never runs environment recipes, which run \
+             where the repository is, as the person who trusted them (docs/recipes.md)"
+                .into(),
+        ),
         false => Err(format!(
             "{name:?} is not a provider; allow one of {}",
             PROVIDERS.join(", ")

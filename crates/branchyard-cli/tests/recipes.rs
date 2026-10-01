@@ -283,3 +283,292 @@ fn a_failing_doctor_or_create_fails_the_check_and_your_own_recipes_need_no_trust
     assert!(!out.status.success());
     assert!(text(&out.stdout).contains("recipes.Bad") || text(&out.stderr).contains("recipes.Bad"));
 }
+
+/// Build `bin` of `package` next to `by`; cargo exposes a binary's path
+/// only to its own package's tests.
+fn built(package: &str, bin: &str) -> PathBuf {
+    let profile_dir = Path::new(BY).parent().unwrap().to_path_buf();
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command
+        .args(["build", "--quiet", "--offline", "--manifest-path"])
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+        .args(["-p", package, "--bin", bin])
+        .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
+    match profile_dir.file_name().and_then(|n| n.to_str()) {
+        Some("debug") => {}
+        Some("release") => {
+            command.arg("--release");
+        }
+        Some(other) => {
+            command.args(["--profile", other]);
+        }
+        None => panic!("unexpected binary location {BY}"),
+    }
+    assert!(command.status().unwrap().success(), "building {bin} failed");
+    profile_dir.join(bin)
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", text(&out.stderr));
+    text(&out.stdout)
+}
+
+impl Repo {
+    /// With a first commit, so branches can be made.
+    fn committed() -> Repo {
+        let repo = Repo::new();
+        fs::write(repo.root.join(".gitignore"), ".vms/\n").unwrap();
+        git(&repo.root, &["add", "."]);
+        git(
+            &repo.root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@localhost",
+                "commit",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        repo
+    }
+
+    /// The `--provider recipe:devbox` flags, with the machine's paths in
+    /// this test's directory.
+    fn recipe_flags(&self) -> Vec<String> {
+        let base = self.root.parent().unwrap();
+        vec![
+            "--provider".into(),
+            "recipe:devbox".into(),
+            "--recipe-workdir".into(),
+            base.join("vm-home/work").display().to_string(),
+            "--recipe-home".into(),
+            base.join("vm-home/home").display().to_string(),
+        ]
+    }
+
+    fn run_on_recipe(&self, agent: &Path, prompt: &str, name: &str, extra: &[&str]) -> Output {
+        let mut args: Vec<String> = [
+            "run",
+            prompt,
+            "--name",
+            name,
+            "--harness",
+            "gemini-cli",
+            "--yes",
+            "--command",
+            agent.to_str().unwrap(),
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        args.extend(self.recipe_flags());
+        args.extend(extra.iter().map(|a| (*a).to_owned()));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut command = Command::new(BY);
+        command
+            .current_dir(&self.root)
+            .args(&args)
+            .env("BRANCHYARD_TRUST_FILE", &self.trust)
+            .env("BRANCHYARD_USER_CONFIG", &self.user)
+            .env("BRANCHYARD_SSH", &self.ssh)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null());
+        for var in [
+            "BRANCHYARD_BRANCH",
+            "BRANCHYARD_REMOTE",
+            "BRANCHYARD_DELEGATION",
+            "BRANCHYARD_ROOT",
+            "BRANCHYARD_BY",
+        ] {
+            command.env_remove(var);
+        }
+        command.output().unwrap()
+    }
+}
+
+#[test]
+fn by_run_on_a_recipe_machine_brings_the_work_back_and_rm_destroys_a_kept_one() {
+    let repo = Repo::committed();
+    let agent = built("branchyard-runtime", "fake-acp-agent");
+
+    // Untrusted: refused before anything is created.
+    let out = repo.run_on_recipe(&agent, "WRITE hello.txt=hi", "hello", &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let said = text(&out.stderr);
+    assert!(said.contains("has commands you have not trusted"), "{said}");
+    assert!(said.contains("by recipe trust devbox"), "{said}");
+    assert!(vms(&repo.root).is_empty());
+    assert!(!repo.root.join(".branchyard/worktrees/hello").exists());
+
+    let out = repo.by(&["recipe", "trust", "devbox"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let out = repo.run_on_recipe(&agent, "WRITE hello.txt=hi", "hello", &[]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stderr.contains("machines recipe devbox makes"), "{stderr}");
+    assert!(
+        stdout.contains("wrote hello.txt") && stdout.contains("ready"),
+        "{stdout}"
+    );
+    // The file the harness wrote on the machine is in the branch's diff.
+    let out = repo.by(&["diff", "hello"]);
+    let diff = text(&out.stdout);
+    assert!(diff.contains("hello.txt") && diff.contains("+hi"), "{diff}");
+    // Its machine was created and destroyed through the recipe.
+    let made = vms(&repo.root);
+    assert!(
+        made.iter()
+            .any(|n| n.starts_with("by-hello-") && n.ends_with(".destroyed")),
+        "{made:?}"
+    );
+
+    // A kept machine is suspended between turns, and `by rm` destroys it.
+    let out = repo.run_on_recipe(
+        &agent,
+        "WRITE kept.txt=k",
+        "kept",
+        &["--keep-sandbox", "pause"],
+    );
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    let kept: Vec<String> = vms(&repo.root)
+        .into_iter()
+        .filter(|n| n.starts_with("by-kept-"))
+        .collect();
+    assert_eq!(kept.len(), 1, "created, not destroyed: {kept:?}");
+    let records = repo.root.join(".branchyard/recipes");
+    assert_eq!(fs::read_dir(&records).unwrap().count(), 1);
+    let out = repo.by(&["rm", "kept"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        vms(&repo.root)
+            .iter()
+            .any(|n| n == &format!("{}.destroyed", kept[0])),
+        "{:?}",
+        vms(&repo.root)
+    );
+    assert_eq!(fs::read_dir(&records).unwrap().count(), 0);
+
+    // A server does not run recipes: refused before anything is sent.
+    let token = repo.root.parent().unwrap().join("token");
+    fs::write(&token, "by_test_token\n").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    let out = repo.by(&[
+        "--remote",
+        "http://127.0.0.1:9",
+        "--token-file",
+        token.to_str().unwrap(),
+        "run",
+        "go",
+        "--provider",
+        "recipe:devbox",
+    ]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("a server does not run environment recipes"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn defaults_can_choose_a_recipe_and_a_changed_recipe_is_refused_again() {
+    let repo = Repo::committed();
+    let agent = built("branchyard-runtime", "fake-acp-agent");
+    let out = repo.by(&["recipe", "trust", "devbox"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let config = format!("{RECIPE}\n[defaults]\nprovider = \"recipe\"\nrecipe = \"devbox\"\n");
+    fs::write(repo.root.join("branchyard.toml"), &config).unwrap();
+    let out = repo.by(&["config", "validate"]);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    let out = Command::new(BY)
+        .current_dir(&repo.root)
+        .args([
+            "run",
+            "WRITE d.txt=d",
+            "--name",
+            "by-default",
+            "--harness",
+            "gemini-cli",
+            "--yes",
+            "--command",
+            agent.to_str().unwrap(),
+        ])
+        .env("BRANCHYARD_TRUST_FILE", &repo.trust)
+        .env("BRANCHYARD_USER_CONFIG", &repo.user)
+        .env("BRANCHYARD_SSH", &repo.ssh)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("NO_COLOR", "1")
+        .env_remove("BRANCHYARD_BRANCH")
+        .env_remove("BRANCHYARD_REMOTE")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    // The default workdir is under /tmp/branchyard on the machine; here
+    // the "machine" is this host.
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stderr.contains("machines recipe devbox makes"), "{stderr}");
+    assert!(
+        vms(&repo.root)
+            .iter()
+            .any(|n| n.starts_with("by-by-default-") && n.ends_with(".destroyed")),
+        "{:?}",
+        vms(&repo.root)
+    );
+    let worktree = repo.root.join(".branchyard/worktrees/by-default");
+    let workdir =
+        PathBuf::from(branchyard::RecipeOptions::default().workdir("by-default", &worktree));
+    assert!(
+        workdir.starts_with("/tmp/branchyard") && workdir.join("d.txt").is_file(),
+        "{}",
+        workdir.display()
+    );
+    let _ = fs::remove_dir_all(workdir.parent().unwrap());
+
+    // A recipe changed since it was trusted is refused again.
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        config.replace("./vm/destroy.sh", "./vm/destroy.sh --force"),
+    )
+    .unwrap();
+    let out = repo.run_on_recipe(&agent, "WRITE x=1", "changed", &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("changed since you trusted it"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // `[defaults] recipe` alone, or naming no valid recipe, is refused.
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        format!("{RECIPE}\n[defaults]\nrecipe = \"devbox\"\n"),
+    )
+    .unwrap();
+    let out = repo.by(&["config", "validate"]);
+    assert!(!out.status.success());
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(said.contains("defaults.recipe"), "{said}");
+}

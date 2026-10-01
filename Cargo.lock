@@ -639,6 +639,7 @@ dependencies = [
  "branchyard-harness",
  "branchyard-microsandbox",
  "branchyard-provision",
+ "branchyard-recipe",
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-substrate",
