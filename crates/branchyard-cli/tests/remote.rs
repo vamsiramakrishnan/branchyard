@@ -227,8 +227,16 @@ fn text(bytes: &[u8]) -> String {
 /// paths, commit IDs and times.
 fn normalize(text: &str, root: &Path) -> String {
     let text = text.replace(&root.display().to_string(), "<root>");
+    // A table's AGE column is relative to when each side ran, which can
+    // differ by seconds under load: compare the rest of the row.
+    let aged = text.lines().next().is_some_and(|h| h.ends_with(" AGE"));
     let mut out = String::new();
     for line in text.lines() {
+        let line = if aged {
+            mask_age(line)
+        } else {
+            line.to_owned()
+        };
         let line = match line.get(..24) {
             Some(stamp) if stamp.as_bytes()[10] == b'T' && stamp.ends_with('Z') => {
                 format!("<time>{}", &line[24..])
@@ -239,6 +247,22 @@ fn normalize(text: &str, root: &Path) -> String {
         out.push('\n');
     }
     out
+}
+
+/// A row's last field, when it is an age such as `now` or `12s`, becomes
+/// `<age>`.
+fn mask_age(line: &str) -> String {
+    let Some((rest, age)) = line.rsplit_once(' ') else {
+        return line.to_owned();
+    };
+    let unit = age.strip_suffix(['s', 'm', 'h', 'd']);
+    let is_age = age == "now"
+        || unit.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if is_age {
+        format!("{rest} <age>")
+    } else {
+        line.to_owned()
+    }
 }
 
 /// Runs of 7 or more hex digits containing a digit become `<sha>`.

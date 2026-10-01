@@ -495,10 +495,74 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
         .env("TERM", "xterm")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null());
     let mut process = watch.spawn().unwrap();
     let mut keys = process.stdin.take().unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
+    // Everything drawn so far, read as it comes, so each key is typed only
+    // once the dashboard is ready for it rather than after a guessed delay.
+    let screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let reader = {
+        let screen = screen.clone();
+        let mut out = process.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = out.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                screen.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        })
+    };
+    let drawn = || screen.lock().unwrap().len();
+    // Cells are drawn with cursor moves between them, so compare the
+    // printable characters only: escapes and spaces removed on both sides.
+    let printable = |raw: &str| {
+        let mut out = String::new();
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => match chars.next() {
+                    Some('[') => while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {},
+                    Some(']') => {
+                        while let Some(c) = chars.next() {
+                            if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                c if c.is_whitespace() || c.is_control() => {}
+                c => out.push(c),
+            }
+        }
+        out
+    };
+    let shows_after = |from: usize, text: &str| {
+        let seen = screen.lock().unwrap();
+        printable(&String::from_utf8_lossy(&seen[from.min(seen.len())..]))
+            .contains(&printable(text))
+    };
+    let wait_for = |from: usize, text: &str| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !shows_after(from, text) {
+            assert!(Instant::now() < deadline, "{text:?} never drawn");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    // The alternate screen is entered after raw mode, so keys typed once a
+    // row is drawn there are not flushed with the cooked-mode buffer.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let entered = loop {
+        if let Some(at) = String::from_utf8_lossy(&screen.lock().unwrap()).find("\x1b[?1049h") {
+            break at;
+        }
+        assert!(Instant::now() < deadline, "the dashboard never started");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    wait_for(entered, "ready");
     // A follow-up first: `s`, a line of text, Enter; it runs in the
     // background while the dashboard carries on.
     keys.write_all(b"sWRITE x.txt=2\r").unwrap();
@@ -514,22 +578,36 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    std::thread::sleep(Duration::from_millis(500));
-    keys.write_all(b"m").unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    // `m` asks only once the dashboard has seen the branch ready again;
+    // until its question (its `n not now` choice) is drawn, ask again.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let from = drawn();
+        keys.write_all(b"m").unwrap();
+        let asked = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < asked && !shows_after(from, "not now") {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if shows_after(from, "not now") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "m never asked to merge");
+    }
+    let from = drawn();
     keys.write_all(b"y").unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     while !fs::read_to_string(repo.root.join("x.txt")).is_ok_and(|t| t == "2\n") {
         assert!(Instant::now() < deadline, "the merge did not happen");
         std::thread::sleep(Duration::from_millis(100));
     }
-    // Let the result reach the screen, then quit.
-    std::thread::sleep(Duration::from_millis(1000));
+    // The result reaches the screen, then quit.
+    wait_for(from, "merged w into main (");
     keys.write_all(b"qq").unwrap();
     drop(keys);
-    let out = process.wait_with_output().unwrap();
-    let screen = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{screen}");
+    let status = process.wait().unwrap();
+    reader.join().unwrap();
+    let screen = String::from_utf8_lossy(&screen.lock().unwrap()).into_owned();
+    assert!(status.success(), "{screen}");
     // ratatui redraws only changed cells, so look for whole runs only.
     for expected in [
         "running: by send w 'WRITE x.txt=2'",
