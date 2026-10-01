@@ -4,12 +4,17 @@
 //!
 //! | Source | Signature | Replay window | Event ID |
 //! |---|---|---|---|
-//! | GitHub | `X-Hub-Signature-256: sha256=HMAC(secret, body)` | none (GitHub sends no timestamp; the delivery ID deduplicates) | `X-GitHub-Delivery` |
+//! | GitHub | `X-Hub-Signature-256: sha256=HMAC(secret, body)` | none (GitHub signs no timestamp) | a hash of the body |
 //! | Slack | `X-Slack-Signature: v0=HMAC(secret, "v0:" ts ":" body)` | `X-Slack-Request-Timestamp` | `event_id` |
-//! | Linear | `Linear-Signature: HMAC(secret, body)` | `webhookTimestamp` in the body | `Linear-Delivery` |
-//! | Generic | `X-Branchyard-Signature: sha256=HMAC(secret, body)` | none | `X-Branchyard-Event-Id`, else the body's `id` |
+//! | Linear | `Linear-Signature: HMAC(secret, body)` | `webhookTimestamp` in the body | a hash of the body |
+//! | Generic | `X-Branchyard-Signature: sha256=HMAC(secret, body)` | none | the body's `id`, else a hash of the body |
 //!
-//! Every HMAC is SHA-256, hex-encoded, compared in constant time.
+//! Every HMAC is SHA-256, hex-encoded, compared in constant time. An
+//! event's ID comes only from the signed bytes: a delivery ID header is not
+//! signed, so a captured delivery replayed under a new one would otherwise
+//! be a new event. It is kept as `delivery`, for looking a delivery up at
+//! its sender. A sender's own redelivery sends the same body, and is the
+//! same event.
 
 use branchyard_client::triggers::{EventSource, TriggerEvent};
 use hmac::{Hmac, KeyInit, Mac};
@@ -184,7 +189,7 @@ pub fn receive(
             .ok_or_else(|| refused("stale_delivery", "the delivery has no webhookTimestamp"))?;
         fresh(at)?;
     }
-    let id = match source {
+    let delivery = match source {
         EventSource::Github => header("x-github-delivery"),
         EventSource::Linear => header("linear-delivery"),
         EventSource::Generic => header("x-branchyard-event-id"),
@@ -194,34 +199,38 @@ pub fn receive(
         EventSource::Github => header("x-github-event"),
         _ => None,
     };
-    read(source, kind.as_deref(), id.as_deref(), &payload, body)
+    read(source, kind.as_deref(), delivery.as_deref(), &payload, body)
         .map_err(|e| refused("invalid_request", e))
 }
 
 /// Read a delivery body of `source` without verifying it: for a trigger
 /// test, and after [`receive`] verified it. `kind` is GitHub's
-/// `X-GitHub-Event` (inferred from the body's shape when `None`); `id`
-/// the delivery's ID header, if any.
+/// `X-GitHub-Event` (inferred from the body's shape when `None`);
+/// `delivery` the delivery's ID header, if any.
 pub fn read(
     source: EventSource,
     kind: Option<&str>,
-    id: Option<&str>,
+    delivery: Option<&str>,
     payload: &Value,
     body: &[u8],
 ) -> Result<Delivery, String> {
     if !payload.is_object() {
         return Err("the body is not a JSON object".into());
     }
-    let id = id
-        .filter(|i| !i.trim().is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| body_hash(body));
-    match source {
+    let id = body_hash(body);
+    let read = match source {
         EventSource::Github => github(kind, id, payload),
         EventSource::Slack => slack(payload, id),
         EventSource::Linear => linear(payload, id),
         EventSource::Generic => Ok(generic(payload, id)),
-    }
+    };
+    read.map(|delivered| match delivered {
+        Delivery::Event(mut e) => {
+            e.delivery = delivery.filter(|d| !d.trim().is_empty()).map(str::to_owned);
+            Delivery::Event(e)
+        }
+        other => other,
+    })
 }
 
 fn text(value: &Value, path: &[&str]) -> Option<String> {
@@ -474,7 +483,24 @@ mod tests {
             panic!("an event")
         };
         assert_eq!(e.kind, "issues.labeled");
-        assert_eq!(e.id, "d-1");
+        assert_eq!(e.delivery.as_deref(), Some("d-1"));
+        // The ID is the signed body's, not the unsigned header's: the same
+        // body under another delivery ID is the same event.
+        assert_eq!(e.id.len(), 32);
+        let other = headers(&[
+            (
+                "x-hub-signature-256",
+                format!("sha256={}", sign("s3cret", &[&body])),
+            ),
+            ("x-github-event", "issues".into()),
+            ("x-github-delivery", "d-replayed".into()),
+        ]);
+        let Delivery::Event(again) =
+            receive(EventSource::Github, &other, &body, "s3cret", NOW, 300).unwrap()
+        else {
+            panic!("an event")
+        };
+        assert_eq!(again.id, e.id);
         assert_eq!(e.repo.as_deref(), Some("acme/app"));
         assert_eq!(e.number.as_deref(), Some("42"));
         assert_eq!(e.author.as_deref(), Some("alice"));
@@ -653,7 +679,7 @@ mod tests {
             panic!()
         };
         assert_eq!(e.kind, "issue.create");
-        assert_eq!(e.id, "ld-1");
+        assert_eq!(e.delivery.as_deref(), Some("ld-1"));
         assert_eq!(e.number.as_deref(), Some("ENG-12"));
         assert_eq!(e.repo.as_deref(), Some("ENG"));
         assert_eq!(e.labels, ["agent"]);

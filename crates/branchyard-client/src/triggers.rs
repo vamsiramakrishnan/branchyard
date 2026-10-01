@@ -335,9 +335,15 @@ pub struct TriggerEvent {
     /// `pull_request.synchronize`, `check_suite.failure`, `app_mention`,
     /// `issue.create`.
     pub kind: String,
-    /// The delivery's or event's own ID: with the trigger's, the key that
-    /// keeps a redelivery from firing twice.
+    /// The event's ID, from the signed bytes only: Slack's `event_id`, a
+    /// generic body's `id`, else a hash of the body. With the trigger's,
+    /// the key that keeps a redelivery from firing twice.
     pub id: String,
+    /// The sender's delivery ID header (`X-GitHub-Delivery`,
+    /// `Linear-Delivery`, `X-Branchyard-Event-Id`), for looking a delivery
+    /// up at the sender; not signed, so not part of the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

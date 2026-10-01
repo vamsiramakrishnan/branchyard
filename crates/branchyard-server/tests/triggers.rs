@@ -208,16 +208,23 @@ fn github_deliveries_are_verified_matched_rendered_and_never_fired_twice() {
     assert!(diff.contains("issue-42.txt"), "{diff}");
     assert!(diff.contains("Parser-crash"), "{diff}");
 
-    // GitHub redelivers: the same delivery ID is the same run.
-    let (status, ack) = deliver(
-        &server,
-        &id,
-        &github_headers("gh-secret", "issues", "d-1", &body),
-        &body,
+    // GitHub redelivers the same body: the same run. So is a captured
+    // delivery replayed under a new (unsigned) delivery ID.
+    for delivery in ["d-1", "d-1-replayed"] {
+        let (status, ack) = deliver(
+            &server,
+            &id,
+            &github_headers("gh-secret", "issues", delivery, &body),
+            &body,
+        );
+        assert_eq!(status, 200, "{ack}");
+        assert_eq!(ack["duplicate"], true);
+        assert_eq!(ack["run"]["id"], serde_json::json!(fired.id));
+    }
+    assert_eq!(
+        fired.event.as_ref().unwrap().delivery.as_deref(),
+        Some("d-1")
     );
-    assert_eq!(status, 200, "{ack}");
-    assert_eq!(ack["duplicate"], true);
-    assert_eq!(ack["run"]["id"], serde_json::json!(fired.id));
     // A wrong signature, a missing one, or a tampered body: 401.
     let (status, ack) = deliver(
         &server,

@@ -184,6 +184,24 @@
           "type": "null"
         }
       ]
+    },
+    "public_url": {
+      "description": "This server's URL as webhook senders reach it (behind a proxy, its\npublic address): the base of each event trigger's webhook URL.\nDefault: http(s)://<listen>. See docs/triggers.md.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "allow_trigger_prechecks": {
+      "description": "Let triggers of served repositories run a precheck command before\nfiring: `true` for every repository, or a list of repository names.\nOff by default; see docs/triggers.md.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileWorkspaceScripts"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
