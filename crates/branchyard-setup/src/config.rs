@@ -655,6 +655,79 @@ pub struct WorkspaceConfig {
     /// copy of its own (`node_modules`). Literal relative paths.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub share: Vec<String>,
+    /// A warm pool (docs/pools.md): worktrees made ready, with the prepared
+    /// environment in place, before a branch asks for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<PoolConfig>,
+}
+
+/// A warm pool: `[workspace.pool]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PoolConfig {
+    /// Ready worktrees kept, 0 to 32. `by serve` and `by worker` refill it
+    /// after each claim; `by env pool fill` fills it once.
+    pub size: u32,
+    /// Labels a `by serve` or `by worker` must all carry to keep this pool
+    /// filled; others leave it alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Minutes a ready worktree is kept before it is discarded. Default:
+    /// 1440 (a day).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_minutes: Option<u64>,
+    /// How many commits the base may have moved past a ready worktree for
+    /// a branch to still take it (it is brought forward). Default: 20. A
+    /// commit that changes an environment input always makes it stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_behind: Option<u32>,
+    /// The revision worktrees are made at. Default: `HEAD` of the checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// The largest `[workspace.pool] size`.
+pub const POOL_MAX_SIZE: u32 = 32;
+
+impl PoolConfig {
+    /// The checks beyond the shape: `key` prefixes each message.
+    pub fn check(&self, key: &str) -> Result<(), ConfigError> {
+        let fail = |what: &str, why: String| Err(ConfigError(format!("{key}.{what}: {why}")));
+        if self.size > POOL_MAX_SIZE {
+            return fail("size", format!("is at most {POOL_MAX_SIZE}"));
+        }
+        for label in &self.labels {
+            let valid = (1..=63).contains(&label.len())
+                && label.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && label.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                });
+            if !valid {
+                return fail(
+                    "labels",
+                    format!(
+                        "{label:?} is not a label (1 to 63 of a-z, 0-9, '.', '_' and '-', \
+                         starting with a letter or digit)"
+                    ),
+                );
+            }
+        }
+        if self.max_age_minutes == Some(0) {
+            return fail("max_age_minutes", "must be at least 1".into());
+        }
+        if let Some(base) = &self.base {
+            if base.trim().is_empty() || base.starts_with('-') || base.contains(char::is_whitespace)
+            {
+                return fail("base", format!("{base:?} is not a revision"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `max_age_minutes` in seconds.
+    pub fn max_age_secs(&self) -> Option<u64> {
+        self.max_age_minutes.map(|m| m.saturating_mul(60))
+    }
 }
 
 /// One command, or a list run in order.
@@ -772,6 +845,9 @@ impl WorkspaceConfig {
             if let Err(why) = check_share_path(path) {
                 return fail("share".into(), &format!("{path:?} {why}"));
             }
+        }
+        if let Some(pool) = &self.pool {
+            pool.check(&format!("{key}.pool"))?;
         }
         let mut defaults = Vec::new();
         for (name, run) in &self.run {
@@ -1985,6 +2061,22 @@ fn render_workspace(out: &mut String, table: &str, workspace: &WorkspaceConfig) 
             out.push_str(&format!("{key} = [{}]\n", items.join(", ")));
         }
     }
+    if let Some(pool) = &workspace.pool {
+        out.push_str(&format!("\n[{table}.pool]\nsize = {}\n", pool.size));
+        if !pool.labels.is_empty() {
+            let items: Vec<String> = pool.labels.iter().map(|g| toml_string(g)).collect();
+            out.push_str(&format!("labels = [{}]\n", items.join(", ")));
+        }
+        if let Some(minutes) = pool.max_age_minutes {
+            out.push_str(&format!("max_age_minutes = {minutes}\n"));
+        }
+        if let Some(behind) = pool.max_behind {
+            out.push_str(&format!("max_behind = {behind}\n"));
+        }
+        if let Some(base) = &pool.base {
+            out.push_str(&format!("base = {}\n", toml_string(base)));
+        }
+    }
     for (name, run) in &workspace.run {
         out.push_str(&format!("\n[{table}.run.{name}]\n"));
         out.push_str(&format!("command = {}\n", run.command.render()));
@@ -2316,6 +2408,21 @@ command = ["pnpm build", "pnpm worker"]
                 "[workspace]\nsetup = \"x\"\nprepare = true\ninputs = [\"/etc/x\"]",
                 "workspace.inputs",
             ),
+            ("[workspace.pool]\nsize = 33", "workspace.pool.size"),
+            ("[workspace.pool]\nmax_age_minutes = 5", "size"),
+            (
+                "[workspace.pool]\nsize = 1\nlabels = [\"GPU\"]",
+                "workspace.pool.labels",
+            ),
+            (
+                "[workspace.pool]\nsize = 1\nmax_age_minutes = 0",
+                "workspace.pool.max_age_minutes",
+            ),
+            (
+                "[workspace.pool]\nsize = 1\nbase = \"-x\"",
+                "workspace.pool.base",
+            ),
+            ("[workspace.pool]\nsize = 1\nwarm = true", "warm"),
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
@@ -2369,6 +2476,31 @@ command = ["pnpm build", "pnpm worker"]
         let mut shared = workspace.clone();
         shared.share.push("vendor/bundle".into());
         assert_ne!(shared.digest(), workspace.digest());
+    }
+
+    #[test]
+    fn a_pool_parses_renders_back_and_leaves_the_digest_alone() {
+        let text = "[workspace]\nsetup = \"pnpm install\"\nprepare = true\n\
+                    [workspace.pool]\nsize = 2\nlabels = [\"linux\"]\n\
+                    max_age_minutes = 90\nmax_behind = 5\nbase = \"main\"\n\
+                    [workspace.run.dev]\ncommand = \"pnpm dev\"\n";
+        let config = parse(text).unwrap();
+        let workspace = config.workspace.clone().unwrap();
+        let pool = workspace.pool.clone().unwrap();
+        assert_eq!(pool.size, 2);
+        assert_eq!(pool.labels, ["linux"]);
+        assert_eq!(pool.max_age_secs(), Some(5400));
+        assert_eq!(pool.max_behind, Some(5));
+        assert_eq!(pool.base.as_deref(), Some("main"));
+        assert_eq!(workspace.run.len(), 1);
+        assert_eq!(
+            parse(&render(&config, "")).unwrap().workspace,
+            config.workspace
+        );
+        // A pool runs nothing setup does not: trust is unchanged.
+        let mut without = workspace.clone();
+        without.pool = None;
+        assert_eq!(without.digest(), workspace.digest());
     }
 
     #[test]

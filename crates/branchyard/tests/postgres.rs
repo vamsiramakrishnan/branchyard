@@ -596,3 +596,127 @@ fn kept_sandboxes_and_snapshots_are_recorded_in_postgres_across_engines() {
     pg.yard.remove("pg-kept").unwrap();
     assert!(fake.sandboxes().is_empty(), "{:?}", fake.sandboxes());
 }
+
+fn pool_spec(setup: &str) -> branchyard::WorkspaceSpec {
+    branchyard::WorkspaceSpec {
+        setup: vec![setup.into()],
+        prepare: true,
+        pool: Some(branchyard::PoolSpec {
+            size: 2,
+            ..branchyard::PoolSpec::default()
+        }),
+        ..branchyard::WorkspaceSpec::default()
+    }
+}
+
+const POOL_SETUP: &str = "mkdir -p deps && echo built > deps/lib.txt";
+
+/// The slot a branch's worktree came from, if any.
+fn pool_used(branch: &branchyard::Branch) -> Option<String> {
+    branch
+        .events()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.activity {
+            Activity::Workspace(r) if r.phase == branchyard::WorkspacePhase::Setup => {
+                Some(r.pool.as_ref().and_then(|p| p.slot.clone()))
+            }
+            _ => None,
+        })
+        .flatten()
+}
+
+/// Fill a pool whose setup stops, with the state in PostgreSQL. Run only
+/// as the pool recovery test's child, which kills it.
+#[test]
+#[ignore = "the child process of the PostgreSQL pool recovery test"]
+fn postgres_pool_child() {
+    let var = |name: &str| std::env::var(name).ok();
+    let (Some(root), Some(url), Some(scope), Some(setup)) = (
+        var("BY_CHILD_ROOT"),
+        var("BY_CHILD_URL"),
+        var("BY_CHILD_SCOPE"),
+        var("BY_CHILD_SETUP"),
+    ) else {
+        return;
+    };
+    let yard = Yard::open_postgres(root, &url, &scope).unwrap();
+    let _ = yard.fill_pool(&pool_spec(&setup));
+}
+
+#[test]
+fn a_warm_pool_is_kept_in_postgres_across_restarts_and_claimed_once() {
+    let Some(pg) = Pg::new() else { return };
+    std::fs::write(pg.f.root.join(".gitignore"), "deps/\n").unwrap();
+    pg.f.git(&["add", ".gitignore"]);
+    pg.f.git(&["commit", "-q", "-m", "ignore"]);
+
+    // A filler killed in setup leaves a row and a worktree; the next open
+    // reclaims both.
+    let marker = pg.f.dir.join("started");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "postgres_pool_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("BY_CHILD_ROOT", &pg.f.root)
+        .env("BY_CHILD_URL", &pg.url)
+        .env("BY_CHILD_SCOPE", &pg.scope)
+        .env(
+            "BY_CHILD_SETUP",
+            format!("touch {}; sleep 120", marker.display()),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("setup in the slot", || marker.exists());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let left = pg.yard.pool_slots().unwrap();
+    assert_eq!(left.len(), 1);
+    assert!(left[0].path.is_dir());
+    let yard = pg.open();
+    assert!(yard.pool_slots().unwrap().is_empty());
+    assert!(!left[0].path.exists());
+
+    // Filled, then seen whole by another engine: nothing lost, nothing
+    // made twice.
+    let spec = pool_spec(POOL_SETUP);
+    let filled = yard.fill_pool(&spec).unwrap();
+    assert_eq!(filled.made.len(), 2, "{filled:?}");
+    let again = pg.open();
+    assert_eq!(again.pool_status(&spec).unwrap().ready(), 2);
+    assert!(again.fill_pool(&spec).unwrap().made.is_empty());
+
+    // Two engines' branches at once each take a different slot.
+    let used: Vec<Option<String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ["p", "q"]
+            .into_iter()
+            .map(|name| {
+                let yard = pg.open();
+                let options = branchyard::TaskOptions {
+                    workspace: Some(spec.clone()),
+                    ..pg.f.options()
+                };
+                scope.spawn(move || {
+                    let branch = yard
+                        .task("SH cat deps/lib.txt")
+                        .options(options)
+                        .name(name)
+                        .run()
+                        .unwrap();
+                    assert!(text(&branch.events().unwrap()).contains("built"));
+                    pool_used(&branch)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(used.iter().all(Option::is_some), "{used:?}");
+    assert_ne!(used[0], used[1]);
+    assert!(pg.open().pool_slots().unwrap().is_empty());
+}

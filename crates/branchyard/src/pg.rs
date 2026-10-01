@@ -35,8 +35,9 @@ use serde_json::Value;
 
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PortBackend,
-    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SteerRow, StepRow,
+    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend,
+    PortBackend, ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow,
+    SlotRow, SlotState, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
@@ -298,6 +299,30 @@ const STEPS: &[(&str, &str)] = &[
     (
         "by_knowledge_repo",
         "CREATE INDEX IF NOT EXISTS by_knowledge_repo ON by_knowledge (repo, id)",
+    ),
+    (
+        "by_pool_slots",
+        "CREATE TABLE IF NOT EXISTS by_pool_slots (
+            repo TEXT NOT NULL,
+            id TEXT NOT NULL,
+            place TEXT NOT NULL,
+            recipe TEXT NOT NULL,
+            state TEXT NOT NULL,
+            base TEXT NOT NULL,
+            path TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            host TEXT NOT NULL,
+            pid BIGINT NOT NULL,
+            pid_start TEXT NOT NULL,
+            branch TEXT,
+            created_ms BIGINT NOT NULL,
+            changed_ms BIGINT NOT NULL,
+            PRIMARY KEY (repo, id)
+        )",
+    ),
+    (
+        "by_pool_slots_place",
+        "CREATE INDEX IF NOT EXISTS by_pool_slots_place ON by_pool_slots (repo, place, created_ms)",
     ),
 ];
 
@@ -2852,6 +2877,111 @@ impl crate::knowledge::KnowledgeBackend for Postgres {
                     &[&self.repo, &int(id)],
                 )
                 .map_err(db("knowledge"))?;
+            Ok(changed == 1)
+        })
+    }
+}
+
+const SLOT_COLUMNS: &str = "id, place, recipe, state, base, path, detail, host, pid, pid_start, \
+     branch, created_ms, changed_ms";
+
+fn slot_row(r: &Row) -> Result<SlotRow, Error> {
+    Ok(SlotRow {
+        id: r.get(0),
+        place: r.get(1),
+        recipe: r.get(2),
+        state: SlotState::parse(r.get(3))?,
+        base: r.get(4),
+        path: r.get(5),
+        detail: r.get(6),
+        host: r.get(7),
+        pid: u32::try_from(r.get::<_, i64>(8)).unwrap_or(0),
+        start: r.get(9),
+        branch: r.get(10),
+        created_ms: uint(r.get(11)),
+        changed_ms: uint(r.get(12)),
+    })
+}
+
+impl PoolBackend for Postgres {
+    fn insert_slot(&self, row: &SlotRow) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO by_pool_slots (repo, {SLOT_COLUMNS}) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"
+                ),
+                &[
+                    &self.repo,
+                    &row.id,
+                    &row.place,
+                    &row.recipe,
+                    &row.state.as_str(),
+                    &row.base,
+                    &row.path,
+                    &row.detail,
+                    &row.host,
+                    &i64::from(row.pid),
+                    &row.start,
+                    &row.branch,
+                    &int(row.created_ms),
+                    &int(row.changed_ms),
+                ],
+            )
+            .map_err(db("pool slot"))?;
+            Ok(())
+        })
+    }
+
+    fn slots(&self, place: Option<&str>) -> Result<Vec<SlotRow>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {SLOT_COLUMNS} FROM by_pool_slots \
+                     WHERE repo = $1 AND ($2::text IS NULL OR place = $2) \
+                     ORDER BY created_ms, id"
+                ),
+                &[&self.repo, &place],
+            )
+        })?;
+        rows.iter().map(slot_row).collect()
+    }
+
+    fn update_slot(&self, row: &SlotRow, expected: SlotState) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE by_pool_slots SET state = $3, base = $4, path = $5, detail = $6, \
+                     host = $7, pid = $8, pid_start = $9, branch = $10, changed_ms = $11 \
+                     WHERE repo = $1 AND id = $2 AND state = $12",
+                    &[
+                        &self.repo,
+                        &row.id,
+                        &row.state.as_str(),
+                        &row.base,
+                        &row.path,
+                        &row.detail,
+                        &row.host,
+                        &i64::from(row.pid),
+                        &row.start,
+                        &row.branch,
+                        &int(row.changed_ms),
+                        &expected.as_str(),
+                    ],
+                )
+                .map_err(db("pool slot"))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn delete_slot(&self, id: &str) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "DELETE FROM by_pool_slots WHERE repo = $1 AND id = $2",
+                    &[&self.repo, &id],
+                )
+                .map_err(db("pool slot"))?;
             Ok(changed == 1)
         })
     }

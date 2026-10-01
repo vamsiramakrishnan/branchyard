@@ -648,6 +648,13 @@ impl App {
             prepare: w.prepare,
             inputs: w.inputs.clone(),
             share: w.share.clone(),
+            pool: w.pool.as_ref().map(|p| branchyard::PoolSpec {
+                size: p.size,
+                labels: p.labels.clone(),
+                max_age_secs: p.max_age_secs(),
+                max_behind: p.max_behind,
+                base: p.base.clone(),
+            }),
         }))
     }
 }

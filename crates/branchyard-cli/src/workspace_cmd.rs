@@ -130,11 +130,23 @@ impl Resolved {
             prepare: self.workspace.prepare,
             inputs: self.workspace.inputs.clone(),
             share: self.workspace.share.clone(),
+            pool: self.workspace.pool.as_ref().map(pool_spec),
         }
     }
 
     fn runs_ok(&self) -> bool {
         matches!(self.trust, TrustState::NotNeeded | TrustState::Trusted)
+    }
+}
+
+/// What the engine stores for `[workspace.pool]`.
+pub fn pool_spec(pool: &config::PoolConfig) -> branchyard::PoolSpec {
+    branchyard::PoolSpec {
+        size: pool.size,
+        labels: pool.labels.clone(),
+        max_age_secs: pool.max_age_secs(),
+        max_behind: pool.max_behind,
+        base: pool.base.clone(),
     }
 }
 

@@ -24,8 +24,9 @@ use serde_json::Value;
 
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PortBackend,
-    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SteerRow, StepRow,
+    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend,
+    PortBackend, ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow,
+    SlotRow, SlotState, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
@@ -242,6 +243,22 @@ CREATE TABLE IF NOT EXISTS knowledge (
     decided_ms INTEGER,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS pool_slots (
+    id TEXT PRIMARY KEY,
+    place TEXT NOT NULL,
+    recipe TEXT NOT NULL,
+    state TEXT NOT NULL,
+    base TEXT NOT NULL,
+    path TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    host TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    pid_start TEXT NOT NULL,
+    branch TEXT,
+    created_ms INTEGER NOT NULL,
+    changed_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pool_slots_place ON pool_slots (place, created_ms);
 ";
 
 #[derive(Debug)]
@@ -2876,6 +2893,143 @@ impl crate::knowledge::KnowledgeBackend for Sqlite {
             let changed = tx
                 .execute("DELETE FROM knowledge WHERE id = ?1", params![int(id)])
                 .map_err(|e| db("knowledge", e))?;
+            Ok(changed == 1)
+        })
+    }
+}
+
+const SLOT_COLUMNS: &str = "id, place, recipe, state, base, path, detail, host, pid, pid_start, \
+     branch, created_ms, changed_ms";
+
+type SlotColumns = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+    i64,
+    i64,
+);
+
+fn slot_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<SlotColumns> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
+        r.get(11)?,
+        r.get(12)?,
+    ))
+}
+
+fn slot_row(c: SlotColumns) -> Result<SlotRow, Error> {
+    Ok(SlotRow {
+        id: c.0,
+        place: c.1,
+        recipe: c.2,
+        state: SlotState::parse(&c.3)?,
+        base: c.4,
+        path: c.5,
+        detail: c.6,
+        host: c.7,
+        pid: u32::try_from(c.8).unwrap_or(0),
+        start: c.9,
+        branch: c.10,
+        created_ms: uint(c.11),
+        changed_ms: uint(c.12),
+    })
+}
+
+impl PoolBackend for Sqlite {
+    fn insert_slot(&self, row: &SlotRow) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO pool_slots ({SLOT_COLUMNS}) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                ),
+                params![
+                    row.id,
+                    row.place,
+                    row.recipe,
+                    row.state.as_str(),
+                    row.base,
+                    row.path,
+                    row.detail,
+                    row.host,
+                    i64::from(row.pid),
+                    row.start,
+                    row.branch,
+                    int(row.created_ms),
+                    int(row.changed_ms)
+                ],
+            )
+            .map_err(|e| db("pool slot", e))?;
+            Ok(())
+        })
+    }
+
+    fn slots(&self, place: Option<&str>) -> Result<Vec<SlotRow>, Error> {
+        let rows = self.query(|conn| {
+            let e = |error| db("pool slots", error);
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {SLOT_COLUMNS} FROM pool_slots \
+                     WHERE ?1 IS NULL OR place = ?1 ORDER BY created_ms, id"
+                ))
+                .map_err(e)?;
+            let rows = statement
+                .query_map(params![place], slot_columns)
+                .map_err(e)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })?;
+        rows.into_iter().map(slot_row).collect()
+    }
+
+    fn update_slot(&self, row: &SlotRow, expected: SlotState) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE pool_slots SET state = ?2, base = ?3, path = ?4, detail = ?5, \
+                     host = ?6, pid = ?7, pid_start = ?8, branch = ?9, changed_ms = ?10 \
+                     WHERE id = ?1 AND state = ?11",
+                    params![
+                        row.id,
+                        row.state.as_str(),
+                        row.base,
+                        row.path,
+                        row.detail,
+                        row.host,
+                        i64::from(row.pid),
+                        row.start,
+                        row.branch,
+                        int(row.changed_ms),
+                        expected.as_str()
+                    ],
+                )
+                .map_err(|e| db("pool slot", e))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn delete_slot(&self, id: &str) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute("DELETE FROM pool_slots WHERE id = ?1", params![id])
+                .map_err(|e| db("pool slot", e))?;
             Ok(changed == 1)
         })
     }

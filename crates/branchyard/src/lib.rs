@@ -121,6 +121,7 @@ mod pg;
 mod placement;
 mod plan;
 mod policy;
+mod pool;
 mod proc;
 mod projection;
 mod provisioning;
@@ -202,6 +203,12 @@ pub use plan::{
     approved_prompt, from_events as plan_from_events, parse_tasks as parse_plan_tasks,
     planning_prompt, read_only as read_only_policy, Plan, PlanActivity, PlanInfo, PlanPhase,
     PlanTask, READ_ONLY_TOOLS,
+};
+pub use pool::{
+    recipe as pool_recipe, PoolDrained, PoolFill, PoolKeeper, PoolSlot, PoolSlotState, PoolSpec,
+    PoolStatus, PoolUse, DEFAULT_MAX_AGE as POOL_DEFAULT_MAX_AGE,
+    DEFAULT_MAX_BEHIND as POOL_DEFAULT_MAX_BEHIND, KEEP_EVERY as POOL_KEEP_EVERY,
+    MAX_SIZE as POOL_MAX_SIZE,
 };
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use pull_request::{
@@ -559,6 +566,45 @@ impl Yard {
         only: &[String],
     ) -> environments::Pruned {
         environments::prune(self, keep, max_age, only)
+    }
+
+    /// `spec`'s warm pool on this host: its slots, oldest first. See
+    /// `docs/pools.md`.
+    pub fn pool_status(&self, spec: &WorkspaceSpec) -> Result<PoolStatus, Error> {
+        pool::status(self, spec)
+    }
+
+    /// Every warm pool slot on this host, of any pool.
+    pub fn pool_slots(&self) -> Result<Vec<PoolSlot>, Error> {
+        pool::slots(self)
+    }
+
+    /// Discard `spec`'s stale slots and make new ones until its pool has
+    /// `size` ready, unless another process is filling. A slot whose
+    /// environment key has none built runs setup to build it: the caller
+    /// decides whether `spec`'s scripts may run, as for
+    /// [`TaskOptions::workspace`].
+    pub fn fill_pool(&self, spec: &WorkspaceSpec) -> Result<PoolFill, Error> {
+        pool::fill(self, spec)
+    }
+
+    /// Remove every ready slot on this host, and what stopped processes
+    /// left.
+    pub fn drain_pool(&self) -> Result<PoolDrained, Error> {
+        pool::drain(self)
+    }
+
+    /// Keep the pool `spec` returns (read again each time) filled from a
+    /// thread of its own: at once, whenever a branch in this process claims
+    /// a slot or finds none, and otherwise every `every`. `on_fill` sees
+    /// each fill. Stops when the keeper is dropped.
+    pub fn keep_pool(
+        &self,
+        spec: impl Fn() -> Option<WorkspaceSpec> + Send + 'static,
+        every: Duration,
+        on_fill: impl Fn(&PoolFill) + Send + 'static,
+    ) -> PoolKeeper {
+        PoolKeeper::start(self.clone(), Box::new(spec), every, Box::new(on_fill))
     }
 
     /// The variables `branch`'s scripts and harness get:

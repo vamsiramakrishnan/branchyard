@@ -9934,6 +9934,17 @@
                 }
               ],
               "description": "The prepared environment setup built, or that stood in for it."
+            },
+            "pool": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PoolUse"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the branch's worktree came from its warm pool (a hit) or\nnot (a miss, with why), and when the branch was asked for."
             }
           },
           "required": [
@@ -10056,6 +10067,42 @@
             }
           ],
           "description": "Where a branch's environment came from."
+        },
+        "PoolUse": {
+          "type": "object",
+          "properties": {
+            "slot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The slot whose worktree the branch took (a hit); `None` when it\ntook none (a miss)."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why no slot was taken, or how the one taken was brought forward."
+            },
+            "requested_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the branch was asked for (its record written), in\nmilliseconds since the Unix epoch: its start latency runs from here\nto its first prompt."
+            },
+            "worktree_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long taking the slot, or creating the worktree without one,\ntook, in milliseconds."
+            }
+          },
+          "required": [
+            "requested_ms",
+            "worktree_ms"
+          ],
+          "description": "How a new branch's worktree related to its pool: on its setup's\n`workspace` event ([`crate::WorkspaceReport::pool`])."
         },
         "Checkpoint": {
           "type": "object",
@@ -13557,6 +13604,17 @@
                 }
               ],
               "description": "The prepared environment setup built, or that stood in for it."
+            },
+            "pool": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PoolUse"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the branch's worktree came from its warm pool (a hit) or\nnot (a miss, with why), and when the branch was asked for."
             }
           },
           "required": [
@@ -13679,6 +13737,42 @@
             }
           ],
           "description": "Where a branch's environment came from."
+        },
+        "PoolUse": {
+          "type": "object",
+          "properties": {
+            "slot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The slot whose worktree the branch took (a hit); `None` when it\ntook none (a miss)."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why no slot was taken, or how the one taken was brought forward."
+            },
+            "requested_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the branch was asked for (its record written), in\nmilliseconds since the Unix epoch: its start latency runs from here\nto its first prompt."
+            },
+            "worktree_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long taking the slot, or creating the worktree without one,\ntook, in milliseconds."
+            }
+          },
+          "required": [
+            "requested_ms",
+            "worktree_ms"
+          ],
+          "description": "How a new branch's worktree related to its pool: on its setup's\n`workspace` event ([`crate::WorkspaceReport::pool`])."
         },
         "Checkpoint": {
           "type": "object",
@@ -19525,6 +19619,17 @@
                 }
               ],
               "description": "The prepared environment setup built, or that stood in for it."
+            },
+            "pool": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PoolUse"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the branch's worktree came from its warm pool (a hit) or\nnot (a miss, with why), and when the branch was asked for."
             }
           },
           "required": [
@@ -19647,6 +19752,42 @@
             }
           ],
           "description": "Where a branch's environment came from."
+        },
+        "PoolUse": {
+          "type": "object",
+          "properties": {
+            "slot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The slot whose worktree the branch took (a hit); `None` when it\ntook none (a miss)."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why no slot was taken, or how the one taken was brought forward."
+            },
+            "requested_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the branch was asked for (its record written), in\nmilliseconds since the Unix epoch: its start latency runs from here\nto its first prompt."
+            },
+            "worktree_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long taking the slot, or creating the worktree without one,\ntook, in milliseconds."
+            }
+          },
+          "required": [
+            "requested_ms",
+            "worktree_ms"
+          ],
+          "description": "How a new branch's worktree related to its pool: on its setup's\n`workspace` event ([`crate::WorkspaceReport::pool`])."
         },
         "Checkpoint": {
           "type": "object",

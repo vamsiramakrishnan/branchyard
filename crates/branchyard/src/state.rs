@@ -619,12 +619,95 @@ pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
     ) -> Result<Option<SandboxRow>, Error>;
 }
 
+/// Where a warm pool's slot is in its life. See `crate::pool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SlotState {
+    /// Its worktree is being made by the process its row names.
+    Filling,
+    /// Ready and unclaimed.
+    Ready,
+    /// Taken by the process its row names: for a branch, or to be
+    /// discarded. Never ready again.
+    Claimed,
+}
+
+impl SlotState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SlotState::Filling => "filling",
+            SlotState::Ready => "ready",
+            SlotState::Claimed => "claimed",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<SlotState, Error> {
+        match text {
+            "filling" => Ok(SlotState::Filling),
+            "ready" => Ok(SlotState::Ready),
+            "claimed" => Ok(SlotState::Claimed),
+            other => Err(Error::State(format!("unknown pool slot state {other:?}"))),
+        }
+    }
+}
+
+/// A warm pool's slot as stored: a prepared worktree on one host's
+/// checkout (`place`), and who is making or taking it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SlotRow {
+    pub id: String,
+    /// `<hostname>:<repository root>`: only processes there see its
+    /// worktree.
+    pub place: String,
+    /// The pool it belongs to: what made it (`crate::pool::recipe`).
+    pub recipe: String,
+    pub state: SlotState,
+    /// The commit its worktree is at.
+    pub base: String,
+    /// Its worktree.
+    pub path: String,
+    /// JSON: the environment restored into it, how, and for a claim the
+    /// branch's worktree (`crate::pool::Detail`).
+    pub detail: String,
+    /// The process filling or claiming it, as a lease names its holder.
+    pub host: String,
+    pub pid: u32,
+    pub start: String,
+    /// The branch it was claimed for; `None` when claimed to be discarded.
+    pub branch: Option<String>,
+    pub created_ms: u64,
+    /// When it last changed state.
+    pub changed_ms: u64,
+}
+
+/// Warm pool slots ([`SlotRow`]). A slot changes state only by
+/// compare-and-set ([`PoolBackend::update_slot`]), so of several engines
+/// claiming one ready slot exactly one gets it, and a claimed slot is
+/// never ready again. Rows belong to no branch: deleting a branch leaves
+/// them.
+pub(crate) trait PoolBackend: Send + Sync + fmt::Debug {
+    /// Insert a new row; fails if its id exists.
+    fn insert_slot(&self, row: &SlotRow) -> Result<(), Error>;
+    /// Every row at `place` (every place with `None`), oldest first.
+    fn slots(&self, place: Option<&str>) -> Result<Vec<SlotRow>, Error>;
+    /// Replace the row with `row` if it is still in state `expected`;
+    /// whether it was.
+    fn update_slot(&self, row: &SlotRow, expected: SlotState) -> Result<bool, Error>;
+    /// Delete the row; whether it existed.
+    fn delete_slot(&self, id: &str) -> Result<bool, Error>;
+}
+
 /// [`PortBackend`], [`SandboxBackend`], the outcome store
-/// ([`crate::fleet::OutcomeBackend`]) and the knowledge store
-/// ([`crate::knowledge::KnowledgeBackend`]) together, so a [`Store`] holds
-/// one trait object for them.
+/// ([`crate::fleet::OutcomeBackend`]), the knowledge store
+/// ([`crate::knowledge::KnowledgeBackend`]) and pool slots
+/// ([`PoolBackend`]) together, so a [`Store`] holds one trait object for
+/// them.
 pub(crate) trait Extras:
-    PortBackend + SandboxBackend + crate::fleet::OutcomeBackend + crate::knowledge::KnowledgeBackend
+    PortBackend
+    + SandboxBackend
+    + crate::fleet::OutcomeBackend
+    + crate::knowledge::KnowledgeBackend
+    + PoolBackend
 {
 }
 
@@ -632,7 +715,8 @@ impl<
         T: PortBackend
             + SandboxBackend
             + crate::fleet::OutcomeBackend
-            + crate::knowledge::KnowledgeBackend,
+            + crate::knowledge::KnowledgeBackend
+            + PoolBackend,
     > Extras for T
 {
 }
@@ -787,6 +871,11 @@ impl Store {
 
     /// Repository knowledge; see [`crate::knowledge::KnowledgeBackend`].
     pub fn knowledge(&self) -> &dyn crate::knowledge::KnowledgeBackend {
+        self.extras.as_ref()
+    }
+
+    /// Warm pool slots; see [`PoolBackend`].
+    pub fn pool(&self) -> &dyn PoolBackend {
         self.extras.as_ref()
     }
 

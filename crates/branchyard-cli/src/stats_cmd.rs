@@ -40,6 +40,49 @@ pub struct Stats {
     /// repository visible to the caller.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue: Option<Queue>,
+    /// From the event store, and locally the pool's slots: how new
+    /// branches used the warm pool. `None` when none had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<PoolStats>,
+}
+
+/// How branches used the warm pool (`docs/pools.md`).
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub struct PoolStats {
+    /// Branches whose worktree was a ready slot.
+    pub hits: u64,
+    /// Branches with a pool that found no slot to take.
+    pub misses: u64,
+    /// Start latency, from a branch being asked for to its first prompt,
+    /// in seconds: of hits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_hit_seconds: Option<Percentiles>,
+    /// The same, of misses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_miss_seconds: Option<Percentiles>,
+    /// Locally: ready slots now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready: Option<usize>,
+    /// Locally: the pool's size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    /// Locally: how long making the slots there now took, in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_seconds: Option<Percentiles>,
+}
+
+/// The median and 90th percentile of `values`; `None` when empty.
+fn percentiles(mut values: Vec<f64>) -> Option<Percentiles> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    let at = |q: f64| values[((values.len() as f64 - 1.0) * q).round() as usize];
+    Some(Percentiles {
+        count: values.len(),
+        median: at(0.5),
+        p90: at(0.9),
+    })
 }
 
 #[derive(Debug, Default, PartialEq, Serialize)]
@@ -86,6 +129,11 @@ impl Stats {
         let mut tools = 0;
         let mut started: BTreeMap<&str, u64> = BTreeMap::new();
         let mut durations: Vec<f64> = Vec::new();
+        // Branches with a pool, by whether they hit, until their first
+        // prompt; then their start latency.
+        let mut pooled: BTreeMap<&str, (bool, u64)> = BTreeMap::new();
+        let mut pool = PoolStats::default();
+        let (mut start_hit, mut start_miss) = (Vec::new(), Vec::new());
         for event in events {
             let at = event.event.at_ms;
             let branch = event.branch.as_str();
@@ -99,8 +147,25 @@ impl Stats {
                 }
             };
             match &event.event.activity {
+                Activity::Workspace(report) => {
+                    if let Some(used) = &report.pool {
+                        let hit = used.slot.is_some();
+                        match hit {
+                            true => pool.hits += 1,
+                            false => pool.misses += 1,
+                        }
+                        pooled.insert(branch, (hit, used.requested_ms));
+                    }
+                }
                 Activity::Prompt(_) => {
                     started.insert(branch, at);
+                    if let Some((hit, asked)) = pooled.remove(branch) {
+                        let latency = at.saturating_sub(asked) as f64 / 1000.0;
+                        match hit {
+                            true => start_hit.push(latency),
+                            false => start_miss.push(latency),
+                        }
+                    }
                 }
                 Activity::Harness(Event::ToolStarted { .. }) => tools += 1,
                 Activity::Harness(Event::TurnEnded { outcome, .. }) => {
@@ -140,6 +205,31 @@ impl Stats {
         self.outcomes = Some(outcomes);
         self.tool_calls = Some(tools);
         self.connector_calls = Some(connectors);
+        if pool.hits + pool.misses > 0 {
+            pool.start_hit_seconds = percentiles(start_hit);
+            pool.start_miss_seconds = percentiles(start_miss);
+            self.pool = Some(pool);
+        }
+    }
+
+    /// Add the warm pool's slots on this host now, for a pool of `size`.
+    pub fn add_slots(&mut self, size: u32, slots: &[branchyard::PoolSlot]) {
+        let pool = self.pool.get_or_insert_with(PoolStats::default);
+        pool.size = Some(size);
+        pool.ready = Some(
+            slots
+                .iter()
+                .filter(|s| s.state == branchyard::PoolSlotState::Ready)
+                .count(),
+        );
+        pool.fill_seconds = percentiles(
+            slots
+                .iter()
+                .filter(|s| s.state == branchyard::PoolSlotState::Ready)
+                .filter_map(|s| s.fill_ms)
+                .map(|ms| ms as f64 / 1000.0)
+                .collect(),
+        );
     }
 
     /// Add the server's unfinished operations, as of `now_ms`.
@@ -205,6 +295,29 @@ impl Stats {
             "cost      ${cost:.2}{}\n",
             listed(self.cost_usd.iter().map(|(k, v)| format!("{k} ${v:.2}")))
         );
+        if let Some(pool) = &self.pool {
+            out += &format!("pool      {} hits, {} misses", pool.hits, pool.misses);
+            if let (Some(ready), Some(size)) = (pool.ready, pool.size) {
+                out += &format!("; {ready} of {size} ready");
+            }
+            if let Some(fill) = &pool.fill_seconds {
+                out += &format!(", made in median {}", seconds(fill.median));
+            }
+            out.push('\n');
+            for (what, p) in [
+                ("hit", &pool.start_hit_seconds),
+                ("miss", &pool.start_miss_seconds),
+            ] {
+                if let Some(p) = p {
+                    out += &format!(
+                        "start     {what:<4} median {}, p90 {} ({})\n",
+                        seconds(p.median),
+                        seconds(p.p90),
+                        p.count
+                    );
+                }
+            }
+        }
         if let Some(queue) = &self.queue {
             let queued: usize = queue.queued.values().sum();
             out += &format!(
@@ -272,6 +385,14 @@ pub fn main(_env: &Env, target: &Target, as_json: bool) -> Outcome {
                 events.extend(page.events);
             }
             stats.add_events(&events);
+            // The pool here now, when [workspace] has one.
+            let pooled = crate::workspace_cmd::resolve(yard.root())
+                .ok()
+                .flatten()
+                .and_then(|r| r.workspace.pool.map(|p| p.size));
+            if let Some(size) = pooled {
+                stats.add_slots(size, &yard.pool_slots()?);
+            }
             stats
         }
         Target::Remote(remote) => {
@@ -377,7 +498,9 @@ mod tests {
         assert_eq!(queue.queued[&5], 2);
         assert_eq!(queue.running, 1);
         assert_eq!(queue.oldest_seconds, Some(10.0));
+        assert_eq!(stats.pool, None);
         let text = stats.render();
+        assert!(!text.contains("pool"), "{text}");
         for expected in [
             "branches  3 (interrupted 1, ready 1, running 1)",
             "turns     6 (claude-code 3, codex 3)",
@@ -388,5 +511,59 @@ mod tests {
         ] {
             assert!(text.contains(expected), "{expected:?} missing from\n{text}");
         }
+    }
+
+    #[test]
+    fn pool_hits_misses_and_start_latency_add_up() {
+        let report = |slot: Option<&str>, asked: u64| {
+            let mut report =
+                branchyard::WorkspaceReport::new(branchyard::WorkspacePhase::Setup, None);
+            report.pool = Some(Box::new(branchyard::PoolUse {
+                slot: slot.map(str::to_owned),
+                reason: slot.is_none().then(|| "no ready slot".to_owned()),
+                requested_ms: asked,
+                worktree_ms: 5,
+            }));
+            Activity::Workspace(report)
+        };
+        let mut stats = Stats::from_branches(&[]);
+        stats.add_events(&[
+            event(1, "hit", 1_200, report(Some("s1"), 1_000)),
+            event(2, "hit", 1_500, Activity::Prompt("p".into())),
+            event(3, "miss", 3_000, report(None, 1_000)),
+            event(4, "miss", 5_000, Activity::Prompt("p".into())),
+            // A later prompt is not a start.
+            event(5, "hit", 9_000, Activity::Prompt("again".into())),
+        ]);
+        let slot = |state: branchyard::PoolSlotState, fill_ms: u64| -> branchyard::PoolSlot {
+            serde_json::from_value(serde_json::json!({
+                "id": "s", "state": state, "base": "c", "path": "/p",
+                "created_ms": 1, "changed_ms": 1, "fill_ms": fill_ms
+            }))
+            .unwrap()
+        };
+        stats.add_slots(
+            2,
+            &[
+                slot(branchyard::PoolSlotState::Ready, 2_000),
+                slot(branchyard::PoolSlotState::Filling, 0),
+            ],
+        );
+        let pool = stats.pool.as_ref().unwrap();
+        assert_eq!((pool.hits, pool.misses), (1, 1));
+        assert_eq!(pool.start_hit_seconds.as_ref().unwrap().median, 0.5);
+        assert_eq!(pool.start_miss_seconds.as_ref().unwrap().median, 4.0);
+        assert_eq!((pool.ready, pool.size), (Some(1), Some(2)));
+        let text = stats.render();
+        for expected in [
+            "pool      1 hits, 1 misses; 1 of 2 ready, made in median",
+            "start     hit  median 0.5s, p90 0.5s (1)",
+            "start     miss median 4.0s, p90 4.0s (1)",
+        ] {
+            assert!(text.contains(expected), "{expected:?} missing from\n{text}");
+        }
+        let json = serde_json::to_value(&stats).unwrap();
+        assert_eq!(json["pool"]["hits"], 1);
+        assert_eq!(json["pool"]["start_miss_seconds"]["median"], 4.0);
     }
 }

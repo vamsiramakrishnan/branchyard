@@ -411,7 +411,7 @@ pub fn list(root: &Path) -> Vec<EnvironmentInfo> {
 }
 
 /// Note that `info` was used now.
-fn touch(root: &Path, info: &EnvironmentInfo) {
+pub(crate) fn touch(root: &Path, info: &EnvironmentInfo) {
     let mut info = info.clone();
     info.last_used_ms = now_ms();
     let _ = write(&manifest_path(root, &info.key), &info);
@@ -532,7 +532,7 @@ pub(crate) fn plan(
     })
 }
 
-fn failure_reason(key: &str, failure: &EnvironmentInfo) -> String {
+pub(crate) fn failure_reason(key: &str, failure: &EnvironmentInfo) -> String {
     format!(
         "environment {} failed to build in {}: {}; run `by env rebuild` to try again",
         short(key),
@@ -889,9 +889,10 @@ fn release_snapshot(yard: &Yard, snapshot: &EnvironmentSnapshot) -> Result<(), S
     crate::snapshots::release_environment(provider.as_ref(), snapshot)
 }
 
-/// Branches whose worktrees link into an environment, by key.
+/// Branches whose worktrees link into an environment, and warm pool slots
+/// that do, by key.
 fn in_use(yard: &Yard) -> BTreeMap<String, Vec<String>> {
-    let mut using: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut using: BTreeMap<String, Vec<String>> = crate::pool::linking(yard);
     for record in yard.store().list().unwrap_or_default() {
         if let Some(workspace) = &record.workspace {
             if let (Some(key), false) = (&workspace.environment, workspace.spec.share.is_empty()) {
@@ -1083,24 +1084,71 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
             return Err(Error::State(e));
         }
     };
-    let copied = crate::workspace::copy(root, &work, &spec.copy, None);
+    let built = build_in(
+        yard,
+        spec,
+        &work,
+        "by env rebuild",
+        "env-rebuild",
+        &key,
+        &recipe,
+        inputs,
+    );
+    drop(lock);
+    cleanup();
+    let built = built?;
+    if built.environment.is_some() {
+        prune_after_build(yard);
+    }
+    Ok(EnvironmentBuild {
+        environment: built.environment,
+        key,
+        report: built.report,
+    })
+}
+
+/// What [`build_in`] did.
+pub(crate) struct Built {
+    pub environment: Option<EnvironmentInfo>,
+    pub report: crate::WorkspaceReport,
+    /// What the copy phase placed in the worktree.
+    pub copied: Vec<String>,
+}
+
+/// Build `key`'s host environment in `work`, a detached worktree of the
+/// repository, holding the key's lock: copy files, run setup, and capture
+/// what it produced (moved out of `work`), or record the key's failure.
+/// `by` names the builder; setup sees `branch` as `BRANCHYARD_BRANCH`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_in(
+    yard: &Yard,
+    spec: &WorkspaceSpec,
+    work: &Path,
+    by: &str,
+    branch: &str,
+    key: &str,
+    recipe: &str,
+    inputs: Vec<EnvironmentInput>,
+) -> Result<Built, Error> {
+    let root = &yard.root;
+    let copied = crate::workspace::copy(root, work, &spec.copy, None);
     let mut report = crate::workspace::WorkspaceReport::new(crate::WorkspacePhase::Setup, None);
     report.ran_in = Some(crate::RanIn::Host);
     let placed: Vec<String> = copied.copied.clone();
-    let before = crate::workspace::untracked(&work);
+    let before = crate::workspace::untracked(work);
     if !copied.ok {
         report.ok = false;
         report.error = Some(copied.failure());
     } else {
         let env = vec![
-            (crate::ENV_BRANCH.to_owned(), "env-rebuild".to_owned()),
+            (crate::ENV_BRANCH.to_owned(), branch.to_owned()),
             (crate::ENV_WORKTREE.to_owned(), work.display().to_string()),
             (crate::ENV_ROOT.to_owned(), root.display().to_string()),
         ];
         crate::workspace::run_commands(
             &mut report,
             &spec.setup,
-            &work,
+            work,
             &env,
             None,
             crate::workspace::SETUP_TIMEOUT,
@@ -1108,8 +1156,8 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
             &|| None,
         )?;
     }
-    let result = if report.ok {
-        let produced: Vec<String> = crate::workspace::untracked(&work)
+    let environment = if report.ok {
+        let produced: Vec<String> = crate::workspace::untracked(work)
             .into_iter()
             .filter(|p| !before.contains(p) && !placed.contains(p))
             .collect();
@@ -1117,12 +1165,12 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
             Capture {
                 root,
                 spec,
-                key: &key,
-                recipe: &recipe,
+                key,
+                recipe,
                 place: HOST,
                 inputs,
-                branch: "by env rebuild",
-                worktree: Some(&work),
+                branch: by,
+                worktree: Some(work),
                 produced: &produced,
                 snapshot: None,
             },
@@ -1131,7 +1179,7 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
         );
         match captured.map_err(|(why, _)| why) {
             Ok(info) => {
-                let mut used = EnvironmentUse::new(&key, EnvironmentOrigin::Built);
+                let mut used = EnvironmentUse::new(key, EnvironmentOrigin::Built);
                 used.built_by = Some(info.built_by.clone());
                 report.environment = Some(Box::new(used));
                 Some(info)
@@ -1143,27 +1191,13 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
             }
         }
     } else {
-        record_failure(
-            root,
-            spec,
-            &key,
-            &recipe,
-            HOST,
-            inputs,
-            "by env rebuild",
-            &report.failure(),
-        );
+        record_failure(root, spec, key, recipe, HOST, inputs, by, &report.failure());
         None
     };
-    drop(lock);
-    cleanup();
-    if result.is_some() {
-        prune_after_build(yard);
-    }
-    Ok(EnvironmentBuild {
-        environment: result,
-        key,
+    Ok(Built {
+        environment,
         report,
+        copied: placed,
     })
 }
 
