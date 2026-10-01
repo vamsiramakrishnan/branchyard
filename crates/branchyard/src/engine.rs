@@ -457,6 +457,9 @@ fn run(
     for var in &provisioned.env {
         placement.set_env(&var.name, &var.value);
     }
+    if let Some(parent) = &turn.options.trace_parent {
+        placement.set_env(crate::ENV_TRACEPARENT, parent);
+    }
     // A per-turn MCP file lives until this function returns, after the
     // harness is gone.
     let _turn_file = provisioned.turn_file;

@@ -27,6 +27,7 @@ use tokio::sync::watch;
 
 use crate::api::RepoState;
 use crate::config::WebhookConfig;
+use crate::observe::Observability;
 use crate::store::OperationStore;
 
 /// Feed entries read per delivery batch.
@@ -124,7 +125,28 @@ pub fn spawn(
     client: reqwest::Client,
     shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(repo, webhook, store, client, shutdown))
+    spawn_observed(
+        repo,
+        webhook,
+        store,
+        client,
+        Observability::default(),
+        shutdown,
+    )
+}
+
+/// [`spawn`], counting deliveries in `observability`'s metrics and sending
+/// each with the `traceparent` of the operation that last worked on its
+/// branch here, when there is one.
+pub fn spawn_observed(
+    repo: RepoState,
+    webhook: WebhookConfig,
+    store: Arc<dyn OperationStore>,
+    client: reqwest::Client,
+    observability: Observability,
+    shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run(repo, webhook, store, client, observability, shutdown))
 }
 
 async fn run(
@@ -132,6 +154,7 @@ async fn run(
     webhook: WebhookConfig,
     store: Arc<dyn OperationStore>,
     client: reqwest::Client,
+    observability: Observability,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let cursor_id = format!("{}:{}", repo.name, webhook.id);
@@ -177,7 +200,7 @@ async fn run(
             for entry in &entries {
                 let kinds = kinds_of(&entry.activity);
                 if wants(&webhook, &kinds) {
-                    deliver(&client, &webhook, &repo.name, entry, &kinds).await;
+                    deliver(&client, &webhook, &repo.name, entry, &kinds, &observability).await;
                 }
                 cursor = entry.seq;
                 let (store, id, cursor) = (store.clone(), cursor_id.clone(), cursor);
@@ -216,7 +239,10 @@ async fn deliver(
     repo: &str,
     entry: &FeedEntry,
     kinds: &[&'static str],
+    observability: &Observability,
 ) {
+    let metrics = &observability.metrics;
+    let traceparent = observability.tracer.branch_trace(repo, &entry.branch);
     let envelope = Envelope {
         repo,
         seq: entry.seq,
@@ -240,11 +266,15 @@ async fn deliver(
     let signature = sign(&webhook.secret, &body);
     let max_attempts = max_attempts();
     let attempt = || async {
-        let response = client
+        let mut request = client
             .post(&webhook.url)
             .header("content-type", "application/json")
             .header("x-branchyard-signature", format!("sha256={signature}"))
-            .header("x-branchyard-delivery", entry.seq.to_string())
+            .header("x-branchyard-delivery", entry.seq.to_string());
+        if let Some(traceparent) = &traceparent {
+            request = request.header("traceparent", traceparent.as_str());
+        }
+        let response = request
             .body(body.clone())
             .timeout(REQUEST_TIMEOUT)
             .send()
@@ -259,6 +289,7 @@ async fn deliver(
         .retry(backoff(max_attempts))
         .sleep(tokio::time::sleep)
         .notify(|error, wait| {
+            metrics.inc(crate::metrics::WEBHOOKS, &[("result", "retried")]);
             tracing::warn!(
                 webhook = %webhook.url,
                 seq = entry.seq,
@@ -268,6 +299,11 @@ async fn deliver(
             )
         })
         .await;
+    let result = match delivered {
+        Ok(()) => "delivered",
+        Err(_) => "dead_lettered",
+    };
+    metrics.inc(crate::metrics::WEBHOOKS, &[("result", result)]);
     if let Err(error) = delivered {
         tracing::error!(
             webhook = %webhook.url,

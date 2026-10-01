@@ -356,6 +356,7 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         provision: provision(task)?,
         seats: None,
         require_labels: task.require_labels.clone(),
+        priority: task.priority,
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -413,6 +414,7 @@ pub fn fan(
         provision: provision(task)?,
         seats: None,
         require_labels: task.require_labels.clone(),
+        priority: task.priority,
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -446,6 +448,7 @@ fn send_request(
             unapproved_tools: task.unapproved_tools,
             provision: provision(task)?,
             require_labels: task.require_labels.clone(),
+            priority: task.priority,
         },
         notice,
     ))
@@ -524,6 +527,7 @@ pub fn fork(
         provider: provider.clone(),
         provision: provision(task)?,
         require_labels: task.require_labels.clone(),
+        priority: task.priority,
     };
     let op = remote.repo.fork(branch, &request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -547,6 +551,7 @@ pub fn reincarnate(env: &Env, remote: &Remote, branch: &str, task: &TaskArgs) ->
         provider: provider.clone(),
         provision: provision(task)?,
         require_labels: task.require_labels.clone(),
+        priority: task.priority,
     };
     let op = remote.repo.reincarnate(branch, &request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -581,6 +586,7 @@ pub fn spawn(
         after: args.after,
         bindings: args.bindings.clone(),
         require_labels: task.require_labels.clone(),
+        priority: task.priority,
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
     };
     let op = remote
@@ -731,6 +737,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         provision: Some(root.provision.clone()),
         seats: plan.seats.clone(),
         require_labels: Vec::new(),
+        priority: None,
     };
     let op = match remote.repo.submit_task(&request, &new_key()) {
         Ok(op) => op,

@@ -602,3 +602,52 @@ fn a_receiver_that_resets_the_connection_never_delays_the_operation() {
     );
     server.stop();
 }
+
+/// A delivery of a branch's activity carries the `traceparent` of the
+/// operation that worked on the branch, and deliveries are counted.
+#[test]
+fn deliveries_carry_the_operations_traceparent_and_are_counted() {
+    use branchyard_server::observe::Observability;
+    use branchyard_server::telemetry::{MemoryExporter, SpanContext, Tracer};
+    let f = Fixture::new();
+    let receiver = Receiver::start();
+    let memory = Arc::new(MemoryExporter::default());
+    let observability = Observability {
+        metrics: Arc::new(branchyard_server::metrics::Metrics::default()),
+        tracer: Tracer::new(memory.clone()),
+    };
+    let mut config = f.config();
+    config.webhooks = vec![webhook(&receiver.url(), SECRET, &["status"])];
+    config.observability = Some(observability.clone());
+    let server = Server::start(config);
+    let client = server.client();
+    let op = run(&client, &task("WRITE a.txt=1", "one"));
+    eventually("a status delivery", || {
+        receiver
+            .deliveries()
+            .iter()
+            .any(|d| d.json()["activity"]["status"]["state"] == "ready")
+    });
+    let delivery = receiver
+        .deliveries()
+        .into_iter()
+        .find(|d| d.json()["activity"]["status"]["state"] == "ready")
+        .unwrap();
+    let traceparent = delivery.headers.get("traceparent").expect("a traceparent");
+    let context = SpanContext::parse(traceparent).unwrap();
+    observability.tracer.flush(Duration::from_secs(10));
+    let operation = memory
+        .spans()
+        .into_iter()
+        .find(|s| s.name == "operation task")
+        .expect("the operation's span");
+    assert_eq!(context, operation.context, "{op:?}");
+    let delivered = observability.metrics.snapshot();
+    let counted = &delivered[branchyard_server::metrics::WEBHOOKS]
+        [&vec![("result".to_owned(), "delivered".to_owned())]];
+    assert!(
+        matches!(counted, branchyard_server::metrics::Value::Number(n) if *n >= 1.0),
+        "{counted:?}"
+    );
+    server.stop();
+}

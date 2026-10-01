@@ -90,7 +90,9 @@ impl Work {
         app: &App,
         repo: &RepoState,
         principal: Option<&crate::config::Principal>,
+        trace: Option<&str>,
     ) -> Result<OperationResult, ErrorBody> {
+        let trace_parent = trace.map(str::to_owned);
         let sdk = |e: branchyard::Error| *error::sdk(&e).body;
         let api = |e: ApiError| *e.body;
         let yard = &repo.yard;
@@ -104,6 +106,7 @@ impl Work {
             Work::Task { request } => {
                 let options = TaskOptions {
                     actor: actor.clone(),
+                    trace_parent: trace_parent.clone(),
                     ..task_options(app, repo, &request).map_err(api)?
                 };
                 let builder = yard.task(request.prompt.clone()).options(options);
@@ -117,7 +120,10 @@ impl Work {
                 ran.and_then(finished).map_err(sdk)
             }
             Work::Send { branch, request } => {
-                let options = send_options(app, repo, &request).map_err(api)?;
+                let options = TaskOptions {
+                    trace_parent: trace_parent.clone(),
+                    ..send_options(app, repo, &request).map_err(api)?
+                };
                 let target = yard.branch(&branch).map_err(sdk)?;
                 send_allowed(app, &target, &branch, &request).map_err(api)?;
                 target
@@ -128,6 +134,7 @@ impl Work {
             Work::Fork { branch, request } => {
                 let options = TaskOptions {
                     actor: actor.clone(),
+                    trace_parent: trace_parent.clone(),
                     ..fork_options(app, repo, &request).map_err(api)?
                 };
                 yard.branch(&branch)
@@ -138,6 +145,7 @@ impl Work {
             Work::Reincarnate { branch, request } => {
                 let options = TaskOptions {
                     actor: actor.clone(),
+                    trace_parent: trace_parent.clone(),
                     ..reincarnate_options(app, repo, &request).map_err(api)?
                 };
                 yard.branch(&branch)
@@ -162,7 +170,8 @@ impl Work {
                 name,
                 request,
             } => {
-                let (options, spawn) = spawn_parts(app, repo, &request, name).map_err(api)?;
+                let (mut options, spawn) = spawn_parts(app, repo, &request, name).map_err(api)?;
+                options.trace_parent = trace_parent.clone();
                 let run = || {
                     let source = yard.branch(&parent)?;
                     let delegate = source.delegate(options)?;
@@ -224,9 +233,31 @@ impl Executor for AppExecutor {
                 end_cursor: None,
             };
         };
+        let observability = app.registry.observability();
+        // What the branches had spent before, so the operation's cost is
+        // what they spent during it; and the trace their activity belongs
+        // to, for webhook deliveries.
+        let mut before = std::collections::BTreeMap::new();
+        for name in &operation.branches {
+            if let Ok(branch) = repo.yard.branch(name) {
+                if let Some(cost) = branch.info().cost_usd {
+                    before.insert(name.clone(), cost);
+                }
+            }
+            if let Some(trace) = &stored.trace {
+                observability.tracer.note_branch(&repo.name, name, trace);
+            }
+        }
         let result = serde_json::from_value::<Work>(work.clone())
             .map_err(|e| *ApiError::internal(format!("unreadable operation description: {e}")).body)
-            .and_then(|work| work.run(app, repo, stored.principal.as_ref()));
+            .and_then(|work| {
+                work.run(
+                    app,
+                    repo,
+                    stored.principal.as_ref(),
+                    stored.trace.as_deref(),
+                )
+            });
         // Read the feed's head so the end cursor covers all the activity.
         let end_cursor = match repo.feed.sync() {
             Ok(head) => Some(head),
@@ -235,8 +266,77 @@ impl Executor for AppExecutor {
                 None
             }
         };
+        observe_run(app, repo, stored, &before, &result, end_cursor);
         Finished { result, end_cursor }
     }
+}
+
+/// Most feed entries an operation's metrics and spans are read from.
+const OBSERVED_ENTRIES: usize = 100_000;
+
+/// Count and trace what an operation did: its branches' cost, and the
+/// turns, tool calls and connector calls its events record between its
+/// admission and its end (see [`crate::observe`]).
+fn observe_run(
+    app: &App,
+    repo: &RepoState,
+    stored: &StoredOperation,
+    before: &std::collections::BTreeMap<String, f64>,
+    result: &Result<OperationResult, ErrorBody>,
+    end_cursor: Option<u64>,
+) {
+    let observability = app.registry.observability();
+    let operation = &stored.operation;
+    let mut infos: Vec<branchyard::BranchInfo> = Vec::new();
+    if let Ok(result) = result {
+        infos.extend(result.branches.iter().cloned());
+        infos.extend(result.descendants.iter().cloned());
+    }
+    for name in &operation.branches {
+        if !infos.iter().any(|i| &i.name == name) {
+            if let Ok(branch) = repo.yard.branch(name) {
+                infos.push(branch.info().clone());
+            }
+        }
+    }
+    crate::observe::record_cost(&observability.metrics, stored, before, &infos);
+    let Some(end) = end_cursor else { return };
+    let branches: std::collections::BTreeSet<String> = infos
+        .iter()
+        .map(|i| i.name.clone())
+        .chain(operation.branches.iter().cloned())
+        .collect();
+    let mut entries = Vec::new();
+    let mut cursor = operation.cursor;
+    while cursor < end && entries.len() < OBSERVED_ENTRIES {
+        match repo.feed.read_after(cursor, 1000) {
+            Ok(page) if page.is_empty() => break,
+            Ok(page) => {
+                cursor = page.last().map(|e| e.seq).unwrap_or(end);
+                entries.extend(page.into_iter().filter(|e| e.seq <= end));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reading an operation's events for its metrics");
+                return;
+            }
+        }
+    }
+    let harness: std::collections::BTreeMap<String, String> = infos
+        .iter()
+        .map(|i| (i.name.clone(), i.harness.clone()))
+        .collect();
+    let harness_of = |b: &str| harness.get(b).cloned().unwrap_or_else(|| "unknown".into());
+    let parent = stored
+        .trace
+        .as_deref()
+        .and_then(crate::telemetry::SpanContext::parse);
+    crate::observe::record_events(
+        observability,
+        &branches,
+        &harness_of,
+        &entries,
+        parent.as_ref(),
+    );
 }
 
 /// The scope an operation of `kind` needs, as its endpoint checks it.

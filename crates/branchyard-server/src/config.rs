@@ -198,6 +198,15 @@ pub struct TenantPolicy {
     /// repositories.
     #[serde(default)]
     pub max_artifact_bytes: Option<u64>,
+    /// This tenant's share of the queue against other tenants at the same
+    /// priority (default 1): claims go to the tenant with the lowest usage
+    /// per unit of weight. See `docs/server.md#scheduling`.
+    #[serde(default)]
+    pub weight: Option<f64>,
+    /// The highest priority this tenant's operations may carry; a request
+    /// asking for more is admitted at this. Default 10, the highest.
+    #[serde(default)]
+    pub max_priority: Option<i32>,
 }
 
 impl TenantPolicy {
@@ -397,6 +406,18 @@ pub struct Config {
     /// The connector gateway its branches' turns are given, and whether
     /// this server runs it; see `docs/connectors.md`. `None`: off.
     pub connectors: Option<ConnectorsConfig>,
+    /// Waiting this long queued raises an operation's effective priority
+    /// by one; `None` turns aging off. See `docs/server.md#scheduling`.
+    pub aging: Option<Duration>,
+    /// How long a claim keeps counting toward its tenant's usage, as the
+    /// time constant of its decay.
+    pub fair_share_window: Duration,
+    /// `/metrics`; `None` (the default): not served.
+    pub metrics: Option<MetricsConfig>,
+    /// The metrics registry and tracer to use, for embedding and tests;
+    /// `None` (the default): a fresh registry, and traces as the
+    /// OpenTelemetry variables configure them. Never from a file or flag.
+    pub observability: Option<crate::observe::Observability>,
 }
 
 /// `connectors` in the configuration file: the connector gateway.
@@ -464,6 +485,25 @@ impl Config {
             webhooks: Vec::new(),
             webhook_insecure: false,
             connectors: None,
+            aging: Some(crate::store::DEFAULT_AGING),
+            fair_share_window: crate::store::DEFAULT_FAIR_SHARE_WINDOW,
+            metrics: None,
+            observability: None,
+        }
+    }
+
+    /// How this server's dispatcher orders its claims: the configured
+    /// tenants' weights, aging and fair-share window.
+    pub fn scheduling(&self) -> crate::store::Scheduling {
+        crate::store::Scheduling {
+            weights: self
+                .tenants
+                .iter()
+                .filter_map(|(name, t)| t.weight.map(|w| (name.clone(), w)))
+                .collect(),
+            aging: self.aging,
+            window: self.fair_share_window,
+            clock_ms: None,
         }
     }
 
@@ -625,6 +665,45 @@ impl Config {
         if self.max_body_bytes < 1024 {
             return Err("max_body_bytes must be at least 1024".into());
         }
+        for (name, tenant) in &self.tenants {
+            if let Some(weight) = tenant.weight {
+                if !(weight.is_finite() && weight > 0.0 && weight <= 1e6) {
+                    return Err(format!(
+                        "tenant {name}: weight {weight} must be a positive number up to 1000000"
+                    ));
+                }
+            }
+            if let Some(max) = tenant.max_priority {
+                let range = crate::store::MIN_PRIORITY..=crate::store::MAX_PRIORITY;
+                if !range.contains(&max) {
+                    return Err(format!(
+                        "tenant {name}: max_priority {max} is outside {} to {}",
+                        crate::store::MIN_PRIORITY,
+                        crate::store::MAX_PRIORITY
+                    ));
+                }
+            }
+        }
+        if let Some(metrics) = &self.metrics {
+            if let Some(addr) = metrics.listen {
+                if !addr.ip().is_loopback() && !self.insecure_bind {
+                    return Err(format!(
+                        "refusing to serve metrics over plain HTTP on {addr}, which is not a \
+                         loopback address; pass --insecure-bind to allow it"
+                    ));
+                }
+                if !addr.ip().is_loopback() && metrics.token_sha256.is_none() {
+                    return Err(format!(
+                        "the metrics listener on {addr} is not loopback: give it a metrics token"
+                    ));
+                }
+                if addr == self.listen && addr.port() != 0 && !self.worker_only {
+                    return Err(format!(
+                        "the metrics listener {addr} is the server's own listen address"
+                    ));
+                }
+            }
+        }
         if self.max_artifact_bytes < 1024 {
             return Err("max_artifact_bytes must be at least 1024".into());
         }
@@ -661,6 +740,27 @@ impl Config {
              replay the tokens.",
             self.listen
         )))
+    }
+}
+
+/// `/metrics` (docs/observability.md): served on the main listener to a
+/// principal with the `admin` scope or the metrics token, and, with
+/// `listen`, on a listener of its own.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MetricsConfig {
+    /// A separate plain-HTTP listener serving only `/metrics`.
+    pub listen: Option<SocketAddr>,
+    /// SHA-256 of the metrics token, which reads `/metrics` and nothing
+    /// else. Without one, the separate listener needs no token.
+    pub token_sha256: Option<String>,
+}
+
+impl fmt::Debug for MetricsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MetricsConfig")
+            .field("listen", &self.listen)
+            .field("token", &self.token_sha256.as_ref().map(|_| "<redacted>"))
+            .finish()
     }
 }
 
@@ -775,6 +875,31 @@ pub(crate) struct FileConfig {
     /// The connector gateway (docs/connectors.md): where it is, which
     /// bundles it serves, and whether this server runs it.
     connectors: Option<FileConnectors>,
+    /// Seconds an operation waits queued before its effective priority
+    /// rises by one, so low-priority work cannot starve; 0 turns aging
+    /// off. Default 60. See docs/server.md#scheduling.
+    aging_seconds: Option<f64>,
+    /// Seconds a claim keeps counting toward its tenant's fair share (the
+    /// time constant of its exponential decay); 0 counts only running
+    /// operations. Default 300.
+    fair_share_window_seconds: Option<f64>,
+    /// Serve Prometheus metrics at /metrics (docs/observability.md). Off
+    /// without this.
+    metrics: Option<FileMetrics>,
+}
+
+/// `metrics`: Prometheus metrics at `/metrics`; see docs/observability.md.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileMetrics {
+    /// A separate plain-HTTP listener (`IP:port`) serving only /metrics,
+    /// as `--metrics-addr` sets it.
+    listen: Option<String>,
+    /// A token that reads /metrics and nothing else, at least 16
+    /// characters. Exactly one of `token` and `token_file`, or neither.
+    token: Option<String>,
+    token_file: Option<PathBuf>,
 }
 
 /// `connectors`: the connector gateway; see `docs/connectors.md`.
@@ -863,6 +988,12 @@ pub(crate) struct FileTenantPolicy {
     max_branches: Option<usize>,
     max_cost_usd: Option<f64>,
     max_artifact_bytes: Option<u64>,
+    /// The tenant's share of the queue against other tenants at the same
+    /// priority. Default 1.
+    weight: Option<f64>,
+    /// The highest priority its operations may carry (-10 to 10); higher
+    /// requests are admitted at this. Default 10.
+    max_priority: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -921,6 +1052,10 @@ pub struct Partial {
     pub webhooks: Vec<WebhookConfig>,
     pub webhook_insecure: bool,
     pub connectors: Option<ConnectorsConfig>,
+    /// `aging_seconds`: `Some(None)` turns aging off.
+    pub aging: Option<Option<Duration>>,
+    pub fair_share_window: Option<Duration>,
+    pub metrics: Option<MetricsConfig>,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -1029,6 +1164,8 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
                     max_branches: p.max_branches,
                     max_cost_usd: p.max_cost_usd,
                     max_artifact_bytes: p.max_artifact_bytes,
+                    weight: p.weight,
+                    max_priority: p.max_priority,
                 },
             )
         })
@@ -1057,7 +1194,48 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         Some(s) => return Err(format!("unclaimable_after_seconds {s} is not usable")),
         None => None,
     };
+    let seconds = |name: &str, value: Option<f64>| match value {
+        Some(s) if (0.0..1e9).contains(&s) => Ok(Some(Duration::from_secs_f64(s))),
+        Some(s) => Err(format!("{name} {s} is not usable")),
+        None => Ok(None),
+    };
+    let aging = seconds("aging_seconds", file.aging_seconds)?.map(|d| (!d.is_zero()).then_some(d));
+    let fair_share_window = seconds("fair_share_window_seconds", file.fair_share_window_seconds)?;
+    let metrics = match file.metrics {
+        None => None,
+        Some(m) => {
+            let token = match (m.token, m.token_file) {
+                (Some(token), None) => {
+                    if let Some(warning) = readable_by_others(path) {
+                        warnings.push(warning);
+                    }
+                    Some(token)
+                }
+                (None, Some(file)) => Some(read_token_file(&resolve(file), &mut warnings)?),
+                (None, None) => None,
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "config {}: metrics takes token or token_file, not both",
+                        path.display()
+                    ))
+                }
+            };
+            if token.as_ref().is_some_and(|t| t.len() < 16) {
+                return Err(format!(
+                    "config {}: the metrics token is shorter than 16 characters",
+                    path.display()
+                ));
+            }
+            Some(MetricsConfig {
+                listen: m.listen.as_deref().map(parse_listen).transpose()?,
+                token_sha256: token.map(|t| sha256_hex(t.as_bytes())),
+            })
+        }
+    };
     Ok(Partial {
+        aging,
+        fair_share_window,
+        metrics,
         listen,
         data_dir: file.data_dir.map(resolve),
         repos: file

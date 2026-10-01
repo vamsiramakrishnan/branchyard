@@ -207,6 +207,11 @@ impl Live {
                 "--require-label chooses among a server's workers: use it with --remote".into(),
             ));
         }
+        if task.priority.is_some() {
+            return Err(Failure::Message(
+                "--priority orders a server's queue: use it with --remote".into(),
+            ));
+        }
         let console = self.console.clone();
         let exe = std::env::current_exe().ok();
         let policy = match (&exe, task.allow_delegation) {
@@ -238,6 +243,9 @@ impl Live {
             seats: None,
             workspace: None,
             actor: None,
+            // A local harness inherits this process's environment,
+            // `TRACEPARENT` included.
+            trace_parent: None,
         })
     }
 

@@ -30,6 +30,9 @@ hyper-util = { version = "0.1", features = ["tokio", "service", "server", "serve
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
 rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
 postgres = { version = "0.19", optional = true }
+# OTLP's protobuf messages for trace export (docs/observability.md); already
+# in the workspace through the Substrate provider.
+prost = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
