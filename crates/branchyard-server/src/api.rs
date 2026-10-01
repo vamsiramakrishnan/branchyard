@@ -21,9 +21,9 @@ use branchyard::{
 };
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, FeedEntry, ForkRequest,
-    GraphRequest, HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind,
-    PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
-    SteerRequest, TaskRequest,
+    GraphRequest, HarnessList, IntegrateRequest, InventoryReport, MergeRequest, Operation,
+    OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest,
+    SpawnRequest, SteerRequest, TaskRequest, WorkerInventory,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -660,6 +660,7 @@ pub fn router(app: Shared) -> Router {
     let v1 = Router::new()
         .route("/v1/repos", get(repos))
         .route("/v1/harnesses", get(harnesses))
+        .route("/v1/inventory", get(inventory))
         .route("/v1/operations", get(operation_by_key))
         .route("/v1/operations/{id}", get(operation))
         .route("/v1/repos/{repo}/tasks", axum::routing::post(post_task))
@@ -1154,6 +1155,44 @@ async fn harnesses(
     Ok(Json(HarnessList { harnesses: list }))
 }
 
+/// `GET /v1/inventory`: live workers serving the caller's repositories,
+/// this one first, with the harness inventory each advertises.
+async fn inventory(
+    State(app): State<Shared>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Json<InventoryReport>, ApiError> {
+    if !caller.0.allows("read") {
+        return Err(scope_required("read"));
+    }
+    let visible: Vec<String> = app.visible_repos(&caller).map(|r| r.name.clone()).collect();
+    let registry = app.registry.clone();
+    let workers = blocking(move || registry.live_workers())
+        .await?
+        .map_err(|e| ApiError::internal(format!("could not read the live workers: {e}")))?;
+    let this = app.registry.worker().id.clone();
+    let mut workers: Vec<WorkerInventory> = workers
+        .into_iter()
+        .filter_map(|w| {
+            let repos: Vec<String> = w
+                .repos
+                .into_iter()
+                .filter(|r| visible.contains(r))
+                .collect();
+            (!repos.is_empty()).then(|| WorkerInventory {
+                this: w.id == this,
+                id: w.id,
+                host: w.host,
+                labels: w.labels,
+                repos,
+                seen_ms_ago: w.seen_ms_ago,
+                inventory: w.inventory,
+            })
+        })
+        .collect();
+    workers.sort_by_key(|w| !w.this);
+    Ok(Json(InventoryReport { workers }))
+}
+
 fn unknown_operation(what: String) -> ApiError {
     ApiError::new(
         StatusCode::NOT_FOUND,
@@ -1281,7 +1320,7 @@ pub(crate) fn incoming_trace(headers: &HeaderMap) -> Option<String> {
 pub(crate) fn required_labels(labels: &[String]) -> Result<Vec<String>, ApiError> {
     if let Some(bad) = labels.iter().find(|l| !crate::store::valid_label(l)) {
         return Err(ApiError::bad_request(format!(
-            "require_labels: {bad:?} is not a label (1 to 63 of a-z, 0-9, '.', '_' and '-', \
+            "require_labels: {bad:?} is not a label (1 to 63 of a-z, 0-9, '.', '_', '-' and ':', \
              starting with a letter or digit)"
         )));
     }
@@ -1345,6 +1384,29 @@ pub(crate) async fn admit_task(
     let policy = app.tenant_policy(caller);
     app.check_admission_quotas(caller, &policy).await?;
     let options = work::task_options(app, repo, &request)?;
+    let mut requires = required_labels(&request.require_labels)?;
+    // Steer a task that runs its harnesses by name, here, toward a worker
+    // whose inventory says they can run (docs/harness-lifecycle.md).
+    let by_name = options.command.is_none()
+        && matches!(options.provider, None | Some(branchyard::Provider::Local));
+    if by_name {
+        let named: Vec<String> = match request.harnesses.is_empty() {
+            true => request.harness.iter().cloned().collect(),
+            false => request.harnesses.clone(),
+        };
+        let ids: Vec<String> = named
+            .iter()
+            .filter_map(|h| branchyard::inventory::harness_of(h))
+            .map(str::to_owned)
+            .collect();
+        if !ids.is_empty() && ids.len() == named.len() {
+            let (registry, name) = (app.registry.clone(), repo.name.clone());
+            let derived = blocking(move || registry.harness_requirement(&name, &ids)).await?;
+            requires.extend(derived);
+            requires.sort();
+            requires.dedup();
+        }
+    }
     let planned = {
         let (yard, prompt, harnesses) = (
             repo.yard.clone(),
@@ -1377,7 +1439,7 @@ pub(crate) async fn admit_task(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(caller, &policy),
-        requires: required_labels(&request.require_labels)?,
+        requires,
         priority: admitted_priority(&policy, request.priority, 0)?,
         trace,
     };

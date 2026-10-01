@@ -157,6 +157,12 @@ impl Sink for AppSink {
             attempts: Some(1),
             failover: Some(false),
             excluded: Default::default(),
+            harnesses: self
+                .app
+                .registry
+                .live_workers()
+                .ok()
+                .map(|workers| crate::store::WorkersGate::new(&repo.name, workers).into_arc()),
         };
         let route = repo
             .yard

@@ -745,6 +745,36 @@ pub struct HarnessList {
     pub harnesses: Vec<HarnessInfo>,
 }
 
+/// One worker's machine and the harnesses it has
+/// (docs/harness-lifecycle.md).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkerInventory {
+    /// The worker's ID, as its claims record it.
+    pub id: String,
+    pub host: String,
+    /// The labels it claims with, `harness:<id>` ones included.
+    pub labels: Vec<String>,
+    /// The repositories it serves (only those the caller can see).
+    pub repos: Vec<String>,
+    /// Milliseconds since its last beat.
+    pub seen_ms_ago: u64,
+    /// The server that answered is this worker.
+    #[serde(default)]
+    pub this: bool,
+    /// What it advertised; `None` when it advertises nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<branchyard::inventory::Inventory>,
+}
+
+/// `GET /v1/inventory`: the live workers serving the caller's repositories,
+/// the answering server's first, and the harnesses each one's machine has.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InventoryReport {
+    pub workers: Vec<WorkerInventory>,
+}
+
 /// A merge on the wire: [`branchyard::Merged`]'s own serde form.
 pub type MergedInfo = Merged;
 

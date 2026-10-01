@@ -1003,20 +1003,26 @@ pub(crate) fn plan(
 }
 
 /// Whether `candidate` can run now under `options`: its profile exists, is
-/// allowed, and (run locally) its executable is found.
+/// allowed, and (run locally) its executable is found and, with
+/// `harnesses`, this machine's inventory says it can run (installed, not
+/// logged out, not at a usage limit), perhaps after installing it.
 pub(crate) fn availability(
     yard: &Yard,
     options: &TaskOptions,
     candidate: &FleetCandidate,
+    harnesses: Option<&dyn crate::inventory::HarnessGate>,
 ) -> Result<(), String> {
     let profile = harness::select(Some(&candidate.harness)).map_err(|e| e.to_string())?;
     harness::check_approvals(profile, options.unapproved_tools).map_err(|e| e.to_string())?;
     placement::check(yard, options.provider.as_ref()).map_err(|e| e.to_string())?;
     if !placement::sandboxed(options.provider.as_ref()) {
-        let command = harness::command(
-            profile,
-            candidate.command.as_deref().or(options.command.as_deref()),
-        );
+        let replaced = candidate.command.as_deref().or(options.command.as_deref());
+        // The harness by its own name: what this machine has of it, which
+        // may install it first. A replaced command is checked as a path.
+        if let (Some(gate), None) = (harnesses, replaced) {
+            gate.check(profile.harness)?;
+        }
+        let command = harness::command(profile, replaced);
         harness::check_available(&candidate.harness, &command).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1037,6 +1043,10 @@ pub struct RouteOptions {
     /// (`by usage`, `[usage] skip_over`). Such a candidate is excluded
     /// like an unavailable one.
     pub excluded: std::collections::BTreeMap<String, String>,
+    /// What the machine that runs the task has of each harness
+    /// (docs/harness-lifecycle.md): a candidate it says cannot run there
+    /// is excluded, with its reason; it may install one first.
+    pub harnesses: Option<std::sync::Arc<dyn crate::inventory::HarnessGate>>,
 }
 
 /// A routed run or fan: what the router chose, and the branches as they
@@ -1102,7 +1112,7 @@ pub(crate) fn route(
     let history = stats(&yard.store().outcomes().outcomes(Some(kind))?);
     let available = |c: &FleetCandidate| match how.excluded.get(&c.harness) {
         Some(why) => Err(why.clone()),
-        None => availability(yard, options, c),
+        None => availability(yard, options, c, how.harnesses.as_deref()),
     };
     let route = plan(
         kind,
@@ -1422,7 +1432,7 @@ pub(crate) fn failover(
     let mut skipped = Vec::new();
     let Some(next) = remaining
         .iter()
-        .find(|c| match availability(yard, options, c) {
+        .find(|c| match availability(yard, options, c, None) {
             Ok(()) => true,
             Err(why) => {
                 skipped.push(format!("{}: {why}", c.label()));

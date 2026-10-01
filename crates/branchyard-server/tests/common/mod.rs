@@ -144,6 +144,11 @@ impl Fixture {
         config.shutdown_grace = Duration::from_secs(10);
         config.poll_interval = Duration::from_millis(100);
         config.log_requests = false;
+        // Never this machine's real harnesses: a worker advertises none
+        // unless a test gives it an inventory (tests/inventory.rs).
+        config.inventory_source = Some(branchyard_server::ops::InventorySource(
+            std::sync::Arc::new(|| None),
+        ));
         config
     }
 }

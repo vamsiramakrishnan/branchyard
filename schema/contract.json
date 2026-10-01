@@ -16750,6 +16750,511 @@
         }
       }
     },
+    "WorkerInventory": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The worker's ID, as its claims record it."
+        },
+        "host": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The labels it claims with, `harness:<id>` ones included."
+        },
+        "repos": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The repositories it serves (only those the caller can see)."
+        },
+        "seen_ms_ago": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Milliseconds since its last beat."
+        },
+        "this": {
+          "type": "boolean",
+          "description": "The server that answered is this worker.",
+          "default": false
+        },
+        "inventory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Inventory"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What it advertised; `None` when it advertises nothing."
+        }
+      },
+      "required": [
+        "id",
+        "host",
+        "labels",
+        "repos",
+        "seen_ms_ago"
+      ],
+      "description": "One worker's machine and the harnesses it has\n(docs/harness-lifecycle.md).",
+      "title": "WorkerInventory",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Inventory": {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "The machine's host name, as it reports it."
+            },
+            "os": {
+              "type": "string",
+              "description": "`uname -s`: `Linux`, `Darwin`."
+            },
+            "detected_at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When it was detected, in milliseconds since the Unix epoch."
+            },
+            "checked": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The harness IDs looked for. One not listed in `harnesses` is not\ninstalled; one not looked for is unknown."
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/HarnessState"
+              },
+              "description": "The installed harnesses, in catalog order."
+            },
+            "tools": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Install programs found on the machine (`npm`, `curl`, ...), by name,\nwith their paths.",
+              "default": {}
+            }
+          },
+          "required": [
+            "host",
+            "os",
+            "detected_at_ms",
+            "checked",
+            "harnesses"
+          ],
+          "description": "What one machine has."
+        },
+        "HarnessState": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The catalog ID."
+            },
+            "path": {
+              "type": "string",
+              "description": "The executable found."
+            },
+            "on_path": {
+              "type": "boolean",
+              "description": "Found through `PATH`; otherwise in one of the install directories,\nwhere a harness started by name would not find it."
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The version its version command printed, when one could be read."
+            },
+            "version_note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why there is no version: the command timed out, failed, or printed\nnone."
+            },
+            "login": {
+              "$ref": "#/$defs/Login"
+            },
+            "quota": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quota"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How much of its login's 5-hour and weekly windows is used, where\n`by usage` can tell (Claude Code and Codex on this machine)."
+            }
+          },
+          "required": [
+            "id",
+            "path",
+            "on_path",
+            "login"
+          ],
+          "description": "One installed harness."
+        },
+        "Login": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/LoginState"
+            },
+            "evidence": {
+              "$ref": "#/$defs/Evidence"
+            },
+            "detail": {
+              "type": "string",
+              "description": "What decided it, for people: `codex login status: Logged in using\nChatGPT`, `OPENAI_API_KEY is set`, `~/.codex/auth.json exists`."
+            }
+          },
+          "required": [
+            "state",
+            "evidence",
+            "detail"
+          ],
+          "description": "Whether a harness is logged in, and how sure that is."
+        },
+        "LoginState": {
+          "type": "string",
+          "enum": [
+            "logged_in",
+            "logged_out",
+            "unknown"
+          ]
+        },
+        "Evidence": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "verified",
+              "description": "The harness's own status command said so."
+            },
+            {
+              "type": "string",
+              "const": "likely",
+              "description": "Inferred from credential files and key variables, by name."
+            },
+            {
+              "type": "string",
+              "const": "none",
+              "description": "Nothing to go on."
+            }
+          ]
+        },
+        "Quota": {
+          "type": "object",
+          "properties": {
+            "five_hour_percent": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "weekly_percent": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "limit_reached": {
+              "type": "boolean",
+              "description": "The harness said a limit was reached."
+            },
+            "resets_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the fuller window resets, in milliseconds since the Unix epoch."
+            }
+          },
+          "required": [
+            "limit_reached"
+          ],
+          "description": "A login's usage, as `by usage` reads it."
+        }
+      }
+    },
+    "InventoryReport": {
+      "type": "object",
+      "properties": {
+        "workers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkerInventory"
+          }
+        }
+      },
+      "required": [
+        "workers"
+      ],
+      "description": "`GET /v1/inventory`: the live workers serving the caller's repositories,\nthe answering server's first, and the harnesses each one's machine has.",
+      "title": "InventoryReport",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "WorkerInventory": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The worker's ID, as its claims record it."
+            },
+            "host": {
+              "type": "string"
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The labels it claims with, `harness:<id>` ones included."
+            },
+            "repos": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The repositories it serves (only those the caller can see)."
+            },
+            "seen_ms_ago": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since its last beat."
+            },
+            "this": {
+              "type": "boolean",
+              "description": "The server that answered is this worker.",
+              "default": false
+            },
+            "inventory": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Inventory"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What it advertised; `None` when it advertises nothing."
+            }
+          },
+          "required": [
+            "id",
+            "host",
+            "labels",
+            "repos",
+            "seen_ms_ago"
+          ],
+          "description": "One worker's machine and the harnesses it has\n(docs/harness-lifecycle.md)."
+        },
+        "Inventory": {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "The machine's host name, as it reports it."
+            },
+            "os": {
+              "type": "string",
+              "description": "`uname -s`: `Linux`, `Darwin`."
+            },
+            "detected_at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When it was detected, in milliseconds since the Unix epoch."
+            },
+            "checked": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The harness IDs looked for. One not listed in `harnesses` is not\ninstalled; one not looked for is unknown."
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/HarnessState"
+              },
+              "description": "The installed harnesses, in catalog order."
+            },
+            "tools": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Install programs found on the machine (`npm`, `curl`, ...), by name,\nwith their paths.",
+              "default": {}
+            }
+          },
+          "required": [
+            "host",
+            "os",
+            "detected_at_ms",
+            "checked",
+            "harnesses"
+          ],
+          "description": "What one machine has."
+        },
+        "HarnessState": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The catalog ID."
+            },
+            "path": {
+              "type": "string",
+              "description": "The executable found."
+            },
+            "on_path": {
+              "type": "boolean",
+              "description": "Found through `PATH`; otherwise in one of the install directories,\nwhere a harness started by name would not find it."
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The version its version command printed, when one could be read."
+            },
+            "version_note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why there is no version: the command timed out, failed, or printed\nnone."
+            },
+            "login": {
+              "$ref": "#/$defs/Login"
+            },
+            "quota": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quota"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How much of its login's 5-hour and weekly windows is used, where\n`by usage` can tell (Claude Code and Codex on this machine)."
+            }
+          },
+          "required": [
+            "id",
+            "path",
+            "on_path",
+            "login"
+          ],
+          "description": "One installed harness."
+        },
+        "Login": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/LoginState"
+            },
+            "evidence": {
+              "$ref": "#/$defs/Evidence"
+            },
+            "detail": {
+              "type": "string",
+              "description": "What decided it, for people: `codex login status: Logged in using\nChatGPT`, `OPENAI_API_KEY is set`, `~/.codex/auth.json exists`."
+            }
+          },
+          "required": [
+            "state",
+            "evidence",
+            "detail"
+          ],
+          "description": "Whether a harness is logged in, and how sure that is."
+        },
+        "LoginState": {
+          "type": "string",
+          "enum": [
+            "logged_in",
+            "logged_out",
+            "unknown"
+          ]
+        },
+        "Evidence": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "verified",
+              "description": "The harness's own status command said so."
+            },
+            {
+              "type": "string",
+              "const": "likely",
+              "description": "Inferred from credential files and key variables, by name."
+            },
+            {
+              "type": "string",
+              "const": "none",
+              "description": "Nothing to go on."
+            }
+          ]
+        },
+        "Quota": {
+          "type": "object",
+          "properties": {
+            "five_hour_percent": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "weekly_percent": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "limit_reached": {
+              "type": "boolean",
+              "description": "The harness said a limit was reached."
+            },
+            "resets_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the fuller window resets, in milliseconds since the Unix epoch."
+            }
+          },
+          "required": [
+            "limit_reached"
+          ],
+          "description": "A login's usage, as `by usage` reads it."
+        }
+      }
+    },
     "MergedInfo": {
       "type": "object",
       "properties": {

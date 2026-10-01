@@ -88,6 +88,8 @@ pub fn contract() -> Value {
     entry::<api::RepoList>("RepoList", &mut types);
     entry::<api::HarnessEntry>("HarnessEntry", &mut types);
     entry::<api::HarnessList>("HarnessList", &mut types);
+    entry::<api::WorkerInventory>("WorkerInventory", &mut types);
+    entry::<api::InventoryReport>("InventoryReport", &mut types);
     entry::<api::MergedInfo>("MergedInfo", &mut types);
     entry::<branchyard::BranchInfo>("BranchInfo", &mut types);
     entry::<branchyard::Inspection>("Inspection", &mut types);

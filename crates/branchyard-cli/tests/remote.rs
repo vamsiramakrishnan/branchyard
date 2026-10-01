@@ -393,7 +393,7 @@ fn remote_commands_print_what_local_ones_do() {
         &["diff", "hello"],
         &["log", "hello"],
         &["log", "p"],
-        &["harnesses"],
+        &["harnesses", "--profiles"],
     ] {
         same(args);
     }
@@ -401,7 +401,7 @@ fn remote_commands_print_what_local_ones_do() {
         &["ls", "--json"][..],
         &["show", "hello", "--json"],
         &["log", "hello", "--json"],
-        &["harnesses", "--json"],
+        &["harnesses", "--profiles", "--json"],
     ] {
         same_json(args);
     }

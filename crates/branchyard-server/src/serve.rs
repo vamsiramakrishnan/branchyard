@@ -468,6 +468,12 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         repos: config.repos.iter().map(|(name, _)| name.clone()).collect(),
         exclusive: config.database.is_none(),
         labels: config.labels.clone(),
+        inventory: config.inventory.then(|| {
+            config
+                .inventory_source
+                .clone()
+                .unwrap_or_else(crate::ops::inventory_source)
+        }),
         unclaimable_after: config.unclaimable_after,
         scheduling: config.scheduling(),
         observability: config

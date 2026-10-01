@@ -636,6 +636,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "branchyard-bridge",
+ "branchyard-controls",
  "branchyard-harness",
  "branchyard-microsandbox",
  "branchyard-provision",

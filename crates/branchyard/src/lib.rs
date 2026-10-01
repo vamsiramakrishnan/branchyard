@@ -111,6 +111,7 @@ mod goal;
 mod graph;
 mod harness;
 mod inbox;
+pub mod inventory;
 mod judge;
 mod knowledge;
 mod lock;

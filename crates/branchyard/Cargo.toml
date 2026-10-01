@@ -20,6 +20,7 @@ schema = ["dep:schemars", "branchyard-provision/schema", "branchyard-harness/sch
 [dependencies]
 blake3 = "1"
 branchyard-bridge = { path = "../branchyard-bridge" }
+branchyard-controls = { path = "../branchyard-controls" }
 branchyard-harness = { path = "../branchyard-harness" }
 branchyard-microsandbox = { path = "../branchyard-microsandbox" }
 branchyard-provision = { path = "../branchyard-provision" }

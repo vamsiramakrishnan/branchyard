@@ -52,6 +52,7 @@ pub fn route_options(task: &TaskArgs, attempts: Option<u32>) -> RouteOptions {
         // its entry says so.
         failover: task.auto.then_some(true),
         excluded: Default::default(),
+        harnesses: None,
     }
 }
 
@@ -100,6 +101,9 @@ pub fn routed(
     let mut how = route_options(task, attempts);
     // Candidates whose login is near its usage limit (docs/usage.md).
     how.excluded = crate::usage::route_exclusions(fleet);
+    // What this machine has of each harness, installing on demand when
+    // [harnesses] install = "auto" (docs/harness-lifecycle.md).
+    how.harnesses = crate::harness_cmd::route_gate(fleet, options, false);
     let route = yard.route(
         prompt,
         options,
@@ -403,11 +407,14 @@ pub fn route(
         )
     })?;
     let yard = open()?;
+    let options = TaskOptions::default();
     let how = RouteOptions {
         seed: Some(how.seed.unwrap_or_else(branchyard::fleet_seed)),
+        // What this machine has of each harness, installing nothing.
+        harnesses: crate::harness_cmd::route_gate(fleet, &options, true),
         ..how.clone()
     };
-    let route = yard.route(prompt, &TaskOptions::default(), fleet, &how, how.attempts)?;
+    let route = yard.route(prompt, &options, fleet, &how, how.attempts)?;
     match as_json {
         true => print(&json::text(
             &serde_json::to_value(&route).unwrap_or_default(),

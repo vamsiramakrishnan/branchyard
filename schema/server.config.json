@@ -156,6 +156,13 @@
       },
       "default": []
     },
+    "inventory": {
+      "description": "Detect the harnesses installed on this machine and advertise them,\nwith a `harness:<id>` label for each that can run. Default true. See\ndocs/harness-lifecycle.md.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "unclaimable_after_seconds": {
       "description": "How long an operation may wait queued before it says why no live\nworker can claim it. Default 60.",
       "type": [
