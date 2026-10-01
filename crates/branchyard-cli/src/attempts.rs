@@ -383,13 +383,39 @@ pub fn compare(env: &Env, target: &Target, args: &CompareArgs) -> Outcome {
     let Some(pick) = &args.pick else {
         return Ok(());
     };
+    let names: Vec<String> = attempts.iter().map(|a| a.branch.clone()).collect();
+    let removed = pick_and_discard(env, target, &names, pick, args)?;
+    if args.json {
+        return print(&json::text(&json!({
+            "attempts": attempts,
+            "picked": pick,
+            "removed": removed,
+        })));
+    }
+    Ok(())
+}
+
+/// Merge `pick` through the validated merge `by merge` uses, then, with
+/// `--discard-others`, remove the rest of `names` after asking (or with
+/// `--yes`). Returns what was removed. `by compare --pick` and `by judge
+/// --pick` both end here.
+pub fn pick_and_discard(
+    env: &Env,
+    target: &Target,
+    names: &[String],
+    pick: &str,
+    args: &CompareArgs,
+) -> Result<Vec<String>, Failure> {
     // The existing validated merge: the pick's check runs on the exact
     // merge result, and the target moves only by compare-and-swap.
-    commands::merge(target, pick, args.into.as_deref(), false)?;
-    let others: Vec<&str> = attempts
+    match args.json {
+        true => commands::merge_quietly(target, pick, args.into.as_deref())?,
+        false => commands::merge(target, pick, args.into.as_deref(), false)?,
+    }
+    let others: Vec<&str> = names
         .iter()
-        .map(|a| a.branch.as_str())
-        .filter(|b| b != pick)
+        .map(String::as_str)
+        .filter(|b| *b != pick)
         .collect();
     let mut removed = Vec::new();
     if args.discard_others && !others.is_empty() {
@@ -411,17 +437,10 @@ pub fn compare(env: &Env, target: &Target, args: &CompareArgs) -> Outcome {
             }
         }
     }
-    if args.json {
-        return print(&json::text(&json!({
-            "attempts": attempts,
-            "picked": pick,
-            "removed": removed,
-        })));
-    }
-    Ok(())
+    Ok(removed)
 }
 
-fn duration_text(ms: Option<u64>) -> String {
+pub fn duration_text(ms: Option<u64>) -> String {
     match ms {
         None => "-".into(),
         Some(ms) if ms < 1_000 => format!("{ms}ms"),

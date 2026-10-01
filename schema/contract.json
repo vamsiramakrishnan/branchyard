@@ -6158,6 +6158,19 @@
               ],
               "additionalProperties": false,
               "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fleet": {
+                  "$ref": "#/$defs/FleetActivity"
+                }
+              },
+              "required": [
+                "fleet"
+              ],
+              "additionalProperties": false,
+              "description": "Routing, failover and judging: the router's choice for this branch,\nits harness failing over to the next candidate, a judge's scratch\nbranch, or a judge's score. See [`FleetActivity`] and\n`docs/fleet.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -8238,6 +8251,289 @@
             }
           ],
           "description": "Where a turn's sandbox came from."
+        },
+        "FleetActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RouteDecision",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "routed"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "The router chose this branch's harness, or the kind was recorded."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "next": {
+                  "$ref": "#/$defs/FleetCandidate"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "failed_over"
+                }
+              },
+              "required": [
+                "type",
+                "reason",
+                "next"
+              ],
+              "description": "This branch's harness failed, and the task moves to `next`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "type": {
+                  "type": "string",
+                  "const": "judging"
+                }
+              },
+              "required": [
+                "type",
+                "candidates"
+              ],
+              "description": "This branch is a judge's scratch branch for these candidates."
+            },
+            {
+              "$ref": "#/$defs/JudgeMark",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "judged"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A judge scored this branch."
+            }
+          ],
+          "description": "Routing, failover and judging, recorded as [`Activity::Fleet`].\n\nSerialized as an object tagged by `type` in snake case."
+        },
+        "TaskKind": {
+          "type": "string",
+          "enum": [
+            "bugfix",
+            "feature",
+            "refactor",
+            "review",
+            "research",
+            "docs",
+            "migration",
+            "tests",
+            "other"
+          ],
+          "description": "What a task is, for choosing who does it. Given with `--kind`, or\ninferred from the prompt by [`classify`]."
+        },
+        "FleetCandidate": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "Harness or profile ID."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Executable and fixed arguments replacing the profile's, as\n[`TaskOptions::command`]; for development and testing."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "One candidate of a fleet entry: a harness, and optionally the model and\nreasoning effort it runs with."
+        },
+        "Effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "How hard the model reasons, where the harness can be told."
+        },
+        "RouteDecision": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TaskKind"
+            },
+            "kind_source": {
+              "type": "string",
+              "description": "`flag` (given with `--kind`) or `classifier`."
+            },
+            "entry": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The fleet entry used (`bugfix`, `default`), or `None` when the\nharness was named and only the kind is recorded."
+            },
+            "candidate": {
+              "$ref": "#/$defs/FleetCandidate"
+            },
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "This branch's attempt, from 1, of `attempts`."
+            },
+            "attempts": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why this candidate, in words."
+            },
+            "failover": {
+              "type": "boolean",
+              "description": "Whether this branch fails over to `fallbacks` when its harness\nfails."
+            },
+            "fallbacks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FleetCandidate"
+              },
+              "description": "Candidates a failover may move to, in order."
+            },
+            "tried": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FleetCandidate"
+              },
+              "description": "Candidates this failover chain has already tried."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The chain's cost limit, and what branches before this one spent."
+            },
+            "spent_usd": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch this one failed over from."
+            },
+            "environment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "kind_source",
+            "candidate",
+            "attempt",
+            "attempts",
+            "reason",
+            "failover"
+          ],
+          "description": "What the router decided for a branch, recorded on it before its first\nturn as [`FleetActivity::Routed`]."
+        },
+        "JudgeMark": {
+          "type": "object",
+          "properties": {
+            "score": {
+              "type": "number",
+              "format": "double",
+              "description": "From 0 to 100."
+            },
+            "rank": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "From 1."
+            },
+            "of": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "picked": {
+              "type": "boolean",
+              "description": "Whether the judge proposed this candidate."
+            },
+            "by": {
+              "type": "string",
+              "description": "`deterministic`, or the judge harness and whether its verdict was\nused."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "check": {
+              "type": "string",
+              "description": "The candidate's check, as `by compare` words it."
+            }
+          },
+          "required": [
+            "score",
+            "rank",
+            "of",
+            "picked",
+            "by",
+            "check"
+          ],
+          "description": "A judge's score for one candidate, recorded on it."
         }
       }
     },
@@ -8741,6 +9037,19 @@
               ],
               "additionalProperties": false,
               "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fleet": {
+                  "$ref": "#/$defs/FleetActivity"
+                }
+              },
+              "required": [
+                "fleet"
+              ],
+              "additionalProperties": false,
+              "description": "Routing, failover and judging: the router's choice for this branch,\nits harness failing over to the next candidate, a judge's scratch\nbranch, or a judge's score. See [`FleetActivity`] and\n`docs/fleet.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -10821,6 +11130,289 @@
             }
           ],
           "description": "Where a turn's sandbox came from."
+        },
+        "FleetActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RouteDecision",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "routed"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "The router chose this branch's harness, or the kind was recorded."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "next": {
+                  "$ref": "#/$defs/FleetCandidate"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "failed_over"
+                }
+              },
+              "required": [
+                "type",
+                "reason",
+                "next"
+              ],
+              "description": "This branch's harness failed, and the task moves to `next`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "type": {
+                  "type": "string",
+                  "const": "judging"
+                }
+              },
+              "required": [
+                "type",
+                "candidates"
+              ],
+              "description": "This branch is a judge's scratch branch for these candidates."
+            },
+            {
+              "$ref": "#/$defs/JudgeMark",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "judged"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A judge scored this branch."
+            }
+          ],
+          "description": "Routing, failover and judging, recorded as [`Activity::Fleet`].\n\nSerialized as an object tagged by `type` in snake case."
+        },
+        "TaskKind": {
+          "type": "string",
+          "enum": [
+            "bugfix",
+            "feature",
+            "refactor",
+            "review",
+            "research",
+            "docs",
+            "migration",
+            "tests",
+            "other"
+          ],
+          "description": "What a task is, for choosing who does it. Given with `--kind`, or\ninferred from the prompt by [`classify`]."
+        },
+        "FleetCandidate": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "Harness or profile ID."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Executable and fixed arguments replacing the profile's, as\n[`TaskOptions::command`]; for development and testing."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "One candidate of a fleet entry: a harness, and optionally the model and\nreasoning effort it runs with."
+        },
+        "Effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "How hard the model reasons, where the harness can be told."
+        },
+        "RouteDecision": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TaskKind"
+            },
+            "kind_source": {
+              "type": "string",
+              "description": "`flag` (given with `--kind`) or `classifier`."
+            },
+            "entry": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The fleet entry used (`bugfix`, `default`), or `None` when the\nharness was named and only the kind is recorded."
+            },
+            "candidate": {
+              "$ref": "#/$defs/FleetCandidate"
+            },
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "This branch's attempt, from 1, of `attempts`."
+            },
+            "attempts": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why this candidate, in words."
+            },
+            "failover": {
+              "type": "boolean",
+              "description": "Whether this branch fails over to `fallbacks` when its harness\nfails."
+            },
+            "fallbacks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FleetCandidate"
+              },
+              "description": "Candidates a failover may move to, in order."
+            },
+            "tried": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FleetCandidate"
+              },
+              "description": "Candidates this failover chain has already tried."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The chain's cost limit, and what branches before this one spent."
+            },
+            "spent_usd": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch this one failed over from."
+            },
+            "environment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "kind_source",
+            "candidate",
+            "attempt",
+            "attempts",
+            "reason",
+            "failover"
+          ],
+          "description": "What the router decided for a branch, recorded on it before its first\nturn as [`FleetActivity::Routed`]."
+        },
+        "JudgeMark": {
+          "type": "object",
+          "properties": {
+            "score": {
+              "type": "number",
+              "format": "double",
+              "description": "From 0 to 100."
+            },
+            "rank": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "From 1."
+            },
+            "of": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "picked": {
+              "type": "boolean",
+              "description": "Whether the judge proposed this candidate."
+            },
+            "by": {
+              "type": "string",
+              "description": "`deterministic`, or the judge harness and whether its verdict was\nused."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "check": {
+              "type": "string",
+              "description": "The candidate's check, as `by compare` words it."
+            }
+          },
+          "required": [
+            "score",
+            "rank",
+            "of",
+            "picked",
+            "by",
+            "check"
+          ],
+          "description": "A judge's score for one candidate, recorded on it."
         }
       }
     },
@@ -13589,6 +14181,19 @@
               ],
               "additionalProperties": false,
               "description": "Where a turn's sandbox came from (fresh, resumed, branched from a\nprovider snapshot) and what became of it: kept, destroyed, evicted,\na snapshot released. See `docs/sandbox-snapshots.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "fleet": {
+                  "$ref": "#/$defs/FleetActivity"
+                }
+              },
+              "required": [
+                "fleet"
+              ],
+              "additionalProperties": false,
+              "description": "Routing, failover and judging: the router's choice for this branch,\nits harness failing over to the next candidate, a judge's scratch\nbranch, or a judge's score. See [`FleetActivity`] and\n`docs/fleet.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -15669,6 +16274,289 @@
             }
           ],
           "description": "Where a turn's sandbox came from."
+        },
+        "FleetActivity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RouteDecision",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "routed"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "The router chose this branch's harness, or the kind was recorded."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "next": {
+                  "$ref": "#/$defs/FleetCandidate"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "failed_over"
+                }
+              },
+              "required": [
+                "type",
+                "reason",
+                "next"
+              ],
+              "description": "This branch's harness failed, and the task moves to `next`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "type": {
+                  "type": "string",
+                  "const": "judging"
+                }
+              },
+              "required": [
+                "type",
+                "candidates"
+              ],
+              "description": "This branch is a judge's scratch branch for these candidates."
+            },
+            {
+              "$ref": "#/$defs/JudgeMark",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "judged"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A judge scored this branch."
+            }
+          ],
+          "description": "Routing, failover and judging, recorded as [`Activity::Fleet`].\n\nSerialized as an object tagged by `type` in snake case."
+        },
+        "TaskKind": {
+          "type": "string",
+          "enum": [
+            "bugfix",
+            "feature",
+            "refactor",
+            "review",
+            "research",
+            "docs",
+            "migration",
+            "tests",
+            "other"
+          ],
+          "description": "What a task is, for choosing who does it. Given with `--kind`, or\ninferred from the prompt by [`classify`]."
+        },
+        "FleetCandidate": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "Harness or profile ID."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Executable and fixed arguments replacing the profile's, as\n[`TaskOptions::command`]; for development and testing."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "One candidate of a fleet entry: a harness, and optionally the model and\nreasoning effort it runs with."
+        },
+        "Effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "How hard the model reasons, where the harness can be told."
+        },
+        "RouteDecision": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TaskKind"
+            },
+            "kind_source": {
+              "type": "string",
+              "description": "`flag` (given with `--kind`) or `classifier`."
+            },
+            "entry": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The fleet entry used (`bugfix`, `default`), or `None` when the\nharness was named and only the kind is recorded."
+            },
+            "candidate": {
+              "$ref": "#/$defs/FleetCandidate"
+            },
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "This branch's attempt, from 1, of `attempts`."
+            },
+            "attempts": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why this candidate, in words."
+            },
+            "failover": {
+              "type": "boolean",
+              "description": "Whether this branch fails over to `fallbacks` when its harness\nfails."
+            },
+            "fallbacks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FleetCandidate"
+              },
+              "description": "Candidates a failover may move to, in order."
+            },
+            "tried": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FleetCandidate"
+              },
+              "description": "Candidates this failover chain has already tried."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The chain's cost limit, and what branches before this one spent."
+            },
+            "spent_usd": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch this one failed over from."
+            },
+            "environment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "connectors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "kind_source",
+            "candidate",
+            "attempt",
+            "attempts",
+            "reason",
+            "failover"
+          ],
+          "description": "What the router decided for a branch, recorded on it before its first\nturn as [`FleetActivity::Routed`]."
+        },
+        "JudgeMark": {
+          "type": "object",
+          "properties": {
+            "score": {
+              "type": "number",
+              "format": "double",
+              "description": "From 0 to 100."
+            },
+            "rank": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "From 1."
+            },
+            "of": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "picked": {
+              "type": "boolean",
+              "description": "Whether the judge proposed this candidate."
+            },
+            "by": {
+              "type": "string",
+              "description": "`deterministic`, or the judge harness and whether its verdict was\nused."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "check": {
+              "type": "string",
+              "description": "The candidate's check, as `by compare` words it."
+            }
+          },
+          "required": [
+            "score",
+            "rank",
+            "of",
+            "picked",
+            "by",
+            "check"
+          ],
+          "description": "A judge's score for one candidate, recorded on it."
         }
       }
     },

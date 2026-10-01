@@ -326,3 +326,20 @@ See [prepared environments](environments.md) and [worker labels](server.md#worke
 | Several servers, and execute-only workers, on one database | one server per data directory | `by serve --database` on each, `by worker --database`; operations looked up by key with `GET /v1/operations?idempotency_key=` (`Client::operation_by_key`) ([server](server.md#several-servers-on-one-database)) |
 | `HarnessInfo` | not `Serialize`; copied field by field | serde |
 | `by --remote artifact`/`scratch`, the server's HTTP API, `branchyard-client` for storage | refused: "does not yet reach a server over --remote" | server endpoints, the same JSON as local; `--max-artifact-bytes` |
+
+## Added with the fleet table, routing and the judge
+
+Routing, judging and the outcome store run in local mode; `by --remote` refuses each with a message. See [fleet](fleet.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `[fleet.<kind>]`, `[fleet.default]` in `branchyard.toml` (either file) | none | `candidates` (`harness`, `model`, `effort`, `command`), `attempts`, `budget_usd`, `max_turns`, `max_minutes`, `judge`, `failover`, `exploration`, `environment`, `connectors`; checked strictly; in `schema/branchyard.config.json` |
+| `by run` without `--harness` when a `[fleet]` exists | `[defaults] harness`, else claude-code | routed through the table; `[defaults] harness` applies only without a `[fleet]` |
+| `by run --auto`, `by fan --auto`, `--kind`, `--seed`; `by fan --attempts`, `--judge`; `by fan` without `--harness` | `fan` required `--harness` | `Yard::route`, `run_routed`, `fan_routed`, `run_with_kind` (`Fleet`, `FleetEntry`, `FleetCandidate`, `RouteOptions`, `Route`, `Routed`, `TaskKind`, `classify`); `--auto` with `--harness` is refused |
+| `by judge`, `by fleet stats`, `by fleet route` | none | `Yard::judge` (`JudgeOptions`, `Judge`, `HarnessJudge`, `Judgement`, `parse_verdict`, `deterministic_scores`), `Yard::outcomes`, `fleet_stats` |
+| `Activity::Fleet` (`FleetActivity`: `routed`, `failed_over`, `judging`, `judged`) | none | `fleet` in `by log --json`, a line in `by log`; in `schema/contract.json` |
+| Failover | none | after a routed run's, fan's or send's turn fails for its harness: `Yard::failover`; `harness_fault` classifies |
+| A send naming no model | replaced the branch's provisioning, dropping its model | keeps the branch's model and effort; a different model is refused once a turn has run |
+| `by compare --pick --json` | printed the merge line before the JSON | JSON only (locally); `by judge --pick` uses the same code |
+| `by compare --fan NAME` | `NAME-<harness>` | also a routed fan's `NAME-<harness>-<n>` |
+| `outcomes` table (SQLite), `by_outcomes` (PostgreSQL) | none | one row per created top-level branch, kept after removal ([fleet](fleet.md#outcomes)) |

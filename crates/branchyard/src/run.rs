@@ -399,6 +399,158 @@ pub(crate) fn run_on(
     results.into_iter().collect()
 }
 
+/// One branch of [`run_attempts`]: what differs from the task's options.
+pub(crate) struct AttemptSpec {
+    /// The name's suffix, as a fan's harness: `<name>-<label>`. `None` for
+    /// a single branch named as `run` names it.
+    pub label: Option<String>,
+    pub harness: Option<String>,
+    /// Replaces the task's command when set.
+    pub command: Option<Vec<String>>,
+    /// Replaces the task's provisioning.
+    pub provision: Option<Provisioning>,
+    /// Replaces the task's budget when set.
+    pub budget: Option<crate::Budget>,
+    /// Recorded on the branch before its first turn.
+    pub events: Vec<crate::Activity>,
+}
+
+/// `run`, or `run_on` with a harness, command, provisioning and budget per
+/// branch, recording each spec's events before its turn: a routed run or
+/// fan (`crate::fleet`). Branches with labels run in parallel, as a fan.
+pub(crate) fn run_attempts(
+    yard: &Yard,
+    prompt: &str,
+    options: &TaskOptions,
+    specs: Vec<AttemptSpec>,
+) -> Result<Vec<Branch>, Error> {
+    if specs.is_empty() {
+        return Err(Error::State(
+            "run_attempts needs at least one attempt".into(),
+        ));
+    }
+    let per: Vec<TaskOptions> = specs
+        .iter()
+        .map(|spec| TaskOptions {
+            harness: spec.harness.clone().or(options.harness.clone()),
+            command: spec.command.clone().or(options.command.clone()),
+            provision: spec.provision.clone(),
+            budget: spec.budget.clone().unwrap_or(options.budget.clone()),
+            ..options.clone()
+        })
+        .collect();
+    let launches = per
+        .iter()
+        .map(|o| {
+            launch(
+                yard,
+                o.harness.as_deref(),
+                o.command.as_deref(),
+                o.provider.as_ref(),
+                o.unapproved_tools,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let grant = root_grant(options, new_home_private(options))?;
+    for o in &per {
+        crate::provisioning::check(o.provision.as_ref(), new_home_private(o))?;
+    }
+    let base = resolve_base(yard, options.base.as_deref())?;
+    let store = yard.store();
+    let labels: Vec<&str> = specs.iter().filter_map(|s| s.label.as_deref()).collect();
+    if !labels.is_empty() && labels.len() != specs.len() {
+        return Err(Error::State(
+            "run_attempts needs a label for every attempt or for none".into(),
+        ));
+    }
+    if labels.is_empty() && specs.len() > 1 {
+        return Err(Error::State("several attempts need labels".into()));
+    }
+    let reserved = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &labels)?;
+    let mut turns = Vec::new();
+    for (index, ((name, launch), (spec, o))) in reserved
+        .iter()
+        .zip(launches)
+        .zip(specs.iter().zip(&per))
+        .enumerate()
+    {
+        let created = create(
+            yard,
+            NewBranch {
+                name,
+                prompt,
+                profile: launch.profile,
+                base: base.clone(),
+                parent: None,
+                check: options.check.clone(),
+                command: o.command.clone(),
+                home: isolated_home(yard, options, name),
+                cost_baseline: None,
+                provider: options.provider.clone(),
+                grant: grant.clone(),
+                depth: 0,
+                provision: o.provision.clone(),
+                workspace: options.workspace.clone(),
+                seed: None,
+            },
+        )
+        .and_then(|(record, lease)| {
+            for activity in &spec.events {
+                let event = crate::RecordedEvent {
+                    at_ms: now_ms(),
+                    activity: activity.clone(),
+                };
+                if let Err(error) = store.append(name, &event, Some(lease.fence())) {
+                    abandon(lease, record, &error);
+                    return Err(error);
+                }
+            }
+            Ok((record, lease))
+        });
+        match created {
+            Ok((record, lease)) => turns.push((
+                Turn {
+                    yard,
+                    record,
+                    profile: launch.profile,
+                    command: launch.command,
+                    mode: SessionMode::Fresh,
+                    prompt,
+                    options: o,
+                    fork_source: None,
+                    note: None,
+                    sandbox: Default::default(),
+                },
+                lease,
+            )),
+            Err(error) => {
+                for name in &reserved[index..] {
+                    store.release(name);
+                }
+                for (turn, lease) in turns {
+                    abandon(lease, turn.record, &error);
+                }
+                return Err(error);
+            }
+        }
+    }
+    prepare_fan(yard, options, &mut turns);
+    let results: Vec<Result<Branch, Error>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = turns
+            .into_iter()
+            .map(|(turn, lease)| scope.spawn(move || engine::execute(turn, lease)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            })
+            .collect()
+    });
+    results.into_iter().collect()
+}
+
 /// A fan of sandboxed branches that share a provider which can live-branch
 /// and have setup to run: the setup runs once, in a sandbox prepared on the
 /// first branch's worktree, which is paused and live-branched into one
@@ -731,8 +883,8 @@ pub(crate) fn prepare_send(
     if options.check.is_some() {
         record.check = options.check.clone();
     }
-    if options.provision.is_some() {
-        record.provision = options.provision.clone();
+    if let Some(asked) = &options.provision {
+        record.provision = Some(same_model(name, &record, asked.clone())?);
     }
     crate::provisioning::check(record.provision.as_ref(), record.home.is_some())?;
     // A delegated child keeps the envelope and seats its parent gave it.
@@ -776,6 +928,28 @@ pub(crate) fn prepare_send(
         mode,
         note,
     })
+}
+
+/// A send's provisioning keeps the session on the model and reasoning
+/// effort it started with: unset, they are the branch's; a different model
+/// is refused once a turn has run, since switching models mid-session is
+/// not a continuation (reincarnate or fork with a fresh session instead).
+fn same_model(name: &str, record: &Record, mut asked: Provisioning) -> Result<Provisioning, Error> {
+    let had = record.provision.as_ref();
+    match (had.and_then(|p| p.model.as_deref()), asked.model.as_deref()) {
+        (Some(have), Some(want)) if have != want && record.info.turns > 0 => {
+            return Err(Error::Unsupported(format!(
+                "{name}'s session runs model {have}; a send cannot switch it to {want} \
+                 mid-branch (reincarnate it with the other model instead)"
+            )))
+        }
+        (Some(have), None) => asked.model = Some(have.to_owned()),
+        _ => {}
+    }
+    if asked.effort.is_none() {
+        asked.effort = had.and_then(|p| p.effort);
+    }
+    Ok(asked)
 }
 
 pub(crate) fn fork(
@@ -975,13 +1149,38 @@ pub(crate) fn fork(
 /// and a generated handoff brief as its first prompt. Marks `name`
 /// `superseded_by` the new branch, best-effort. See `docs/lifecycle.md`.
 pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Result<Branch, Error> {
+    reincarnate_with(yard, name, options, Reincarnation::default())
+}
+
+/// How [`reincarnate_with`] differs from a plain reincarnation.
+#[derive(Default)]
+pub(crate) struct Reincarnation {
+    /// Start from the branch's base when it has no candidate, with its
+    /// original prompt when no turn of it submitted one, instead of
+    /// refusing.
+    pub from_base: bool,
+    /// What the new name is a slug of, instead of the original prompt.
+    pub stem: Option<String>,
+    /// Recorded on the new branch before its turn.
+    pub events: Vec<crate::Activity>,
+    /// Why, for the handoff brief when the status does not say it.
+    pub why: Option<String>,
+}
+
+/// [`reincarnate`], as a failover (`crate::fleet`) needs it.
+pub(crate) fn reincarnate_with(
+    yard: &Yard,
+    name: &str,
+    options: &TaskOptions,
+    how: Reincarnation,
+) -> Result<Branch, Error> {
     let store = yard.store();
     let parent = store.read(name)?;
-    let candidate = parent
-        .info
-        .candidate
-        .clone()
-        .ok_or_else(|| Error::NoCandidate(name.to_owned()))?;
+    let candidate = match (parent.info.candidate.clone(), how.from_base) {
+        (Some(candidate), _) => Some(candidate),
+        (None, true) => None,
+        (None, false) => return Err(Error::NoCandidate(name.to_owned())),
+    };
     let parent_profile = profiles::by_id(&parent.info.profile)
         .ok_or_else(|| Error::UnknownHarness(parent.info.profile.clone()))?;
     let profile = match &options.harness {
@@ -1007,12 +1206,24 @@ pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Res
     let grant = root_grant(options, private)?;
     let provision = options.provision.clone().or(parent.provision.clone());
     crate::provisioning::check(provision.as_ref(), private)?;
-    let brief = handoff_brief(&store, name, &parent, &candidate, profile, parent_profile);
+    let brief = match &candidate {
+        Some(candidate) => handoff_brief(&store, name, &parent, candidate, profile, parent_profile),
+        // Nothing to hand off: no turn of it submitted a prompt.
+        None if parent.info.turns == 0 => parent.info.prompt.clone(),
+        None => base_brief(
+            &store,
+            name,
+            &parent,
+            profile,
+            parent_profile,
+            how.why.as_deref(),
+        ),
+    };
     let reserved = names::reserve(
         &store,
         &yard.root,
         options.name.as_deref(),
-        &parent.info.prompt,
+        how.stem.as_deref().unwrap_or(&parent.info.prompt),
         &[],
     )?
     .remove(0);
@@ -1025,7 +1236,9 @@ pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Res
             name: &reserved,
             prompt: &brief,
             profile,
-            base: candidate.commit,
+            base: candidate
+                .as_ref()
+                .map_or(parent.info.base.clone(), |c| c.commit.clone()),
             parent: Some(name.to_owned()),
             check: options.check.clone().or(parent.check.clone()),
             command,
@@ -1045,6 +1258,16 @@ pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Res
     .inspect_err(|_| store.release(&reserved))?;
     let (record, lease) = record;
     let new_name = record.info.name.clone();
+    for activity in how.events {
+        let event = crate::RecordedEvent {
+            at_ms: now_ms(),
+            activity,
+        };
+        if let Err(error) = store.append(&new_name, &event, Some(lease.fence())) {
+            abandon(lease, record, &error);
+            return Err(error);
+        }
+    }
     // Best-effort and informational only: never blocks the new branch from
     // starting, and races harmlessly with a concurrent write to the old
     // branch the way any out-of-turn `store.write` does.
@@ -1069,6 +1292,34 @@ pub(crate) fn reincarnate(yard: &Yard, name: &str, options: &TaskOptions) -> Res
         },
         lease,
     )
+}
+
+/// The first prompt for a branch failed over from one that ran turns but
+/// left no candidate: the original task, what it last said, and why.
+fn base_brief(
+    store: &crate::state::Store,
+    name: &str,
+    parent: &Record,
+    profile: &Profile,
+    parent_profile: &Profile,
+    why: Option<&str>,
+) -> String {
+    let events = record::read(store, name).unwrap_or_default();
+    let last = delegation::last_message(&events);
+    let mut brief = format!(
+        "{name} is being restarted with {}: do its task in a fresh session.\n\n\
+         ## Original task\n{}\n\n\
+         ## Progress so far\n{} turn(s) with {}, which left no changes.\n",
+        profile.id, parent.info.prompt, parent.info.turns, parent_profile.id,
+    );
+    if !last.is_empty() {
+        brief.push_str(&format!("\n## Its last message\n{last}\n"));
+    }
+    if let Some(why) = why {
+        brief.push_str(&format!("\n## Why it was restarted\n{why}\n"));
+    }
+    brief.push_str("\nStart from the repository as it is and do the task.");
+    brief
 }
 
 /// The first prompt for a reincarnated branch: the original task, turns so

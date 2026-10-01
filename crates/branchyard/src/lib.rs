@@ -103,10 +103,12 @@ mod conformance;
 mod delegation;
 mod engine;
 mod environments;
+mod fleet;
 mod git;
 mod graph;
 mod harness;
 mod inbox;
+mod judge;
 mod lock;
 mod names;
 mod ops;
@@ -164,11 +166,21 @@ pub use environments::{
     DEFAULT_INPUTS as ENVIRONMENT_DEFAULT_INPUTS, DEFAULT_KEEP as ENVIRONMENT_DEFAULT_KEEP,
     DEFAULT_MAX_AGE as ENVIRONMENT_DEFAULT_MAX_AGE,
 };
+pub use fleet::{
+    classify, credit, fresh_seed as fleet_seed, harness_fault, recorded_route,
+    stats as fleet_stats, BranchOutcome, CandidateStats, Classification, Excluded, Fleet,
+    FleetActivity, FleetCandidate, FleetEntry, JudgeMark, JudgeSpec, OutcomeRecord, Route,
+    RouteDecision, RouteOptions, RoutePick, Routed, TaskKind, DEFAULT_EXPLORATION,
+};
 pub use graph::{
     Access, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphEdit, GraphNode,
     GraphProposal, SpawnSpec, MAX_EDITS,
 };
 pub use inbox::{DeliveryHook, SteerDelivery};
+pub use judge::{
+    deterministic_scores, harness_judge, parse_verdict, prompt as judge_prompt, HarnessJudge,
+    Judge, JudgeOptions, JudgedBy, Judgement, Scored, Verdict,
+};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use pull_request::{
     slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
@@ -416,7 +428,10 @@ impl Yard {
     /// branch's check. Refuses if `target` moved since the check started, if
     /// the check fails, or if the merge conflicts.
     pub fn merge(&self, branch: &str, target: &str) -> Result<Merged, Error> {
-        ops::merge(self, branch, target)
+        let merged = ops::merge(self, branch, target)?;
+        // The outcome store learns the merge; it never undoes one.
+        let _ = fleet::observe(self, branch, None);
+        Ok(merged)
     }
 
     /// Remove a branch's worktree and record; deletes the git branch unless
@@ -553,6 +568,78 @@ impl Yard {
     /// The diff from branch `a`'s candidate (or base) to `b`'s.
     pub fn diff_between(&self, a: &str, b: &str) -> Result<String, Error> {
         compare::between(self, a, b)
+    }
+
+    /// What the router would choose for `prompt` under `fleet`, without
+    /// running anything: the kind, the entry, the candidates picked (one,
+    /// or `attempts`) and those excluded, and why. See `docs/fleet.md`.
+    pub fn route(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        fleet: &Fleet,
+        how: &RouteOptions,
+        attempts: Option<u32>,
+    ) -> Result<Route, Error> {
+        fleet::route(self, prompt, options, fleet, how, attempts).map(|(route, _)| route)
+    }
+
+    /// Run `prompt` on the candidate the router picks from `fleet`, failing
+    /// over to the next while its harness fails, when the entry (or `how`)
+    /// asks for failover. `options.harness` is ignored.
+    pub fn run_routed(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        fleet: &Fleet,
+        how: &RouteOptions,
+    ) -> Result<Routed, Error> {
+        fleet::run_routed(self, prompt, options, fleet, how, false)
+    }
+
+    /// A fan of the entry's attempts (or `how.attempts`) on the candidates
+    /// the router picks, each failing over as [`Yard::run_routed`] does.
+    /// Named `<name>-<harness>`, then `-2`, `-3` for a harness picked again.
+    pub fn fan_routed(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        fleet: &Fleet,
+        how: &RouteOptions,
+    ) -> Result<Routed, Error> {
+        fleet::run_routed(self, prompt, options, fleet, how, true)
+    }
+
+    /// Run `prompt` on `options.harness` as [`TaskBuilder::run`] does,
+    /// recording `kind` on the branch for the outcome store.
+    pub fn run_with_kind(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        kind: TaskKind,
+    ) -> Result<Branch, Error> {
+        fleet::run_with_kind(self, prompt, options, kind)
+    }
+
+    /// When `branch`'s last turn failed because of its harness and it was
+    /// routed with failover, start its task on the next candidate and
+    /// return that branch; `None` otherwise. Routed runs and fans do this
+    /// themselves; call it after a send.
+    pub fn failover(&self, branch: &str, options: &TaskOptions) -> Result<Option<Branch>, Error> {
+        fleet::failover(self, branch, options)
+    }
+
+    /// Judge attempts at one task: their checks, a deterministic score,
+    /// optionally a judge's verdict, a ranking and a proposed pick. See
+    /// `docs/fleet.md`.
+    pub fn judge(&self, branches: &[String], options: &JudgeOptions) -> Result<Judgement, Error> {
+        judge::judge(self, branches, options)
+    }
+
+    /// Finished branches' outcomes, or those of `kind`, oldest first; they
+    /// outlive their branches.
+    pub fn outcomes(&self, kind: Option<TaskKind>) -> Result<Vec<OutcomeRecord>, Error> {
+        self.store().outcomes().outcomes(kind)
     }
 
     /// Apply `branch`'s candidate diff to this checkout, which must be
@@ -1730,6 +1817,11 @@ pub enum Activity {
     /// provider snapshot) and what became of it: kept, destroyed, evicted,
     /// a snapshot released. See `docs/sandbox-snapshots.md`.
     Sandbox(Box<SandboxEvent>),
+    /// Routing, failover and judging: the router's choice for this branch,
+    /// its harness failing over to the next candidate, a judge's scratch
+    /// branch, or a judge's score. See [`FleetActivity`] and
+    /// `docs/fleet.md`.
+    Fleet(Box<FleetActivity>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

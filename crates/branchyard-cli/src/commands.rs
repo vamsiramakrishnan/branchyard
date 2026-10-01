@@ -304,6 +304,9 @@ fn workspace(env: &Env, yard: &Yard) -> Result<Option<branchyard::WorkspaceSpec>
 
 pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome {
     if let Target::Remote(remote) = target {
+        if crate::fleet_cmd::is_routed(task) || task.kind.is_some() {
+            return Err(crate::fleet_cmd::local_only());
+        }
         // The issue's link lives in the prompt's header on a server.
         let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
         return remote::run(env, remote, &prompt, &task);
@@ -317,21 +320,64 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome
         workspace,
         ..live.options(task)?
     };
-    let result = yard.task(prompt).options(options).run();
+    // Routed (docs/fleet.md): the router picks the harness and fails over;
+    // the branch that ends the chain is the one summarized.
+    let result = match (crate::fleet_cmd::is_routed(task), task.kind) {
+        (true, _) => match crate::fleet_cmd::routed(&yard, &prompt, &options, task, false, None) {
+            Ok(mut routed) => Ok(routed.branches.remove(0)),
+            Err(Failure::Sdk(error)) => Err(error),
+            Err(other) => {
+                live.console.finish();
+                return Err(other);
+            }
+        },
+        (false, Some(kind)) => yard.run_with_kind(&prompt, &options, kind),
+        (false, None) => yard.task(prompt).options(options).run(),
+    };
     if let (Ok(branch), Some(issue)) = (&result, &issue) {
         crate::pr::link_issue(branch, issue)?;
     }
     live.finish(env, result)
 }
 
+/// `by fan`'s routing and judging; see docs/fleet.md.
+#[derive(Clone, Debug, Default)]
+pub struct FanRoute {
+    /// Branches to start when routed, instead of the entry's attempts.
+    pub attempts: Option<u32>,
+    /// Judge the attempts afterwards.
+    pub judge: bool,
+}
+
 pub fn fan(
     env: &Env,
     target: &Target,
     prompt: &str,
-    harnesses: &[String],
+    harnesses: Option<&[String]>,
     task: &TaskArgs,
+    route: &FanRoute,
 ) -> Outcome {
+    let routed = crate::fleet_cmd::is_routed(task);
+    if harnesses.is_some() && task.auto {
+        return Err(Failure::Message(
+            "--auto routes through the [fleet] table; it takes no --harness".into(),
+        ));
+    }
+    let harnesses = match (harnesses, routed) {
+        (Some(harnesses), _) => harnesses,
+        (None, true) => &[],
+        (None, false) => {
+            return Err(Failure::Message(
+                "fan needs --harness ID,ID,... or a [fleet] table to route by (--auto); see \
+                 docs/fleet.md"
+                    .into(),
+            ))
+        }
+    };
     if let Target::Remote(remote) = target {
+        if routed || task.kind.is_some() || route.judge {
+            return Err(crate::fleet_cmd::local_only());
+        }
         let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
         return remote::fan(env, remote, &prompt, harnesses, &task);
     }
@@ -345,12 +391,27 @@ pub fn fan(
         workspace,
         ..live.options(task)?
     };
-    let builder = yard.task(prompt).options(options);
-    // Knowing the names up front lines the prefixes up from the first line.
-    if let Ok(names) = builder.planned_names(&ids) {
-        live.console.reserve(&names);
-    }
-    let result = builder.run_on(&ids);
+    let result = match routed {
+        true => {
+            match crate::fleet_cmd::routed(&yard, prompt, &options, task, true, route.attempts) {
+                Ok(routed) => Ok(routed.branches),
+                Err(Failure::Sdk(error)) => Err(error),
+                Err(other) => {
+                    live.console.finish();
+                    return Err(other);
+                }
+            }
+        }
+        false => {
+            let builder = yard.task(prompt).options(options);
+            // Knowing the names up front lines the prefixes up from the
+            // first line.
+            if let Ok(names) = builder.planned_names(&ids) {
+                live.console.reserve(&names);
+            }
+            builder.run_on(&ids)
+        }
+    };
     let branches = match result {
         Ok(branches) => branches,
         Err(error) => {
@@ -371,7 +432,24 @@ pub fn fan(
         .map(Branch::info)
         .chain(descendants.iter())
         .collect();
-    fan_summary(env, &infos)
+    let summary = fan_summary(env, &infos);
+    if route.judge {
+        let names: Vec<String> = branches.iter().map(|b| b.info().name.clone()).collect();
+        let judgement =
+            crate::fleet_cmd::judge_names(&yard, &names, None, None, task.fleet.as_ref())?;
+        print(&format!(
+            "\n{}",
+            crate::fleet_cmd::judgement_table(&judgement, env.style())
+        ))?;
+        if judgement.pick.is_some() {
+            print(&format!(
+                "\n{}\n  by judge {} --pick\n",
+                env.style().paint(Tone::Dim, "next"),
+                names.join(" ")
+            ))?;
+        }
+    }
+    summary
 }
 
 /// The comparison closing `by fan`, and its exit status: failure only when
@@ -442,7 +520,8 @@ pub fn send(
     let branch = open()?.branch(branch)?;
     if json {
         let live = Live::start_to(env, task, true, true, branch.provider()?);
-        let result = branch.send(prompt, live.options(task)?);
+        let options = live.options(task)?;
+        let result = failed_over(branch.send(prompt, options.clone()), &options);
         live.console.finish();
         let branch = match result {
             Ok(branch) => branch,
@@ -458,8 +537,29 @@ pub fn send(
     }
     let delegating = task.delegate.is_some() || !branch.info().children.is_empty();
     let live = Live::start(env, task, delegating, branch.provider()?);
-    let result = branch.send(prompt, live.options(task)?);
+    let options = live.options(task)?;
+    let result = failed_over(branch.send(prompt, options.clone()), &options);
     live.finish(env, result)
+}
+
+/// A routed branch whose turn failed for its harness goes on, on the next
+/// candidate, when its route asked for failover (docs/fleet.md).
+fn failed_over(
+    result: Result<Branch, branchyard::Error>,
+    options: &TaskOptions,
+) -> Result<Branch, branchyard::Error> {
+    let sent = result?;
+    match sent.yard().failover(&sent.info().name, options)? {
+        Some(next) => {
+            eprintln!(
+                "by: {}'s harness failed; the task went on as {}",
+                sent.info().name,
+                next.info().name
+            );
+            Ok(next)
+        }
+        None => Ok(sent),
+    }
 }
 
 /// How long `by send --steer` waits for the engine running the turn to
@@ -834,6 +934,24 @@ fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcom
             std::thread::sleep(FOLLOW_POLL);
         }
     }
+}
+
+/// [`merge`] without removing, and locally without printing, for a command
+/// whose stdout is JSON (`by compare --pick --json`, `by judge --pick
+/// --json`). Remotely the server's merge line is still printed.
+pub fn merge_quietly(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::merge(remote, branch, into);
+    }
+    let yard = open()?;
+    let target = match into {
+        Some(target) => target.to_owned(),
+        None => yard
+            .current_branch()?
+            .ok_or_else(|| Failure::Message("HEAD is detached; pass --into <branch>".into()))?,
+    };
+    yard.merge(branch, &target)?;
+    Ok(())
 }
 
 pub fn merge(target: &Target, branch: &str, into: Option<&str>, remove: bool) -> Outcome {

@@ -69,6 +69,13 @@
         "$ref": "#/$defs/ProjectOverride"
       },
       "description": "Per-repository settings, keyed by the repository root's absolute\npath. User file only: `[projects.\"/src/app\".workspace]` replaces\nthat repository's own `[workspace]` for you."
+    },
+    "fleet": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/FleetConfig"
+      },
+      "description": "Who runs each kind of task: `[fleet.bugfix]`, ..., and\n`[fleet.default]`. With a fleet, `by run` without `--harness` routes\n(docs/fleet.md). A project's entry replaces the user file's for the\nsame kind."
     }
   },
   "title": "Branchyard configuration",
@@ -484,6 +491,176 @@
         }
       },
       "description": "`[projects.\"<repository root>\"]` in the user file."
+    },
+    "FleetConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CandidateConfig"
+          },
+          "description": "Harnesses to route among, each with an optional model and effort."
+        },
+        "attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Branches `by fan --auto` starts (best of N); `by run` starts one. Default 1.",
+          "maximum": 16
+        },
+        "budget_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "Each attempt's cost limit, in dollars, which a failover chain shares;\na candidate whose recorded mean cost is over it is not picked.",
+          "minimum": 0.0
+        },
+        "max_turns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Each attempt's turn limit."
+        },
+        "max_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "Interrupt an attempt's turn after this many minutes.",
+          "minimum": 0.0
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A judge harness for `by judge` and `by fan --judge`; without one the\njudge is deterministic."
+        },
+        "failover": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Start the task again on the next candidate when a harness fails\n(not when the task does). `by run --auto` always does."
+        },
+        "exploration": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The chance, from 0 to 1, that the router picks at random instead of\nby sampled success. Default 0.1.",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "environment": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "An environment name, recorded on routed branches for tools that\nprepare environments; Branchyard does not act on it yet."
+        },
+        "connectors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Connector names, recorded on routed branches for tools that grant\nconnectors; Branchyard does not act on them yet."
+        }
+      },
+      "required": [
+        "candidates"
+      ],
+      "description": "`[fleet.<kind>]`: the candidates for a kind of task, in order of\npreference, and how they run."
+    },
+    "CandidateConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "Harness or profile ID, as `by harnesses` lists them."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A model name, or a size alias (`small`, `medium`, `large`, `extra-large`)."
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Reasoning effort: `low`, `medium`, `high`, `xhigh`, or 0-100."
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The executable and fixed arguments instead of the profile's, as\n`--command`; for development and testing."
+        }
+      },
+      "required": [
+        "harness"
+      ],
+      "description": "One candidate: `{ harness = \"codex\", model = \"large\", effort = \"high\" }`."
+    },
+    "JudgeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "The judge's harness or profile ID. It runs read-only on a scratch\nbranch and must answer a JSON verdict."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rubric": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Added to the judge's prompt, after the default rubric."
+        }
+      },
+      "required": [
+        "harness"
+      ],
+      "description": "`judge = { harness = \"claude-code\", rubric = \"...\" }`."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

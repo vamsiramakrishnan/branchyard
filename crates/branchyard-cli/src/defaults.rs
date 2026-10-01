@@ -67,10 +67,21 @@ pub fn apply(
             return Ok((globals, command));
         }
         Command::Run { task, .. } => apply_task(&config, task, Scope::NewBranch)?,
-        Command::Fan { task, .. } => {
+        Command::Fan {
+            task, harnesses, ..
+        } => {
+            let explicit = task.auto;
             apply_task(&config, task, Scope::NewBranch)?;
-            // fan's harnesses are its --harness list.
+            // fan's harnesses are its --harness list, which routing replaces.
             task.harness = None;
+            if harnesses.is_some() {
+                if explicit {
+                    return Err(
+                        "--auto routes through the [fleet] table; it takes no --harness".into(),
+                    );
+                }
+                task.implied_auto = false;
+            }
         }
         Command::Send { task, .. } => apply_task(&config, task, Scope::Continue)?,
         Command::Fork { task, .. } => apply_task(&config, task, Scope::Continue)?,
@@ -167,7 +178,14 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
     if scope == Scope::Continue {
         return Ok(());
     }
-    if task.harness.is_none() {
+    if !config.fleet.is_empty() {
+        task.fleet = Some(fleet(config)?);
+        // A [fleet] routes a task that names no harness (docs/fleet.md).
+        if task.harness.is_none() && !task.auto {
+            task.implied_auto = true;
+        }
+    }
+    if task.harness.is_none() && !task.auto && !task.implied_auto {
         task.harness = d.harness.clone();
     }
     if task.check.is_none() {
@@ -260,6 +278,80 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
     Ok(())
 }
 
+/// The configuration's `[fleet]` as the SDK takes it.
+pub fn fleet(config: &ProjectConfig) -> Result<branchyard::Fleet, String> {
+    let words = |key: &str, line: &Option<String>| -> Result<Option<Vec<String>>, String> {
+        line.as_deref()
+            .map(branchyard_setup::config::split_words)
+            .transpose()
+            .map_err(|e| format!("{key}: {e}"))
+    };
+    let effort = |key: &str, text: &Option<String>| -> Result<Option<branchyard::Effort>, String> {
+        text.as_deref()
+            .map(branchyard::Effort::parse)
+            .transpose()
+            .map_err(|e| format!("{key}: {e}"))
+    };
+    let mut entries = std::collections::BTreeMap::new();
+    for (kind, entry) in &config.fleet {
+        let key = format!("fleet.{kind}");
+        let mut candidates = Vec::new();
+        for (index, c) in entry.candidates.iter().enumerate() {
+            let at = format!("{key}.candidates[{index}]");
+            candidates.push(branchyard::FleetCandidate {
+                harness: c.harness.clone(),
+                model: c.model.clone(),
+                effort: effort(&at, &c.effort)?,
+                command: words(&at, &c.command)?,
+            });
+        }
+        let judge = match &entry.judge {
+            Some(j) => Some(branchyard::JudgeSpec {
+                harness: j.harness.clone(),
+                model: j.model.clone(),
+                effort: effort(&format!("{key}.judge"), &j.effort)?,
+                command: words(&format!("{key}.judge"), &j.command)?,
+                rubric: j.rubric.clone(),
+            }),
+            None => None,
+        };
+        entries.insert(
+            kind.clone(),
+            branchyard::FleetEntry {
+                candidates,
+                attempts: entry.attempts.unwrap_or(1),
+                budget: branchyard::Budget {
+                    max_usd: entry.budget_usd,
+                    max_turns: entry.max_turns,
+                    max_duration: entry
+                        .max_minutes
+                        .and_then(|m| Duration::try_from_secs_f64(m * 60.0).ok()),
+                    ..branchyard::Budget::default()
+                },
+                judge,
+                failover: entry.failover.unwrap_or(false),
+                exploration: entry.exploration.unwrap_or(branchyard::DEFAULT_EXPLORATION),
+                environment: entry.environment.clone(),
+                connectors: entry.connectors.clone(),
+            },
+        );
+    }
+    Ok(branchyard::Fleet { entries })
+}
+
+/// The `[fleet]` of the files under `cwd`, for commands that take no task
+/// options (`by judge`, `by fleet`); `None` without one, or inside a
+/// harness.
+pub fn fleet_at(
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<branchyard::Fleet>, String> {
+    match load(cwd, env)? {
+        Some(config) if !config.fleet.is_empty() => fleet(&config).map(Some),
+        _ => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +405,60 @@ config = "/srv/server.json"
         assert_eq!(spec.secrets.len(), 1);
         assert_eq!(spec.secrets[0].name, "OPENAI_API_KEY");
         assert_eq!(spec.mcp_servers[0].name, "docs");
+    }
+
+    #[test]
+    fn a_fleet_routes_new_branches_that_name_no_harness() {
+        let config = config(
+            r#"
+[defaults]
+harness = "codex"
+[fleet.default]
+candidates = [{ harness = "codex", model = "large", effort = "high", command = "/x/codex --y" }]
+attempts = 3
+budget_usd = 2
+max_minutes = 1
+failover = true
+judge = { harness = "claude-code", rubric = "short" }
+environment = "rust"
+connectors = ["github"]
+"#,
+        );
+        let mut task = TaskArgs::default();
+        apply_task(&config, &mut task, Scope::NewBranch).unwrap();
+        assert!(task.implied_auto && !task.auto);
+        assert_eq!(task.harness, None, "the router picks, not [defaults]");
+        let fleet = task.fleet.unwrap();
+        let entry = &fleet.entries["default"];
+        assert_eq!(entry.attempts, 3);
+        assert_eq!(entry.budget.max_usd, Some(2.0));
+        assert_eq!(entry.budget.max_duration, Some(Duration::from_secs(60)));
+        assert!(entry.failover);
+        assert_eq!(entry.exploration, branchyard::DEFAULT_EXPLORATION);
+        assert_eq!(entry.candidates[0].effort, Some(branchyard::Effort::High));
+        assert_eq!(
+            entry.candidates[0].command.as_deref(),
+            Some(&["/x/codex".to_owned(), "--y".into()][..])
+        );
+        assert_eq!(
+            entry.judge.as_ref().unwrap().rubric.as_deref(),
+            Some("short")
+        );
+        assert_eq!(entry.connectors, ["github"]);
+        // A named harness is not routed.
+        let mut named = TaskArgs {
+            harness: Some("gemini-cli".into()),
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut named, Scope::NewBranch).unwrap();
+        assert!(!named.implied_auto);
+        // The table's keys are the SDK's kinds and `default`.
+        let kinds: Vec<&str> = branchyard::TaskKind::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .chain(["default"])
+            .collect();
+        assert_eq!(branchyard_setup::config::FLEET_KEYS, kinds.as_slice());
     }
 
     #[test]

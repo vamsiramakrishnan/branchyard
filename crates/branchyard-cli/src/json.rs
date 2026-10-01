@@ -231,6 +231,11 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "sandbox": event,
             "text": event.describe(),
         }),
+        Activity::Fleet(activity) => json!({
+            "activity": "fleet",
+            "fleet": activity,
+            "text": activity.describe(),
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value

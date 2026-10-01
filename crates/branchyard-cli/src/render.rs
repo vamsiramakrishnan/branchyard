@@ -415,6 +415,13 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             },
             &event.describe(),
         ),
+        Activity::Fleet(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::FleetActivity::FailedOver { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &activity.describe(),
+        ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
                 Some(id) => format!(" (re #{id})"),

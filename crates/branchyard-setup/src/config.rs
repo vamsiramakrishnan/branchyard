@@ -78,6 +78,216 @@ pub struct ProjectConfig {
     /// that repository's own `[workspace]` for you.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub projects: BTreeMap<String, ProjectOverride>,
+    /// Who runs each kind of task: `[fleet.bugfix]`, ..., and
+    /// `[fleet.default]`. With a fleet, `by run` without `--harness` routes
+    /// (docs/fleet.md). A project's entry replaces the user file's for the
+    /// same kind.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fleet: BTreeMap<String, FleetConfig>,
+}
+
+/// The keys `[fleet]` takes: the task kinds, then `default`.
+pub const FLEET_KEYS: &[&str] = &[
+    "bugfix",
+    "feature",
+    "refactor",
+    "review",
+    "research",
+    "docs",
+    "migration",
+    "tests",
+    "other",
+    "default",
+];
+
+/// The most attempts a fleet entry may ask for.
+pub const MAX_ATTEMPTS: u32 = 16;
+
+/// `[fleet.<kind>]`: the candidates for a kind of task, in order of
+/// preference, and how they run.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FleetConfig {
+    /// Harnesses to route among, each with an optional model and effort.
+    pub candidates: Vec<CandidateConfig>,
+    /// Branches `by fan --auto` starts (best of N); `by run` starts one. Default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 16))]
+    pub attempts: Option<u32>,
+    /// Each attempt's cost limit, in dollars, which a failover chain shares;
+    /// a candidate whose recorded mean cost is over it is not picked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0))]
+    pub budget_usd: Option<f64>,
+    /// Each attempt's turn limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_turns: Option<u32>,
+    /// Interrupt an attempt's turn after this many minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0))]
+    pub max_minutes: Option<f64>,
+    /// A judge harness for `by judge` and `by fan --judge`; without one the
+    /// judge is deterministic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeConfig>,
+    /// Start the task again on the next candidate when a harness fails
+    /// (not when the task does). `by run --auto` always does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover: Option<bool>,
+    /// The chance, from 0 to 1, that the router picks at random instead of
+    /// by sampled success. Default 0.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub exploration: Option<f64>,
+    /// An environment name, recorded on routed branches for tools that
+    /// prepare environments; Branchyard does not act on it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// Connector names, recorded on routed branches for tools that grant
+    /// connectors; Branchyard does not act on them yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connectors: Vec<String>,
+}
+
+/// One candidate: `{ harness = "codex", model = "large", effort = "high" }`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateConfig {
+    /// Harness or profile ID, as `by harnesses` lists them.
+    pub harness: String,
+    /// A model name, or a size alias (`small`, `medium`, `large`, `extra-large`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Reasoning effort: `low`, `medium`, `high`, `xhigh`, or 0-100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The executable and fixed arguments instead of the profile's, as
+    /// `--command`; for development and testing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// `judge = { harness = "claude-code", rubric = "..." }`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeConfig {
+    /// The judge's harness or profile ID. It runs read-only on a scratch
+    /// branch and must answer a JSON verdict.
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Added to the judge's prompt, after the default rubric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubric: Option<String>,
+}
+
+impl FleetConfig {
+    /// The checks beyond the shape: `key` (`fleet.bugfix`) prefixes each
+    /// message.
+    pub fn check(&self, key: &str) -> Result<(), ConfigError> {
+        let fail = |what: &str, why: String| Err(ConfigError(format!("{key}.{what}: {why}")));
+        if self.candidates.is_empty() {
+            return fail("candidates", "needs at least one candidate".into());
+        }
+        for (index, candidate) in self.candidates.iter().enumerate() {
+            let at = format!("candidates[{index}]");
+            check_harness(&candidate.harness).or_else(|why| fail(&format!("{at}.harness"), why))?;
+            check_model_effort(candidate.model.as_deref(), candidate.effort.as_deref())
+                .or_else(|(what, why)| fail(&format!("{at}.{what}"), why))?;
+            check_command(candidate.command.as_deref())
+                .or_else(|why| fail(&format!("{at}.command"), why))?;
+            if self.candidates[..index].contains(candidate) {
+                return fail(&at, "is listed twice".into());
+            }
+        }
+        match self.attempts {
+            Some(0) => return fail("attempts", "must be at least 1".into()),
+            Some(n) if n > MAX_ATTEMPTS => {
+                return fail(
+                    "attempts",
+                    format!("must be at most {MAX_ATTEMPTS}, not {n}"),
+                )
+            }
+            _ => {}
+        }
+        for (what, value) in [
+            ("budget_usd", self.budget_usd),
+            ("max_minutes", self.max_minutes),
+        ] {
+            if let Some(value) = value {
+                if !(value.is_finite() && value > 0.0) {
+                    return fail(what, format!("must be a positive number, not {value}"));
+                }
+            }
+        }
+        if self.max_turns == Some(0) {
+            return fail("max_turns", "must be at least 1".into());
+        }
+        if let Some(exploration) = self.exploration {
+            if !(0.0..=1.0).contains(&exploration) {
+                return fail(
+                    "exploration",
+                    format!("must be from 0 to 1, not {exploration}"),
+                );
+            }
+        }
+        if let Some(judge) = &self.judge {
+            check_harness(&judge.harness).or_else(|why| fail("judge.harness", why))?;
+            check_model_effort(judge.model.as_deref(), judge.effort.as_deref())
+                .or_else(|(what, why)| fail(&format!("judge.{what}"), why))?;
+            check_command(judge.command.as_deref()).or_else(|why| fail("judge.command", why))?;
+            if judge.rubric.as_deref().is_some_and(|r| r.trim().is_empty()) {
+                return fail("judge.rubric", "must not be empty".into());
+            }
+        }
+        if self
+            .environment
+            .as_deref()
+            .is_some_and(|e| e.trim().is_empty())
+        {
+            return fail("environment", "must not be empty".into());
+        }
+        if let Some(bad) = self.connectors.iter().find(|c| c.trim().is_empty()) {
+            return fail("connectors", format!("{bad:?} is not a connector name"));
+        }
+        Ok(())
+    }
+}
+
+fn check_harness(harness: &str) -> Result<(), String> {
+    match branchyard_harness::profiles::default_for(harness)
+        .or_else(|| branchyard_harness::profiles::by_id(harness))
+    {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "{harness:?} is not a harness or profile; see `by harnesses`"
+        )),
+    }
+}
+
+fn check_model_effort(
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(), (&'static str, String)> {
+    if model.is_some_and(|m| m.trim().is_empty()) {
+        return Err(("model", "must not be empty".into()));
+    }
+    if let Some(effort) = effort {
+        branchyard_provision::Effort::parse(effort).map_err(|e| ("effort", e))?;
+    }
+    Ok(())
+}
+
+fn check_command(command: Option<&str>) -> Result<(), String> {
+    match command {
+        Some(command) if split_words(command)?.is_empty() => Err("needs a command".into()),
+        _ => Ok(()),
+    }
 }
 
 /// A branch's workspace lifecycle: `[workspace]`.
@@ -771,6 +981,15 @@ impl ProjectConfig {
                 workspace.check(&format!("projects.{root:?}.workspace"))?;
             }
         }
+        for (kind, entry) in &self.fleet {
+            if !FLEET_KEYS.contains(&kind.as_str()) {
+                return fail(
+                    &format!("fleet.{kind}"),
+                    format!("is not a task kind; use one of {}", FLEET_KEYS.join(", ")),
+                );
+            }
+            entry.check(&format!("fleet.{kind}"))?;
+        }
         if let Some(sandbox) = &self.microsandbox {
             if sandbox.image.trim().is_empty() {
                 return fail("microsandbox.image", "must not be empty".into());
@@ -1255,6 +1474,15 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
         );
         render_workspace(&mut out, "workspace", workspace);
     }
+    if !config.fleet.is_empty() {
+        out.push_str(
+            "\n# Who runs each kind of task; `by run` without --harness routes among them.\n\
+             # See docs/fleet.md.\n",
+        );
+        let table: BTreeMap<&str, &BTreeMap<String, FleetConfig>> =
+            [("fleet", &config.fleet)].into_iter().collect();
+        out.push_str(&toml::to_string(&table).unwrap_or_default());
+    }
     for (root, project) in &config.projects {
         if let Some(workspace) = &project.workspace {
             out.push_str(&format!(
@@ -1333,6 +1561,17 @@ pass_env = ["OPENAI_API_KEY"]
 [notify]
 desktop = true
 terminal = "osc777"
+[fleet.default]
+candidates = [{ harness = "claude-code", model = "large", effort = "high" }, { harness = "codex" }]
+attempts = 2
+budget_usd = 3
+failover = true
+judge = { harness = "claude-code", rubric = "Prefer small diffs." }
+[fleet.docs]
+candidates = [{ harness = "codex", effort = "low" }]
+exploration = 0
+connectors = ["github"]
+environment = "rust"
 "#;
 
     #[test]
@@ -1352,6 +1591,43 @@ terminal = "osc777"
     fn unknown_keys_and_bad_values_are_refused_by_name() {
         for (text, needle) in [
             ("[defaults]\nharnes = \"codex\"", "harnes"),
+            (
+                "[fleet.chores]\ncandidates = [{ harness = \"codex\" }]",
+                "fleet.chores",
+            ),
+            ("[fleet.docs]\ncandidates = []", "fleet.docs.candidates"),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"nope\" }]",
+                "fleet.docs.candidates[0].harness",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\", effort = \"max\" }]",
+                "fleet.docs.candidates[0].effort",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }, { harness = \"codex\" }]",
+                "is listed twice",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\", modle = \"x\" }]",
+                "modle",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\nattempts = 0",
+                "fleet.docs.attempts",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\nexploration = 2",
+                "fleet.docs.exploration",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\njudge = { harness = \"x\" }",
+                "fleet.docs.judge.harness",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\nbudget = 3",
+                "budget",
+            ),
             ("[defaults]\nharness = \"nope\"", "defaults.harness"),
             ("[defaults]\neffort = \"extreme\"", "defaults.effort"),
             ("[defaults]\nbudget_usd = -1", "defaults.budget_usd"),

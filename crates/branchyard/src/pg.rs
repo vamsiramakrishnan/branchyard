@@ -251,6 +251,25 @@ CREATE TABLE IF NOT EXISTS by_sandboxes (
     PRIMARY KEY (repo, branch, kind, name)
 );
 CREATE INDEX IF NOT EXISTS by_sandboxes_provider ON by_sandboxes (repo, kind, provider, used_ms);
+CREATE TABLE IF NOT EXISTS by_outcomes (
+    repo TEXT NOT NULL,
+    id TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    model TEXT,
+    effort TEXT,
+    outcome TEXT NOT NULL,
+    score DOUBLE PRECISION,
+    cost_usd DOUBLE PRECISION,
+    duration_ms BIGINT,
+    turns BIGINT NOT NULL,
+    routed BOOLEAN NOT NULL,
+    recorded_ms BIGINT NOT NULL,
+    PRIMARY KEY (repo, id)
+);
+CREATE INDEX IF NOT EXISTS by_outcomes_kind ON by_outcomes (repo, kind, recorded_ms);
 ";
 
 fn steer_row(r: &Row) -> SteerRow {
@@ -2545,5 +2564,99 @@ impl StorageBackend for Postgres {
                 acquired_at: uint(r.get::<_, i64>(1)) / 1000,
             })
         })
+    }
+}
+
+const OUTCOME_COLUMNS: &str = "id, repository, branch, kind, harness, model, effort, outcome, \
+     score, cost_usd, duration_ms, turns, routed, recorded_ms";
+
+fn outcome_row(r: &Row) -> Result<crate::fleet::OutcomeRecord, Error> {
+    Ok(crate::fleet::OutcomeRecord {
+        id: r.get(0),
+        repo: r.get(1),
+        branch: r.get(2),
+        kind: r
+            .get::<_, String>(3)
+            .parse()
+            .map_err(|e| Error::State(format!("outcome kind: {e}")))?,
+        harness: r.get(4),
+        model: r.get(5),
+        effort: r.get(6),
+        outcome: crate::fleet::BranchOutcome::parse(r.get(7))?,
+        score: r.get(8),
+        cost_usd: r.get(9),
+        duration_ms: r.get::<_, Option<i64>>(10).map(uint),
+        turns: u32::try_from(r.get::<_, i64>(11)).unwrap_or(0),
+        routed: r.get(12),
+        recorded_ms: uint(r.get(13)),
+    })
+}
+
+impl crate::fleet::OutcomeBackend for Postgres {
+    fn put_outcome(&self, row: &crate::fleet::OutcomeRecord) -> Result<(), Error> {
+        // Statistics derived from branches, not a branch's state: committed
+        // as event appends are, without a sync of its own.
+        self.tx(false, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO by_outcomes (repo, {OUTCOME_COLUMNS}) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+                     ON CONFLICT (repo, id) DO UPDATE SET \
+                     repository = EXCLUDED.repository, branch = EXCLUDED.branch, \
+                     kind = EXCLUDED.kind, harness = EXCLUDED.harness, model = EXCLUDED.model, \
+                     effort = EXCLUDED.effort, outcome = EXCLUDED.outcome, \
+                     score = EXCLUDED.score, cost_usd = EXCLUDED.cost_usd, \
+                     duration_ms = EXCLUDED.duration_ms, turns = EXCLUDED.turns, \
+                     routed = EXCLUDED.routed, recorded_ms = EXCLUDED.recorded_ms"
+                ),
+                &[
+                    &self.repo,
+                    &row.id,
+                    &row.repo,
+                    &row.branch,
+                    &row.kind.as_str(),
+                    &row.harness,
+                    &row.model,
+                    &row.effort,
+                    &row.outcome.as_str(),
+                    &row.score,
+                    &row.cost_usd,
+                    &row.duration_ms.map(int),
+                    &i64::from(row.turns),
+                    &row.routed,
+                    &int(row.recorded_ms),
+                ],
+            )
+            .map_err(db("outcome"))?;
+            Ok(())
+        })
+    }
+
+    fn outcome(&self, id: &str) -> Result<Option<crate::fleet::OutcomeRecord>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+                &format!("SELECT {OUTCOME_COLUMNS} FROM by_outcomes WHERE repo = $1 AND id = $2"),
+                &[&self.repo, &id],
+            )
+        })?;
+        row.as_ref().map(outcome_row).transpose()
+    }
+
+    fn outcomes(
+        &self,
+        kind: Option<crate::fleet::TaskKind>,
+    ) -> Result<Vec<crate::fleet::OutcomeRecord>, Error> {
+        let kind = kind.map(|k| k.as_str().to_owned());
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {OUTCOME_COLUMNS} FROM by_outcomes \
+                     WHERE repo = $1 AND ($2::TEXT IS NULL OR kind = $2) \
+                     ORDER BY recorded_ms, id"
+                ),
+                &[&self.repo, &kind],
+            )
+        })?;
+        rows.iter().map(outcome_row).collect()
     }
 }

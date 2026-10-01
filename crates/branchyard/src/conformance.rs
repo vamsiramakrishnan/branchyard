@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+use crate::fleet::{BranchOutcome, OutcomeBackend, OutcomeRecord, TaskKind};
 use crate::graph::GraphBackend;
 use crate::state::{
     now_ms, Acquired, Backend, Begun, Fence, Owner, PortBackend, ProcessRow, Record,
@@ -34,6 +35,10 @@ pub(crate) struct Opened {
     pub sandboxes: Arc<dyn SandboxBackend>,
     /// [`Opened::again`], as [`SandboxBackend`].
     pub again_sandboxes: Box<dyn Fn() -> Arc<dyn SandboxBackend> + Send + Sync>,
+    /// The same backend, as [`OutcomeBackend`].
+    pub outcomes: Arc<dyn OutcomeBackend>,
+    /// [`Opened::again`], as [`OutcomeBackend`].
+    pub again_outcomes: Box<dyn Fn() -> Arc<dyn OutcomeBackend> + Send + Sync>,
     _cleanup: Box<dyn std::any::Any>,
 }
 
@@ -70,11 +75,17 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn SandboxBackend>
     };
+    let open_outcomes = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn OutcomeBackend>
+    };
     Opened {
         backend: shared.clone(),
         storage: shared.clone(),
         graph: shared.clone(),
         ports: shared.clone(),
+        outcomes: shared.clone(),
+        again_outcomes: Box::new(open_outcomes),
         sandboxes: shared,
         again: Box::new(open),
         again_ports: Box::new(open_ports),
@@ -113,11 +124,20 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
             Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn SandboxBackend>
         }
     };
+    let open_outcomes = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || {
+            Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn OutcomeBackend>
+        }
+    };
     Some(Opened {
         backend: shared.clone(),
         storage: shared.clone(),
         graph: shared.clone(),
         ports: shared.clone(),
+        outcomes: shared.clone(),
+        again_outcomes: Box::new(open_outcomes),
         sandboxes: shared,
         again_ports: Box::new(open_ports),
         again_sandboxes: Box::new(open_sandboxes),
@@ -1531,11 +1551,79 @@ pub(crate) fn sandboxes(s: Opened) {
     assert_eq!(rows.sandboxes("c").unwrap().len(), 1);
 }
 
+/// Outcomes: rows survive a reopen, are replaced by id, list oldest first
+/// by kind or all, keep every field, and outlive their branch.
+pub(crate) fn outcomes(s: Opened) {
+    let rows = &s.outcomes;
+    let row = |id: &str, kind, outcome, at| OutcomeRecord {
+        id: id.into(),
+        repo: "/src/app".into(),
+        branch: id.split('#').next().unwrap().into(),
+        kind,
+        harness: "codex".into(),
+        model: Some("large".into()),
+        effort: Some("high".into()),
+        outcome,
+        score: None,
+        cost_usd: Some(0.25),
+        duration_ms: Some(1500),
+        turns: 2,
+        routed: true,
+        recorded_ms: at,
+    };
+    rows.put_outcome(&row("a#1", TaskKind::Bugfix, BranchOutcome::Ready, 10))
+        .unwrap();
+    rows.put_outcome(&row("b#2", TaskKind::Docs, BranchOutcome::Failed, 5))
+        .unwrap();
+    let plain = OutcomeRecord {
+        model: None,
+        effort: None,
+        score: None,
+        cost_usd: None,
+        duration_ms: None,
+        routed: false,
+        ..row("c#3", TaskKind::Bugfix, BranchOutcome::Interrupted, 20)
+    };
+    rows.put_outcome(&plain).unwrap();
+    // Replaced by id, not duplicated: judged best with a score.
+    let judged = OutcomeRecord {
+        score: Some(87.5),
+        outcome: BranchOutcome::JudgedBest,
+        recorded_ms: 30,
+        ..row("a#1", TaskKind::Bugfix, BranchOutcome::Ready, 10)
+    };
+    rows.put_outcome(&judged).unwrap();
+    let again = (s.again_outcomes)();
+    assert_eq!(again.outcome("a#1").unwrap(), Some(judged.clone()));
+    assert_eq!(again.outcome("nope#0").unwrap(), None);
+    assert_eq!(
+        again.outcomes(Some(TaskKind::Bugfix)).unwrap(),
+        vec![plain.clone(), judged.clone()],
+        "oldest first"
+    );
+    let all: Vec<String> = again
+        .outcomes(None)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(all, ["b#2", "c#3", "a#1"]);
+    assert!(again.outcomes(Some(TaskKind::Tests)).unwrap().is_empty());
+
+    // A removed branch's outcome stays: it is what the router learns from.
+    let branches = &s.backend;
+    assert!(branches.reserve("a", &owner("o")).unwrap());
+    granted(branches.acquire(&record("a"), &owner("o"), TTL).unwrap());
+    branches.delete("a").unwrap();
+    assert_eq!(rows.outcome("a#1").unwrap(), Some(judged));
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
-            concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes);
+            concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes,
+            outcomes);
     };
     ($open:expr; $($check:ident),*) => {
         $(
