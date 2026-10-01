@@ -54,6 +54,9 @@ Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped
 | `--shutdown-grace SECS` | At shutdown, how long running operations may finish. Default 60 |
 | `-q`, `--quiet` | Do not log requests; also lowers the default log level to `warn` (see [Logging](#deployment-notes)) unless `BRANCHYARD_LOG`/`RUST_LOG` is set |
 | `--log-format FORMAT` | `pretty` or `json` (one object per line) log lines on stderr; default `BRANCHYARD_LOG_FORMAT`, else `pretty` |
+| `--metrics` | Serve Prometheus metrics at `GET /metrics` to a principal with the `admin` scope or the metrics token ([observability](observability.md#metrics)); off by default |
+| `--metrics-addr ADDR` | Also serve `/metrics`, and nothing else, on a plain-HTTP listener of its own (a `by worker` too); implies `--metrics` |
+| `--metrics-token-file FILE` | A token (first line, at least 16 characters) that reads `/metrics` and nothing else; implies `--metrics` |
 
 Configuration file (relative paths resolve against the file's directory; unknown keys are errors):
 
@@ -74,7 +77,8 @@ Configuration file (relative paths resolve against the file's directory; unknown
   ],
   "tenants": {
     "acme": { "repos": ["app"], "max_running": 4, "max_branches": 20,
-              "max_cost_usd": 50.0, "max_artifact_bytes": 1073741824 }
+              "max_cost_usd": 50.0, "max_artifact_bytes": 1073741824,
+              "weight": 2, "max_priority": 5 }
   },
   "tls": { "cert": "/etc/branchyard/cert.pem", "key": "/etc/branchyard/key.pem" },
   "max_body_bytes": 1048576,
@@ -91,9 +95,14 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
   "database": "postgres://branchyard@db.internal/branchyard",
   "labels": ["linux", "gpu"],
-  "unclaimable_after_seconds": 60
+  "unclaimable_after_seconds": 60,
+  "aging_seconds": 60,
+  "fair_share_window_seconds": 300,
+  "metrics": { "listen": "127.0.0.1:9464", "token_file": "/etc/branchyard/metrics.token" }
 }
 ```
+
+`weight`, `max_priority`, `aging_seconds` and `fair_share_window_seconds` set [scheduling](#scheduling); `metrics` turns on [metrics](observability.md#metrics). Traces are configured by the standard OpenTelemetry variables instead ([observability](observability.md#traces)).
 
 `allow_workspace_scripts` (`true`, or a list of served repositories) lets a repository's own `[workspace]` scripts in its `branchyard.toml` run for the branches this server creates: copy, setup before the first turn, teardown on removal, with `BRANCHYARD_PORT` reserved per branch. Off by default, and no request can ask for it: every other repository's yard refuses workspace scripts outright. See [workspace](workspace.md#trust).
 
@@ -247,6 +256,8 @@ POST /v1/repos/app/tasks
 
 Only `prompt` is required. Give `harness` for one branch or `harnesses` for one branch each (`<name>-<harness>`), not both. `policy.mode` is `allow` or `deny` (the default); rules apply first, in order. There is no remote `ask`: the server has no terminal to ask on. `budget.max_seconds` applies per call, like the SDK's `max_duration`. `budget.stall_after_seconds` and `budget.stall_action` (`notify`, the default, or `interrupt`) are the SDK's `Budget::stall_after`/`stall_action` (`docs/lifecycle.md#stall-detection`); a branch's `stalled` field then reflects the same live state a local `by ls` would show. `command` is refused (`403 command_not_allowed`) unless the server allows client commands; without it, the server uses its `harness_commands` entry for the harness, else the profile's executable on its `PATH`. One task runs one command, so harnesses with different configured commands must be separate tasks.
 
+`priority` (task, send, fork, reincarnate and spawn) is the operation's priority, an integer from -10 to 10, default 0; outside that range is `400 invalid_request`, and above the tenant's `max_priority` it is admitted at `max_priority`. A spawn that names none inherits the priority of the latest operation that worked on its parent. Merges and integrations run at 0. See [scheduling](#scheduling).
+
 `provider` is [`branchyard::Provider`](../crates/branchyard/src/lib.rs)'s serde form, tagged by `kind`: `local`, `microsandbox` or `substrate`, with [the provider's options](providers.md). Anything but `local` is refused (`403 provider_not_allowed`) unless the operator allowed that provider. Everything in it is about the server: `pass_env` names are read from **the server's environment** at each turn, a Substrate `key` must be an absolute path to a file on the server (`400` otherwise), and a Microsandbox provider needs a server built with the `microsandbox` feature on a host with KVM.
 
 `provision` is [`branchyard::Provisioning`](provisioning.md)'s serde form: `secrets` (names only, `[{"name": "ANTHROPIC_API_KEY"}]`; a `from` is refused with `400`, and a name the operator did not define with `403 secret_not_allowed`; values come from the server's table), `auth`, `mcp_servers` (commands the server runs: refused unless it allows client commands), `instructions`, `model`, `effort`, `telemetry` and `connectors` (grant entries, [connectors](#connectors); refused `403 connectors_not_configured` without them). It is accepted on task, send and fork requests and stored with the branch, with the server's sources.
@@ -270,7 +281,7 @@ Task, send, fork, reincarnate, merge, spawn and integrate are long operations. T
   "branches": ["flaky"], "cursor": 41, "created_at_ms": 1790000000000 }
 ```
 
-`kind` is `task`, `send`, `fork`, `reincarnate`, `merge`, `spawn` or `integrate`. An operation whose request named `require_labels` carries them as `requires` (sorted, once each), and, once it has waited queued longer than `unclaimable_after` and no live worker serving its repository carries them all, `waiting` says why ([worker labels](#worker-labels)). `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
+`kind` is `task`, `send`, `fork`, `reincarnate`, `merge`, `spawn` or `integrate`. `priority` is the priority it was admitted at, left out when 0. An operation whose request named `require_labels` carries them as `requires` (sorted, once each), and, once it has waited queued longer than `unclaimable_after` and no live worker serving its repository carries them all, `waiting` says why ([worker labels](#worker-labels)). `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
 
 `branches` are the names planned at acceptance. `cursor` is the feed position at acceptance and `end_cursor` the position once the operation's activity was ingested: to watch one operation, stream from `cursor` until the operation finishes and the stream reaches `end_cursor`, keeping entries for its branches. That is what `by --remote … run` does.
 
@@ -280,7 +291,44 @@ From admission until it finishes, the branches an operation works on are locked:
 
 Admission is a durable enqueue. In one transaction the server writes the operation's record (with its tenant and admitting principal), its idempotency binding (a unique index on the caller and key), checks the tenant's `max_running` and `max_branches` against the tenant's queued and running operations ([quotas](#quotas)), takes its branch locks, and writes a queue row holding a description of the work: the request as sent, plus what admission fixed (planned names, a merge's target, an integration's parent, a seat child's name). Only then does it answer `202`. If a quota refuses it, a branch is held, or any of those writes fails, including the queue write, the transaction rolls back and nothing of the operation remains: the client gets `500` and may retry with the same key. The description holds no secret values; a request names secrets, and the server that runs it reads them, like commands, providers and policies, from its own configuration.
 
-A dispatcher in each server claims queue rows oldest first, for the repositories it serves, up to `--max-running` at once. A claim carries a lease, renewed every third of `--operation-lease`, and a fence, its attempt number, which every later write for the operation names. The worker records the operation `running` before it calls the engine, and its outcome after, deleting the queue row and releasing the branch locks in the same transaction; a worker whose claim was taken over is refused both writes. A claim whose lease expired, or whose process is gone from this host, is claimed again by any worker: an operation still `queued` then runs, and one recorded `running` is recorded `interrupted` and never run again, since its turn may have started, and the engine recovers that turn's branch as it recovers any whose engine died.
+A dispatcher in each server claims queue rows in [scheduling](#scheduling) order (highest effective priority, then the tenant furthest below its fair share, then the oldest), for the repositories it serves, up to `--max-running` at once. A claim carries a lease, renewed every third of `--operation-lease`, and a fence, its attempt number, which every later write for the operation names. The worker records the operation `running` before it calls the engine, and its outcome after, deleting the queue row and releasing the branch locks in the same transaction; a worker whose claim was taken over is refused both writes. A claim whose lease expired, or whose process is gone from this host, is claimed again by any worker: an operation still `queued` then runs, and one recorded `running` is recorded `interrupted` and never run again, since its turn may have started, and the engine recovers that turn's branch as it recovers any whose engine died.
+
+### Scheduling
+
+Which queued operation a worker claims next, among those of its repositories whose required labels it carries:
+
+1. **Highest effective priority first.** An operation's effective priority is its `priority` plus one for every `aging_seconds` (default 60) it has waited since admission, so low-priority work cannot starve: an operation at -10 outranks a fresh one at 10 after 21 minutes. `aging_seconds: 0` turns aging off.
+2. **Then the tenant with the lowest usage per unit of weight.** A tenant's usage is its operations running now (claimed under a live lease, on any worker) plus its recent claims, each counting `exp(-age / fair_share_window_seconds)` (default 300 s; 0 counts only what runs), divided by the tenant's `weight` (`tenants.<name>.weight`, default 1). Two tenants with weights 2 and 1 and steady work get about two claims for every one; a tenant that has had nothing recently is served first.
+3. **Then the oldest**, which also breaks a tie between tenants.
+
+The order is the claim's own: one statement on PostgreSQL, and inside the claim's `BEGIN IMMEDIATE` transaction on SQLite, so the never-twice guarantee of [dispatch](#dispatch) is unchanged. On PostgreSQL it is:
+
+```sql
+WITH share AS (                     -- each tenant's usage per unit of weight
+  SELECT t.tenant,
+    (COALESCE((SELECT u.used * exp(-LEAST(GREATEST($now - u.at_ms, 0)::float8 / $window, 700))
+               FROM by_tenant_usage u WHERE u.tenant = t.tenant), 0)
+     + (SELECT count(*) FROM by_operation_queue r WHERE r.tenant = t.tenant
+          AND r.worker IS NOT NULL AND r.lease_until > clock_timestamp()))
+    / COALESCE(weight_of(t.tenant), 1) AS share
+  FROM (SELECT DISTINCT tenant FROM by_operation_queue) t),
+next AS (                           -- the first claimable row, locked
+  SELECT q.id, q.worker AS prior FROM by_operation_queue q JOIN share s USING (tenant)
+  WHERE q.repo = ANY($repos) AND (q.lease_until IS NULL OR q.lease_until <= clock_timestamp())
+    AND q.requires <@ $labels
+  ORDER BY q.priority + COALESCE(GREATEST($now - q.enqueued_ms, 0) / NULLIF($aging, 0), 0) DESC,
+           s.share, q.seq
+  LIMIT 1 FOR UPDATE OF q SKIP LOCKED),
+claimed AS (UPDATE by_operation_queue q SET attempt = q.attempt + 1, worker = $worker, ...
+            FROM next WHERE q.id = next.id RETURNING ...),
+counted AS (INSERT INTO by_tenant_usage ... ON CONFLICT (tenant) DO UPDATE  -- decay, then + 1
+            SET used = by_tenant_usage.used * exp(...) + 1, at_ms = GREATEST(...))
+SELECT ... FROM claimed
+```
+
+(abridged from `PG_CLAIM` in [`store.rs`](../crates/branchyard-server/src/store.rs); `weight_of` is an `unnest` of the configured weights). A row another worker locked is skipped, and one it claimed and committed meanwhile fails the lease condition when PostgreSQL rechecks it on the locked row's latest version, so two workers never claim one row. The usage is a snapshot: two workers claiming at the same moment may both favour the same tenant, which the next claims even out. SQLite computes each tenant's share in Rust inside the immediate transaction, orders by its rank, and updates the usage before committing.
+
+What it does not do: per-tenant ceilings are [quotas](#quotas) (`max_running` still bounds a tenant however low its usage), shares are per database rather than per worker, a running operation is never pre-empted, and a merge or integration is ordinary work at priority 0. Ages are measured against the claiming worker's clock (the operation records when it was admitted), so servers' clocks should agree to well under `aging_seconds`; leases stay on the database's clock. Every claim updates its tenant's row in `by_tenant_usage` (`tenant_usage` on SQLite): one row per tenant, never more.
 
 ### Idempotency
 
@@ -398,6 +446,7 @@ Every command runs remotely, with the same flags: `--provider` and its options, 
 - **Harnesses** run as the server's user, with its `PATH`, `HOME` and harness logins. Install and log in the harnesses as that user, or set `harness_commands`.
 - **Limits.** Request bodies are bounded (`max_body_bytes`, default 1 MiB), request heads must arrive within 30 seconds, at most 256 requests are handled at once (more wait), and at most `max_running` operations run at once (more queue). There is no per-request deadline beyond those, and no rate limiting per token.
 - **Health.** `GET /healthz` needs no token. Every request is given an ID (the caller's `x-request-id`, if it looks safe to reuse, else a fresh one), echoed on the response and attached to a [`tracing`](https://docs.rs/tracing) span (`tower-http`'s `TraceLayer`); with request logging on (the default; off with `--quiet`, which also drops the level to `warn`) each request logs one `INFO` line to stderr with its ID, method, path, status and latency, never headers or bodies.
+- **Metrics and traces.** `--metrics` (or `--metrics-addr`) serves Prometheus metrics, and `OTEL_EXPORTER_OTLP_ENDPOINT` exports OpenTelemetry traces of each operation over OTLP/HTTP; see [observability](observability.md).
 - **Logging.** `branchyard-server`, `by serve` and `branchyard-herdr` log to stderr with [`tracing`](https://docs.rs/tracing)/[`tracing-subscriber`](https://docs.rs/tracing-subscriber). The level is `BRANCHYARD_LOG`, else `RUST_LOG` (same [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/struct.EnvFilter.html) syntax, e.g. `branchyard_server=debug,warn`), else `info` (`warn` with `--quiet`). The format is `--log-format json|pretty` (on `branchyard-server`, `by serve`, `by worker` and `branchyard-herdr`), else `BRANCHYARD_LOG_FORMAT` (`json` or `pretty`), else `pretty`; `json` writes one JSON object per line for a log collector. The flag wins over the variable.
 - **Backups.** Branch state and event logs are each repository's `.branchyard/state.db`, with worktrees under `.branchyard/worktrees/`; server state is `DATA-DIR/state.db` (operations, idempotency keys, the dispatch queue, branch locks). Both are SQLite databases in write-ahead-log mode: back them up with `sqlite3 FILE ".backup COPY"` or while the server is stopped, not by copying the file alone. With `--database`, both are in PostgreSQL instead: back it up with `pg_dump` of the schema. Either way they grow without bound for now. An `operations.jsonl` from an earlier version is imported on first start and renamed `operations.jsonl.imported`; `DATA-DIR/feeds/` is no longer used.
 - **Providers and delegation.** Allow a provider only once its cluster, image or runtime is set up for this server (see [providers](providers.md)); the credentials a turn gets are the server's `pass_env` variables. Delegation runs children on the server's threads and gives harnesses the server's `by`, which must be the same version as the server.
@@ -410,6 +459,8 @@ Every command runs remotely, with the same flags: `--provider` and its options, 
 | Operations (with their tenant and admitting principal), idempotency keys and the dispatch queue | `DATA-DIR/state.db` committed with `synchronous=FULL`, or the database's `by_operations` and `by_operation_queue` tables committed with `synchronous_commit = on`, in one transaction before `202`, and at each state change | Yes; queued ones run after the restart and keep counting toward their tenant's `max_running`, running ones become `interrupted` |
 | Cancel requests, `max_duration` deadlines, turn leases, journaled steps, harness process identities | Each repository's `.branchyard/state.db`, or the database | Yes |
 | Webhook delivery cursors | `DATA-DIR/state.db`'s `webhook_cursors` table, or the database's `by_webhook_cursors` | Yes |
+| Each queued operation's priority, tenant and admission time; each tenant's decayed recent claims | The queue's `priority`, `tenant` and `enqueued_ms` columns; `tenant_usage` (`by_tenant_usage`) | Yes ([scheduling](#scheduling)) |
+| Metrics counters, unexported spans | The server process | No: counters restart at zero, as Prometheus expects |
 | Branch locks | The same store's `branch_locks` (`by_branch_locks`), with the operation's admission and outcome | Yes, with their operations; a removal's expires after 10 minutes |
 | A turn in progress | The server process and its harness child | No: it is recovered, not continued |
 
@@ -435,7 +486,7 @@ by serve  --database "$DB" --repo app=/srv/app --listen 10.0.0.5:8422 --tls-cert
 by worker --database "$DB" --repo app=/srv/app --max-running 16
 ```
 
-Any of them accepts an operation, any claims it, and each answers for every operation. A claim is a single `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED LIMIT 1)` on `by_operation_queue`, so two workers never claim one row; leases are measured by the database's clock. An idle dispatcher looks for work every `poll_interval` (500 ms), and at once for what its own server admitted. The queue is plain tables so that it needs no extension; PGMQ could replace `by_operation_queue` without changing the admission transaction's shape.
+Any of them accepts an operation, any claims it, and each answers for every operation. A claim is a single statement on `by_operation_queue` that picks a row in [scheduling](#scheduling) order with `FOR UPDATE SKIP LOCKED`, takes it and counts it toward its tenant's usage, so two workers never claim one row; leases are measured by the database's clock. An idle dispatcher looks for work every `poll_interval` (500 ms), and at once for what its own server admitted. The queue is plain tables so that it needs no extension; PGMQ could replace `by_operation_queue` without changing the admission transaction's shape.
 
 Limits:
 
@@ -456,7 +507,7 @@ by run --remote https://by.internal "train the model" --require-label gpu
 
 - **Where labels come from.** `--label` (repeatable) on `by serve`, `by worker` or `branchyard-server`, or `labels` in the configuration file; the flags replace the file's. A server without labels claims only operations that require none. A label is 1 to 63 of `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or digit.
 - **Where requirements come from.** `require_labels` in a task (one branch or a fan), send, fork, reincarnate or spawn request, and `--require-label` on `by run`, `fan`, `send`, `fork` and `reincarnate` with `--remote` (in local mode the flag is refused: there are no workers to choose among). Admission checks them (`400 invalid_request` for a malformed one) and records them on the operation and its queue row. A merge or integration requires none.
-- **Claims.** The claim's query takes the oldest claimable row whose required labels are a subset of the worker's: on SQLite every element of the row's JSON array must be among the worker's; on PostgreSQL `requires <@ $labels` inside the same `FOR UPDATE SKIP LOCKED` subquery, so two workers racing still never claim one row. Queue rows from before the column existed require nothing.
+- **Claims.** The claim's query takes the first claimable row in [scheduling](#scheduling) order among those whose required labels are a subset of the worker's: on SQLite every element of the row's JSON array must be among the worker's; on PostgreSQL `requires <@ $labels` inside the same `FOR UPDATE SKIP LOCKED` subquery, so two workers racing still never claim one row. Queue rows from before the column existed require nothing.
 - **Liveness and why it waits.** Each dispatcher records its worker (id, host, pid, labels, repositories) every 5 seconds in a `workers` table (`by_workers` on PostgreSQL) and deletes its row at shutdown; a worker unseen for 15 seconds is not counted. An operation that requires labels and has waited longer than `unclaimable_after` (default 60 s) is reported, on every read (`GET /v1/operations/{id}`, `?idempotency_key=`, `GET /v1/repos/{repo}/operations`), with `waiting`: `no live worker carries the labels it requires (gpu, linux); live workers serving app: w_… on host [linux]`. Nothing is written: as soon as a worker with the labels beats, the reason goes away, and that worker claims it. A waiting `by run --remote` prints it once on standard error; `by show BRANCH --remote` for a branch that does not exist yet shows the queued operation that will create it, with `requires` and `waiting`.
 - **Not yet.** A rig seat or a fleet entry cannot carry labels of its own: a seat's spawn through the API takes the spawn request's `require_labels`, and a fleet routes through whatever request it makes. Labels route among workers; they are not an authorization boundary (any principal may require any label), and they do not reserve capacity.
 
@@ -481,7 +532,7 @@ What it is not yet:
 
 | Crate | Contents |
 |---|---|
-| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown; [`storage_routes.rs`](../crates/branchyard-server/src/storage_routes.rs) for artifacts and scratch areas. Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs), [`storage.rs`](../crates/branchyard-server/tests/storage.rs) |
+| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown; [`storage_routes.rs`](../crates/branchyard-server/src/storage_routes.rs) for artifacts and scratch areas. [`metrics.rs`](../crates/branchyard-server/src/metrics.rs), [`telemetry.rs`](../crates/branchyard-server/src/telemetry.rs) and [`observe.rs`](../crates/branchyard-server/src/observe.rs) for [observability](observability.md). Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`observability.rs`](../crates/branchyard-server/tests/observability.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs), [`storage.rs`](../crates/branchyard-server/tests/storage.rs) |
 | [`branchyard-client`](../crates/branchyard-client/src/lib.rs) | Wire types, a blocking HTTP/1.1 client over rustls, an SSE parser, and a reconnecting event stream |
 | [`branchyard-cli`](../crates/branchyard-cli/src/main.rs) | `by serve`, remote mode and `by watch` |
 | [`branchyard-herdr`](../crates/branchyard-herdr/src/main.rs) | The Herdr plugin's binary: the bridge, the branch pane, and the merge, cancel and send actions. Tests: [`bridge.rs`](../crates/branchyard-herdr/tests/bridge.rs) (against `by serve` and a fake `herdr`), [`manifest.rs`](../crates/branchyard-herdr/tests/manifest.rs) |

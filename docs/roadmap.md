@@ -23,6 +23,8 @@ Two products whose main offer was running coding CLIs in worktrees (Terragon, an
 
 Triggers and schedules (cron, GitHub, Slack, Linear, email; a precheck, a test run, pause after repeated failures); priority and fair share in the queue; quota meters per login; Linear, Jira and GitLab issues; listening ports per branch; `by adopt` for existing Claude and Codex sessions; metrics and traces for Branchyard itself.
 
+**Status, 1 October 2026.** Priority and fair share in the queue, and metrics and traces for Branchyard itself, are implemented (hermetic tests only; no real Prometheus or collector): operations carry a priority (-10 to 10, capped per tenant, inherited by a spawned child), and claims take the highest effective priority first, aged so low-priority work cannot starve, then the tenant with the lowest usage per unit of weight, then the oldest, still one statement on PostgreSQL ([scheduling](server.md#scheduling)); `/metrics` serves Prometheus text, and OpenTelemetry traces of admission, claim, operation, turns, tool and connector calls go over OTLP/HTTP, with the operation's context given to harnesses as `TRACEPARENT` and to webhooks; `by stats` summarizes a repository ([observability](observability.md)). The OpenTelemetry crates were not available offline, so OTLP export is a small exporter of Branchyard's own (no gRPC).
+
 ## Wave 3
 
 A web and phone companion on the server's event stream; `by --remote ssh://`; environment recipes (repo scripts that create a VM); repository knowledge that learns from sessions, adopted after review; plan approval and goals a judge verifies; prebuilt binaries and an image with harnesses.

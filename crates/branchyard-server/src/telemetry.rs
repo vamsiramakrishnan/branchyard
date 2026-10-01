@@ -364,7 +364,8 @@ impl Tracer {
     }
 
     /// A span measured from now until [`Active::end`] (or its drop), which
-    /// also enters a [`tracing`] span carrying its IDs.
+    /// also enters a [`tracing`] span carrying its IDs on this thread until
+    /// then, so log lines written meanwhile carry them.
     pub fn start(&self, name: &str, context: SpanContext, parent: Option<&SpanContext>) -> Active {
         let span = tracing::info_span!(
             "span",
@@ -375,7 +376,7 @@ impl Tracer {
         Active {
             tracer: self.clone(),
             data: Some(SpanData::new(name, context, parent, now_ms(), now_ms())),
-            _span: span,
+            _span: span.entered(),
         }
     }
 
@@ -400,11 +401,12 @@ impl Tracer {
     }
 }
 
-/// A span in progress; recorded when ended or dropped.
+/// A span in progress; recorded when ended or dropped. Ended on the
+/// thread that started it.
 pub struct Active {
     tracer: Tracer,
     data: Option<SpanData>,
-    _span: tracing::Span,
+    _span: tracing::span::EnteredSpan,
 }
 
 impl Active {
