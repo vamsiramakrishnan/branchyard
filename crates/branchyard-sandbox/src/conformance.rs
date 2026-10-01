@@ -190,6 +190,25 @@ impl<'a> Sandbox<'a> {
         }
     }
 
+    /// Wait until `pid` runs the program `name`, by its `/proc/<pid>/comm`.
+    /// A shell knows a background child's PID (`$!`) as soon as it forks,
+    /// before the child has exec'd its program; until then, which under
+    /// load can outlast the shell itself, the child is still named `sh`.
+    fn await_exec(&self, pid: u32, name: &str) {
+        let deadline = Instant::now() + self.setup.timeout;
+        loop {
+            let (_, comm, _) = self.run(&format!("cat /proc/{pid}/comm 2>/dev/null"));
+            if comm.trim() == name {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pid {pid} never became {name}: comm {comm:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Wait until `pid` is gone, or panic naming `what`.
     fn assert_gone(&self, pid: u32, what: &str) {
         let deadline = Instant::now() + self.setup.timeout;
@@ -402,6 +421,9 @@ pub fn teardown_names_survivors(provider: &dyn SandboxProvider, setup: &Setup) {
     let sandbox = Sandbox::ensure(provider, setup, "teardown");
     let mut process = sandbox.spawn("sleep 300 & echo $!");
     let (child, _reader) = first_pid(process.as_mut());
+    // Teardown names what it finds; a child it finds before the exec is
+    // rightly named `sh`, so wait for the exec this check asks it to name.
+    sandbox.await_exec(child, "sleep");
     let status = process.wait().expect("wait");
     assert!(status.success(), "{status}");
     assert!(

@@ -311,6 +311,8 @@ impl Drop for LocalProcess {
 
 /// Command names of the live (non-zombie) members of process group `pgid`:
 /// from `/proc` on Linux, else from `ps`. Empty when neither is available.
+/// A member forked but not yet exec'd still carries its parent's name,
+/// such as `sh` for a shell's background job.
 fn group_members(pgid: u32) -> Vec<String> {
     #[cfg(target_os = "linux")]
     {
