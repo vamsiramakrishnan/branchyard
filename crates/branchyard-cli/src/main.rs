@@ -26,6 +26,7 @@ mod review;
 mod review_format;
 mod rig;
 mod setup_io;
+mod stats_cmd;
 mod watch;
 mod wizard;
 mod workspace_cmd;
@@ -307,6 +308,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         ),
         Command::Reincarnate { branch, task } => commands::reincarnate(env, target, &branch, &task),
         Command::Ls { json } => commands::ls(env, target, json),
+        Command::Stats { json } => stats_cmd::main(env, target, json),
         Command::Show {
             branch,
             json,

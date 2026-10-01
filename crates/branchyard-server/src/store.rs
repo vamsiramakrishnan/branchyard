@@ -29,7 +29,7 @@
 //! without changing the transaction's shape. [`FileStore`], the JSON-lines
 //! file earlier versions used, is only read, to import it once.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -85,6 +85,10 @@ pub struct StoredOperation {
     /// is queued or running, before they exist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub creates: Vec<String>,
+    /// The W3C `traceparent` of the operation's admission span, when it is
+    /// traced: the worker that runs it, on any server, continues its trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 impl StoredOperation {
@@ -208,6 +212,126 @@ pub struct Claim {
     /// The serializable description of the work (`crate::work::Work`).
     pub work: Value,
     pub fence: i64,
+    /// Another worker's claim on it lapsed (its lease expired, or its
+    /// process is gone from this host) and this claim took it over.
+    pub took_over: bool,
+}
+
+/// The lowest priority an operation may carry.
+pub const MIN_PRIORITY: i32 = -10;
+/// The highest priority an operation may carry; a tenant's
+/// `max_priority` may lower it.
+pub const MAX_PRIORITY: i32 = 10;
+/// How long, by default, an operation waits queued before its effective
+/// priority rises by one ([`Scheduling::aging`]).
+pub const DEFAULT_AGING: Duration = Duration::from_secs(60);
+/// How long, by default, a tenant's claims keep counting toward its usage
+/// ([`Scheduling::window`]): each with weight `exp(-age / window)`.
+pub const DEFAULT_FAIR_SHARE_WINDOW: Duration = Duration::from_secs(300);
+
+/// How [`OperationStore::claim_next`] chooses among the queued operations a
+/// worker may claim (see `docs/server.md#scheduling`):
+///
+/// 1. the highest *effective priority* first: the operation's priority,
+///    plus one for every [`Scheduling::aging`] it has waited, so
+///    low-priority work cannot starve;
+/// 2. among equal effective priorities, the tenant with the lowest usage
+///    per unit of weight: its operations running now (live claims) plus
+///    its recent claims, each weighing `exp(-age / window)`, divided by its
+///    [`Scheduling::weights`] entry (1 when absent);
+/// 3. then the oldest, which also breaks a tie between tenants.
+///
+/// Worker labels and repositories still filter first. The order is one
+/// statement on PostgreSQL and one immediate transaction on SQLite, so two
+/// workers racing never claim one operation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Scheduling {
+    /// Each tenant's weight; a tenant not named weighs 1.
+    pub weights: BTreeMap<String, f64>,
+    /// Waiting this long raises an operation's effective priority by one;
+    /// `None` turns aging off.
+    pub aging: Option<Duration>,
+    /// How long a claim keeps counting toward its tenant's usage, as the
+    /// time constant of its exponential decay; zero counts only what runs.
+    pub window: Duration,
+    /// A fixed clock, in milliseconds since the Unix epoch, that ages and
+    /// decay are measured against; `None` reads the claiming process's
+    /// clock. For tests.
+    pub clock_ms: Option<u64>,
+}
+
+impl Default for Scheduling {
+    fn default() -> Scheduling {
+        Scheduling {
+            weights: BTreeMap::new(),
+            aging: Some(DEFAULT_AGING),
+            window: DEFAULT_FAIR_SHARE_WINDOW,
+            clock_ms: None,
+        }
+    }
+}
+
+impl Scheduling {
+    /// The time claims are measured at.
+    pub fn now_ms(&self) -> i64 {
+        self.clock_ms.unwrap_or_else(crate::ops::now_ms) as i64
+    }
+
+    fn weight(&self, tenant: &str) -> f64 {
+        self.weights
+            .get(tenant)
+            .copied()
+            .filter(|w| w.is_finite() && *w > 0.0)
+            .unwrap_or(1.0)
+    }
+
+    /// Milliseconds per step of aging; 0 when off.
+    fn aging_ms(&self) -> i64 {
+        self.aging.map(ms).unwrap_or(0)
+    }
+
+    /// `used` claims recorded at `at_ms`, decayed to now.
+    fn decayed(&self, used: f64, at_ms: i64, now: i64) -> f64 {
+        let window = ms(self.window);
+        if window <= 0 {
+            return 0.0;
+        }
+        let age = (now - at_ms).max(0) as f64 / window as f64;
+        used * (-age.min(700.0)).exp()
+    }
+
+    /// An operation's effective priority: its own, aged.
+    pub fn effective(&self, priority: i32, enqueued_ms: i64, now: i64) -> i64 {
+        let aging = self.aging_ms();
+        let bonus = match aging > 0 {
+            true => (now - enqueued_ms).max(0) / aging,
+            false => 0,
+        };
+        i64::from(priority) + bonus
+    }
+
+    /// The tenants' weights as the claim's parameters.
+    #[cfg(feature = "postgres")]
+    fn weight_arrays(&self) -> (Vec<String>, Vec<f64>) {
+        self.weights
+            .keys()
+            .map(|t| (t.clone(), self.weight(t)))
+            .unzip()
+    }
+}
+
+/// An operation as it waits in the queue, for metrics and `by stats`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Queued {
+    pub id: String,
+    pub repo: String,
+    pub tenant: String,
+    pub priority: i32,
+    pub requires: Vec<String>,
+    /// When it was admitted, in milliseconds since the Unix epoch.
+    pub enqueued_ms: i64,
+    /// A worker holds a live claim on it.
+    pub claimed: bool,
 }
 
 /// A worker as its last [`OperationStore::beat`] recorded it.
@@ -320,17 +444,36 @@ pub trait OperationStore: Send + Sync {
     ) -> io::Result<Admission>;
     /// The tenant's queued and running operations.
     fn unfinished(&self, tenant: &str) -> io::Result<Vec<StoredOperation>>;
-    /// Claim the oldest queued operation of one of `repos` that no live
-    /// claim holds and whose required labels are all among `labels`, for
-    /// `lease`. A claim whose lease expired, or whose process is gone from
-    /// this host, is claimed again under a new fence.
+    /// [`OperationStore::claim_next`] with the default [`Scheduling`].
     fn claim(
         &self,
         worker: &Worker,
         repos: &[String],
         labels: &[String],
         lease: Duration,
+    ) -> io::Result<Option<Claim>> {
+        self.claim_next(worker, repos, labels, lease, &Scheduling::default())
+    }
+    /// Claim, for `lease`, the queued operation of one of `repos` that no
+    /// live claim holds, whose required labels are all among `labels`, and
+    /// that `scheduling` puts first: the highest effective priority, then
+    /// the tenant with the lowest usage per unit of weight, then the
+    /// oldest. A claim whose lease expired, or whose process is gone from
+    /// this host, is claimed again under a new fence. Records the claim
+    /// toward its tenant's usage in the same transaction.
+    fn claim_next(
+        &self,
+        worker: &Worker,
+        repos: &[String],
+        labels: &[String],
+        lease: Duration,
+        scheduling: &Scheduling,
     ) -> io::Result<Option<Claim>>;
+    /// Every queued operation, claimed or not, oldest first.
+    fn queue(&self) -> io::Result<Vec<Queued>>;
+    /// The priority of the latest operation of `repo` that worked on
+    /// `branch`, if any: what a child spawned from it inherits.
+    fn branch_priority(&self, repo: &str, branch: &str) -> io::Result<Option<i32>>;
     /// Record that `worker`, carrying `labels`, serves `repos` now.
     fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()>;
     /// Workers that beat within `within`.
@@ -567,19 +710,48 @@ const SQLITE_SCHEMA: &str = "
         labels TEXT NOT NULL,
         repos TEXT NOT NULL,
         seen INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS tenant_usage (
+        tenant TEXT PRIMARY KEY,
+        used REAL NOT NULL,
+        at_ms INTEGER NOT NULL
     );";
 
-/// Columns added since the table was first created.
+/// Columns added to the queue since it was first created, and how: a row
+/// from before one existed requires nothing, has priority 0, belongs to the
+/// default tenant and counts as admitted at the epoch (so it ages first).
+const SQLITE_QUEUE_COLUMNS: &[(&str, &str)] = &[
+    (
+        "requires",
+        "ALTER TABLE operation_queue ADD COLUMN requires TEXT NOT NULL DEFAULT '[]'",
+    ),
+    (
+        "priority",
+        "ALTER TABLE operation_queue ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "tenant",
+        "ALTER TABLE operation_queue ADD COLUMN tenant TEXT NOT NULL DEFAULT 'default'",
+    ),
+    (
+        "enqueued_ms",
+        "ALTER TABLE operation_queue ADD COLUMN enqueued_ms INTEGER NOT NULL DEFAULT 0",
+    ),
+];
+
+/// Columns added since the table was first created. Run inside the
+/// opener's `BEGIN IMMEDIATE`, so openers take turns reading a column's
+/// absence and adding it.
 fn sqlite_migrate(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let has: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('operation_queue') WHERE name = 'requires'",
-        [],
-        |r| r.get(0),
-    )?;
-    if has == 0 {
-        conn.execute_batch(
-            "ALTER TABLE operation_queue ADD COLUMN requires TEXT NOT NULL DEFAULT '[]'",
+    for (column, statement) in SQLITE_QUEUE_COLUMNS {
+        let has: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('operation_queue') WHERE name = ?1",
+            [column],
+            |r| r.get(0),
         )?;
+        if has == 0 {
+            conn.execute_batch(statement)?;
+        }
     }
     Ok(())
 }
@@ -781,6 +953,96 @@ fn sqlite_reap(conn: &Conn, worker: &Worker, now: i64) -> io::Result<()> {
     Ok(())
 }
 
+/// Each tenant's rank by usage per unit of weight (see [`Scheduling`]):
+/// its live claims at `clock` (the database's time, as leases are measured)
+/// plus its recorded claims decayed to `now`, over its weight.
+fn sqlite_shares(
+    conn: &Conn,
+    scheduling: &Scheduling,
+    clock: i64,
+    now: i64,
+) -> io::Result<BTreeMap<String, i64>> {
+    let mut usage: BTreeMap<String, f64> = BTreeMap::new();
+    let mut statement = conn
+        .prepare("SELECT tenant, used, at_ms FROM tenant_usage")
+        .map_err(sql)?;
+    let recorded: Vec<(String, f64, i64)> = statement
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(sql)?
+        .collect::<Result<_, _>>()
+        .map_err(sql)?;
+    for (tenant, used, at_ms) in recorded {
+        *usage.entry(tenant).or_default() += scheduling.decayed(used, at_ms, now);
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT tenant, COUNT(*) FROM operation_queue \
+             WHERE worker IS NOT NULL AND lease_until > ?1 GROUP BY tenant",
+        )
+        .map_err(sql)?;
+    let running: Vec<(String, i64)> = statement
+        .query_map([clock], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(sql)?
+        .collect::<Result<_, _>>()
+        .map_err(sql)?;
+    for (tenant, count) in running {
+        *usage.entry(tenant).or_default() += count as f64;
+    }
+    let shares: Vec<(String, f64)> = usage
+        .into_iter()
+        .map(|(tenant, used)| {
+            let share = used / scheduling.weight(&tenant);
+            (tenant, share)
+        })
+        .collect();
+    Ok(share_ranks(&shares))
+}
+
+/// Tenants ranked by share, lowest first, equal shares sharing a rank: what
+/// the SQLite claim orders by, so no share crosses into SQL as a decimal.
+/// A tenant with no usage has share 0, ranked under the empty name.
+fn share_ranks(shares: &[(String, f64)]) -> BTreeMap<String, i64> {
+    let mut values: Vec<f64> = shares.iter().map(|(_, s)| *s).collect();
+    values.push(0.0);
+    values.sort_by(|a, b| a.total_cmp(b));
+    values.dedup();
+    let rank = |share: f64| values.partition_point(|v| v.total_cmp(&share).is_lt()) as i64;
+    shares
+        .iter()
+        .map(|(tenant, share)| (tenant.clone(), rank(*share)))
+        .chain(std::iter::once((String::new(), rank(0.0))))
+        .collect()
+}
+
+/// Count a claim toward `tenant`'s usage: its recorded claims decayed to
+/// `now`, plus one.
+fn sqlite_count_claim(
+    conn: &Conn,
+    scheduling: &Scheduling,
+    tenant: &str,
+    now: i64,
+) -> io::Result<()> {
+    let recorded: Option<(f64, i64)> = conn
+        .query_row(
+            "SELECT used, at_ms FROM tenant_usage WHERE tenant = ?1",
+            [tenant],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    let (used, at_ms) = match recorded {
+        Some((used, at_ms)) => (scheduling.decayed(used, at_ms, now) + 1.0, at_ms.max(now)),
+        None => (1.0, now),
+    };
+    conn.execute(
+        "INSERT INTO tenant_usage (tenant, used, at_ms) VALUES (?1, ?2, ?3) \
+         ON CONFLICT (tenant) DO UPDATE SET used = excluded.used, at_ms = excluded.at_ms",
+        rusqlite::params![tenant, used, at_ms],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
 impl OperationStore for SqliteStore {
     fn load(&self) -> io::Result<Vec<StoredOperation>> {
         let conn = self.conn();
@@ -883,9 +1145,18 @@ impl OperationStore for SqliteStore {
             }
             sqlite_insert(tx, operation, false)?;
             tx.execute(
-                "INSERT INTO operation_queue (id, seq, repo, work, requires) \
-                 VALUES (?1, (SELECT seq FROM operations WHERE id = ?1), ?2, ?3, ?4)",
-                rusqlite::params![op.id, op.repo, work, serde_json::to_string(&op.requires)?],
+                "INSERT INTO operation_queue \
+                     (id, seq, repo, work, requires, priority, tenant, enqueued_ms) \
+                 VALUES (?1, (SELECT seq FROM operations WHERE id = ?1), ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    op.id,
+                    op.repo,
+                    work,
+                    serde_json::to_string(&op.requires)?,
+                    op.priority,
+                    operation.tenant(),
+                    op.created_at_ms as i64
+                ],
             )
             .map_err(sql)?;
             Ok((Admission::Admitted, true))
@@ -896,32 +1167,50 @@ impl OperationStore for SqliteStore {
         sqlite_unfinished(&self.conn(), tenant)
     }
 
-    fn claim(
+    fn claim_next(
         &self,
         worker: &Worker,
         repos: &[String],
         labels: &[String],
         lease: Duration,
+        scheduling: &Scheduling,
     ) -> io::Result<Option<Claim>> {
         let repos = serde_json::to_string(repos)?;
         let labels = serde_json::to_string(labels)?;
         self.immediate(|tx| {
-            let now = sqlite_now();
-            sqlite_reap(tx, worker, now)?;
-            let next: Option<(String, i64, String)> = tx
+            let clock = sqlite_now();
+            let now = scheduling.now_ms();
+            sqlite_reap(tx, worker, clock)?;
+            // Each tenant's usage per unit of weight, from its live claims
+            // and its decayed recent ones: computed here, inside the
+            // immediate transaction, and looked up by the order below.
+            let shares = sqlite_shares(tx, scheduling, clock, now)?;
+            let next: Option<(String, i64, String, Option<String>, String)> = tx
                 .query_row(
-                    "SELECT id, attempt, work FROM operation_queue \
+                    "SELECT id, attempt, work, worker, tenant FROM operation_queue \
                      WHERE repo IN (SELECT value FROM json_each(?1)) \
                        AND (lease_until IS NULL OR lease_until <= ?2) \
                        AND NOT EXISTS (SELECT 1 FROM json_each(requires) r \
                            WHERE r.value NOT IN (SELECT value FROM json_each(?3))) \
-                     ORDER BY seq LIMIT 1",
-                    rusqlite::params![repos, now, labels],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                     ORDER BY priority \
+                         + COALESCE(MAX(?4 - enqueued_ms, 0) / NULLIF(?5, 0), 0) DESC, \
+                       COALESCE((SELECT s.value FROM json_each(?6) s WHERE s.key = tenant), \
+                           json_extract(?6, '$.\"\"')), \
+                       seq \
+                     LIMIT 1",
+                    rusqlite::params![
+                        repos,
+                        clock,
+                        labels,
+                        now,
+                        scheduling.aging_ms(),
+                        serde_json::to_string(&shares)?
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()
                 .map_err(sql)?;
-            let Some((id, attempt, work)) = next else {
+            let Some((id, attempt, work, prior, tenant)) = next else {
                 return Ok((None, false));
             };
             let fence = attempt + 1;
@@ -935,10 +1224,11 @@ impl OperationStore for SqliteStore {
                     worker.host,
                     worker.pid,
                     worker.start,
-                    now + ms(lease)
+                    clock + ms(lease)
                 ],
             )
             .map_err(sql)?;
+            sqlite_count_claim(tx, scheduling, &tenant, now)?;
             let operation = sqlite_op(tx, "SELECT id, body FROM operations WHERE id = ?1", &id)?
                 .ok_or_else(|| io::Error::other(format!("queued operation {id} has no record")))?;
             let work = serde_json::from_str(&work)?;
@@ -947,10 +1237,69 @@ impl OperationStore for SqliteStore {
                     operation,
                     work,
                     fence,
+                    took_over: prior.is_some(),
                 }),
                 true,
             ))
         })
+    }
+
+    fn queue(&self) -> io::Result<Vec<Queued>> {
+        let conn = self.conn();
+        let mut statement = conn
+            .prepare(
+                "SELECT id, repo, tenant, priority, requires, enqueued_ms, \
+                     (worker IS NOT NULL AND lease_until > ?1) \
+                 FROM operation_queue ORDER BY seq",
+            )
+            .map_err(sql)?;
+        let rows: Vec<(String, String, String, i32, String, i64, bool)> = statement
+            .query_map([sqlite_now()], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .map_err(sql)?
+            .collect::<Result<_, _>>()
+            .map_err(sql)?;
+        rows.into_iter()
+            .map(
+                |(id, repo, tenant, priority, requires, enqueued_ms, claimed)| {
+                    Ok(Queued {
+                        id,
+                        repo,
+                        tenant,
+                        priority,
+                        requires: serde_json::from_str(&requires)?,
+                        enqueued_ms,
+                        claimed,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    fn branch_priority(&self, repo: &str, branch: &str) -> io::Result<Option<i32>> {
+        let found: Option<Option<i64>> = self
+            .conn()
+            .query_row(
+                "SELECT json_extract(body, '$.operation.priority') FROM operations \
+                 WHERE json_extract(body, '$.operation.repo') = ?1 \
+                   AND EXISTS (SELECT 1 FROM json_each(body, '$.operation.branches') b \
+                       WHERE b.value = ?2) \
+                 ORDER BY seq DESC LIMIT 1",
+                [repo, branch],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        Ok(found.map(|p| p.unwrap_or(0) as i32))
     }
 
     fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()> {
@@ -1283,7 +1632,90 @@ const PG_SCHEMA: &[(&str, &str)] = &[
             seen TIMESTAMPTZ NOT NULL
         )",
     ),
+    // Scheduling (docs/server.md#scheduling). A queue row from before
+    // these has priority 0, belongs to the default tenant and counts as
+    // admitted at the epoch, so it ages first.
+    (
+        "by_operation_queue.priority",
+        "ALTER TABLE by_operation_queue \
+         ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "by_operation_queue.tenant",
+        "ALTER TABLE by_operation_queue \
+         ADD COLUMN IF NOT EXISTS tenant TEXT NOT NULL DEFAULT 'default'",
+    ),
+    (
+        "by_operation_queue.enqueued_ms",
+        "ALTER TABLE by_operation_queue \
+         ADD COLUMN IF NOT EXISTS enqueued_ms BIGINT NOT NULL DEFAULT 0",
+    ),
+    (
+        "by_tenant_usage",
+        "CREATE TABLE IF NOT EXISTS by_tenant_usage (
+            tenant TEXT PRIMARY KEY,
+            used DOUBLE PRECISION NOT NULL,
+            at_ms BIGINT NOT NULL
+        )",
+    ),
 ];
+
+/// The claim: one statement, so it is atomic on its own.
+///
+/// `share` is each tenant's usage per unit of weight: its recorded claims
+/// decayed to now (`$9`) with time constant `$10` ms (0: none count), plus
+/// its live claims, over its weight (`$11`/`$12`, else 1). `next` orders the
+/// claimable rows by effective priority (priority plus one per `$8` ms
+/// waited; 0: no aging), then share, then age, and locks the first one no
+/// other worker has locked (`FOR UPDATE OF q SKIP LOCKED`): a row another
+/// claim took meanwhile fails the lease condition when it is rechecked on
+/// the locked row's latest version, so it is never claimed twice. `claimed`
+/// takes it under the next fence, and `counted` adds the claim to its
+/// tenant's usage, decayed first, in the same statement.
+#[cfg(feature = "postgres")]
+const PG_CLAIM: &str = "
+    WITH share AS (
+        SELECT t.tenant,
+            (COALESCE((SELECT u.used * CASE WHEN $10::bigint > 0 THEN exp(-LEAST(
+                    GREATEST($9::bigint - u.at_ms, 0)::float8 / $10::bigint, 700)) ELSE 0 END
+                 FROM by_tenant_usage u WHERE u.tenant = t.tenant), 0)
+             + (SELECT count(*) FROM by_operation_queue r
+                WHERE r.tenant = t.tenant AND r.worker IS NOT NULL
+                  AND r.lease_until > clock_timestamp()))
+            / COALESCE((SELECT w.weight FROM unnest($11::text[], $12::float8[]) AS w (tenant, weight)
+                        WHERE w.tenant = t.tenant), 1) AS share
+        FROM (SELECT DISTINCT tenant FROM by_operation_queue) t
+    ),
+    next AS (
+        SELECT q.id, q.worker AS prior FROM by_operation_queue q
+        JOIN share s ON s.tenant = q.tenant
+        WHERE q.repo = ANY($1)
+          AND (q.lease_until IS NULL OR q.lease_until <= clock_timestamp())
+          AND q.requires <@ $7::text[]
+        ORDER BY q.priority
+                 + COALESCE(GREATEST($9::bigint - q.enqueued_ms, 0) / NULLIF($8::bigint, 0), 0) DESC,
+            s.share, q.seq
+        LIMIT 1
+        FOR UPDATE OF q SKIP LOCKED
+    ),
+    claimed AS (
+        UPDATE by_operation_queue q SET attempt = q.attempt + 1, worker = $2,
+            host = $3, pid = $4, start = $5,
+            lease_until = clock_timestamp() + $6::float8 * interval '1 millisecond'
+        FROM next WHERE q.id = next.id
+        RETURNING q.id, q.attempt, q.work, q.tenant, next.prior IS NOT NULL AS took_over
+    ),
+    counted AS (
+        INSERT INTO by_tenant_usage AS u (tenant, used, at_ms)
+        SELECT tenant, 1, $9::bigint FROM claimed
+        ON CONFLICT (tenant) DO UPDATE SET
+            used = u.used * CASE WHEN $10::bigint > 0 THEN exp(-LEAST(
+                GREATEST(EXCLUDED.at_ms - u.at_ms, 0)::float8 / $10::bigint, 700)) ELSE 0 END + 1,
+            at_ms = GREATEST(u.at_ms, EXCLUDED.at_ms)
+    )
+    SELECT c.id, c.attempt, c.work, (SELECT body FROM by_operations o WHERE o.id = c.id),
+        c.took_over
+    FROM claimed c";
 
 /// Which of `names` (see [`PG_SCHEMA`]) are missing, read from the
 /// catalogs on the connection's search path without locking any table.
@@ -1499,6 +1931,7 @@ impl OperationStore for PostgresStore {
         let locks = lock_order(&operation.locks);
         let tenant = operation.tenant().to_owned();
         let requires = op.requires.clone();
+        let (priority, enqueued_ms) = (op.priority, op.created_at_ms as i64);
         let admitted = self.with(move |c| {
             let mut tx = c.transaction()?;
             if !quota.is_empty() {
@@ -1559,9 +1992,18 @@ impl OperationStore for PostgresStore {
                 }
             }
             tx.execute(
-                "INSERT INTO by_operation_queue (id, repo, work, requires) \
-                 VALUES ($1, $2, $3, $4)",
-                &[&id, &repo, &work, &requires],
+                "INSERT INTO by_operation_queue \
+                     (id, repo, work, requires, priority, tenant, enqueued_ms) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &id,
+                    &repo,
+                    &work,
+                    &requires,
+                    &priority,
+                    &tenant,
+                    &enqueued_ms,
+                ],
             )?;
             tx.commit()?;
             Ok(Ok(()))
@@ -1604,17 +2046,22 @@ impl OperationStore for PostgresStore {
         pg_ops(&rows)
     }
 
-    fn claim(
+    fn claim_next(
         &self,
         worker: &Worker,
         repos: &[String],
         labels: &[String],
         lease: Duration,
+        scheduling: &Scheduling,
     ) -> io::Result<Option<Claim>> {
         let worker = worker.clone();
         let repos = repos.to_vec();
         let labels = labels.to_vec();
         let lease = pg_lease(lease);
+        let now = scheduling.now_ms();
+        let aging = scheduling.aging_ms();
+        let window = ms(scheduling.window);
+        let (tenants, weights) = scheduling.weight_arrays();
         let claimed = self.with(move |c| {
             // Claims whose process is gone from this host need not wait for
             // their lease.
@@ -1637,16 +2084,7 @@ impl OperationStore for PostgresStore {
             }
             let pid = i64::from(worker.pid);
             let rows = c.query(
-                "UPDATE by_operation_queue q SET attempt = q.attempt + 1, worker = $2, \
-                     host = $3, pid = $4, start = $5, \
-                     lease_until = clock_timestamp() + $6::float8 * interval '1 millisecond' \
-                 WHERE q.id = (SELECT id FROM by_operation_queue \
-                     WHERE repo = ANY($1) \
-                       AND (lease_until IS NULL OR lease_until <= clock_timestamp()) \
-                       AND requires <@ $7::text[] \
-                     ORDER BY seq FOR UPDATE SKIP LOCKED LIMIT 1) \
-                 RETURNING q.id, q.attempt, q.work, \
-                     (SELECT body FROM by_operations o WHERE o.id = q.id)",
+                PG_CLAIM,
                 &[
                     &repos,
                     &worker.id,
@@ -1655,22 +2093,66 @@ impl OperationStore for PostgresStore {
                     &worker.start,
                     &(lease as f64),
                     &labels,
+                    &aging,
+                    &now,
+                    &window,
+                    &tenants,
+                    &weights,
                 ],
             )?;
             Ok(rows.first().map(|row| {
-                let (id, fence, work, body): (String, i64, String, String) =
-                    (row.get(0), row.get(1), row.get(2), row.get(3));
-                (id, fence, work, body)
+                let (id, fence, work, body, took_over): (String, i64, String, String, bool) =
+                    (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
+                (id, fence, work, body, took_over)
             }))
         })?;
-        let Some((id, fence, work, body)) = claimed else {
+        let Some((id, fence, work, body, took_over)) = claimed else {
             return Ok(None);
         };
         Ok(Some(Claim {
             operation: parse_op(&id, &body, "")?,
             work: serde_json::from_str(&work)?,
             fence,
+            took_over,
         }))
+    }
+
+    fn queue(&self) -> io::Result<Vec<Queued>> {
+        let rows = self.with(|c| {
+            c.query(
+                "SELECT id, repo, tenant, priority, requires, enqueued_ms, \
+                     (worker IS NOT NULL AND lease_until > clock_timestamp()) \
+                 FROM by_operation_queue ORDER BY seq",
+                &[],
+            )
+        })?;
+        Ok(rows
+            .iter()
+            .map(|row| Queued {
+                id: row.get(0),
+                repo: row.get(1),
+                tenant: row.get(2),
+                priority: row.get(3),
+                requires: row.get(4),
+                enqueued_ms: row.get(5),
+                claimed: row.get(6),
+            })
+            .collect())
+    }
+
+    fn branch_priority(&self, repo: &str, branch: &str) -> io::Result<Option<i32>> {
+        let (repo, branch) = (repo.to_owned(), branch.to_owned());
+        let rows = self.with(move |c| {
+            c.query(
+                "SELECT COALESCE(((body::jsonb) #>> '{operation,priority}')::int, 0) \
+                 FROM by_operations \
+                 WHERE (body::jsonb) #>> '{operation,repo}' = $1 \
+                   AND ((body::jsonb) #> '{operation,branches}') ? $2 \
+                 ORDER BY seq DESC LIMIT 1",
+                &[&repo, &branch],
+            )
+        })?;
+        Ok(rows.first().map(|row| row.get(0)))
     }
 
     fn beat(&self, worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()> {
@@ -1928,12 +2410,14 @@ pub fn check_labels(store: &dyn OperationStore, repo: &str) {
             error: None,
             requires: requires.iter().map(|l| l.to_string()).collect(),
             waiting: None,
+            priority: 0,
         },
         idempotency: None,
         locks: Vec::new(),
         tenant: String::new(),
         principal: None,
         creates: Vec::new(),
+        trace: None,
     };
     let admit = |id: &str, requires: &[&str]| {
         let admitted = store
@@ -2054,6 +2538,379 @@ pub fn check_labels(store: &dyn OperationStore, repo: &str) {
     assert!(unclaimable(&labels(&["gpu"]), repo, &live).is_some());
 }
 
+/// A small deterministic generator for the scheduling property check
+/// (xorshift64*), so a failure names a seed that reproduces it.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// What the scheduling conformance admits: an operation of `repo` for
+/// `tenant`, at `priority`, admitted `age_ms` before the fixed clock.
+fn scheduled(
+    repo: &str,
+    id: &str,
+    tenant: &str,
+    priority: i32,
+    created_at_ms: u64,
+    requires: &[&str],
+) -> StoredOperation {
+    use branchyard_client::api::{OperationKind, OperationState};
+    StoredOperation {
+        operation: Operation {
+            id: id.into(),
+            repo: repo.into(),
+            kind: OperationKind::Task,
+            state: OperationState::Queued,
+            branches: Vec::new(),
+            cursor: 0,
+            end_cursor: None,
+            created_at_ms,
+            finished_at_ms: None,
+            result: None,
+            error: None,
+            requires: requires.iter().map(|l| l.to_string()).collect(),
+            waiting: None,
+            priority,
+        },
+        idempotency: None,
+        locks: Vec::new(),
+        tenant: tenant.into(),
+        principal: None,
+        creates: Vec::new(),
+        trace: None,
+    }
+}
+
+/// The scheduling model the stores implement, in plain Rust: which of
+/// `queued` (admission order) a worker carrying `gpu` claims next, given
+/// each tenant's recorded claims (`used`, at a fixed clock, so undecayed)
+/// and what runs. The conformance checks the stores against it claim by
+/// claim.
+struct Model {
+    /// (id, tenant, priority, created_at_ms, requires gpu, state:
+    /// 0 queued, 1 running, 2 finished)
+    ops: Vec<(String, String, i32, u64, bool, u8)>,
+    used: BTreeMap<String, f64>,
+}
+
+impl Model {
+    fn pick(&self, scheduling: &Scheduling, gpu: bool) -> Option<usize> {
+        let now = scheduling.now_ms();
+        let share = |tenant: &str| {
+            let running = self
+                .ops
+                .iter()
+                .filter(|o| o.1 == tenant && o.5 == 1)
+                .count() as f64;
+            (self.used.get(tenant).copied().unwrap_or(0.0) + running) / scheduling.weight(tenant)
+        };
+        let mut best: Option<(usize, i64, f64)> = None;
+        for (i, op) in self.ops.iter().enumerate() {
+            if op.5 != 0 || (op.4 && !gpu) {
+                continue;
+            }
+            let effective = scheduling.effective(op.2, op.3 as i64, now);
+            let share = share(&op.1);
+            let better = match best {
+                None => true,
+                Some((_, e, s)) => effective > e || (effective == e && share < s),
+            };
+            if better {
+                best = Some((i, effective, share));
+            }
+        }
+        best.map(|b| b.0)
+    }
+}
+
+/// The scheduling conformance every [`OperationStore`] passes (see
+/// [`Scheduling`]): priority order; weighted fair share between two tenants;
+/// aging that lifts long-waiting low-priority work over fresh high-priority
+/// work, and none without it; two workers racing never claiming one
+/// operation twice; and random submissions, finishes and labeled and
+/// unlabeled claims matching [`Model`] claim by claim. Measured against a
+/// fixed clock, never the time it takes. `repo` names a repository (and
+/// prefixes tenants) no other test of the store uses. Panics on a
+/// violation. Run on SQLite here and on PostgreSQL by `tests/postgres.rs`.
+#[doc(hidden)]
+pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
+    use branchyard_client::api::OperationState;
+    const NOW: u64 = 2_000_000_000_000;
+    const LEASE: Duration = Duration::from_secs(300);
+    let repos = vec![repo.to_owned()];
+    let worker = |id: &str| Worker {
+        id: format!("{repo}-{id}"),
+        ..Worker::current()
+    };
+    let admit = |op: StoredOperation| {
+        let admitted = store
+            .admit(&op, &serde_json::json!({}), &AdmissionQuota::default())
+            .unwrap();
+        assert_eq!(admitted, Admission::Admitted);
+    };
+    let fixed = |weights: &[(&str, f64)], aging: Option<Duration>| Scheduling {
+        weights: weights
+            .iter()
+            .map(|(t, w)| (format!("{repo}-{t}"), *w))
+            .collect(),
+        aging,
+        window: Duration::from_secs(3600),
+        clock_ms: Some(NOW),
+    };
+    let claim = |w: &Worker, labels: &[String], scheduling: &Scheduling| {
+        store
+            .claim_next(w, &repos, labels, LEASE, scheduling)
+            .unwrap()
+    };
+    let finish = |w: &Worker, claim: &Claim| {
+        let mut done = claim.operation.clone();
+        done.operation.state = OperationState::Succeeded;
+        assert!(store.finish(w, claim.fence, &done).unwrap());
+    };
+    let short = |id: &str| id.trim_start_matches(&format!("{repo}-")).to_owned();
+
+    // Priority order, highest first, then the oldest; aging off.
+    let tenant = format!("{repo}-solo");
+    for (n, priority) in [0, 5, -3, 5, 10, -10].into_iter().enumerate() {
+        admit(scheduled(
+            repo,
+            &format!("{repo}-p{n}"),
+            &tenant,
+            priority,
+            NOW,
+            &[],
+        ));
+    }
+    let one = worker("one");
+    let plain = fixed(&[], None);
+    let mut order = Vec::new();
+    while let Some(c) = claim(&one, &[], &plain) {
+        assert_eq!(c.operation.operation.priority, {
+            let n: usize = short(&c.operation.operation.id)[1..].parse().unwrap();
+            [0, 5, -3, 5, 10, -10][n]
+        });
+        order.push(short(&c.operation.operation.id));
+        finish(&one, &c);
+    }
+    assert_eq!(order, ["p4", "p1", "p3", "p0", "p2", "p5"]);
+
+    // Aging: a -10 that has waited 30 steps outranks a fresh 10; without
+    // aging it does not.
+    for aged in [true, false] {
+        let tag = if aged { "aged" } else { "flat" };
+        admit(scheduled(
+            repo,
+            &format!("{repo}-{tag}-low"),
+            &tenant,
+            -10,
+            NOW - 30_000,
+            &[],
+        ));
+        admit(scheduled(
+            repo,
+            &format!("{repo}-{tag}-high"),
+            &tenant,
+            10,
+            NOW,
+            &[],
+        ));
+        let scheduling = fixed(&[], aged.then_some(Duration::from_secs(1)));
+        let first = claim(&one, &[], &scheduling).unwrap();
+        let expected = if aged { "low" } else { "high" };
+        assert_eq!(
+            short(&first.operation.operation.id),
+            format!("{tag}-{expected}")
+        );
+        finish(&one, &first);
+        let second = claim(&one, &[], &scheduling).unwrap();
+        finish(&one, &second);
+    }
+
+    // Weighted fair share: tenant a (weight 2) and b (weight 1), thirty
+    // operations each, admitted alternately, claimed and finished one at a
+    // time: a gets two claims for each of b's.
+    let (a, b) = (format!("{repo}-a"), format!("{repo}-b"));
+    for n in 0..30 {
+        admit(scheduled(repo, &format!("{repo}-a{n}"), &a, 0, NOW, &[]));
+        admit(scheduled(repo, &format!("{repo}-b{n}"), &b, 0, NOW, &[]));
+    }
+    let weighted = fixed(&[("a", 2.0), ("b", 1.0)], None);
+    let mut first_thirty = (0, 0);
+    let mut claimed = Vec::new();
+    while let Some(c) = claim(&one, &[], &weighted) {
+        let id = short(&c.operation.operation.id);
+        if claimed.len() < 30 {
+            match id.starts_with('a') {
+                true => first_thirty.0 += 1,
+                false => first_thirty.1 += 1,
+            }
+        }
+        claimed.push(id);
+        finish(&one, &c);
+    }
+    assert_eq!(claimed.len(), 60);
+    assert!(
+        (19..=21).contains(&first_thirty.0),
+        "tenant a should get about two thirds of the first thirty claims: {first_thirty:?} \
+         in {claimed:?}"
+    );
+    // Within a tenant, oldest first.
+    let a_order: Vec<&String> = claimed.iter().filter(|i| i.starts_with('a')).collect();
+    let mut sorted = a_order.clone();
+    sorted.sort_by_key(|i| i[1..].parse::<u32>().unwrap());
+    assert_eq!(a_order, sorted);
+
+    // Two workers racing for mixed priorities and tenants claim each
+    // operation exactly once.
+    let mut rng = Rng(0x5eed_0001);
+    let mut expected: Vec<String> = Vec::new();
+    for n in 0..24 {
+        let tenant = format!("{repo}-race{}", rng.below(3));
+        let id = format!("{repo}-race-{n}");
+        admit(scheduled(
+            repo,
+            &id,
+            &tenant,
+            rng.below(21) as i32 - 10,
+            NOW - rng.below(10_000),
+            &[],
+        ));
+        expected.push(id);
+    }
+    let racers = [worker("racer-a"), worker("racer-b")];
+    let racing = fixed(&[("race0", 3.0)], Some(Duration::from_secs(1)));
+    let mut won: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = racers
+            .iter()
+            .map(|w| {
+                let racing = racing.clone();
+                scope.spawn(move || {
+                    let mut got = Vec::new();
+                    while let Some(c) = claim(w, &[], &racing) {
+                        got.push(c.operation.operation.id.clone());
+                        finish(w, &c);
+                    }
+                    got
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    won.sort();
+    expected.sort();
+    assert_eq!(won, expected, "each operation claimed exactly once");
+
+    // Random submissions, finishes and claims by a worker with and one
+    // without the `gpu` label, checked against the model claim by claim.
+    for seed in 1..=4u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let tag = format!("prop{seed}");
+        let tenants: Vec<String> = (0..3).map(|t| format!("{repo}-{tag}-t{t}")).collect();
+        let weights = [("t0", 1.0), ("t1", 2.0), ("t2", 0.5)];
+        let scheduling = Scheduling {
+            weights: weights
+                .iter()
+                .map(|(t, w)| (format!("{repo}-{tag}-{t}"), *w))
+                .collect(),
+            aging: Some(Duration::from_secs(5)),
+            window: Duration::from_secs(3600),
+            clock_ms: Some(NOW),
+        };
+        let mut model = Model {
+            ops: Vec::new(),
+            used: BTreeMap::new(),
+        };
+        let gpu_worker = worker(&format!("{tag}-gpu"));
+        let plain_worker = worker(&format!("{tag}-plain"));
+        let gpu_labels = vec!["gpu".to_owned()];
+        let mut claims: Vec<(usize, Claim, bool)> = Vec::new();
+        for step in 0..120 {
+            match rng.below(4) {
+                // Submit.
+                0 | 1 if model.ops.len() < 40 => {
+                    let n = model.ops.len();
+                    let id = format!("{repo}-{tag}-{n}");
+                    let tenant = tenants[rng.below(3) as usize].clone();
+                    let priority = rng.below(21) as i32 - 10;
+                    let created = NOW - rng.below(60_000);
+                    let gpu = rng.below(4) == 0;
+                    admit(scheduled(
+                        repo,
+                        &id,
+                        &tenant,
+                        priority,
+                        created,
+                        if gpu { &["gpu"] } else { &[] },
+                    ));
+                    model.ops.push((id, tenant, priority, created, gpu, 0));
+                }
+                // Finish something running.
+                2 if !claims.is_empty() => {
+                    let k = rng.below(claims.len() as u64) as usize;
+                    let (i, c, gpu) = claims.remove(k);
+                    let w = if gpu { &gpu_worker } else { &plain_worker };
+                    finish(w, &c);
+                    model.ops[i].5 = 2;
+                }
+                // Claim, with or without the label.
+                _ => {
+                    let gpu = rng.below(2) == 0;
+                    let (w, labels) = match gpu {
+                        true => (&gpu_worker, gpu_labels.as_slice()),
+                        false => (&plain_worker, &[][..]),
+                    };
+                    let want = model.pick(&scheduling, gpu);
+                    let got = claim(w, labels, &scheduling);
+                    let got_id = got.as_ref().map(|c| c.operation.operation.id.clone());
+                    assert_eq!(
+                        got_id,
+                        want.map(|i| model.ops[i].0.clone()),
+                        "seed {seed}, step {step}, gpu {gpu}: the store and the model differ"
+                    );
+                    if let (Some(i), Some(c)) = (want, got) {
+                        model.ops[i].5 = 1;
+                        *model.used.entry(model.ops[i].1.clone()).or_default() += 1.0;
+                        claims.push((i, c, gpu));
+                    }
+                }
+            }
+        }
+        // Drain: everything left is claimed exactly once, in model order.
+        for (i, c, gpu) in claims.drain(..) {
+            finish(if gpu { &gpu_worker } else { &plain_worker }, &c);
+            model.ops[i].5 = 2;
+        }
+        while let Some(i) = model.pick(&scheduling, true) {
+            let c = claim(&gpu_worker, &gpu_labels, &scheduling).unwrap();
+            assert_eq!(
+                c.operation.operation.id, model.ops[i].0,
+                "seed {seed}, drain"
+            );
+            *model.used.entry(model.ops[i].1.clone()).or_default() += 1.0;
+            model.ops[i].5 = 2;
+            finish(&gpu_worker, &c);
+        }
+        assert!(claim(&gpu_worker, &gpu_labels, &scheduling).is_none());
+    }
+
+    // The queue as metrics read it: nothing of this repository is left.
+    assert!(!store.queue().unwrap().iter().any(|q| q.repo == repo));
+}
+
 /// Operations in memory only, for tests and embedding: a [`SqliteStore`]
 /// on an in-memory database.
 pub struct MemoryStore(SqliteStore);
@@ -2087,8 +2944,10 @@ impl OperationStore for MemoryStore {
         admit(operation: &StoredOperation, work: &Value, quota: &AdmissionQuota)
             -> io::Result<Admission>;
         unfinished(tenant: &str) -> io::Result<Vec<StoredOperation>>;
-        claim(worker: &Worker, repos: &[String], labels: &[String], lease: Duration)
-            -> io::Result<Option<Claim>>;
+        claim_next(worker: &Worker, repos: &[String], labels: &[String], lease: Duration,
+            scheduling: &Scheduling) -> io::Result<Option<Claim>>;
+        queue() -> io::Result<Vec<Queued>>;
+        branch_priority(repo: &str, branch: &str) -> io::Result<Option<i32>>;
         beat(worker: &Worker, labels: &[String], repos: &[String]) -> io::Result<()>;
         workers(within: Duration) -> io::Result<Vec<LiveWorker>>;
         leave(worker: &Worker) -> io::Result<()>;
@@ -2128,12 +2987,14 @@ mod tests {
                 error: None,
                 requires: Vec::new(),
                 waiting: None,
+                priority: 0,
             },
             idempotency: None,
             locks: Vec::new(),
             tenant: String::new(),
             principal: None,
             creates: Vec::new(),
+            trace: None,
         }
     }
 
@@ -2337,6 +3198,61 @@ mod tests {
     }
 
     #[test]
+    fn claims_follow_priority_fair_share_and_aging_on_sqlite() {
+        check_scheduling(&MemoryStore::default(), "mem");
+        let temp = temp("scheduling");
+        check_scheduling(
+            &SqliteStore::open(temp.path().join("state.db"), None).unwrap(),
+            "file",
+        );
+    }
+
+    #[test]
+    fn share_ranks_put_equal_shares_together_and_no_usage_lowest() {
+        let ranks = share_ranks(&[
+            ("a".into(), 1.0),
+            ("b".into(), 0.5),
+            ("c".into(), 1.0),
+            ("d".into(), 0.0),
+        ]);
+        assert_eq!(ranks["d"], ranks[""]);
+        assert!(ranks[""] < ranks["b"] && ranks["b"] < ranks["a"]);
+        assert_eq!(ranks["a"], ranks["c"]);
+    }
+
+    #[test]
+    fn queue_and_branch_priority_read_what_admission_wrote() {
+        let store = MemoryStore::default();
+        let mut op = scheduled("r", "x", "acme", 7, 5, &["gpu"]);
+        op.operation.branches = vec!["feature".into()];
+        store
+            .admit(&op, &serde_json::json!({}), &AdmissionQuota::default())
+            .unwrap();
+        let queue = store.queue().unwrap();
+        assert_eq!(
+            queue,
+            [Queued {
+                id: "x".into(),
+                repo: "r".into(),
+                tenant: "acme".into(),
+                priority: 7,
+                requires: vec!["gpu".into()],
+                enqueued_ms: 5,
+                claimed: false,
+            }]
+        );
+        assert_eq!(store.branch_priority("r", "feature").unwrap(), Some(7));
+        assert_eq!(store.branch_priority("r", "other").unwrap(), None);
+        assert_eq!(store.branch_priority("q", "feature").unwrap(), None);
+        let claim = store
+            .claim(&worker("w"), &["r".into()], &["gpu".into()], LEASE)
+            .unwrap()
+            .unwrap();
+        assert!(!claim.took_over);
+        assert!(store.queue().unwrap()[0].claimed);
+    }
+
+    #[test]
     fn workers_claim_only_what_their_labels_allow_on_sqlite() {
         check_labels(&MemoryStore::default(), "mem");
         let temp = temp("labels");
@@ -2399,12 +3315,21 @@ mod tests {
             });
             let store = SqliteStore::open(&path, None).unwrap();
             if old {
-                let requires: String = store
+                let migrated: (String, i32, String, i64) = store
                     .conn()
-                    .query_row("SELECT requires FROM operation_queue", [], |r| r.get(0))
+                    .query_row(
+                        "SELECT requires, priority, tenant, enqueued_ms FROM operation_queue",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
                     .unwrap();
-                assert_eq!(requires, "[]");
+                assert_eq!(migrated, ("[]".into(), 0, "default".into(), 0));
             }
+            let usage: i64 = store
+                .conn()
+                .query_row("SELECT COUNT(*) FROM tenant_usage", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(usage, 0);
         }
     }
 
@@ -2440,6 +3365,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         let second = store.claim(&two, &repos, &[], LEASE).unwrap().unwrap();
         assert_eq!(second.fence, first.fence + 1);
+        assert!(!first.took_over);
+        assert!(second.took_over, "the first claim's lease had lapsed");
         // The first worker is fenced out of every write.
         assert!(!store.renew(&one, "a", first.fence, LEASE).unwrap());
         assert!(!store
@@ -2450,6 +3377,7 @@ mod tests {
         store.release(&two, "a", second.fence).unwrap();
         let third = store.claim(&one, &repos, &[], LEASE).unwrap().unwrap();
         assert_eq!(third.fence, second.fence + 1);
+        assert!(!third.took_over, "a released claim is not taken over");
         // A reset store (its only process restarted) frees every claim.
         store.reset().unwrap();
         assert!(store.claim(&two, &repos, &[], LEASE).unwrap().is_some());

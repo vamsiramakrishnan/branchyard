@@ -1629,3 +1629,92 @@ impl Drop for Killed {
         let _ = self.0.wait();
     }
 }
+
+/// `--priority` reaches the server's queue, and `by stats` summarizes the
+/// branches locally (with the turns' outcomes from the event store) and
+/// remotely (with the server's queue by priority); locally `--priority` is
+/// refused, since there is no queue.
+#[test]
+fn priority_reaches_the_queue_and_by_stats_summarizes_it() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &["--allow-client-commands", "--label", "linux"],
+    );
+    let done = server.by(
+        &dir.0,
+        &with_agent(&[
+            "run",
+            "WRITE a.txt=1",
+            "--name",
+            "done",
+            "--priority",
+            "-3",
+            "--yes",
+        ])
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>(),
+    );
+    assert!(done.status.success(), "{}", text(&done.stderr));
+    // Requires a label no worker carries: it stays queued, at priority 7.
+    let args = with_agent(&[
+        "run",
+        "WRITE x.txt=1",
+        "--name",
+        "queued",
+        "--require-label",
+        "gpu",
+        "--priority",
+        "7",
+        "--yes",
+    ]);
+    let running = command(BY, &dir.0)
+        .arg("--remote")
+        .arg(&server.url)
+        .arg("--token-file")
+        .arg(&server.token_file)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let running = Killed(running);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let stats = loop {
+        let out = server.by(&dir.0, &["stats", "--json"]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let stats: Value = serde_json::from_slice(&out.stdout).unwrap();
+        if stats["queue"]["queued"]["7"] == 1 {
+            break stats;
+        }
+        assert!(Instant::now() < deadline, "never queued: {stats}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(stats["branches"]["ready"], 1, "{stats}");
+    assert_eq!(stats["turns"]["gemini-cli"], 1, "{stats}");
+    let shown = text(&server.by(&dir.0, &["stats"]).stdout);
+    assert!(
+        shown.contains("queue     1 queued (priority 7: 1)"),
+        "{shown}"
+    );
+    drop(running);
+
+    // Locally: no queue, so no priority; the stats read the event store.
+    let refused = local(&there, &["run", "x", "--priority", "2"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(text(&refused.stderr).contains("use it with --remote"));
+    let out = local(&there, &["run", "WRITE b.txt=1", "--name", "here", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    // The server's SQLite state is the repository's own, so the branch
+    // it ran counts here too.
+    let stats: Value = serde_json::from_slice(&local(&there, &["stats", "--json"]).stdout).unwrap();
+    assert_eq!(stats["branches"]["ready"], 2, "{stats}");
+    assert_eq!(stats["outcomes"]["completed"], 2, "{stats}");
+    assert_eq!(stats["turn_seconds"]["count"], 2, "{stats}");
+    assert!(stats.get("queue").is_none(), "{stats}");
+    let bad = local(&there, &["run", "x", "--priority", "11"]);
+    assert_eq!(bad.status.code(), Some(2), "{}", text(&bad.stderr));
+}

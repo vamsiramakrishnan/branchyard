@@ -203,6 +203,11 @@ pub struct TaskRequest {
     /// `docs/server.md#worker-labels`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -250,6 +255,11 @@ pub struct SendRequest {
     /// `docs/server.md#worker-labels`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/fork`.
@@ -304,6 +314,11 @@ pub struct ForkRequest {
     /// `docs/server.md#worker-labels`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/reincarnate`: a new branch from
@@ -349,6 +364,11 @@ pub struct ReincarnateRequest {
     /// `docs/server.md#worker-labels`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/merge`. Without a target, the
@@ -408,6 +428,11 @@ pub struct SpawnRequest {
     /// `docs/server.md#worker-labels`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     /// The child's connector grant, like [`branchyard::Spawn::connectors`]:
     /// narrowed to its parent's; unset is its seat's or its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -595,6 +620,15 @@ pub struct Operation {
     /// its repository carries the labels it requires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
+    /// Its priority as admitted (after the tenant's cap; a spawn's
+    /// inherited from its parent when its request named none). Claims take
+    /// higher priorities first; see `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub priority: i32,
+}
+
+fn is_zero(value: &i32) -> bool {
+    *value == 0
 }
 
 /// A structured error. `code` is stable; `message` is for people.

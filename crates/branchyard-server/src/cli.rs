@@ -254,6 +254,18 @@ struct Flags {
     /// Allow a --webhook URL that is plain http:// off loopback
     #[arg(long, help_heading = "Webhooks")]
     webhook_insecure: bool,
+    /// Serve Prometheus metrics at /metrics to a principal with the admin scope or the
+    /// metrics token
+    #[arg(long, help_heading = "Observability")]
+    metrics: bool,
+    /// Also serve /metrics, and nothing else, on a plain-HTTP listener of its own (implies
+    /// --metrics)
+    #[arg(long, value_name = "ADDR", help_heading = "Observability")]
+    metrics_addr: Option<String>,
+    /// A token, on the first line of FILE, that reads /metrics and nothing else (implies
+    /// --metrics)
+    #[arg(long, value_name = "FILE", help_heading = "Observability")]
+    metrics_token_file: Option<PathBuf>,
     /// Do not log requests
     #[arg(short, long)]
     quiet: bool,
@@ -614,6 +626,33 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         .secrets
         .extend(flags.secrets.into_iter().map(|s| (s.name.clone(), s)));
     config.database = flags.database.or(partial.database);
+    if let Some(aging) = partial.aging {
+        config.aging = aging;
+    }
+    if let Some(window) = partial.fair_share_window {
+        config.fair_share_window = window;
+    }
+    config.metrics = partial.metrics;
+    if flags.metrics || flags.metrics_addr.is_some() || flags.metrics_token_file.is_some() {
+        let mut metrics = config.metrics.take().unwrap_or(config::MetricsConfig {
+            listen: None,
+            token_sha256: None,
+        });
+        if let Some(addr) = &flags.metrics_addr {
+            metrics.listen = Some(config::parse_listen(addr)?);
+        }
+        if let Some(path) = &flags.metrics_token_file {
+            let token = config::read_token_file(path, &mut warnings)?;
+            if token.len() < 16 {
+                return Err(format!(
+                    "the metrics token in {} is shorter than 16 characters",
+                    path.display()
+                ));
+            }
+            metrics.token_sha256 = Some(config::sha256_hex(token.as_bytes()));
+        }
+        config.metrics = Some(metrics);
+    }
     config.log_requests = !flags.quiet;
     config.webhooks = partial.webhooks;
     for (i, webhook) in flags.webhooks.into_iter().enumerate() {

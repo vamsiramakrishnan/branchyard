@@ -736,6 +736,7 @@ pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/.well-known/jwks.json", get(jwks))
+        .route("/metrics", get(metrics_route))
         .merge(v1)
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
         .method_not_allowed_fallback(|| async {
@@ -805,6 +806,88 @@ async fn jwks(State(app): State<Shared>) -> Response {
     }
 }
 
+/// `GET /metrics`: Prometheus metrics, for a principal with the `admin`
+/// scope or the metrics token; `404` unless metrics are configured. See
+/// `docs/observability.md`.
+async fn metrics_route(State(app): State<Shared>, headers: HeaderMap) -> Response {
+    let Some(metrics) = &app.config.metrics else {
+        return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route").into_response();
+    };
+    let header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let operator = app
+        .credentials
+        .verify(header)
+        .is_some_and(|principal| principal.allows("admin"));
+    if !operator && !metrics_token_matches(metrics, header) {
+        return match app.credentials.verify(header) {
+            Some(_) => scope_required("admin").into_response(),
+            None => ApiError::unauthorized().into_response(),
+        };
+    }
+    render_metrics(app.registry.clone()).await
+}
+
+/// Whether `header` presents the metrics token.
+pub(crate) fn metrics_token_matches(
+    metrics: &crate::config::MetricsConfig,
+    header: Option<&str>,
+) -> bool {
+    let (Some(expected), Some(presented)) = (
+        &metrics.token_sha256,
+        header
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map(str::trim),
+    ) else {
+        return false;
+    };
+    let digest = crate::config::sha256_hex(presented.as_bytes());
+    crate::auth::constant_time_eq(digest.as_bytes(), expected.as_bytes())
+}
+
+/// The registry's counters, and the shared queue's and workers' gauges
+/// read now, in the Prometheus text format.
+pub(crate) async fn render_metrics(registry: Arc<Registry>) -> Response {
+    let rendered = tokio::task::spawn_blocking(move || {
+        let mut snapshot = registry.observability().metrics.snapshot();
+        let queue = registry.queue()?;
+        let workers = registry.live_workers()?;
+        crate::metrics::queue_gauges(&mut snapshot, &queue, &workers, crate::ops::now_ms() as i64);
+        Ok::<_, std::io::Error>(crate::metrics::encode(&snapshot))
+    })
+    .await;
+    match rendered {
+        Ok(Ok(text)) => {
+            ([(header::CONTENT_TYPE, crate::metrics::CONTENT_TYPE)], text).into_response()
+        }
+        Ok(Err(e)) => ApiError::internal(format!("could not read the queue: {e}")).into_response(),
+        Err(e) => ApiError::internal(e.to_string()).into_response(),
+    }
+}
+
+/// The router of `--metrics-addr`'s listener: `/metrics` only, with the
+/// metrics token when one is configured.
+pub fn metrics_router(app: Shared) -> Router {
+    async fn serve(State(app): State<Shared>, headers: HeaderMap) -> Response {
+        let Some(metrics) = &app.config.metrics else {
+            return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route")
+                .into_response();
+        };
+        let header = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        if metrics.token_sha256.is_some() && !metrics_token_matches(metrics, header) {
+            return ApiError::unauthorized().into_response();
+        }
+        render_metrics(app.registry.clone()).await
+    }
+    Router::new()
+        .route("/metrics", get(serve))
+        .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
+        .with_state(app)
+}
+
 /// The request ID assigned by [`request_id`], read back by the
 /// [`TraceLayer`] span above and echoed on the response.
 #[derive(Clone)]
@@ -839,8 +922,13 @@ async fn request_id(mut request: Request, next: Next) -> Response {
 /// routes cannot be probed anonymously. Every read (`GET`, `HEAD`) needs
 /// the `read` scope, checked here once so no handler can forget it.
 async fn authenticate(State(app): State<Shared>, mut request: Request, next: Next) -> Response {
-    // The connector gateway's verification keys are public.
-    if matches!(request.uri().path(), "/healthz" | "/.well-known/jwks.json") {
+    // The connector gateway's verification keys are public; `/metrics`
+    // checks its own credentials (a principal's `admin` scope, or the
+    // metrics token).
+    if matches!(
+        request.uri().path(),
+        "/healthz" | "/.well-known/jwks.json" | "/metrics"
+    ) {
         return next.run(request).await;
     }
     let header = request
@@ -1124,6 +1212,39 @@ async fn admit(app: &Shared, new: NewOperation, work: Work) -> Result<Response, 
     Ok(operation_response(op, replayed))
 }
 
+/// The priority an operation is admitted at: the request's, checked
+/// against -10..=10, or `inherited` when it names none, capped at the
+/// tenant's `max_priority`. See `docs/server.md#scheduling`.
+pub(crate) fn admitted_priority(
+    policy: &TenantPolicy,
+    asked: Option<i32>,
+    inherited: i32,
+) -> Result<i32, ApiError> {
+    use crate::store::{MAX_PRIORITY, MIN_PRIORITY};
+    let priority = match asked {
+        Some(p) if !(MIN_PRIORITY..=MAX_PRIORITY).contains(&p) => {
+            return Err(ApiError::bad_request(format!(
+                "priority {p} is outside {MIN_PRIORITY} to {MAX_PRIORITY}"
+            )))
+        }
+        Some(p) => p,
+        None => inherited,
+    };
+    Ok(priority
+        .min(policy.max_priority.unwrap_or(MAX_PRIORITY))
+        .max(MIN_PRIORITY))
+}
+
+/// The request's W3C `traceparent` header, which its operation's trace
+/// continues; see `docs/observability.md`.
+fn incoming_trace(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| crate::telemetry::SpanContext::parse(v).is_some())
+        .map(str::to_owned)
+}
+
 /// The worker labels a request requires, checked, sorted and once each.
 fn required_labels(labels: &[String]) -> Result<Vec<String>, ApiError> {
     if let Some(bad) = labels.iter().find(|l| !crate::store::valid_label(l)) {
@@ -1197,6 +1318,8 @@ async fn post_task(
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
         requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, 0)?,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Task { request }).await
 }
@@ -1241,6 +1364,8 @@ async fn post_send(
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
         requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, 0)?,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Send { branch, request }).await
 }
@@ -1281,6 +1406,8 @@ async fn post_fork(
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
         requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, 0)?,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Fork { branch, request }).await
 }
@@ -1321,6 +1448,8 @@ async fn post_reincarnate(
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
         requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, 0)?,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Reincarnate { branch, request }).await
 }
@@ -1375,6 +1504,8 @@ async fn post_merge(
         creates: Vec::new(),
         quota: AdmissionQuota::default(),
         requires: Vec::new(),
+        priority: 0,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Merge { branch, target }).await
 }
@@ -1477,6 +1608,15 @@ async fn post_spawn(
     // a send or removal of it must not run meanwhile.
     let mut locks = planned.clone();
     locks.push(parent.clone());
+    // A child the request gives no priority inherits its parent's.
+    let inherited = match request.priority {
+        Some(_) => 0,
+        None => {
+            let (registry, repo_name, parent) =
+                (app.registry.clone(), repo.name.clone(), parent.clone());
+            blocking(move || registry.branch_priority(&repo_name, &parent)).await??
+        }
+    };
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Spawn,
@@ -1488,6 +1628,8 @@ async fn post_spawn(
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
         requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, inherited)?,
+        trace: incoming_trace(&headers),
     };
     admit(
         &app,
@@ -1535,6 +1677,8 @@ async fn post_integrate(
         creates: Vec::new(),
         quota: AdmissionQuota::default(),
         requires: Vec::new(),
+        priority: 0,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Integrate { branch, parent }).await
 }

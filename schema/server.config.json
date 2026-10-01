@@ -184,6 +184,33 @@
           "type": "null"
         }
       ]
+    },
+    "aging_seconds": {
+      "description": "Seconds an operation waits queued before its effective priority\nrises by one, so low-priority work cannot starve; 0 turns aging\noff. Default 60. See docs/server.md#scheduling.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "fair_share_window_seconds": {
+      "description": "Seconds a claim keeps counting toward its tenant's fair share (the\ntime constant of its exponential decay); 0 counts only running\noperations. Default 300.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "metrics": {
+      "description": "Serve Prometheus metrics at /metrics (docs/observability.md). Off\nwithout this.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileMetrics"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -319,6 +346,22 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "weight": {
+          "description": "The tenant's share of the queue against other tenants at the same\npriority. Default 1.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_priority": {
+          "description": "The highest priority its operations may carry (-10 to 10); higher\nrequests are admitted at this. Default 10.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
         }
       },
       "additionalProperties": false
@@ -466,6 +509,33 @@
         "gateway",
         "bundles"
       ]
+    },
+    "FileMetrics": {
+      "description": "`metrics`: Prometheus metrics at `/metrics`; see docs/observability.md.",
+      "type": "object",
+      "properties": {
+        "listen": {
+          "description": "A separate plain-HTTP listener (`IP:port`) serving only /metrics,\nas `--metrics-addr` sets it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "description": "A token that reads /metrics and nothing else, at least 16\ncharacters. Exactly one of `token` and `token_file`, or neither.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

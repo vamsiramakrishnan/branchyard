@@ -267,6 +267,14 @@
             "type": "string"
           },
           "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+        },
+        "priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
         }
       },
       "required": [
@@ -1206,6 +1214,14 @@
             "type": "string"
           },
           "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+        },
+        "priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
         }
       },
       "required": [
@@ -1756,6 +1772,14 @@
             "type": "string"
           },
           "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+        },
+        "priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
         }
       },
       "required": [
@@ -2531,6 +2555,14 @@
             "type": "string"
           },
           "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+        },
+        "priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
         }
       },
       "description": "`POST /v1/repos/{repo}/branches/{branch}/reincarnate`: a new branch from\n`branch`'s latest candidate, always with a fresh session and a generated\nhandoff brief; see [`branchyard::Branch::reincarnate`].",
@@ -3317,6 +3349,14 @@
             "type": "string"
           },
           "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+        },
+        "priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
         },
         "connectors": {
           "type": [
@@ -5332,6 +5372,11 @@
             "null"
           ],
           "description": "Why a queued operation has not been claimed, once it has waited\nlonger than the server's `unclaimable_after`: no live worker serving\nits repository carries the labels it requires."
+        },
+        "priority": {
+          "type": "integer",
+          "format": "int32",
+          "description": "Its priority as admitted (after the tenant's cap; a spawn's\ninherited from its parent when its request named none). Claims take\nhigher priorities first; see `docs/server.md#scheduling`."
         }
       },
       "required": [
@@ -12529,6 +12574,11 @@
                 "null"
               ],
               "description": "Why a queued operation has not been claimed, once it has waited\nlonger than the server's `unclaimable_after`: no live worker serving\nits repository carries the labels it requires."
+            },
+            "priority": {
+              "type": "integer",
+              "format": "int32",
+              "description": "Its priority as admitted (after the tenant's cap; a spawn's\ninherited from its parent when its request named none). Claims take\nhigher priorities first; see `docs/server.md#scheduling`."
             }
           },
           "required": [

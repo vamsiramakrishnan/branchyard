@@ -955,7 +955,16 @@ pub struct TaskOptions {
     /// default (`local:<user>` locally). A server sets it to the request's
     /// principal. See `docs/connectors.md`.
     pub actor: Option<connectors::Actor>,
+    /// A W3C `traceparent` for this call's turns: each turn's harness gets
+    /// it as `TRACEPARENT`, so what it calls (a connector SDK putting it in
+    /// the gateway call's `_meta`, a tool exporting its own spans) joins
+    /// the caller's trace. Not stored with the branch. A server sets it to
+    /// its operation's span; see `docs/observability.md`.
+    pub trace_parent: Option<String>,
 }
+
+/// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.
+pub const ENV_TRACEPARENT: &str = "TRACEPARENT";
 
 /// Where a branch's harness runs.
 ///

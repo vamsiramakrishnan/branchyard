@@ -825,6 +825,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "postgres",
+ "prost",
  "reqwest",
  "rusqlite",
  "rustls",

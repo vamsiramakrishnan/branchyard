@@ -71,10 +71,13 @@ pub mod connectors;
 pub mod error;
 pub mod feed;
 pub mod logging;
+pub mod metrics;
+pub mod observe;
 pub mod ops;
 pub mod serve;
 pub mod storage_routes;
 pub mod store;
+pub mod telemetry;
 pub mod webhook;
 pub mod work;
 

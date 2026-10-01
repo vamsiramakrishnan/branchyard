@@ -111,6 +111,8 @@ pub struct TaskArgs {
     pub issue: Option<String>,
     /// `--require-label`: worker labels the server's operation needs.
     pub require_labels: Vec<String>,
+    /// `--priority`: the server's operation's priority, -10 to 10.
+    pub priority: Option<i32>,
     /// `--auto`: route through the fleet table, failing over when a harness
     /// fails. See docs/fleet.md.
     pub auto: bool,
@@ -878,6 +880,13 @@ pub enum Command {
     /// List branches
     #[command(display_order = 200)]
     Ls {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Summarize branches, turns and cost (and, with --remote, the server's queue)
+    #[command(display_order = 209)]
+    Stats {
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -1933,6 +1942,15 @@ pub struct Launch {
     /// With --remote: only a worker carrying this label runs it (repeatable)
     #[arg(long = "require-label", value_name = "LABEL")]
     require_label: Vec<String>,
+    /// With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's
+    /// parent's); higher runs first
+    #[arg(
+        long,
+        value_name = "N",
+        allow_negative_numbers = true,
+        value_parser = clap::value_parser!(i32).range(-10..=10)
+    )]
+    priority: Option<i32>,
 }
 
 #[derive(Args, Clone, Debug, Default, PartialEq)]
@@ -2065,6 +2083,7 @@ impl Launch {
     fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
         task.isolated = self.isolated;
         task.require_labels = self.require_label.clone();
+        task.priority = self.priority;
         task.command = self.command.map(|argv| argv.0);
         let chosen = self.provider;
         let micro = &self.microsandbox;
@@ -2368,6 +2387,15 @@ pub struct SendFlags {
     /// With --remote: only a worker carrying this label runs it (repeatable)
     #[arg(long = "require-label", value_name = "LABEL", help_heading = "Launch")]
     require_label: Vec<String>,
+    /// With --remote: the operation's priority, -10 to 10 (default 0); higher runs first
+    #[arg(
+        long,
+        value_name = "N",
+        allow_negative_numbers = true,
+        value_parser = clap::value_parser!(i32).range(-10..=10),
+        help_heading = "Launch"
+    )]
+    priority: Option<i32>,
 }
 
 impl Flags for SendFlags {
@@ -2376,6 +2404,7 @@ impl Flags for SendFlags {
         let mut task = TaskArgs {
             command: self.command.map(|argv| argv.0),
             require_labels: self.require_label,
+            priority: self.priority,
             ..TaskArgs::default()
         };
         self.limits.apply(&mut task);
@@ -3139,6 +3168,7 @@ mod tests {
                 instructions: None,
                 issue: None,
                 require_labels: Vec::new(),
+                priority: None,
                 auto: false,
                 implied_auto: false,
                 kind: None,

@@ -313,6 +313,25 @@ See [prepared environments](environments.md) and [worker labels](server.md#worke
 | `by show BRANCH --remote` for a branch not created yet | `unknown_branch` | the queued operation that will create it, with `requires` and `waiting` |
 | `workers` (SQLite), `by_workers` (PostgreSQL); `requires` on the queue | none | live workers with their labels; each queue row's required labels |
 
+## Added with scheduling and observability
+
+See [scheduling](server.md#scheduling) and [observability](observability.md). Hermetic tests only: no real Prometheus or OpenTelemetry collector.
+
+| Surface | Before | Now |
+|---|---|---|
+| `priority` on task, send, fork, reincarnate and spawn requests; `Operation::priority` | none | -10 to 10, default 0 (a spawn: its parent's); capped at the tenant's `max_priority`; in `schema/contract.json` |
+| `--priority N` on `by run`, `fan`, `send`, `fork`, `reincarnate`, `spawn` | none | with `--remote`; refused locally |
+| Claim order | oldest first | highest effective priority (aged), then lowest tenant usage per weight, then oldest; one statement on PostgreSQL |
+| `tenants.<name>.weight`, `max_priority`; `aging_seconds`, `fair_share_window_seconds` in the configuration | none | the tenant's fair share and priority ceiling; aging step and usage decay |
+| `GET /metrics`; `--metrics`, `--metrics-addr`, `--metrics-token-file`; `metrics` in the configuration | none | Prometheus text, for `admin` or the metrics token; off by default |
+| `OTEL_EXPORTER_OTLP_*`, `OTEL_SERVICE_NAME` in the server's environment | ignored | OTLP/HTTP traces (protobuf or JSON) of admission, claim, operation, turns, tool and connector calls |
+| `traceparent` request header | ignored | the operation's trace continues it |
+| `TRACEPARENT` in a server-run turn's environment; `TaskOptions::trace_parent` | none | the operation's span, for the harness and what it calls (a connector SDK's `_meta.traceparent`) |
+| `traceparent` on webhook deliveries | none | the trace of the operation that last worked on the branch here |
+| `by stats [--json]` | none | branches, turns, outcomes, durations, tools, connectors and cost locally; branches and the server's queue by priority with `--remote` |
+| `branchyard_server::metrics`, `telemetry`, `observe`; `Config::observability`; `store::Scheduling`, `check_scheduling` | none | Rust only: the registry and encoder, the tracer with a pluggable `SpanExporter`, and the scheduling conformance |
+| `tenant_usage` (SQLite), `by_tenant_usage` (PostgreSQL); `priority`, `tenant`, `enqueued_ms` on the queue | none | each tenant's decayed recent claims; what the claim orders by |
+
 ## Added with connectors
 
 A branch's harness calls GitHub, Slack or an internal API through Anvil's gateway with a per-turn token for its grant; see [connectors](connectors.md).

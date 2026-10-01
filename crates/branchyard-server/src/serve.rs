@@ -49,6 +49,8 @@ pub struct Running {
     worker: bool,
     /// The connector gateway run beside the server, stopped with it.
     _gateway: Option<branchyard::connectors::gateway::Supervisor>,
+    /// `--metrics-addr`'s listener: its address and its accept loop.
+    metrics: Option<(SocketAddr, tokio::task::JoinHandle<()>)>,
 }
 
 /// How a shutdown went.
@@ -69,6 +71,14 @@ impl Running {
     /// Whether this only runs operations, with no HTTP listener.
     pub fn is_worker(&self) -> bool {
         self.worker
+    }
+
+    /// `http://` and the metrics listener's bound address, when
+    /// `--metrics-addr` gave it one.
+    pub fn metrics_url(&self) -> Option<String> {
+        self.metrics
+            .as_ref()
+            .map(|(addr, _)| format!("http://{addr}/metrics"))
     }
 
     /// `http://` or `https://` and the bound address.
@@ -109,6 +119,9 @@ impl Running {
         }
         for webhook in self.webhooks {
             webhook.abort();
+        }
+        if let Some((_, metrics)) = self.metrics {
+            metrics.abort();
         }
         let registry = self.registry.clone();
         let grace = self.grace;
@@ -223,6 +236,15 @@ pub async fn start(config: Config) -> Result<Running, String> {
         Some(listener) => listener.local_addr().map_err(|e| e.to_string())?,
         None => config.listen,
     };
+    // A worker may serve metrics too: it has no other listener.
+    let metrics_listener = match config.metrics.as_ref().and_then(|m| m.listen) {
+        Some(at) => Some(
+            TcpListener::bind(at)
+                .await
+                .map_err(|e| format!("cannot listen for metrics on {at}: {e}"))?,
+        ),
+        None => None,
+    };
     let pollers = repos
         .values()
         .map(|repo| {
@@ -236,7 +258,12 @@ pub async fn start(config: Config) -> Result<Running, String> {
         .collect();
     let webhooks = match worker {
         true => Vec::new(),
-        false => start_webhooks(&config, &repos, shutdown_rx.clone())?,
+        false => start_webhooks(
+            &config,
+            &repos,
+            registry.observability(),
+            shutdown_rx.clone(),
+        )?,
     };
     let grace = config.shutdown_grace;
     let app = Arc::new(App {
@@ -250,6 +277,17 @@ pub async fn start(config: Config) -> Result<Running, String> {
     registry
         .start(Arc::new(crate::work::AppExecutor(app.clone())))
         .map_err(|e| format!("could not start the operation dispatcher: {e}"))?;
+    let metrics = match metrics_listener {
+        Some(listener) => {
+            let at = listener.local_addr().map_err(|e| e.to_string())?;
+            let router = api::metrics_router(app.clone());
+            Some((
+                at,
+                tokio::spawn(accept_loop(listener, None, router, shutdown_rx.clone())),
+            ))
+        }
+        None => None,
+    };
     let accept = match listener {
         Some(listener) => {
             let router = api::router(app);
@@ -276,6 +314,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         _lock: lock,
         worker,
         _gateway: gateway,
+        metrics,
     })
 }
 
@@ -289,6 +328,7 @@ fn worker_or_not(config: &Config) -> bool {
 fn start_webhooks(
     config: &Config,
     repos: &BTreeMap<String, RepoState>,
+    observability: &crate::observe::Observability,
     shutdown: watch::Receiver<bool>,
 ) -> Result<Vec<tokio::task::JoinHandle<()>>, String> {
     if config.webhooks.is_empty() {
@@ -308,11 +348,12 @@ fn start_webhooks(
                 cursor = %place,
                 "notifying webhook of repo activity"
             );
-            tasks.push(webhook::spawn(
+            tasks.push(webhook::spawn_observed(
                 repo.clone(),
                 webhook.clone(),
                 store.clone(),
                 client.clone(),
+                observability.clone(),
                 shutdown.clone(),
             ));
         }
@@ -356,6 +397,11 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         exclusive: config.database.is_none(),
         labels: config.labels.clone(),
         unclaimable_after: config.unclaimable_after,
+        scheduling: config.scheduling(),
+        observability: config
+            .observability
+            .clone()
+            .unwrap_or_else(crate::observe::Observability::from_env),
     };
     let registry =
         Registry::open(store, options).map_err(|e| format!("operation registry {place}: {e}"))?;
