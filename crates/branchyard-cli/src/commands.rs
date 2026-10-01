@@ -56,7 +56,7 @@ impl Env {
         }
     }
 
-    fn style(&self) -> Style {
+    pub(crate) fn style(&self) -> Style {
         Style { color: self.color }
     }
 

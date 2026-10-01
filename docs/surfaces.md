@@ -329,6 +329,30 @@ A branch's harness calls GitHub, Slack or an internal API through Anvil's gatewa
 | `GET /.well-known/jwks.json` | none | the server's public keys, no token; `404` without `connectors` |
 | `[connectors]` in `branchyard.toml`, `connectors` in the server configuration | none | in `schema/branchyard.config.json` and `schema/server.config.json`; a rig seat's `connectors` in `schema/rig.json` |
 
+## Added with the ports
+
+Ports from emdash and Orca ([roadmap](roadmap.md), Wave 1). The review and catalog commands are the CLI's; thread resolution is the pull-request watch's, and stays local only with it.
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Comment on a diff and send the comments as one prompt | no: `Branch::diff` and `send`; the editor and format are the CLI's | `review [--print] [--file F] [--detach]` | yes: the diff comes from the server, the editor runs here, the prompt is a `send` | `GET` the diff, then a send | `diff`, then a send | no: `by review` refuses inside a harness (it needs a person and an editor); send a prompt with `by send` |
+| Answer and resolve the review threads a push addressed | `PullRequestActivity::ThreadsResolved` records it | inside `pr --watch` (`--no-resolve` to leave them) | no: `pr` is local only | no | no | no |
+| Harness CLIs Branchyard knows of | `branchyard_controls::catalog::harnesses` | `harnesses --all [--json]` | yes: the catalog is built in; profiles are listed, `PATH` is not checked | no | no | the `by` command |
+| Connector catalog | `branchyard_controls::catalog::connectors` | `connectors catalog [--json]` | yes, built in (no server is contacted) | no | no | the `by` command |
+| Import another tool's workspace configuration | `branchyard_setup::import` | inside `init project` | n/a: setup is local | n/a | n/a | n/a |
+
+| Key in `by watch` | Runs | by --remote |
+|---|---|---|
+| `v` | `review --detach` in the terminal the dashboard leaves to it, for its editor; the dashboard comes back when it exits | yes |
+
+| Surface | Before | Now |
+|---|---|---|
+| `PullRequestActivity` | ... `watch_stopped` | also `threads_resolved` (`commit`, `threads`: `ResolvedThread` `id`, `path`, `replied`, `resolved`, `error`); `schema/contract.json` regenerated |
+| The watch's `reviewThreads` query | `isResolved`, path, line, comments | also each thread's `id` |
+| `branchyard_controls::harness::Harness` | Herdr, Scion and integration-target names | also `emdash` and `orca` names; 47 harnesses, 20 of them new from emdash's and Orca's registries |
+| `WorkspaceFacts` (setup) | lockfile suggestions | also `notes` (what an import left out), and imported files in `found`; `schema/setup.protocol.json` unchanged |
+| `watch::actions::Run` | `Background`, `Wait`, `Pane`, `Copy`, `Toggle`, `Open` | also `Terminal`: a `by` command the dashboard leaves the screen to |
+
 ## Changed from 4609ca1
 
 | Gap | Before | Now |

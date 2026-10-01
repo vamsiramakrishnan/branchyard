@@ -6,5 +6,10 @@
 //! [`harness`]'s tests validate against; see its module comment for why the
 //! upstream CLI-recipe builder it once carried was removed rather than kept
 //! unused.
+pub mod catalog;
 pub mod harness;
 pub mod resume;
+#[cfg(test)]
+mod tsdata;
+#[cfg(test)]
+mod upstream;

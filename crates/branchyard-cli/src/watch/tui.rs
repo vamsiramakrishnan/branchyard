@@ -161,6 +161,9 @@ pub struct Invocation {
     pub argv: Vec<String>,
     /// Detached, with its output in a log, rather than waited for.
     pub background: bool,
+    /// Run in this terminal, which the dashboard leaves to it until it
+    /// exits ([`Run::Terminal`]).
+    pub terminal: bool,
 }
 
 /// What keys do right now.
@@ -867,7 +870,7 @@ fn trigger(model: &mut Model, action: &'static Action) -> Vec<Cmd> {
 /// input box.
 fn start(model: &mut Model, action: &Action, branch: &str, text: &str, off: bool) -> Vec<Cmd> {
     match action.run {
-        Run::Background(_) | Run::Wait(_) | Run::Toggle { .. } => {
+        Run::Background(_) | Run::Wait(_) | Run::Toggle { .. } | Run::Terminal(_) => {
             let argv = actions::command(action, branch, text, off).unwrap_or_default();
             let shown: Vec<String> = argv
                 .iter()
@@ -880,6 +883,7 @@ fn start(model: &mut Model, action: &Action, branch: &str, text: &str, off: bool
                 branch: branch.to_owned(),
                 argv,
                 background: matches!(action.run, Run::Background(_)),
+                terminal: matches!(action.run, Run::Terminal(_)),
             })]
         }
         Run::Pane(kind) => {
@@ -1979,6 +1983,21 @@ pub fn run<F: Effects>(
                         let plan = effects.editor(&branch);
                         open_editor(&mut terminal, plan, branch, &tx)?;
                     }
+                    // `by review`: the command gets the terminal (for its
+                    // editor) until it exits, then the dashboard is redrawn.
+                    Cmd::Run(invocation) if invocation.terminal => {
+                        use ratatui::crossterm::terminal::{
+                            disable_raw_mode, enable_raw_mode, EnterAlternateScreen,
+                            LeaveAlternateScreen,
+                        };
+                        let mut stdout = std::io::stdout();
+                        execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+                        disable_raw_mode()?;
+                        effects.perform(Cmd::Run(invocation), &tx);
+                        enable_raw_mode()?;
+                        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+                        terminal.clear()?;
+                    }
                     cmd => effects.perform(cmd, &tx),
                 }
             }
@@ -2804,6 +2823,12 @@ mod tests {
         let watch = yes(&mut m, 'P');
         assert_eq!(watch.argv, ["pr", "--watch", "--", "done"]);
         assert!(watch.background);
+        // v: by review in this terminal (its editor gets the screen), the
+        // comments then sent in the background.
+        let review = run_of(&press(&mut m, &[Key::Char('v')])).clone();
+        assert_eq!(review.argv, ["review", "--detach", "--", "done"]);
+        assert!(review.terminal && !review.background);
+        assert_eq!(review.action, ActionId::Review);
         // o: the dashboard opens the editor itself.
         assert_eq!(press(&mut m, &[Key::Char('o')]), [Cmd::Open("done".into())]);
         update(

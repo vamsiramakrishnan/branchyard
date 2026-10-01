@@ -37,7 +37,7 @@ The branch is named `issue-<n>-<slug of the title>` (`issue-<n>-<slug>-2` if tha
 by pr <BRANCH> [--git-remote NAME] [--head BRANCH] [--base BRANCH] [--title TITLE] [--draft]
                [--gh-repo OWNER/REPO] [--force] [--no-check | --allow-failing-check]
                [--allow-not-ready] [--json]
-by pr <BRANCH> --watch [--interval SECS] [--max-rounds N] [--yes | --ask] [--command CMD]
+by pr <BRANCH> --watch [--interval SECS] [--max-rounds N] [--no-resolve] [--yes | --ask] [--command CMD]
 ```
 
 1. **Readiness.** The branch must be `ready`. A running branch is refused (wait for its turn), a locally merged one too. `--allow-not-ready` pushes the candidate of a branch that failed, was interrupted or stopped at a limit.
@@ -55,8 +55,8 @@ The body is regenerated on every push (edits to it are replaced): the task (the 
 
 Each poll:
 
-1. **Push what is new.** If the branch settled `ready` on a candidate that was not pushed yet (the turn the last feedback started, or one someone else ran), the check runs on it, it is pushed and the pull request's body updated. If the check fails, that failure (with the end of its output) becomes feedback for the branch instead, keyed by the commit.
-2. **Observe.** `gh pr view <n> --json number,url,state,isDraft,headRefOid,reviewDecision,mergeable,mergeStateStatus,reviews,comments`, `gh pr checks <n> --json name,state,bucket,link,workflow`, and the review threads through `gh api graphql` (`reviewThreads`, with `isResolved` and each comment's path and line). A changed observation is recorded as an `observed` event.
+1. **Push what is new.** If the branch settled `ready` on a candidate that was not pushed yet (the turn the last feedback started, or one someone else ran), the check runs on it, it is pushed and the pull request's body updated. If the check fails, that failure (with the end of its output) becomes feedback for the branch instead, keyed by the commit. After a push, the review threads it addressed are answered and resolved ([below](#resolving-the-threads-a-push-addressed)).
+2. **Observe.** `gh pr view <n> --json number,url,state,isDraft,headRefOid,reviewDecision,mergeable,mergeStateStatus,reviews,comments`, `gh pr checks <n> --json name,state,bucket,link,workflow`, and the review threads through `gh api graphql` (`reviewThreads`, with each thread's ID, `isResolved` and each comment's path and line). A changed observation is recorded as an `observed` event.
 3. **Stop** when the pull request is merged or closed (`watch_stopped`).
 4. **Collect feedback** not delivered before:
    - a failed check (`bucket` `fail`), keyed `ci:<check>:<head commit>`, so the same check failing again on a new push counts as new; for a GitHub Actions check, `gh run view <run> --log-failed`, bounded to its last 80 lines and 6000 bytes, is attached (once per run);
@@ -68,6 +68,16 @@ Each poll:
 Polls start `--interval` apart (default 30 seconds) and double while nothing changes, up to ten times the interval; any change, push or delivery resets it.
 
 **Each piece is delivered once.** Before the message is sent, a `feedback_delivered` event records its keys and how (`steer` or `send`). If a send cannot start (the branch is busy, a harness is missing), a `feedback_undelivered` event takes those keys back so a later poll sends them again. A later watch, after a restart or Ctrl-C, folds the log and skips every key already delivered. If the process dies between recording and sending, that piece is not sent again: the log errs towards never repeating feedback to the harness. A turn that fails after receiving feedback stops the watch with an error.
+
+### Resolving the threads a push addressed
+
+Once a turn that received review-thread feedback has ended and its candidate is pushed, the watch looks at the threads it just observed. A thread is answered and resolved when all of these hold:
+
+- it is unresolved, and the watch has not tried it before;
+- every comment in it with a body was delivered as feedback (a reply the reviewer added since is not, so a thread still under discussion is left open);
+- the file the thread is on is one the pushed commits changed (`git diff --name-only <previous push> <this push>`).
+
+For each, `gh api graphql` posts a reply, `Addressed in <commit>.`, with `addPullRequestReviewThreadReply`, then resolves the thread with `resolveReviewThread` (the mutation Orca's `resolve-review-thread.ts` sends, ported under its MIT license; see [third-party sources](../THIRD_PARTY.md)). The output says `resolved the review thread on a.txt, addressed in 1a2b3c4d5e`, and a `threads_resolved` event records each thread's ID, path, whether the reply was posted and whether GitHub reports it resolved, with the error when not. A thread is tried once: a failure (a token that may not resolve threads, a thread deleted meanwhile) is recorded and said, and the watch carries on. `--no-resolve` leaves every thread as it is. Review threads only: a review body or a pull-request comment has nothing to resolve, and the watch never replies to them.
 
 ## Merge readiness
 
@@ -99,6 +109,30 @@ It combines the local check (passed, failed, or stale when it ran on an older ca
 }
 ```
 
+## `by review`
+
+`by review <branch>` is the reviewing side of the same loop, before or without a pull request: the branch's candidate diff opens in your editor (`--editor`, else `$VISUAL`, else `$EDITOR`; a graphical editor must wait, as `code --wait` does), you write comments under the lines they are about, and on save every comment goes to the branch as one prompt.
+
+```diff
+# by review feat: comment on this branch's changes, then save and quit.
+# ...
+diff --git a/src/parser.rs b/src/parser.rs
+>> Split this file once it passes 500 lines
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -10,6 +10,8 @@ fn parse(input: &str) {
++    if input.is_empty() {
++        return Ok(Vec::new());
+>> An empty input should be an error, as the docs say
+```
+
+- A comment is a line starting with `>>`; more `>>` lines continue it. It is about the diff line above it: a context or added line is that line of the branch's file; a removed line, the line above where it was removed; an `@@` line, that hunk's lines; a file header, the whole file.
+- Lines starting with `#` are instructions and ignored. The diff itself must stay as it was: an edited diff line is refused with its line number (`the diff was edited here`), nothing is sent, and the file is kept, so a comment can never land on the wrong line.
+- The prompt is deterministic. Each comment is written as Orca writes review notes (`src/shared/diff-comments-format.ts`, ported under its MIT license): `File:`, then `Line: N`, `Lines: A-B` or `Scope: file`, then `User comment: "..."` with the comment quoted and escaped onto one line, a blank line between comments, under one line saying how many comments on how many files, and ending `Address each comment on this branch.`
+- `--print` prints that prompt and sends nothing; `--file FILE` reads an already edited review file instead of opening an editor; `--detach` starts the `by send` in the background (its output in `.branchyard/review/`) and returns. Otherwise it is `by send`, with its `--yes`, `--ask`, `--command` and limits.
+- With no comments nothing is sent. A review that was not sent (`--print`, a refused edit, a failed send) is kept in `.branchyard/review/<branch>.diff` and reopened by the next `by review` of the same diff.
+- In `by watch`, `v` runs `by review --detach` on the selected branch in the terminal the dashboard leaves to it, and comes back when the editor closes. It works with `--remote`: the diff comes from the server, the editor runs here.
+
 ## `by open`
 
 `by open <branch> [--editor EDITOR] [--print]` starts an editor on the branch's worktree: `--editor`, else `$VISUAL`, else `$EDITOR`. `--editor` takes a known short name (`code`, `cursor`, `windsurf`, `zed`, `subl`, `idea` and the other JetBrains launchers, `fleet`, `xcode` for `xed`, `vim`, `nvim`, `emacs`, `hx`, `nano`, `micro`, `kak`, with aliases such as `vscode` and `sublime`) or any command line, split like a shell, with the worktree added as its last argument. With no editor set it refuses and lists the names; a named editor not on `PATH` is refused by name. `--print` prints the worktree's path instead, for `cd "$(by open b --print)"`. A branch without a worktree (waiting, or removed) is refused.
@@ -117,13 +151,14 @@ Every step is an `Activity::PullRequest` event on the branch's log, shown by `by
 | `feedback_delivered` | `keys`, `via`, `summary` | `pull request feedback sent into the branch (send), 2 pieces: …` |
 | `feedback_undelivered` | `keys`, `reason` | `pull request feedback not delivered (…)` |
 | `watch_stopped` | `reason` | `stopped watching the pull request: the pull request was merged` |
+| `threads_resolved` | `commit`, `threads` (`id`, `path`, `replied`, `resolved`, `error`) | `1 review thread addressed in 1a2b3c4d5e resolved (a.txt)` |
 
 The CLI folds these (`pr::state`) into the branch's issue, last check, last push, pull request, last observation and delivered keys. In the SDK, `Branch::record_pull_request` appends one, `Branch::verify_candidate` runs the check on the candidate in a temporary worktree, and `Branch::push_candidate` pushes it (`Repository::verify` and `Repository::push` in `branchyard-workspace`). In `by watch`, `p` runs `by pr` after a yes (waited for, its output in a pane), `P` runs `by pr --watch` in the background, `o` opens the worktree through `open::plan` and `open::launch` (leaving the dashboard's screen for a terminal editor, whose `Plan::terminal` says so, and redrawing it after), and the detail pane shows the merge-readiness line folded from the branch's `pull_request` events with `pr::state` and `pr::readiness`; all three keys are refused remotely.
 
 ## Not done
 
 - Only GitHub, through `gh`. GitLab (`glab`) and others would fit the same events.
-- The watch does not reply to or resolve review threads, request re-review, or merge the pull request; merging stays a person's decision (or `gh pr merge`).
+- The watch replies only to the review threads a push addressed, and only to resolve them; it does not answer reviews or comments, request re-review, or merge the pull request; merging stays a person's decision (or `gh pr merge`). Whether a thread was really addressed is judged by the file it is on, not by reading the change.
 - `--draft` applies when the pull request is created; turning a draft ready is `gh pr ready`.
 - Comments from bots are fed back like anyone's; there is no filter by author yet.
 - Remote mode: a server would need its own git remote and `gh` login per repository, and an operator's decision to let clients push through it. Not built.

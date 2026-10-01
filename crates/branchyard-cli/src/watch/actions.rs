@@ -45,6 +45,7 @@ pub enum ActionId {
     Rewind,
     Compare,
     Try,
+    Review,
 }
 
 /// What an action asks before it runs.
@@ -116,6 +117,10 @@ pub enum Run {
     /// the dashboard itself; a terminal editor gets the screen until it
     /// exits.
     Open,
+    /// `by ARGV...` in this terminal, waited for: the dashboard leaves its
+    /// screen until it exits, for a command that opens an editor
+    /// (`by review`).
+    Terminal(&'static [&'static str]),
 }
 
 /// Whether an action works in remote mode (`by --remote URL watch`).
@@ -243,6 +248,11 @@ fn pushable(info: &BranchInfo) -> Result<(), String> {
         (_, None) => Err(format!("{} has no candidate commit to push", info.name)),
         _ => Ok(()),
     }
+}
+
+fn reviewable(info: &BranchInfo) -> Result<(), String> {
+    not_running(info)?;
+    has_candidate(info)
 }
 
 fn rewindable(info: &BranchInfo) -> Result<(), String> {
@@ -450,6 +460,16 @@ pub const ACTIONS: &[Action] = &[
         when: has_candidate,
         remote: Remote::No("it changes the checkout on this machine"),
     },
+    Action {
+        key: 'v',
+        id: ActionId::Review,
+        name: "review",
+        help: "comment on the diff in $EDITOR, sent as one prompt (by review)",
+        ask: Ask::Nothing,
+        run: Run::Terminal(&["review", "--detach", "--", "{branch}"]),
+        when: reviewable,
+        remote: Remote::Yes,
+    },
 ];
 
 /// The action bound to `key`.
@@ -522,7 +542,7 @@ pub fn siblings(infos: &[BranchInfo], branch: &str) -> Vec<String> {
 /// `off`. `None` for actions that run no `by`.
 pub fn command(action: &Action, branch: &str, text: &str, off: bool) -> Option<Vec<String>> {
     let template = match action.run {
-        Run::Background(template) | Run::Wait(template) => template,
+        Run::Background(template) | Run::Wait(template) | Run::Terminal(template) => template,
         Run::Toggle { off: template, .. } if off => template,
         Run::Toggle { on, .. } => on,
         Run::Pane(_) | Run::Copy(_) | Run::Open => return None,
@@ -603,6 +623,7 @@ mod tests {
             ('r', ActionId::Rewind),
             ('c', ActionId::Compare),
             ('t', ActionId::Try),
+            ('v', ActionId::Review),
         ] {
             assert_eq!(by_key(key).unwrap().id, id);
         }
@@ -710,6 +731,17 @@ mod tests {
                     assert_eq!(o, off);
                     assert_eq!(branch.as_deref(), (!off).then_some("impl"));
                 }
+                (
+                    ActionId::Review,
+                    Command::Review {
+                        branch,
+                        print: false,
+                        editor: None,
+                        file: None,
+                        detach: true,
+                        ..
+                    },
+                ) => assert_eq!(branch, "impl"),
                 (id, command) => panic!("{id:?} parsed as {command:?}"),
             }
         }
@@ -763,6 +795,11 @@ mod tests {
                 .unwrap()
                 .contains("local only"));
         }
+        assert_eq!(refused('v', BranchStatus::Ready, true, true), None);
+        assert!(refused('v', BranchStatus::Running, true, false).is_some());
+        assert!(refused('v', BranchStatus::Ready, false, false)
+            .unwrap()
+            .contains("no candidate commit"));
         assert!(refused('t', BranchStatus::Running, false, false)
             .unwrap()
             .contains("no candidate commit"));

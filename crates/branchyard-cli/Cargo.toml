@@ -43,6 +43,8 @@ cliclack = "0.5.6"
 branchyard-setup = { version = "0.0.1", path = "../branchyard-setup" }
 dirs = "7"
 branchyard-harness = { version = "0.0.1", path = "../branchyard-harness" }
+# `by harnesses --all` and `by connectors catalog`: the generated catalogs.
+branchyard-controls = { path = "../branchyard-controls" }
 schemars = { version = "1", optional = true }
 # `by watch`'s dashboard. On crossterm 0.29, already in Cargo.lock; ratatui
 # 0.30 needs Rust 1.88.

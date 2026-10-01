@@ -448,6 +448,19 @@ Examples:
   by send fix-the-flaky-test \"now add a regression test\"
   by send fix-the-flaky-test \"also cover Windows\" --steer";
 
+const REVIEW_EXAMPLES: &str = "\
+Opens the branch's diff in your editor. Write a comment on its own line
+starting with >> under the line it is about (under a file's header: the whole
+file; under an @@ line: the hunk). On save, every comment goes to the branch
+as one prompt, formatted File / Line / User comment, as by send would send it.
+With no comments nothing is sent; an unsent review is kept and reopened.
+
+Examples:
+  by review fix-the-flaky-test
+  by review fix-the-flaky-test --editor \"code --wait\"
+  by review fix-the-flaky-test --print
+  by review fix-the-flaky-test --file review.diff --yes";
+
 const FORK_EXAMPLES: &str = "\
 Examples:
   by fork fix-the-flaky-test \"try a lock instead\" -n with-lock";
@@ -527,6 +540,16 @@ Examples:
 Needs the GitHub CLI, gh, logged in (gh auth login). The branch must be
 ready and its check must pass on its candidate; --allow-not-ready and
 --allow-failing-check override that. Local mode only. See docs/pull-requests.md.";
+
+const HARNESSES_EXAMPLES: &str = "\
+Examples:
+  by harnesses
+  by harnesses --all
+  by harnesses --all --json | jq '.[] | select(.id == \"codex\") | .install'
+
+--all reads catalog/harnesses.toml, generated from emdash's and Orca's agent
+registries: knowledge about a CLI, not support for it. A harness Branchyard
+drives has a profile; see docs/compatibility.md.";
 
 const OPEN_EXAMPLES: &str = "\
 Examples:
@@ -653,6 +676,26 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        task: Checked<SendFlags>,
+    },
+    /// Comment on a branch's diff in your editor, then send every comment as one prompt
+    #[command(display_order = 111, after_help = REVIEW_EXAMPLES)]
+    Review {
+        branch: String,
+        /// Print the prompt the comments make instead of sending it
+        #[arg(long)]
+        print: bool,
+        /// The editor: a known name or a command line that waits until the file is closed, such
+        /// as "code --wait" (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR", conflicts_with = "file")]
+        editor: Option<String>,
+        /// Read the comments from this edited review file instead of opening an editor
+        #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+        file: Option<String>,
+        /// Send in the background (by send, detached, its output in a log file) and return
+        #[arg(long, conflicts_with = "print")]
+        detach: bool,
         #[command(flatten)]
         task: Checked<SendFlags>,
     },
@@ -876,12 +919,26 @@ pub enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// List harness profiles and whether they are installed
-    #[command(display_order = 205)]
+    /// List harness profiles and whether they are installed; --all lists every harness CLI
+    /// Branchyard knows of
+    #[command(display_order = 205, after_help = HARNESSES_EXAMPLES)]
     Harnesses {
         /// Print JSON
         #[arg(long)]
         json: bool,
+        /// Every harness CLI in catalog/harnesses.toml, with install and login commands, API-key
+        /// variables and models where known, marking the ones Branchyard can drive
+        #[arg(long)]
+        all: bool,
+    },
+    /// The catalog of connectors Anvil can adopt (see docs/connectors.md)
+    #[command(display_order = 207, subcommand_required = true)]
+    Connectors {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: ConnectorsAction,
     },
     /// Open a branch's worktree in your editor
     #[command(display_order = 206, after_help = OPEN_EXAMPLES)]
@@ -1165,6 +1222,13 @@ pub enum GatewayAction {
     },
     /// Print the public keys the gateway verifies tokens against (JWKS)
     Jwks,
+}
+
+/// `by connectors ...`.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum ConnectorsAction {
+    /// Every connector in catalog/connectors.toml: kind, authentication, credential names
+    Catalog,
 }
 
 /// `by workspace ...`; see docs/workspace.md.
@@ -2510,6 +2574,9 @@ pub struct PrArgs {
     pub interval: Duration,
     /// `--max-rounds`: stop after delivering feedback this many times.
     pub max_rounds: Option<u32>,
+    /// `--no-resolve`: leave review threads the watch fed back unresolved
+    /// after a push addresses them.
+    pub no_resolve: bool,
     /// Limits and permissions for the turns `--watch` starts.
     pub task: TaskArgs,
     pub json: bool,
@@ -2572,6 +2639,10 @@ pub struct PrFlags {
         help_heading = "Watching"
     )]
     max_rounds: Option<u32>,
+    /// With --watch: do not reply "Addressed in <commit>" to, and resolve, the review threads it
+    /// fed back once a pushed commit changes their files
+    #[arg(long, requires = "watch", help_heading = "Watching")]
+    no_resolve: bool,
     /// Print JSON
     #[arg(long, conflicts_with = "watch")]
     json: bool,
@@ -2610,6 +2681,7 @@ impl Flags for PrFlags {
             watch: self.watch,
             interval: self.interval,
             max_rounds: self.max_rounds,
+            no_resolve: self.no_resolve,
             task,
             json: self.json,
         })
@@ -3016,6 +3088,7 @@ mod tests {
             Command::Fork { task, .. } => task.into_inner(),
             Command::Reincarnate { task, .. } => task.into_inner(),
             Command::Send { task, .. } => task.into_inner(),
+            Command::Review { task, .. } => task.into_inner(),
             other => panic!("{other:?} has no task"),
         }
     }
@@ -3665,7 +3738,31 @@ mod tests {
         );
         assert_eq!(
             parse_str("harnesses --json").unwrap(),
-            Command::Harnesses { json: true }
+            Command::Harnesses {
+                json: true,
+                all: false
+            }
+        );
+        assert_eq!(
+            parse_str("harnesses --all").unwrap(),
+            Command::Harnesses {
+                json: false,
+                all: true
+            }
+        );
+        assert_eq!(
+            parse_str("connectors --json catalog").unwrap(),
+            Command::Connectors {
+                json: true,
+                action: ConnectorsAction::Catalog
+            }
+        );
+        assert_eq!(
+            parse_str("connectors catalog --json").unwrap(),
+            Command::Connectors {
+                json: true,
+                action: ConnectorsAction::Catalog
+            }
         );
         assert!(err("diff b --json").contains("unexpected argument '--json'"));
     }
@@ -3816,10 +3913,11 @@ mod tests {
         let error = parse_str("mrege b").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
         assert_eq!(error.exit_code(), 2);
+        // `review` is close to `mrege` too, so clap lists both.
         assert!(
             error
                 .to_string()
-                .contains("a similar subcommand exists: 'merge'"),
+                .contains("similar subcommands exist: 'review', 'merge'"),
             "{error}"
         );
         assert!(err("run go --budget 2").contains("a similar argument exists: '--budget-usd'"));

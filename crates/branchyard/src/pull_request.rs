@@ -49,6 +49,29 @@ pub enum PullRequestActivity {
     FeedbackUndelivered { keys: Vec<String>, reason: String },
     /// `by pr --watch` stopped following the pull request.
     WatchStopped { reason: String },
+    /// Review threads whose comments were delivered as feedback, and whose
+    /// files `commit` (just pushed) changed, were answered "Addressed in
+    /// <commit>" and resolved; each thread is attempted once.
+    ThreadsResolved {
+        commit: String,
+        threads: Vec<ResolvedThread>,
+    },
+}
+
+/// One review thread `by pr --watch` answered and resolved, or tried to.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedThread {
+    /// The thread's GraphQL node ID.
+    pub id: String,
+    pub path: String,
+    /// The "Addressed in" reply was posted.
+    pub replied: bool,
+    /// GitHub reports the thread resolved.
+    pub resolved: bool,
+    /// Why not, when either failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// An issue a branch works on.

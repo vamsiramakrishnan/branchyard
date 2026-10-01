@@ -739,6 +739,27 @@ impl Runner {
                 return;
             }
         };
+        if invocation.terminal {
+            // The dashboard has left the screen; the command has the
+            // terminal until it exits.
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .env_remove("NO_COLOR");
+            let msg = match command.status() {
+                Ok(status) => finished(
+                    status.success(),
+                    match status.success() {
+                        true => "done".to_owned(),
+                        false => format!("by exited with {status}"),
+                    },
+                ),
+                Err(error) => finished(false, format!("could not start by: {error}")),
+            };
+            let _ = done.send(msg);
+            return;
+        }
         let done = done.clone();
         if !invocation.background {
             std::thread::spawn(move || {
@@ -1106,6 +1127,7 @@ mod tests {
             branch: "a/b".into(),
             argv: argv.iter().map(|a| a.to_string()).collect(),
             background,
+            terminal: false,
         }
     }
 

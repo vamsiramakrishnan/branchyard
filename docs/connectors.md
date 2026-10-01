@@ -199,3 +199,20 @@ Built in Anvil (ADR-0029 there, `docs/branchyard.md`): the `branchyard` inbound 
 - A real harness using a connector: the end-to-end test drives the packaged SDK from the fake agent's shell.
 - One gateway per host for several local repositories: each local yard runs its own (`by gateway` per repository) with its own issuer and keys.
 - Removing a branch removes its home, and with it the placed packages; nothing else is tracked in `provisioned.json` for connectors, since the token file is removed when each turn ends.
+
+## Catalog
+
+[`catalog/connectors.toml`](../catalog/connectors.toml) is the starting list of connectors Anvil adopts from: 55 servers, generated from emdash's MCP catalog (`apps/emdash-desktop/src/core/primitives/mcp/api/catalog.ts`, Apache-2.0, pinned under `vendor/emdash/`). `by connectors catalog [--json]` prints it. Listing a connector grants nothing: a branch reaches one only through a grant and the gateway above.
+
+Each entry has:
+
+| Field | Meaning |
+|---|---|
+| `id`, `name`, `description` | emdash's key (with `_` as `-`), name and description |
+| `kind` | `remote-mcp`: a Streamable HTTP MCP server at `url` (46 entries); `stdio-package`: a package run over stdio, with its `command`, `args` and `package` (such as `npx -y resend-mcp`; 7); `stdio-command`: a CLI's own MCP mode (`gt mcp`, `executor mcp`; 2) |
+| `auth` | `server`: the remote server runs its own authorization, as the MCP authorization specification describes (usually OAuth), which the gateway's connect flow completes; `header`: a credential in an HTTP header; `env`: a credential in a variable; `none` |
+| `credentials` | The header or variable names a credential goes in, each `required` or optional; never a value (emdash's placeholders are dropped) |
+| `homepage` | The server's documentation |
+| `source` | `emdash:<key>`, the entry it came from |
+
+Nothing in emdash's catalog is a plain API yet; an OpenAPI or GraphQL contract Anvil compiles directly needs no catalog entry. To adopt one, Anvil reads the entry's URL or package as an MCP source (its ADR-0016) and produces the reviewed model; the catalog is not consulted at run time. The file is regenerated from the vendored source by `BRANCHYARD_BLESS=1 cargo test -p branchyard-controls catalog`, and that test fails when the checked-in file differs from what the pinned source gives, so a re-pin of emdash shows every added, removed or changed server as a diff to review.

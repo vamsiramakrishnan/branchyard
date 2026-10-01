@@ -77,7 +77,15 @@ case "$1 $2" in
 "pr view") next view ;;
 "pr checks") next checks ;;
 "run view") cat "$d/run.log" ;;
-"api graphql") next threads ;;
+"api graphql")
+  case "$*" in
+  *addPullRequestReviewThreadReply*)
+    echo '{"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "R1"}}}}' ;;
+  *resolveReviewThread*)
+    if [ -f "$d/resolve-fails" ]; then echo "GraphQL: Resource not accessible" >&2; exit 1; fi
+    echo '{"data": {"resolveReviewThread": {"thread": {"isResolved": true}}}}' ;;
+  *) next threads ;;
+  esac ;;
 *) echo "fake gh: unexpected: $*" >&2; exit 1 ;;
 esac
 "#;
@@ -560,6 +568,132 @@ fn watch_sends_ci_failures_and_review_comments_back_once_and_pushes_each_fix() {
     let show = repo.json(&["show", "feat", "--json"]);
     assert_eq!(show["merge_readiness"]["verdict"], "merged");
     assert_eq!(show["merge_readiness"]["feedback_rounds"], 2);
+}
+
+/// Review threads the watch fed back are answered and resolved once a
+/// pushed commit changes their files; others are left alone, and
+/// `--no-resolve` leaves them all.
+#[test]
+fn watch_resolves_the_threads_a_pushed_fix_addressed() {
+    for no_resolve in [false, true] {
+        let repo = Repo::new();
+        repo.ok(repo.by_agent(&["run", "WRITE a.txt=two", "--name", "feat"]));
+        repo.ok(repo.by(&["pr", "feat"]));
+        let head = "6".repeat(40);
+        repo.answer("view.1", &view("OPEN", &head));
+        repo.answer("view.2", &view("MERGED", &head));
+        repo.answer("checks.1", &json!([]));
+        let open = threads(json!([
+            {"id": "T1", "isResolved": false, "path": "a.txt", "line": 1, "comments": {"nodes": [
+                {"id": "C1", "author": {"login": "alice"}, "body": "Please WRITE a.txt=three",
+                 "path": "a.txt", "line": 1}
+            ]}},
+            {"id": "T2", "isResolved": false, "path": "other.txt", "line": 3, "comments": {"nodes": [
+                {"id": "C2", "author": {"login": "bob"}, "body": "Is this file still needed?",
+                 "path": "other.txt", "line": 3}
+            ]}},
+            {"id": "T3", "isResolved": true, "path": "a.txt", "line": 1, "comments": {"nodes": [
+                {"id": "C3", "author": {"login": "bob"}, "body": "old", "path": "a.txt", "line": 1}
+            ]}}
+        ]));
+        repo.answer("threads.1", &open);
+        let mut args = vec!["pr", "feat", "--watch", "--interval", "50ms", "--yes"];
+        if no_resolve {
+            args.push("--no-resolve");
+        }
+        let text = repo.ok(repo.by_agent(&args));
+        assert!(text.contains("sending 2 pieces of feedback"), "{text}");
+        assert!(text.contains("wrote a.txt"), "{text}");
+        let pushed = repo.candidate("feat");
+        let mutations: Vec<String> = repo
+            .calls()
+            .into_iter()
+            .filter(|c| c.contains("mutation"))
+            .collect();
+        let events = repo.json(&["log", "feat", "--json"]);
+        let resolved = repo_events_of(events.as_array().unwrap(), "threads_resolved");
+        if no_resolve {
+            assert!(mutations.is_empty(), "{mutations:?}");
+            assert!(resolved.is_empty());
+            continue;
+        }
+        assert!(
+            text.contains(&format!(
+                "resolved the review thread on a.txt, addressed in {}",
+                &pushed[..10]
+            )),
+            "{text}"
+        );
+        assert_eq!(mutations.len(), 2, "{mutations:?}");
+        assert!(mutations[0].contains("addPullRequestReviewThreadReply"));
+        assert!(mutations[0].contains("-f threadId=T1"));
+        assert!(mutations[0].ends_with(&format!("-f body=Addressed in {pushed}.")));
+        assert!(mutations[1].contains("resolveReviewThread(input: { threadId: $threadId })"));
+        assert!(mutations[1].ends_with("-f threadId=T1"));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0]["commit"], pushed.as_str());
+        assert_eq!(
+            resolved[0]["threads"],
+            json!([{"id": "T1", "path": "a.txt", "replied": true, "resolved": true}])
+        );
+        let log = stdout(&repo.by(&["log", "feat"]));
+        assert!(
+            log.contains(&format!(
+                "1 review thread addressed in {} resolved (a.txt)",
+                &pushed[..10]
+            )),
+            "{log}"
+        );
+    }
+}
+
+#[test]
+fn a_thread_that_cannot_be_resolved_is_recorded_and_the_watch_goes_on() {
+    let repo = Repo::new();
+    repo.ok(repo.by_agent(&["run", "WRITE a.txt=two", "--name", "feat"]));
+    repo.ok(repo.by(&["pr", "feat"]));
+    fs::write(repo.gh.join("resolve-fails"), "").unwrap();
+    let head = "7".repeat(40);
+    repo.answer("view.1", &view("OPEN", &head));
+    repo.answer("view.3", &view("MERGED", &head));
+    repo.answer("checks.1", &json!([]));
+    repo.answer(
+        "threads.1",
+        &threads(json!([
+            {"id": "T1", "isResolved": false, "path": "a.txt", "line": 1, "comments": {"nodes": [
+                {"id": "C1", "author": {"login": "alice"}, "body": "Please WRITE a.txt=three",
+                 "path": "a.txt", "line": 1}
+            ]}}
+        ])),
+    );
+    let out = repo.by_agent(&["pr", "feat", "--watch", "--interval", "50ms", "--yes"]);
+    let text = repo.ok(out);
+    assert!(
+        text.contains("stopped watching: the pull request was merged"),
+        "{text}"
+    );
+    let events = repo.json(&["log", "feat", "--json"]);
+    let resolved = repo_events_of(events.as_array().unwrap(), "threads_resolved");
+    assert_eq!(resolved.len(), 1);
+    let thread = &resolved[0]["threads"][0];
+    assert_eq!(
+        (thread["replied"].clone(), thread["resolved"].clone()),
+        (json!(true), json!(false))
+    );
+    assert!(thread["error"]
+        .as_str()
+        .unwrap()
+        .contains("Resource not accessible"));
+    // One reply and one attempt to resolve, however many polls followed.
+    assert_eq!(
+        repo.calls()
+            .iter()
+            .filter(|c| c.contains("mutation"))
+            .count(),
+        2
+    );
+    let log = stdout(&repo.by(&["log", "feat"]));
+    assert!(log.contains("0 review threads addressed in"), "{log}");
 }
 
 /// A child process killed if a test fails while it runs.

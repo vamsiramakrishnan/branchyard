@@ -247,6 +247,71 @@ fn every_generated_file_passes_the_tool_that_reads_it() {
     repo.assert_no_secret_printed();
 }
 
+/// `by init project` reads the worktree configuration another tool
+/// committed (each fixture written for this test) into its `[workspace]`
+/// suggestion, and the file it writes loads.
+#[test]
+fn project_setup_imports_another_tools_workspace_configuration() {
+    for (file, content, setup, run, teardown) in [
+        (
+            ".emdash.json",
+            r#"{"preservePatterns": [".env"], "scripts": {"setup": "pnpm install",
+                "run": "PORT=$EMDASH_PORT pnpm dev", "teardown": "docker compose down"}}"#,
+            "pnpm install",
+            "PORT=$BRANCHYARD_PORT pnpm dev",
+            "docker compose down",
+        ),
+        (
+            "orca.yaml",
+            "scripts:\n  setup: |\n    pnpm install\n  archive: docker compose down\n\
+             defaultTabs:\n  - title: Dev\n    command: pnpm dev\n",
+            "pnpm install",
+            "pnpm dev",
+            "docker compose down",
+        ),
+        (
+            ".superset/config.json",
+            r#"{"setup": ["bun install"], "run": ["bun dev"], "teardown": ["docker compose down"]}"#,
+            "bun install",
+            "bun dev",
+            "docker compose down",
+        ),
+        (
+            ".conductor/settings.toml",
+            "[scripts]\nsetup = \"uv sync\"\narchive = \"docker compose down\"\n\
+             [scripts.run.web]\ncommand = \"uv run app --port $CONDUCTOR_PORT\"\n",
+            "uv sync",
+            "uv run app --port $BRANCHYARD_PORT",
+            "docker compose down",
+        ),
+    ] {
+        let repo = Repo::new();
+        let path = repo.root.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+        let out = repo.by(&["init", "project", "--defaults", "--apply"]);
+        assert!(out.status.success(), "{file}: {}", text(&out));
+        let written = fs::read_to_string(repo.root.join("branchyard.toml")).unwrap();
+        let config: toml_edit::DocumentMut = written.parse().unwrap();
+        let workspace = &config["workspace"];
+        assert_eq!(
+            workspace["setup"].as_str(),
+            Some(setup),
+            "{file}: {written}"
+        );
+        assert_eq!(
+            workspace["teardown"].as_str(),
+            Some(teardown),
+            "{file}: {written}"
+        );
+        let runs = workspace["run"].as_table_like().unwrap();
+        let (_, script) = runs.iter().next().unwrap();
+        assert_eq!(script["command"].as_str(), Some(run), "{file}: {written}");
+        let check = repo.by(&["config", "validate"]);
+        assert!(check.status.success(), "{file}: {}", text(&check));
+    }
+}
+
 #[test]
 fn a_multi_tenant_server_gets_one_0600_token_per_tenant_and_its_hash_only() {
     let repo = Repo::new();

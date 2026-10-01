@@ -237,6 +237,24 @@ pub fn render() -> String {
             );
         }
     }
+    // The CLIs Branchyard knows about without driving them.
+    let catalog = branchyard_controls::catalog::harnesses();
+    let known: Vec<String> = catalog
+        .iter()
+        .filter(|h| !PROFILES.iter().any(|p| p.harness == h.id))
+        .map(|h| format!("`{}`", h.id))
+        .collect();
+    out += &format!(
+        "\n## Known, not driven\n\n\
+         The harness registry names {} CLIs. Beside the rows above, Branchyard knows these {} from the \
+         vendored Herdr, Scion, emdash and Orca registries, with no profile to drive them: {}. `by harnesses \
+         --all` lists every one with its install and login commands, API-key variables and \
+         models where upstream records them ([`catalog/harnesses.toml`](../catalog/harnesses.toml), \
+         generated from the pinned sources); knowing a CLI is not support for it.\n",
+        catalog.len(),
+        known.len(),
+        known.join(", ")
+    );
     out
 }
 

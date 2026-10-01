@@ -1,0 +1,511 @@
+# Generated from pinned upstream sources by branchyard-controls' catalog tests;
+# do not edit. Regenerate with
+#   BRANCHYARD_BLESS=1 cargo test -p branchyard-controls catalog
+# and review the diff. See crates/branchyard-controls/src/catalog.rs.
+#
+# Derived from generalaction/emdash at 873a3e2067f4abc136272ed2b61abea3a2c07bcf
+# (packages/plugins/src/agents/impl/*/index.ts, with the install helpers of
+# packages/core/src/services/agent-plugins/api/plugins/helpers/host-dependency.ts),
+# Copyright 2026 General Action, Inc., licensed under the Apache License,
+# Version 2.0 (vendor/emdash/LICENSE.md),
+# and stablyai/orca at 280733273545f0b3eeedc1be54b14d406239030e
+# (src/shared/tui-agent-config.ts, src/shared/tui-agent.ts), Copyright (c) 2026
+# Lovecast Inc., MIT License (vendor/orca/LICENSE).
+# Modified for Branchyard: the TypeScript plugin definitions were reduced to
+# data (Linux install commands with npm and Homebrew helpers expanded, CLI
+# login, API-key variables, model names, model and resume flags) and joined
+# with Orca's executables under Branchyard's harness IDs.
+
+[[harness]]
+id = "claude-code"
+name = "Claude Code"
+binaries = ["claude"]
+homepage = "https://code.claude.com/docs/en/quickstart"
+install = ["curl -fsSL https://claude.ai/install.sh | bash"]
+login = "claude auth login"
+auth_env = ["ANTHROPIC_API_KEY"]
+models = ["claude-fable-5-1[1m]", "haiku", "opus[1m]", "sonnet"]
+model_flag = "--model"
+resume_flag = "--resume"
+sources = ["emdash:claude", "orca:claude", "orca:claude-agent-teams"]
+
+[[harness]]
+id = "codex"
+name = "Codex"
+binaries = ["codex"]
+homepage = "https://github.com/openai/codex"
+install = ["npm install -g @openai/codex", "curl -fsSL https://chatgpt.com/codex/install.sh | sh", "brew install --cask codex"]
+login = "codex login --device-auth"
+auth_env = ["OPENAI_API_KEY"]
+models = ["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol"]
+model_flag = "-m"
+resume_flag = "resume"
+sources = ["emdash:codex", "orca:codex"]
+
+[[harness]]
+id = "antigravity"
+name = "Antigravity"
+binaries = ["agy", "antigravity"]
+homepage = "https://antigravity.google/docs/cli-overview"
+install = ["curl -fsSL https://antigravity.google/cli/install.sh | bash"]
+auth_env = []
+models = ["Claude Opus 4.6 (Thinking)", "Claude Sonnet 4.6 (Thinking)", "GPT-OSS 120B (Medium)", "Gemini 3.1 Pro (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.5 Flash (High)", "Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)"]
+model_flag = "--model"
+resume_flag = "--conversation="
+sources = ["emdash:antigravity", "orca:antigravity"]
+
+[[harness]]
+id = "oh-my-pi"
+name = "Oh My Pi"
+binaries = ["omp"]
+homepage = "https://omp.sh"
+install = ["curl -fsSL https://omp.sh/install | sh", "bun install -g @oh-my-pi/pi-coding-agent"]
+auth_env = []
+models = []
+model_flag = "--model"
+resume_flag = "--session"
+sources = ["emdash:oh-my-pi", "orca:omp"]
+
+[[harness]]
+id = "deepseek-harness"
+name = "DeepSeek Harness"
+binaries = ["dsh-tui", "dst"]
+install = []
+auth_env = []
+models = []
+sources = ["orca:dsh"]
+
+[[harness]]
+id = "gemini-cli"
+name = "Gemini CLI"
+binaries = ["gemini"]
+install = []
+auth_env = []
+models = []
+sources = ["orca:gemini"]
+
+[[harness]]
+id = "opencode"
+name = "OpenCode"
+binaries = ["opencode", "opencode2"]
+homepage = "https://opencode.ai/docs/cli/"
+install = ["npm install -g opencode-ai"]
+login = "opencode auth login"
+auth_env = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "ORCAROUTER_API_KEY"]
+models = []
+model_flag = "--model"
+resume_flag = "--session"
+sources = ["emdash:opencode", "orca:opencode", "orca:opencode2"]
+
+[[harness]]
+id = "pi"
+name = "Pi"
+binaries = ["pi"]
+homepage = "https://github.com/earendil-works/pi/tree/main/packages/coding-agent"
+install = ["npm install -g @earendil-works/pi-coding-agent --ignore-scripts"]
+auth_env = []
+models = []
+resume_flag = "--session"
+sources = ["emdash:pi", "orca:pi"]
+
+[[harness]]
+id = "goose"
+name = "Goose"
+binaries = ["goose"]
+homepage = "https://goose-docs.ai/docs/quickstart/"
+install = ["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash"]
+auth_env = []
+models = []
+sources = ["emdash:goose", "orca:goose"]
+
+[[harness]]
+id = "aider"
+name = "Aider"
+binaries = ["aider"]
+install = []
+auth_env = []
+models = []
+sources = ["orca:aider"]
+
+[[harness]]
+id = "cursor"
+name = "Cursor CLI"
+binaries = ["cursor-agent"]
+homepage = "https://cursor.com/docs/cli/overview"
+install = ["curl https://cursor.com/install -fsS | bash"]
+auth_env = []
+models = []
+resume_flag = "--resume"
+sources = ["emdash:cursor", "orca:cursor"]
+
+[[harness]]
+id = "github-copilot"
+name = "GitHub Copilot CLI"
+binaries = ["copilot"]
+homepage = "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli"
+install = ["npm install -g @github/copilot"]
+auth_env = []
+models = []
+resume_flag = "--resume"
+sources = ["emdash:copilot", "orca:copilot"]
+
+[[harness]]
+id = "amp"
+name = "Amp"
+binaries = ["amp"]
+homepage = "https://ampcode.com/manual#install"
+install = ["npm install -g @ampcode/cli"]
+auth_env = []
+models = ["high", "low", "medium", "ultra"]
+sources = ["emdash:amp", "orca:amp"]
+
+[[harness]]
+id = "qwen-code"
+name = "Qwen Code"
+binaries = ["qwen"]
+homepage = "https://github.com/QwenLM/qwen-code"
+install = ["npm install -g @qwen-code/qwen-code"]
+auth_env = []
+models = []
+resume_flag = "--resume"
+sources = ["emdash:qwen", "orca:qwen-code"]
+
+[[harness]]
+id = "kimi-cli"
+name = "Kimi CLI"
+binaries = ["kimi", "kimi-code"]
+homepage = "https://moonshotai.github.io/kimi-cli/en/guides/getting-started.html"
+install = ["curl -LsSf https://code.kimi.com/install.sh | bash"]
+auth_env = []
+models = []
+resume_flag = "-S"
+sources = ["emdash:kimi", "orca:kimi"]
+
+[[harness]]
+id = "hermes"
+name = "Hermes"
+binaries = ["hermes"]
+homepage = "https://hermes-agent.nousresearch.com/docs/"
+install = ["curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"]
+auth_env = []
+models = []
+resume_flag = "--continue"
+sources = ["emdash:hermes", "orca:hermes"]
+
+[[harness]]
+id = "cline"
+name = "Cline"
+binaries = ["cline"]
+homepage = "https://docs.cline.bot/cline-cli/overview"
+install = ["npm install -g cline"]
+auth_env = []
+models = []
+sources = ["emdash:cline", "orca:cline"]
+
+[[harness]]
+id = "devin"
+name = "Devin"
+binaries = ["devin"]
+homepage = "https://docs.devin.ai/cli"
+install = ["curl -fsSL https://cli.devin.ai/install.sh | bash"]
+auth_env = []
+models = []
+resume_flag = "--continue"
+sources = ["emdash:devin", "orca:devin"]
+
+[[harness]]
+id = "droid"
+name = "Droid"
+binaries = ["droid"]
+homepage = "https://docs.factory.ai/cli/getting-started/quickstart"
+install = ["curl -fsSL https://app.factory.ai/cli | sh"]
+auth_env = []
+models = []
+resume_flag = "--resume"
+sources = ["emdash:droid", "orca:droid"]
+
+[[harness]]
+id = "grok-build"
+name = "Grok"
+binaries = ["grok"]
+homepage = "https://docs.x.ai/build/overview"
+install = ["curl -fsSL https://x.ai/cli/install.sh | bash", "npm install -g @xai-official/grok@latest"]
+auth_env = []
+models = []
+model_flag = "-m"
+resume_flag = "-r"
+sources = ["emdash:grok", "orca:grok"]
+
+[[harness]]
+id = "kilo"
+name = "Kilocode"
+binaries = ["kilo"]
+homepage = "https://kilo.ai/docs/cli"
+install = ["npm install -g @kilocode/cli"]
+auth_env = []
+models = []
+resume_flag = "--continue"
+sources = ["emdash:kilocode", "orca:kilo"]
+
+[[harness]]
+id = "kiro"
+name = "Kiro (AWS)"
+binaries = ["kiro-cli"]
+homepage = "https://kiro.dev/docs/cli/"
+install = ["curl -fsSL https://cli.kiro.dev/install | bash"]
+auth_env = []
+models = []
+resume_flag = "--resume-id"
+sources = ["emdash:kiro", "orca:kiro"]
+
+[[harness]]
+id = "letta"
+name = "Letta"
+binaries = ["letta"]
+homepage = "https://docs.letta.com/letta-code/cli"
+install = ["npm install -g @letta-ai/letta-code"]
+auth_env = []
+models = []
+sources = ["emdash:letta"]
+
+[[harness]]
+id = "maki"
+name = "maki"
+binaries = []
+install = []
+auth_env = []
+models = []
+sources = []
+
+[[harness]]
+id = "mastracode"
+name = "mastracode"
+binaries = []
+install = []
+auth_env = []
+models = []
+sources = []
+
+[[harness]]
+id = "muse-code"
+name = "Muse Code"
+binaries = ["muse"]
+homepage = "https://dev.meta.ai/docs/muse-code"
+install = ["curl -fsSL https://dev.meta.ai/install.sh | bash"]
+auth_env = []
+models = []
+sources = ["emdash:muse", "orca:muse"]
+
+[[harness]]
+id = "qodercli"
+name = "Qoder CLI"
+binaries = ["qodercli"]
+homepage = "https://qoder.com/en/cli"
+install = ["npm install -g @qoder-ai/qodercli", "curl -fsSL https://qoder.com/install | bash"]
+auth_env = []
+models = []
+resume_flag = "-r"
+sources = ["emdash:qoder", "orca:qoder"]
+
+[[harness]]
+id = "ante"
+name = "Ante (Antigma Labs)"
+binaries = ["ante"]
+install = []
+auth_env = []
+models = []
+sources = ["orca:ante"]
+
+[[harness]]
+id = "auggie"
+name = "Auggie"
+binaries = ["auggie"]
+homepage = "https://docs.augmentcode.com/cli/overview"
+install = ["npm install -g @augmentcode/auggie"]
+auth_env = []
+models = []
+resume_flag = "--resume"
+sources = ["emdash:auggie", "orca:aug"]
+
+[[harness]]
+id = "autohand"
+name = "Autohand Code"
+binaries = ["autohand"]
+homepage = "https://autohand.ai/code/"
+install = ["npm install -g autohand-cli"]
+auth_env = []
+models = []
+sources = ["emdash:autohand", "orca:autohand"]
+
+[[harness]]
+id = "codebuddy"
+name = "CodeBuddy Code"
+binaries = ["codebuddy", "cbc"]
+homepage = "https://www.codebuddy.ai/docs/cli/README"
+install = ["npm install -g @tencent-ai/codebuddy-code"]
+auth_env = []
+models = []
+model_flag = "--model"
+resume_flag = "--resume"
+sources = ["emdash:codebuddy", "orca:codebuddy"]
+
+[[harness]]
+id = "codebuff"
+name = "Codebuff"
+binaries = ["codebuff"]
+homepage = "https://www.codebuff.com/docs/help/quick-start"
+install = ["npm install -g codebuff"]
+auth_env = []
+models = []
+sources = ["emdash:codebuff", "orca:codebuff"]
+
+[[harness]]
+id = "command-code"
+name = "Command Code"
+binaries = ["command-code", "commandcode", "cmdc"]
+homepage = "https://commandcode.ai/docs/reference/cli"
+install = ["npm install -g command-code"]
+auth_env = []
+models = []
+resume_flag = "--resume"
+sources = ["emdash:commandcode", "orca:command-code"]
+
+[[harness]]
+id = "continue"
+name = "Continue"
+binaries = ["cn"]
+homepage = "https://docs.continue.dev/guides/cli"
+install = ["npm i -g @continuedev/cli"]
+auth_env = []
+models = []
+resume_flag = "--resume"
+sources = ["emdash:continue", "orca:continue"]
+
+[[harness]]
+id = "crush"
+name = "Charm"
+binaries = ["crush"]
+homepage = "https://github.com/charmbracelet/crush"
+install = ["npm install -g @charmland/crush"]
+auth_env = []
+models = []
+sources = ["emdash:charm", "orca:crush"]
+
+[[harness]]
+id = "freebuff"
+name = "Freebuff"
+binaries = ["freebuff"]
+homepage = "https://freebuff.com"
+install = ["npm install -g freebuff"]
+auth_env = []
+models = []
+sources = ["emdash:freebuff", "orca:freebuff"]
+
+[[harness]]
+id = "jules"
+name = "Jules"
+binaries = ["jules"]
+homepage = "https://jules.google/docs/cli/reference/"
+install = ["npm install -g @google/jules"]
+auth_env = []
+models = []
+sources = ["emdash:jules"]
+
+[[harness]]
+id = "junie"
+name = "Junie"
+binaries = ["junie"]
+homepage = "https://junie.jetbrains.com/docs/junie-cli.html"
+install = ["curl -fsSL https://junie.jetbrains.com/install.sh | bash"]
+auth_env = []
+models = []
+sources = ["emdash:junie"]
+
+[[harness]]
+id = "mimo-code"
+name = "MiMo Code"
+binaries = ["mimo"]
+homepage = "https://github.com/XiaomiMiMo/MiMo-Code"
+install = ["npm install -g @mimo-ai/cli", "curl -fsSL https://mimo.xiaomi.com/install | bash"]
+auth_env = []
+models = []
+resume_flag = "--session"
+sources = ["emdash:mimocode", "orca:mimo-code"]
+
+[[harness]]
+id = "mistral-vibe"
+name = "Mistral Vibe"
+binaries = ["vibe", "mistral-vibe"]
+homepage = "https://github.com/mistralai/mistral-vibe"
+install = ["curl -LsSf https://mistral.ai/vibe/install.sh | bash"]
+auth_env = []
+models = ["devstral-small", "local", "mistral-medium-3.5"]
+sources = ["emdash:mistral", "orca:mistral-vibe"]
+
+[[harness]]
+id = "openclaude"
+name = "OpenClaude"
+binaries = ["openclaude"]
+install = []
+auth_env = []
+models = []
+sources = ["orca:openclaude"]
+
+[[harness]]
+id = "openclaw"
+name = "OpenClaw"
+binaries = ["openclaw"]
+install = []
+auth_env = []
+models = []
+sources = ["orca:openclaw"]
+
+[[harness]]
+id = "prime-agent"
+name = "Prime Agent"
+binaries = ["prime-agent"]
+homepage = "https://github.com/PrimeIntellect-ai/prime-agent"
+install = ["curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh"]
+auth_env = []
+models = []
+model_flag = "--model"
+resume_flag = "--resume"
+sources = ["emdash:prime-agent", "orca:prime-agent"]
+
+[[harness]]
+id = "rovo-dev"
+name = "Rovo Dev"
+binaries = ["rovodev", "acli", "rovo"]
+homepage = "https://support.atlassian.com/rovo/docs/install-and-run-rovo-dev-cli-on-your-device/"
+install = ["acli rovodev auth login"]
+auth_env = []
+models = []
+sources = ["emdash:rovo", "orca:rovo"]
+
+[[harness]]
+id = "trae"
+name = "Trae CLI"
+binaries = ["traecli"]
+install = []
+auth_env = []
+models = []
+sources = ["orca:trae"]
+
+[[harness]]
+id = "zcode"
+name = "ZCode (Z.ai `zcode` CLI)"
+binaries = ["zcode"]
+install = []
+auth_env = []
+models = []
+sources = ["orca:zcode"]
+
+[[harness]]
+id = "zero"
+name = "Zero"
+binaries = ["zero"]
+homepage = "https://zero.gitlawb.com/"
+install = ["npm install -g @gitlawb/zero"]
+auth_env = []
+models = []
+sources = ["emdash:zero"]

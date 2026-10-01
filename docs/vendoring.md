@@ -24,6 +24,8 @@ The license boundary is unchanged, and the verifier enforces the mechanical part
 | OpenRig | 6 | Runtime adapter contract, four runtime fragments, license | Design input for projection/readiness handling; TypeScript imports require the upstream application |
 | Agent Substrate | 2 | Public `ateapi.proto` and license | Rust client generated at build time; adapter in `branchyard-substrate`, unqualified |
 | Warp | 7 | Process control, exit escalation, JSON utilities, two test files, two license texts | AGPL reference collection, outside Cargo's build |
+| emdash | 41 | 37 agent plugin definitions, their install helpers, the MCP catalog, the project configuration schema, license | Read by `branchyard-controls`' tests to map harnesses and generate `catalog/harnesses.toml` and `catalog/connectors.toml`; `emdash-config.ts` translated into `branchyard-setup`'s importer |
+| Orca | 9 | Agent table and names, Claude resume guard, diff-comment format and types, review-thread resolution, `orca.yaml` parser and hook types, license | Agent table read by tests (registry and catalog); the format, resolution and `orca.yaml` parser translated into `branchyard-cli` and `branchyard-setup` |
 
 The Scion provisioners cover Antigravity, Claude, Codex, Copilot, Gemini CLI, Grok Build, Hermes, Muse Code, and OpenCode, pinned at `d9b9e6a` (re-pinned from `54b9387` on 27 September 2026, when the translation was made, so that the vendored files are the ones the Rust follows; at this revision the Claude suite passes against its provisioner). Their local copies of `scion_harness.py` are preserved: the root and adjacent helper files are not all identical at this revision. Do not consolidate them without a compatibility test.
 
@@ -34,6 +36,15 @@ Each source names harnesses its own way. Herdr's `grok` manifest and Scion's `gr
 Mappings rest on upstream evidence: Herdr's manifest aliases (`grok-build`, `muse-code`, `github-copilot`, `claude-code`) and Scion's launch commands (`grok`, `muse`, `gemini`, `copilot`). The registry's tests read the vendored files directly. They fail when an upstream update adds an unmapped manifest, provisioner or resume source, when a mapped name disappears, when the integration matrix changes, or when an upstream alias contradicts a mapping. Map new names in the same change that updates the upstream.
 
 A registry entry records naming only. It is not a support claim.
+
+## emdash and Orca: ports, as data and as translations
+
+emdash (Apache-2.0, `873a3e2`) and Orca (MIT, `2807332`) are desktop worktree managers; Branchyard takes what they know about harnesses and connectors, and a few conveniences, without taking either application ([roadmap](roadmap.md), the Ports row). Superset (Elastic License 2.0) is replicated from documented behaviour only; nothing of it is vendored. Agent icons (`src/shared/agent-icons/*`, `icon.ts`) are third-party logos and are not vendored.
+
+- **Data read by tests.** `branchyard_controls::harness` maps every emdash plugin `id` and every key of Orca's `TUI_AGENT_CONFIG` to one Branchyard ID, and its tests fail when upstream adds one that is not mapped, when a mapping names one that is gone, when Orca's `TuiAgent` union and its table disagree, or when the two registries name different executables for a mapped harness (Rovo Dev is the one recorded exception, with its reason). `src/tsdata.rs` reads the TypeScript object literals as JSON, evaluating nothing: an identifier, call, spread or expression stays a marker. The same tests generate `catalog/harnesses.toml` (install commands with emdash's npm and Homebrew helpers expanded, CLI login, API-key variables, models, model and resume flags, executables) and `catalog/connectors.toml` (emdash's MCP catalog reduced to kind, URL or package, authentication and credential names), and fail when the checked-in files differ; `BRANCHYARD_BLESS=1 cargo test -p branchyard-controls catalog` regenerates them for review. A catalog entry is knowledge, not support.
+- **Translations.** The diff-comment format (`by review`), the review-thread resolution mutation (`by pr --watch`), Orca's `orca.yaml` parser and emdash's configuration schema (`by init project`) are translated into Rust, each with a header naming its origin and changes, and a test that the vendored source still has the shape the port follows. `patches/ports.json` records every derived file with the blob IDs of the sources it follows; `tools/verify_derivatives.py` fails when a header is incomplete or a pinned source changes.
+
+To update: re-pin `vendor/emdash` or `vendor/orca` (all files at one revision), run `cargo test -p branchyard-controls`, map any new agent in `HARNESSES`, regenerate the catalogs and review their diff, read the upstream diff of each source `patches/ports.json` lists, port what applies, and record the new blobs.
 
 ## Scion: reuse environment projection
 

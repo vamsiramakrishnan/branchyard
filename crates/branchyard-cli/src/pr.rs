@@ -241,6 +241,8 @@ pub struct PrState {
     pub delivered: BTreeSet<String>,
     /// How many times feedback was delivered.
     pub rounds: u32,
+    /// Review threads the watch answered and resolved, or tried to.
+    pub resolved_threads: BTreeSet<String>,
 }
 
 impl PrState {
@@ -281,6 +283,11 @@ pub fn state(info: &BranchInfo, events: &[RecordedEvent]) -> PrState {
                 state.rounds = state.rounds.saturating_sub(1);
             }
             PullRequestActivity::WatchStopped { .. } => {}
+            PullRequestActivity::ThreadsResolved { threads, .. } => {
+                state
+                    .resolved_threads
+                    .extend(threads.iter().map(|t| t.id.clone()));
+            }
         }
     }
     state
@@ -585,6 +592,34 @@ pub fn log_line(activity: &PullRequestActivity) -> (String, Tone) {
             format!("stopped watching the pull request: {reason}"),
             Tone::Dim,
         ),
+        PullRequestActivity::ThreadsResolved { commit, threads } => {
+            let done: Vec<&str> = threads
+                .iter()
+                .filter(|t| t.resolved)
+                .map(|t| t.path.as_str())
+                .collect();
+            let failed = threads.len() - done.len();
+            let mut text = format!(
+                "{} review thread{} addressed in {} resolved",
+                done.len(),
+                plural(done.len() as u32),
+                short(commit)
+            );
+            if !done.is_empty() {
+                text.push_str(&format!(" ({})", done.join(", ")));
+            }
+            if failed > 0 {
+                text.push_str(&format!(", {failed} not"));
+            }
+            (
+                text,
+                if failed > 0 {
+                    Tone::Yellow
+                } else {
+                    Tone::Green
+                },
+            )
+        }
     }
 }
 
@@ -993,16 +1028,32 @@ pub struct Feedback {
 
 const THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
      repository(owner: $owner, name: $name) { pullRequest(number: $number) { \
-     reviewThreads(first: 100) { nodes { isResolved path line comments(first: 50) { \
+     reviewThreads(first: 100) { nodes { id isResolved path line comments(first: 50) { \
      nodes { id author { login } body path line url } } } } } } }";
 
+/// A review thread as the watch last observed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewThread {
+    /// Its GraphQL node ID; empty when `gh` gave none.
+    pub id: String,
+    pub path: Option<String>,
+    pub resolved: bool,
+    /// The feedback keys of its comments with a body (`thread:<comment>`).
+    pub keys: Vec<String>,
+}
+
+/// What [`observe`] saw.
+pub struct Observed {
+    pub observation: PullRequestObservation,
+    /// Feedback among it, without the log of failed runs (see
+    /// [`failed_log`]).
+    pub feedback: Vec<Feedback>,
+    pub threads: Vec<ReviewThread>,
+}
+
 /// Ask `gh` about `pr`: its state, checks, reviews, comments and review
-/// threads; and the feedback among them, without the log of failed runs
-/// (see [`failed_log`]).
-pub fn observe(
-    gh: &Gh,
-    pr: &PullRequestRef,
-) -> Result<(PullRequestObservation, Vec<Feedback>), Failure> {
+/// threads, and the feedback among them.
+pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
     let number = pr.number.to_string();
     let view: Value = gh.json(
         &[
@@ -1127,8 +1178,23 @@ pub fn observe(
         });
     }
     let mut unresolved = 0;
+    let mut review_threads = Vec::new();
     for thread in &threads {
-        if thread["isResolved"].as_bool().unwrap_or(false) {
+        let resolved = thread["isResolved"].as_bool().unwrap_or(false);
+        let keys: Vec<String> = thread["comments"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| !text(&c["body"]).trim().is_empty())
+            .map(|c| format!("thread:{}", text(&c["id"])))
+            .collect();
+        review_threads.push(ReviewThread {
+            id: text(&thread["id"]),
+            path: thread["path"].as_str().map(str::to_owned),
+            resolved,
+            keys,
+        });
+        if resolved {
             continue;
         }
         unresolved += 1;
@@ -1165,7 +1231,11 @@ pub fn observe(
         ci,
         unresolved_threads: unresolved,
     };
-    Ok((observation, feedback))
+    Ok(Observed {
+        observation,
+        feedback,
+        threads: review_threads,
+    })
 }
 
 fn quote(body: &str) -> String {
@@ -1299,8 +1369,8 @@ pub fn refresh(yard: &Yard, name: &str) -> Outcome {
     };
     let gh = Gh::new(yard.root(), None);
     gh.ready()?;
-    let (observation, _) = observe(&gh, pr)?;
-    record_observation(&branch, &state, observation)?;
+    let observed = observe(&gh, pr)?;
+    record_observation(&branch, &state, observed.observation)?;
     Ok(())
 }
 
@@ -1344,8 +1414,12 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
         let state = state(branch.info(), &branch.events()?);
         let mut feedback = Vec::new();
         let mut active = false;
+        let mut pushed = None;
         match push_if_new(&branch, gh, args, &state)? {
-            PushOutcome::Pushed => active = true,
+            PushOutcome::Pushed { from, to } => {
+                active = true;
+                pushed = from.map(|from| (from, to));
+            }
             PushOutcome::CheckFailed(item) => feedback.push(item),
             PushOutcome::Nothing => {}
         }
@@ -1355,7 +1429,14 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
             .pull_request
             .clone()
             .ok_or_else(|| Failure::Message(format!("{name} has no pull request")))?;
-        let (observation, observed) = observe(gh, &pr)?;
+        let Observed {
+            observation,
+            feedback: observed,
+            threads,
+        } = observe(gh, &pr)?;
+        if let (Some((from, to)), false) = (&pushed, args.no_resolve) {
+            resolve_addressed(yard, &branch, gh, &pr, &state, &threads, from, to)?;
+        }
         if record_observation(&branch, &state, observation.clone())? {
             active = true;
             print(&format!(
@@ -1413,7 +1494,12 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
 /// What [`push_if_new`] did.
 enum PushOutcome {
     Nothing,
-    Pushed,
+    /// The candidate `to` was pushed over `from`, the commit pushed
+    /// before (none on a first push).
+    Pushed {
+        from: Option<String>,
+        to: String,
+    },
     /// The check failed on the new candidate: this feedback says so.
     CheckFailed(Feedback),
 }
@@ -1441,7 +1527,10 @@ fn push_if_new(
     match publish(branch, gh, &update) {
         Ok(published) => {
             print(&published_text(&published))?;
-            Ok(PushOutcome::Pushed)
+            Ok(PushOutcome::Pushed {
+                from: state.pushed.as_ref().map(|p| p.commit.clone()),
+                to: published.pushed.commit,
+            })
         }
         Err(PublishError::CheckFailed(run)) => {
             print(&format!(
@@ -1464,6 +1553,88 @@ fn push_if_new(
         }
         Err(PublishError::Other(failure)) => Err(failure),
     }
+}
+
+/// The review threads to answer and resolve after `to` was pushed over
+/// `from`: unresolved ones, not tried before, every comment of which was
+/// delivered as feedback, on a file the push changed.
+pub fn addressed_threads<'a>(
+    state: &PrState,
+    threads: &'a [ReviewThread],
+    changed: &BTreeSet<String>,
+) -> Vec<&'a ReviewThread> {
+    threads
+        .iter()
+        .filter(|t| !t.resolved && !t.id.is_empty() && !t.keys.is_empty())
+        .filter(|t| !state.resolved_threads.contains(&t.id))
+        .filter(|t| t.keys.iter().all(|k| state.delivered.contains(k)))
+        .filter(|t| t.path.as_ref().is_some_and(|p| changed.contains(p)))
+        .collect()
+}
+
+/// After a push, answer "Addressed in <commit>" in each review thread the
+/// watch fed back whose file the pushed commits changed, resolve it, and
+/// record what happened, so no thread is tried twice. A failure is
+/// recorded and said, and the watch carries on.
+#[allow(clippy::too_many_arguments)]
+fn resolve_addressed(
+    yard: &Yard,
+    branch: &Branch,
+    gh: &Gh,
+    pr: &PullRequestRef,
+    state: &PrState,
+    threads: &[ReviewThread],
+    from: &str,
+    to: &str,
+) -> Outcome {
+    let changed: BTreeSet<String> = Git::new(yard.root())
+        .args(["diff", "--name-only", "--no-renames", from, to, "--"])
+        .run()
+        .map(|out| out.lines().map(str::to_owned).collect())
+        .unwrap_or_default();
+    let threads = addressed_threads(state, threads, &changed);
+    if threads.is_empty() {
+        return Ok(());
+    }
+    let host = repo_of(&pr.url)
+        .map(|(host, _, _)| host)
+        .filter(|host| host != "github.com");
+    let reply = format!("Addressed in {to}.");
+    let mut results = Vec::new();
+    for thread in threads {
+        let path = thread.path.clone().unwrap_or_default();
+        let replied =
+            crate::pr_threads::reply_to_review_thread(gh, host.as_deref(), &thread.id, &reply);
+        let resolved = replied.as_ref().map_err(|e| e.to_string()).and_then(|()| {
+            crate::pr_threads::resolve_review_thread(gh, host.as_deref(), &thread.id, true)
+                .map_err(|e| e.to_string())
+        });
+        let result = branchyard::ResolvedThread {
+            id: thread.id.clone(),
+            path: path.clone(),
+            replied: replied.is_ok(),
+            resolved: resolved == Ok(true),
+            error: match resolved {
+                Ok(true) => None,
+                Ok(false) => Some("GitHub did not report the thread resolved".into()),
+                Err(error) => Some(error),
+            },
+        };
+        match &result.error {
+            None => print(&format!(
+                "resolved the review thread on {path}, addressed in {}
+",
+                short(to)
+            ))?,
+            Some(error) => eprintln!("by: could not resolve the review thread on {path}: {error}"),
+        }
+        results.push(result);
+    }
+    branch.record_pull_request(PullRequestActivity::ThreadsResolved {
+        commit: to.to_owned(),
+        threads: results,
+    })?;
+    Ok(())
 }
 
 /// Send `feedback` into the branch: into its running turn by steering, or
@@ -1778,6 +1949,39 @@ mod tests {
         let text = body(&branch, &state, "", elsewhere);
         assert!(text.contains("\nCloses acme/widgets#12\n"), "{text}");
         assert!(!text.contains("<details>"));
+    }
+
+    #[test]
+    fn only_delivered_threads_on_changed_files_are_resolved_once() {
+        let thread = |id: &str, path: &str, resolved: bool, keys: &[&str]| ReviewThread {
+            id: id.into(),
+            path: Some(path.into()),
+            resolved,
+            keys: keys.iter().map(|k| (*k).to_owned()).collect(),
+        };
+        let threads = [
+            thread("T1", "a.rs", false, &["thread:C1"]),
+            // A reply not delivered yet: the reviewer is still talking.
+            thread("T2", "a.rs", false, &["thread:C2", "thread:C3"]),
+            thread("T3", "b.rs", false, &["thread:C4"]),
+            thread("T4", "a.rs", true, &["thread:C5"]),
+            thread("", "a.rs", false, &["thread:C6"]),
+            thread("T5", "a.rs", false, &["thread:C7"]),
+            thread("T6", "a.rs", false, &[]),
+        ];
+        let mut state = PrState::default();
+        for key in ["C1", "C2", "C4", "C5", "C6", "C7"] {
+            state.delivered.insert(format!("thread:{key}"));
+        }
+        // T5 was tried after an earlier push.
+        state.resolved_threads.insert("T5".into());
+        let changed: BTreeSet<String> = ["a.rs".to_owned()].into();
+        let ids: Vec<&str> = addressed_threads(&state, &threads, &changed)
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(ids, ["T1"]);
+        assert!(addressed_threads(&state, &threads, &BTreeSet::new()).is_empty());
     }
 
     #[test]
