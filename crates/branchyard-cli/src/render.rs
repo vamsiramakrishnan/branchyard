@@ -407,6 +407,23 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
         ),
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
         Activity::Workspace(report) => workspace_line(report, style),
+        Activity::Adopted(adoption) => style.paint(
+            Tone::Cyan,
+            &format!(
+                "adopted {} session {} at {} ({}){}",
+                adoption.harness,
+                adoption.session,
+                short_commit(&adoption.base),
+                adoption.how,
+                match adoption.diff_files.len() {
+                    0 => String::new(),
+                    n => format!(
+                        ", {n} changed file{} applied",
+                        if n == 1 { "" } else { "s" }
+                    ),
+                }
+            ),
+        ),
         Activity::ConnectorCall(call) => style.paint(
             match call.decision.as_str() {
                 "allowed" => Tone::Cyan,

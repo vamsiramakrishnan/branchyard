@@ -106,9 +106,12 @@ pub struct TaskArgs {
     pub provision: Option<branchyard::Provisioning>,
     /// `--instructions FILE`, read when the command runs.
     pub instructions: Option<String>,
-    /// `--issue URL|#N|N`: the GitHub issue that is the task; see
-    /// `crate::pr::issue_task`.
+    /// `--issue URL|#N|N|linear:KEY|jira:KEY|gitlab:PATH#N`: the issue
+    /// that is the task; see `crate::pr::issue_task`.
     pub issue: Option<String>,
+    /// `--pr N`: start from GitHub pull request N's head; see
+    /// `crate::pr::issue_task`.
+    pub pr: Option<u64>,
     /// `--require-label`: worker labels the server's operation needs.
     pub require_labels: Vec<String>,
     /// `--auto`: route through the fleet table, failing over when a harness
@@ -551,6 +554,27 @@ Examples:
 registries: knowledge about a CLI, not support for it. A harness Branchyard
 drives has a profile; see docs/compatibility.md.";
 
+const USAGE_EXAMPLES: &str = "\
+Examples:
+  by usage
+  by usage --json | jq '.logins[] | {harness, five_hour: .five_hour.used_percent}'
+
+Read from each login's own session files, never a credential: Codex records
+its rate limits there; Claude Code records tokens only, so its percent needs
+[usage] claude_five_hour_tokens. [usage] guard = \"refuse\" stops by run and
+by fan near a limit; skip_over makes the router pass a candidate over. See
+docs/usage.md.";
+
+const ADOPT_EXAMPLES: &str = "\
+Examples:
+  by adopt                         # this repository's Claude Code and Codex sessions
+  by adopt 3f2a9c --name parser    # make one a branch
+  by send parser \"now add a test\"  # resumes the adopted session
+
+The branch's worktree starts at the commit the session recorded (Codex), else
+the HEAD of the directory it ran in, with that directory's uncommitted changes
+to tracked files applied (--no-diff leaves them out). See docs/usage.md.";
+
 const OPEN_EXAMPLES: &str = "\
 Examples:
   by open fix-the-flaky-test
@@ -630,7 +654,7 @@ pub enum Command {
     Run {
         /// The task for the harness; quote it (with --issue, added to the issue's text)
         #[arg(
-            required_unless_present = "issue",
+            required_unless_present_any = ["issue", "pr"],
             default_value = "",
             hide_default_value = true
         )]
@@ -643,7 +667,7 @@ pub enum Command {
     Fan {
         /// The task for every harness; quote it (with --issue, added to the issue's text)
         #[arg(
-            required_unless_present = "issue",
+            required_unless_present_any = ["issue", "pr"],
             default_value = "",
             hide_default_value = true
         )]
@@ -930,6 +954,35 @@ pub enum Command {
         /// variables and models where known, marking the ones Branchyard can drive
         #[arg(long)]
         all: bool,
+    },
+    /// Each local Claude Code and Codex login's 5-hour and weekly usage, and when it resets
+    #[command(display_order = 208, after_help = USAGE_EXAMPLES)]
+    Usage {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a Claude Code or Codex session already on this machine a branch; --list shows them
+    #[command(display_order = 112, after_help = ADOPT_EXAMPLES)]
+    Adopt {
+        /// The session's ID, or a unique start of it (default: list them)
+        session: Option<String>,
+        /// List this repository's sessions (the default without SESSION)
+        #[arg(long)]
+        list: bool,
+        /// The branch's name (default: a slug of the session's first prompt)
+        #[arg(short, long, conflicts_with = "list")]
+        name: Option<String>,
+        /// Do not carry the session directory's uncommitted changes into the branch
+        #[arg(long, conflicts_with = "list")]
+        no_diff: bool,
+        /// The profile its turns run with, one of the session's harness's (default: the
+        /// harness's default profile), such as claude-code-acp
+        #[arg(long, value_name = "ID", conflicts_with = "list")]
+        harness: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// The catalog of connectors Anvil can adopt (see docs/connectors.md)
     #[command(display_order = 207, subcommand_required = true)]
@@ -1243,15 +1296,43 @@ pub enum WorkspaceAction {
     Trust,
     /// Forget the trust decision for this repository
     Untrust,
-    /// Run a named [workspace.run] script in a branch's worktree
+    /// Run a named [workspace.run] script in a branch's worktree; with --detach, several at once
     Run {
         /// The branch (default: $BRANCHYARD_BRANCH inside a harness), then the
-        /// script's name (default: the one marked default, or the only one)
-        #[arg(value_name = "BRANCH [NAME]", num_args = 0..=2)]
+        /// script's name (default: the one marked default, or the only one); with --detach,
+        /// several names start each its own script, each with its own port
+        #[arg(value_name = "BRANCH [NAME...]")]
         args: Vec<String>,
         /// Start it in the background, output to a log file, and return
         #[arg(long)]
         detach: bool,
+    },
+    /// The TCP ports a branch's processes listen on (default: every branch's)
+    Ports {
+        /// One branch (default: every branch with a worktree here)
+        branch: Option<String>,
+    },
+    /// Open a port a branch listens on in a browser ($BROWSER, xdg-open or open)
+    Browse {
+        /// The branch (default: $BRANCHYARD_BRANCH inside a harness)
+        branch: Option<String>,
+        /// The port (default: the branch's only one, or its reserved BRANCHYARD_PORT)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the URL instead of opening it
+        #[arg(long)]
+        print: bool,
+    },
+    /// Stop the processes listening on a branch's ports (SIGTERM)
+    Kill {
+        /// The branch (default: $BRANCHYARD_BRANCH inside a harness)
+        branch: Option<String>,
+        /// Only the process listening on this port
+        #[arg(long)]
+        port: Option<u16>,
+        /// Do not ask first
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -2234,9 +2315,13 @@ pub struct RunFlags {
     harness: Option<String>,
     #[command(flatten)]
     route: RouteFlags,
-    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
-    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,
+    /// gitlab:GROUP/PROJECT#N, or a Linear, Jira or GitLab URL; a prompt, if given, is added
+    #[arg(long, value_name = "REF", value_parser = non_blank)]
     issue: Option<String>,
+    /// Start from GitHub pull request N's head (fetched with gh and git); by pr then updates it
+    #[arg(long, value_name = "N", conflicts_with_all = ["issue", "base"])]
+    pr: Option<u64>,
     /// Branch name (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
@@ -2266,6 +2351,7 @@ impl Flags for RunFlags {
             name: self.name,
             base: self.base,
             issue: self.issue,
+            pr: self.pr,
             auto: self.route.auto,
             kind: self.route.kind,
             seed: self.route.seed,
@@ -2313,9 +2399,13 @@ pub struct FanFlags {
     name: Option<String>,
     #[command(flatten)]
     route: RouteFlags,
-    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
-    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,
+    /// gitlab:GROUP/PROJECT#N, or a Linear, Jira or GitLab URL; a prompt, if given, is added
+    #[arg(long, value_name = "REF", value_parser = non_blank)]
     issue: Option<String>,
+    /// Start from GitHub pull request N's head (fetched with gh and git); by pr then updates it
+    #[arg(long, value_name = "N", conflicts_with_all = ["issue", "base"])]
+    pr: Option<u64>,
     /// Base revision (default: HEAD)
     #[arg(short, long, value_name = "REV")]
     base: Option<String>,
@@ -2338,6 +2428,7 @@ impl Flags for FanFlags {
             harness: None,
             route: self.route,
             issue: self.issue,
+            pr: self.pr,
             name: self.name,
             base: self.base,
             limits: self.limits,
@@ -2411,6 +2502,7 @@ impl Flags for ForkFlags {
             harness: None,
             route: RouteFlags::default(),
             issue: None,
+            pr: None,
             name: self.name,
             base: None,
             limits: self.limits,
@@ -2451,6 +2543,7 @@ impl Flags for ReincarnateFlags {
             harness: self.harness,
             route: RouteFlags::default(),
             issue: None,
+            pr: None,
             name: self.name,
             base: None,
             limits: self.limits,
@@ -2476,8 +2569,9 @@ pub struct SpawnFlags {
     /// Harness or profile ID (default: claude-code)
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
-    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
-    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,
+    /// gitlab:GROUP/PROJECT#N, or a Linear, Jira or GitLab URL; a prompt, if given, is added
+    #[arg(long, value_name = "REF", value_parser = non_blank)]
     issue: Option<String>,
     /// Branch name (default: a slug of the prompt)
     #[arg(short, long)]
@@ -3138,6 +3232,7 @@ mod tests {
                 provision: None,
                 instructions: None,
                 issue: None,
+                pr: None,
                 require_labels: Vec::new(),
                 auto: false,
                 implied_auto: false,
@@ -3850,7 +3945,28 @@ mod tests {
                 }
             )
         );
-        assert!(err("workspace run a b c").contains("no more were expected"));
+        assert_eq!(
+            parse_str("workspace run a b c --detach").unwrap(),
+            Command::Workspace {
+                json: false,
+                action: WorkspaceAction::Run {
+                    args: vec!["a".into(), "b".into(), "c".into()],
+                    detach: true,
+                },
+            }
+        );
+        assert_eq!(
+            parse_str("workspace kill b --port 5173 --yes --json").unwrap(),
+            Command::Workspace {
+                json: true,
+                action: WorkspaceAction::Kill {
+                    branch: Some("b".into()),
+                    port: Some(5173),
+                    yes: true,
+                },
+            }
+        );
+        assert!(err("workspace browse b --port 0x1").contains("invalid value"));
         assert!(err("workspace").contains("Usage"));
     }
 

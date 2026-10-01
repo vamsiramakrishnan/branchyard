@@ -80,6 +80,14 @@
     "connectors": {
       "$ref": "#/$defs/Connectors",
       "description": "The connector gateway (docs/connectors.md): where it is, which\nbundles it serves, how `by gateway` runs it, and the grants a new\nbranch gets when `--connector` names none."
+    },
+    "usage": {
+      "$ref": "#/$defs/UsageConfig",
+      "description": "Quota meters per login (`by usage`, docs/usage.md): what `by run`\nand `by fan` do when a candidate's login is near its 5-hour or\nweekly limit, and named logins to meter."
+    },
+    "trackers": {
+      "$ref": "#/$defs/Trackers",
+      "description": "Issue trackers for `--issue` besides GitHub (docs/pull-requests.md):\neach one's API address and, instead of a token in the environment,\na connector gateway tool to fetch issues through."
     }
   },
   "title": "Branchyard configuration",
@@ -721,6 +729,166 @@
         }
       },
       "description": "`[connectors]`."
+    },
+    "UsageConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "guard": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageGuard"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What `by run` and `by fan` do when a candidate's login is near its\nlimit: `warn` (the default), `refuse`, or `off`."
+        },
+        "near_percent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The percent of a 5-hour or weekly window at which a login counts as\nnear its limit. Default 90.",
+          "minimum": 0.0,
+          "maximum": 100.0
+        },
+        "skip_over": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The router (docs/fleet.md) skips a candidate whose login has used\nmore than this percent of a window. Unset: it never skips one.",
+          "minimum": 0.0,
+          "maximum": 100.0
+        },
+        "claude_five_hour_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Claude Code keeps no record of its limits on disk: the tokens a\n5-hour window allows you, so `by usage` can show a percent. Unset: it\nshows tokens and cost only."
+        },
+        "claude_weekly_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The same for Claude Code's weekly window."
+        },
+        "accounts": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/UsageAccount"
+          },
+          "description": "More logins to meter, by name: `[usage.accounts.work]` with the\nharness and the configuration directory it logs in from."
+        }
+      },
+      "description": "`[usage]`."
+    },
+    "UsageGuard": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "warn",
+          "description": "Say so on stderr, and start anyway."
+        },
+        {
+          "type": "string",
+          "const": "refuse",
+          "description": "Refuse to start, naming the login and its window."
+        },
+        {
+          "type": "string",
+          "const": "off",
+          "description": "Do not look."
+        }
+      ],
+      "description": "`guard` in `[usage]`."
+    },
+    "UsageAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "`claude-code` or `codex`."
+        },
+        "dir": {
+          "type": "string",
+          "description": "Its configuration directory: what `CLAUDE_CONFIG_DIR` or\n`CODEX_HOME` is set to when you use this login."
+        }
+      },
+      "required": [
+        "harness",
+        "dir"
+      ],
+      "description": "`[usage.accounts.NAME]`: a login other than the default one."
+    },
+    "Trackers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "linear": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "jira": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gitlab": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "`[trackers]`."
+    },
+    "TrackerConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The API's address: Linear's GraphQL endpoint, a Jira site\n(`https://acme.atlassian.net`) or a GitLab instance\n(`https://gitlab.example.com`)."
+        },
+        "gateway_tool": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Fetch issues through this connector gateway tool (such as\n`linear__get_issue`) when no token is in the environment; needs\n`[connectors] gateway`."
+        }
+      },
+      "description": "One tracker in `[trackers]`. Never a credential: tokens come from the\nenvironment (docs/pull-requests.md) or the connector gateway."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

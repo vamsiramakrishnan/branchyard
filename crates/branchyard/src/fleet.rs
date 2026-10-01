@@ -1022,6 +1022,10 @@ pub struct RouteOptions {
     pub attempts: Option<u32>,
     /// Fail over when a harness fails, whatever the entry says.
     pub failover: Option<bool>,
+    /// Harnesses not to pick, with why: a login near its usage limit
+    /// (`by usage`, `[usage] skip_over`). Such a candidate is excluded
+    /// like an unavailable one.
+    pub excluded: std::collections::BTreeMap<String, String>,
 }
 
 /// A routed run or fan: what the router chose, and the branches as they
@@ -1085,7 +1089,10 @@ pub(crate) fn route(
         ))
     })?;
     let history = stats(&yard.store().outcomes().outcomes(Some(kind))?);
-    let available = |c: &FleetCandidate| availability(yard, options, c);
+    let available = |c: &FleetCandidate| match how.excluded.get(&c.harness) {
+        Some(why) => Err(why.clone()),
+        None => availability(yard, options, c),
+    };
     let route = plan(
         kind,
         source,

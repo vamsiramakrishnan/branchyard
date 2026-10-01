@@ -6575,6 +6575,19 @@
               ],
               "additionalProperties": false,
               "description": "A call the harness made through the connector gateway, from the\ngateway's audit log: allowed, denied, or refused for want of\nconfirmation. See `docs/connectors.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "adopted": {
+                  "$ref": "#/$defs/Adoption"
+                }
+              },
+              "required": [
+                "adopted"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was made from a harness session that already existed on\nthis machine (`by adopt`); its next turn resumes that session."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -8182,6 +8195,20 @@
                 "threads"
               ],
               "description": "Review threads whose comments were delivered as feedback, and whose\nfiles `commit` (just pushed) changed, were answered \"Addressed in\n<commit>\" and resolved; each thread is attempted once."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch started from this pull request's head (`by run --pr`);\nits pull request is that one, so `by pr` pushes to its head and\nupdates it."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -8192,13 +8219,28 @@
             "number": {
               "type": "integer",
               "format": "uint64",
-              "minimum": 0
+              "minimum": 0,
+              "description": "The issue's number: GitHub's and GitLab's, or the number in a Linear\nor Jira key (`123` of `ENG-123`)."
             },
             "url": {
               "type": "string"
             },
             "title": {
               "type": "string"
+            },
+            "tracker": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The tracker, when not GitHub: `linear`, `jira` or `gitlab`."
+            },
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The tracker's own reference when it is not `#number`: `ENG-123`,\n`PROJ-7`, `group/project#12`."
             }
           },
           "required": [
@@ -9083,6 +9125,60 @@
             "decision"
           ],
           "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
+        },
+        "Adoption": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The harness whose session it is: `claude-code` or `codex`."
+            },
+            "session": {
+              "type": "string",
+              "description": "The session's own ID, which the branch's next turn resumes."
+            },
+            "source": {
+              "type": "string",
+              "description": "The session's transcript, as read."
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The directory the session ran in."
+            },
+            "base": {
+              "type": "string",
+              "description": "The commit the worktree was created at."
+            },
+            "how": {
+              "type": "string",
+              "description": "How the base was chosen: `session_commit` (the commit the session\nrecorded), `head` (this checkout's HEAD), or `head_with_diff` (HEAD,\nthen the uncommitted diff of the session's directory applied)."
+            },
+            "diff_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files the applied diff changed, when one was."
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What a person should know: what was not carried over, and why."
+            }
+          },
+          "required": [
+            "harness",
+            "session",
+            "source",
+            "base",
+            "how"
+          ],
+          "description": "What `by adopt` recorded about the session it adopted, as the branch's\nfirst event."
         }
       }
     },
@@ -9619,6 +9715,19 @@
               ],
               "additionalProperties": false,
               "description": "A call the harness made through the connector gateway, from the\ngateway's audit log: allowed, denied, or refused for want of\nconfirmation. See `docs/connectors.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "adopted": {
+                  "$ref": "#/$defs/Adoption"
+                }
+              },
+              "required": [
+                "adopted"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was made from a harness session that already existed on\nthis machine (`by adopt`); its next turn resumes that session."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -11226,6 +11335,20 @@
                 "threads"
               ],
               "description": "Review threads whose comments were delivered as feedback, and whose\nfiles `commit` (just pushed) changed, were answered \"Addressed in\n<commit>\" and resolved; each thread is attempted once."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch started from this pull request's head (`by run --pr`);\nits pull request is that one, so `by pr` pushes to its head and\nupdates it."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -11236,13 +11359,28 @@
             "number": {
               "type": "integer",
               "format": "uint64",
-              "minimum": 0
+              "minimum": 0,
+              "description": "The issue's number: GitHub's and GitLab's, or the number in a Linear\nor Jira key (`123` of `ENG-123`)."
             },
             "url": {
               "type": "string"
             },
             "title": {
               "type": "string"
+            },
+            "tracker": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The tracker, when not GitHub: `linear`, `jira` or `gitlab`."
+            },
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The tracker's own reference when it is not `#number`: `ENG-123`,\n`PROJ-7`, `group/project#12`."
             }
           },
           "required": [
@@ -12127,6 +12265,60 @@
             "decision"
           ],
           "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
+        },
+        "Adoption": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The harness whose session it is: `claude-code` or `codex`."
+            },
+            "session": {
+              "type": "string",
+              "description": "The session's own ID, which the branch's next turn resumes."
+            },
+            "source": {
+              "type": "string",
+              "description": "The session's transcript, as read."
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The directory the session ran in."
+            },
+            "base": {
+              "type": "string",
+              "description": "The commit the worktree was created at."
+            },
+            "how": {
+              "type": "string",
+              "description": "How the base was chosen: `session_commit` (the commit the session\nrecorded), `head` (this checkout's HEAD), or `head_with_diff` (HEAD,\nthen the uncommitted diff of the session's directory applied)."
+            },
+            "diff_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files the applied diff changed, when one was."
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What a person should know: what was not carried over, and why."
+            }
+          },
+          "required": [
+            "harness",
+            "session",
+            "source",
+            "base",
+            "how"
+          ],
+          "description": "What `by adopt` recorded about the session it adopted, as the branch's\nfirst event."
         }
       }
     },
@@ -14928,6 +15120,19 @@
               ],
               "additionalProperties": false,
               "description": "A call the harness made through the connector gateway, from the\ngateway's audit log: allowed, denied, or refused for want of\nconfirmation. See `docs/connectors.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "adopted": {
+                  "$ref": "#/$defs/Adoption"
+                }
+              },
+              "required": [
+                "adopted"
+              ],
+              "additionalProperties": false,
+              "description": "The branch was made from a harness session that already existed on\nthis machine (`by adopt`); its next turn resumes that session."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -16535,6 +16740,20 @@
                 "threads"
               ],
               "description": "Review threads whose comments were delivered as feedback, and whose\nfiles `commit` (just pushed) changed, were answered \"Addressed in\n<commit>\" and resolved; each thread is attempted once."
+            },
+            {
+              "$ref": "#/$defs/PullRequestRef",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "started"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch started from this pull request's head (`by run --pr`);\nits pull request is that one, so `by pr` pushes to its head and\nupdates it."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -16545,13 +16764,28 @@
             "number": {
               "type": "integer",
               "format": "uint64",
-              "minimum": 0
+              "minimum": 0,
+              "description": "The issue's number: GitHub's and GitLab's, or the number in a Linear\nor Jira key (`123` of `ENG-123`)."
             },
             "url": {
               "type": "string"
             },
             "title": {
               "type": "string"
+            },
+            "tracker": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The tracker, when not GitHub: `linear`, `jira` or `gitlab`."
+            },
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The tracker's own reference when it is not `#number`: `ENG-123`,\n`PROJ-7`, `group/project#12`."
             }
           },
           "required": [
@@ -17436,6 +17670,60 @@
             "decision"
           ],
           "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
+        },
+        "Adoption": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The harness whose session it is: `claude-code` or `codex`."
+            },
+            "session": {
+              "type": "string",
+              "description": "The session's own ID, which the branch's next turn resumes."
+            },
+            "source": {
+              "type": "string",
+              "description": "The session's transcript, as read."
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The directory the session ran in."
+            },
+            "base": {
+              "type": "string",
+              "description": "The commit the worktree was created at."
+            },
+            "how": {
+              "type": "string",
+              "description": "How the base was chosen: `session_commit` (the commit the session\nrecorded), `head` (this checkout's HEAD), or `head_with_diff` (HEAD,\nthen the uncommitted diff of the session's directory applied)."
+            },
+            "diff_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files the applied diff changed, when one was."
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What a person should know: what was not carried over, and why."
+            }
+          },
+          "required": [
+            "harness",
+            "session",
+            "source",
+            "base",
+            "how"
+          ],
+          "description": "What `by adopt` recorded about the session it adopted, as the branch's\nfirst event."
         }
       }
     },

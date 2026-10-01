@@ -94,6 +94,7 @@
 //! surfaces, the envelope and the authority model, which in local mode
 //! stops honest mistakes, not a hostile harness.
 
+mod adopt;
 mod broker;
 mod bundle;
 mod checkpoint;
@@ -143,6 +144,7 @@ pub use git::current_branch;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
+pub use adopt::{AdoptSpec, Adoption};
 pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
 };
@@ -587,6 +589,14 @@ impl Yard {
     /// worktree. See `docs/checkpoints.md`.
     pub fn compare(&self, branches: &[String], run_checks: bool) -> Result<Vec<Attempt>, Error> {
         compare::compare(self, branches, run_checks)
+    }
+
+    /// Make a branch of a harness session that already exists on this
+    /// machine: a worktree at `spec.base` (with `spec.diff` applied), the
+    /// session recorded as the branch's, settled `no_changes`, so its next
+    /// turn resumes the session. Records [`Activity::Adopted`].
+    pub fn adopt(&self, spec: AdoptSpec) -> Result<Branch, Error> {
+        adopt::adopt(self, spec)
     }
 
     /// The branches one `by fan` started as `<name>-<harness>`.
@@ -1867,6 +1877,9 @@ pub enum Activity {
     /// gateway's audit log: allowed, denied, or refused for want of
     /// confirmation. See `docs/connectors.md`.
     ConnectorCall(Box<connectors::ConnectorCall>),
+    /// The branch was made from a harness session that already existed on
+    /// this machine (`by adopt`); its next turn resumes that session.
+    Adopted(Box<Adoption>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

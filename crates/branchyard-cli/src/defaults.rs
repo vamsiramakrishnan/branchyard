@@ -122,6 +122,16 @@ fn load(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Proje
     Ok(Some(config))
 }
 
+/// The merged configuration files under `cwd`, for commands that read a
+/// section of their own (`[usage]`, `[trackers]`): `None` without files, or
+/// inside a harness's branch.
+pub fn config_at(
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<ProjectConfig>, String> {
+    load(cwd, env)
+}
+
 /// `[notify]`, and `[remote]` for what `--remote`, `--token-file`,
 /// `--ca-file`, `--repo` and their variables left unset. The rest of `[remote]` applies only
 /// when its `url` is the server in use.

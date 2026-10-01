@@ -73,6 +73,16 @@ fn local_gateway(yard: &Yard, config: &Connectors) -> Result<Gateway, Failure> {
     Ok(gateway)
 }
 
+/// The gateway `[connectors]` configures for the repository at `root`, if
+/// any, for a call `by` makes as you (`--issue` through a tracker's
+/// connector; see `crate::trackers`).
+pub fn configured(yard: &Yard) -> Result<Option<Gateway>, Failure> {
+    match config(yard.root())? {
+        Some(config) if config.gateway.is_some() => Ok(Some(local_gateway(yard, &config)?)),
+        _ => Ok(None),
+    }
+}
+
 /// Give `yard` the gateway `[connectors]` configures, if any.
 pub fn configure(yard: &Yard) -> Result<(), Failure> {
     if let Some(config) = config(yard.root())? {
