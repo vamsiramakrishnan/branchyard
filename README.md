@@ -140,6 +140,8 @@ The global options choose where commands run, and may come before or after the c
 
 Pull requests: `by pr BRANCH [--git-remote NAME] [--head BRANCH] [--base BRANCH] [--title T] [--draft] [--no-check | --allow-failing-check] [--allow-not-ready] [--json]`, and with `--watch [--interval SECS] [--max-rounds N] [--no-resolve]`; `by review BRANCH [--print] [--editor E] [--file FILE] [--detach]`; `by run|fan|spawn --issue URL|#N|N|linear:KEY|jira:KEY|gitlab:PATH#N` (Linear, Jira and GitLab through their APIs with tokens from the environment, or a connector gateway); `by run|fan --pr N`; `by show BRANCH --refresh`; `by open BRANCH [--editor NAME|--print]`. `by pr` pushes to `--git-remote`, since `--remote` is the global option naming a server; `by pr`, `by open` and `by show --refresh` are local-mode only ([pull requests](docs/pull-requests.md)).
 
+Triggers ([triggers](docs/triggers.md)): `by trigger add NAME (--cron EXPR [--tz ZONE] | --every DURATION | --on github|slack|linear|generic) --prompt TEXT [--if FIELD=VALUE]... [--precheck CMD] [--harness H | --auto [--kind K]] [--branch-name TEMPLATE] [--pause-after N] [--catch-up DURATION] [--secret-file FILE]`, `by trigger list|show|test [--event FILE] [--precheck]|enable|disable|rm|runs [--limit N]|secret [--secret-file FILE] NAME`, each with `--json`, locally and with `--remote`.
+
 `by workspace show [BRANCH]|trust|untrust|run [BRANCH] [NAME...] [--detach]|ports [BRANCH]|browse [BRANCH] [--port N] [--print]|kill [BRANCH] [--port N] [--yes] [--json]` manages a repository's [workspace](docs/workspace.md) scripts, runs them (several at once with `--detach`, each with its own port), and finds, opens and stops what each branch listens on. `by usage [--json]` meters the local logins and `by adopt [--list] [SESSION] [--name N] [--harness ID] [--no-diff] [--json]` adopts their sessions ([usage](docs/usage.md)). `by env list|show [KEY]|rebuild|prune [KEY...] [--keep N] [--older-than DAYS]` manages its [prepared environments](docs/environments.md).
 
 Routing and judging ([fleet](docs/fleet.md)): `by run|fan [--auto] [--kind KIND] [--seed N]`, `by fan --auto [--attempts N] [--judge]`, `by judge <FAN|BRANCH...> [--harness ID [--command CMD] | --deterministic] [--rubric TEXT] [--pick [--into T] [--discard-others] [--yes]] [--json]`, `by fleet stats [--kind KIND]|route PROMPT [--kind KIND] [--attempts N] [--seed N] [--json]`; local mode only.
@@ -227,6 +229,19 @@ by run "fix the flaky parser test" --auto --seed 7
 by fan "speed up the parser" --auto --attempts 3 --judge
 by judge speed-up-the-parser --pick --discard-others --yes
 by fleet stats --kind bugfix
+```
+
+## Triggers and schedules
+
+A trigger starts a task on its own: on a cron schedule in a time zone, at an interval, or when a signed webhook from GitHub (issues, comments, pull requests, failed check suites), Slack (mentions) or Linear (issues), or any signed JSON, reaches its URL. Conditions on the event are checked when it is created, an optional precheck runs in a fresh worktree first, `by trigger test` shows the task it would create, and three failed runs in a row pause it. Every firing goes through the server's admission path with an idempotency key of the trigger and the event or time, so a redelivered webhook or a restarted server never fires twice. **Triggers fire where `by serve` or `by worker` runs**: `by trigger` adds them to the store of the server this repository would run, or with `--remote` to a server's. Tested hermetically; nothing has received a delivery from the real GitHub, Slack or Linear. See [triggers](docs/triggers.md).
+
+```sh
+by trigger add nightly --cron '0 3 * * 1-5' --tz Europe/Berlin --prompt 'Update dependencies' --harness codex --yes
+by trigger add triage --on github --if label=agent \
+    --prompt 'Resolve GitHub issue #{{event.number}}: {{event.title}}' --branch-name 'issue-{{event.number}}' --auto --yes
+by trigger test triage --event issue.json
+by serve --public-url https://by.example.com      # fires them; GitHub posts to the printed webhook URL
+by trigger runs triage
 ```
 
 ## Sandbox providers
@@ -346,11 +361,11 @@ The generated [compatibility matrix](docs/compatibility.md) lists every profile'
 | Scion controls | Nine provisioners at `d9b9e6a`, adjacent helpers/configuration, the authoring guide, and tests; eight suites run 261 tests, 260 passing and 1 skipped; seven provisioners translated into `branchyard-provision` |
 | Herdr controls | Original resume source (kept down to the official-agent-source registry check) and 22 terminal-observation manifests |
 | OpenRig controls | Launch/readiness contract and configuration fragments; not a standalone adapter |
-| emdash and Orca | 45 emdash files (37 agent plugins, install helpers, the MCP catalog, the project configuration schema, the Linear, Jira and GitLab issue mappers, license) and 28 Orca files (agent table, resume guard, diff-comment format, review-thread resolution, `orca.yaml` parser, worktree helpers, usage parsers and price tables, Jira's ADF renderer, the port scanner, session-store readers, license); read as data by tests and ported into `by review`, `by pr --watch`, `by init project`, `by usage`, `--issue`, `by workspace ports` and `by adopt` ([vendoring](docs/vendoring.md#emdash-and-orca-ports-as-data-and-as-translations)) |
+| emdash and Orca | 45 emdash files (37 agent plugins, install helpers, the MCP catalog, the project configuration schema, the Linear, Jira and GitLab issue mappers, license) and 31 Orca files (agent table, resume guard, diff-comment format, review-thread resolution, `orca.yaml` parser, worktree helpers, usage parsers and price tables, Jira's ADF renderer, the port scanner, session-store readers, license); read as data by tests and ported into `by review`, `by pr --watch`, `by init project`, `by usage`, `--issue`, `by workspace ports` and `by adopt` ([vendoring](docs/vendoring.md#emdash-and-orca-ports-as-data-and-as-translations)) |
 | Warp controls | Separate AGPL source references for process supervision; excluded from the Rust build |
 | Architecture and plan | Server design, harness contracts, implementation milestones, and release gates |
 
-All **159 vendored files** are pinned to upstream revisions, licenses, Git blob IDs, and SHA-256 hashes. `vendor/` is a pinned reference snapshot: a file may carry a local patch only when `vendor.patches.json` records it with its reason and upstream commit (none does today), and `tools/verify_vendor.py` checks every other file against its pin. Adaptations built into Branchyard are recorded outside `vendor/` (`patches/`). [Vendoring decisions](docs/vendoring.md) explain their intended use. [Replicas](https://replicas.dev/) remains a product reference; no licensed runtime source was identified to copy.
+All **162 vendored files** are pinned to upstream revisions, licenses, Git blob IDs, and SHA-256 hashes. `vendor/` is a pinned reference snapshot: a file may carry a local patch only when `vendor.patches.json` records it with its reason and upstream commit (none does today), and `tools/verify_vendor.py` checks every other file against its pin. Adaptations built into Branchyard are recorded outside `vendor/` (`patches/`). [Vendoring decisions](docs/vendoring.md) explain their intended use. [Replicas](https://replicas.dev/) remains a product reference; no licensed runtime source was identified to copy.
 
 Scion's Claude provisioner and its model-alias tests disagreed at the previous pin; at `d9b9e6a` all 13 pass, and CI checks that no incompatibility reappears. See [validation](docs/validation.md).
 

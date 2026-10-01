@@ -148,6 +148,7 @@ class ContractCoversEveryEndpoint(unittest.TestCase):
         sources = [
             ROOT / "crates/branchyard-server/src/api.rs",
             ROOT / "crates/branchyard-server/src/storage_routes.rs",
+            ROOT / "crates/branchyard-server/src/triggers/routes.rs",
         ]
         returned = set()
         for source in sources:
@@ -191,6 +192,41 @@ class ContractTypesValidateTheirDocumentedExamples(unittest.TestCase):
         validate_as({"to": "reviewer"}, "ShareRequest")
         validate_as({"name": "shared-fixtures"}, "CreateScratchRequest")
         validate_as({"ok": True}, "Ack")
+
+
+def _trigger_example(marker: str) -> dict:
+    """The JSON object in the ```json fence in `docs/triggers.md` whose
+    first line is `marker`."""
+    text = (ROOT / "docs/triggers.md").read_text()
+    for fence in re.findall(r"```json\n(.*?)\n```", text, re.S):
+        lines = fence.split("\n", 1)
+        if lines[0].strip() == marker:
+            return json.loads(lines[1])
+    raise AssertionError(f"no ```json fence starting with {marker!r} in docs/triggers.md")
+
+
+class TriggerExamplesValidate(unittest.TestCase):
+    def test_the_documented_trigger_spec_validates(self):
+        validate_as(_trigger_example("POST /v1/triggers"), "TriggerSpec")
+
+    def test_a_trigger_spec_with_an_unknown_field_or_when_is_refused(self):
+        spec = _trigger_example("POST /v1/triggers")
+        spec["schedule"] = "daily"
+        with self.assertRaises(ValidationError):
+            validate_as(spec, "TriggerSpec")
+        spec = _trigger_example("POST /v1/triggers")
+        spec["when"] = {"kind": "hourly"}
+        with self.assertRaises(ValidationError):
+            validate_as(spec, "TriggerSpec")
+
+    def test_the_documented_run_validates(self):
+        validate_as(_trigger_example("TriggerRun"), "TriggerRun")
+
+    def test_schedules_and_acks_validate(self):
+        validate_as({"kind": "cron", "expr": "0 3 * * 1-5", "timezone": "Europe/Berlin"}, "When")
+        validate_as({"kind": "interval", "seconds": 3600}, "When")
+        validate_as({"duplicate": True}, "FireAck")
+        validate_as({"ignored": "a GitHub ping"}, "FireAck")
 
 
 def _graph_proposal() -> dict:

@@ -432,3 +432,24 @@ Quota meters, more trackers, listening ports and adopting sessions ([usage](usag
 | `branchyard.toml` | ... `[connectors]` | also `[usage]` (`guard`, `near_percent`, `skip_over`, `claude_five_hour_tokens`, `claude_weekly_tokens`, `[usage.accounts.NAME]` with `harness`, `dir`) and `[trackers.linear\|jira\|gitlab]` (`url`, `gateway_tool`); `schema/branchyard.config.json` regenerated |
 | `by workspace run` | `[BRANCH] [NAME]` | `[BRANCH] [NAME...]`; several names need `--detach`, each gets its own port, and `BRANCHYARD_BRANCH_PORT` |
 | `by watch` header and detail pane | ... | a usage summary (every minute); a `ports` line per listener (every five seconds) |
+
+## Added with triggers
+
+Tasks started on a schedule or by a signed webhook; see [triggers](triggers.md). A trigger fires only where a dispatcher runs: `by serve`, `branchyard-server` or `by worker` on its store.
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Create a trigger (cron, interval, GitHub, Slack, Linear or generic events) | no: a server object (`branchyard_server::triggers`) | `trigger add`, on the store `by serve` uses | yes | `POST /v1/triggers` | `create_trigger` | no: a harness has no server credential; the `by` command outside a harness |
+| List, show | no | `trigger list`, `show` | yes, the tenant's | `GET /v1/triggers`, `/{t}` | `triggers`, `trigger` | no |
+| Test (conditions, precheck, the rendered task; creates nothing) | no | `trigger test [--event FILE] [--precheck]` (the precheck at your terminal) | yes (`--precheck` where the server allows prechecks) | `POST /v1/triggers/{t}/test` | `test_trigger` | no |
+| Enable, disable, remove, set the secret | no | `trigger enable`, `disable`, `rm`, `secret` | yes | `POST …/enable`, `…/disable`, `…/secret`, `DELETE /v1/triggers/{t}` | `enable_trigger`, `disable_trigger`, `set_trigger_secret`, `remove_trigger` | no |
+| Runs | no | `trigger runs` | yes | `GET /v1/triggers/{t}/runs` | `trigger_runs` | no |
+| Receive a webhook | no | through `by serve`'s listener | n/a | `POST /v1/triggers/{id}/fire`, signed, no bearer token | n/a | n/a |
+
+| Surface | Before | Now |
+|---|---|---|
+| `triggers`, `trigger_runs` (SQLite, in `DATA-DIR/state.db`), `by_triggers`, `by_trigger_runs` (PostgreSQL) | none | durable triggers and runs; the store's conformance suite runs on both |
+| `public_url`, `allow_trigger_prechecks` in the server configuration; `--public-url`, `--allow-trigger-prechecks` | none | the base of webhook URLs; which repositories' triggers may run prechecks; in `schema/server.config.json` |
+| `POST /v1/repos/{repo}/tasks` | its handler admitted the task | the same admission (`api::admit_task`) also admits a firing trigger's task, as the trigger's creating principal, with the idempotency key `trigger:<tenant>/<id>` + the run's key |
+| `TriggerSpec`, `Trigger`, `TriggerRun`, `TriggerEvent`, `TriggerTest`, `FireAck` and the rest of `branchyard_client::triggers` | none | in `schema/contract.json` |
+| Authentication | every route but `/healthz` and `/.well-known/jwks.json` needs a bearer token | also not `POST /v1/triggers/{id}/fire`, which checks the trigger's signature instead |

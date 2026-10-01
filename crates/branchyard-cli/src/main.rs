@@ -31,6 +31,7 @@ mod rig;
 mod setup_io;
 mod stats_cmd;
 mod trackers;
+mod trigger_cmd;
 mod usage;
 mod watch;
 mod wizard;
@@ -333,6 +334,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         }
         Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
         Command::Env { json, action } => env_cmd::main(env, target, &action, json),
+        Command::Trigger { json, action } => trigger_cmd::main(env, target, &action, json),
         Command::Rm {
             branch,
             keep_credentials,

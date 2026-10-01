@@ -266,6 +266,13 @@ struct Flags {
     /// --metrics)
     #[arg(long, value_name = "FILE", help_heading = "Observability")]
     metrics_token_file: Option<PathBuf>,
+    /// This server's URL as webhook senders reach it, the base of each event trigger's
+    /// webhook URL (default: http(s)://<listen>); see docs/triggers.md
+    #[arg(long, value_name = "URL", help_heading = "Triggers")]
+    public_url: Option<String>,
+    /// Let every served repository's triggers run a precheck command before firing
+    #[arg(long, help_heading = "Triggers")]
+    allow_trigger_prechecks: bool,
     /// Do not log requests
     #[arg(short, long)]
     quiet: bool,
@@ -681,6 +688,11 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     }
     config.webhook_insecure = partial.webhook_insecure || flags.webhook_insecure;
     config.connectors = partial.connectors;
+    config.triggers.public_url = flags.public_url.or(partial.public_url);
+    config.triggers.allow_prechecks = match flags.allow_trigger_prechecks {
+        true => config::WorkspaceScripts::All,
+        false => partial.allow_trigger_prechecks,
+    };
     if flags.check {
         for (name, path) in &config.repos {
             if !path.is_dir() {
@@ -711,6 +723,18 @@ pub fn check(args: &[String]) -> Result<Vec<String>, String> {
         .flags;
     flags.check = true;
     check_flags(flags)
+}
+
+/// The configuration `args` would serve, built as `--check` builds it:
+/// nothing is written (no default token or secret is made). For tools
+/// that open a server's stores without serving, such as `by trigger`.
+pub fn resolve(args: &[String]) -> Result<Config, String> {
+    let mut flags = parse_cli(args, "branchyard-server")
+        .map_err(|e| e.to_string().trim_end().to_owned())?
+        .flags;
+    flags.check = true;
+    let (config, _) = build(flags)?;
+    Ok(config)
 }
 
 fn check_flags(flags: Flags) -> Result<Vec<String>, String> {

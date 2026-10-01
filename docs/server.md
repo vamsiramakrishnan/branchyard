@@ -47,6 +47,8 @@ Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped
 | `--database URL` | Keep branch state, operations, their queue and branch locks in PostgreSQL (`postgres://user@host/db`) instead of SQLite; several servers may share it. Needs a build with the `postgres` feature; see [PostgreSQL](#postgresql) |
 | `--worker` | Only run operations queued in `--database`: no listener, no webhooks. `by worker` is `by serve --worker`; see [several servers](#several-servers-on-one-database) |
 | `--label LABEL` | A label this process's worker carries (repeatable; replaces the configuration's `labels`): it claims only operations whose `require_labels` are all among its labels. See [worker labels](#worker-labels) |
+| `--public-url URL` | This server's URL as webhook senders reach it: the base of each event [trigger](triggers.md)'s webhook URL. Default `http(s)://<listen>` |
+| `--allow-trigger-prechecks` | Let every served repository's triggers run a [precheck](triggers.md#prechecks) command before firing. Default: none |
 | `--unclaimable-after SECS` | How long an operation that requires labels may wait queued before it says why no live worker can claim it (`waiting`). Default 60 |
 | `--max-artifact-bytes N` | Largest artifact a `POST .../artifacts` upload may publish, in bytes. Default 268435456 (256 MiB) |
 | `--max-running N` | Operations this process runs at once; more wait queued. Default 8 |
@@ -98,7 +100,9 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "unclaimable_after_seconds": 60,
   "aging_seconds": 60,
   "fair_share_window_seconds": 300,
-  "metrics": { "listen": "127.0.0.1:9464", "token_file": "/etc/branchyard/metrics.token" }
+  "metrics": { "listen": "127.0.0.1:9464", "token_file": "/etc/branchyard/metrics.token" },
+  "public_url": "https://by.example.com",
+  "allow_trigger_prechecks": ["app"]
 }
 ```
 
@@ -106,7 +110,9 @@ Configuration file (relative paths resolve against the file's directory; unknown
 
 `allow_workspace_scripts` (`true`, or a list of served repositories) lets a repository's own `[workspace]` scripts in its `branchyard.toml` run for the branches this server creates: copy, setup before the first turn, teardown on removal, with `BRANCHYARD_PORT` reserved per branch. Off by default, and no request can ask for it: every other repository's yard refuses workspace scripts outright. See [workspace](workspace.md#trust).
 
-The server refuses to start with no repository, no token or credential, an `allow_workspace_scripts` entry naming a repository it does not serve, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
+`allow_trigger_prechecks` (`true`, or a list of served repositories) is the same decision for [triggers](triggers.md): a trigger's precheck command runs, as the server's user, only for those repositories, and a trigger with one is refused (`403 precheck_not_allowed`) elsewhere. `public_url` is the base of every event trigger's webhook URL, for a server behind a proxy.
+
+The server refuses to start with no repository, no token or credential, an `allow_workspace_scripts` or `allow_trigger_prechecks` entry naming a repository it does not serve, a `public_url` that is not `http://` or `https://`, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
 
 SIGINT or SIGTERM starts a graceful shutdown, the same for both: no new connections or operations (`503 shutting_down`), no more operations claimed from the queue, event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`; queued ones stay queued, and run after the restart or on another server sharing the database. A second signal stops waiting at once.
 
@@ -114,7 +120,7 @@ The grace period bounds the whole shutdown, counted from the signal: connections
 
 ## Identity and scopes
 
-Every route except `GET /healthz` and `GET /.well-known/jwks.json` (public keys, [connectors](#connectors)) needs `Authorization: Bearer <token>`, including unknown routes, so routes cannot be probed anonymously. The presented token is **hashed (SHA-256) and compared against every configured credential's hash** in time that depends only on lengths; the verifier holds hashes, never a plaintext token, and neither tokens nor headers are ever logged. A missing or wrong token gets `401 unauthorized` with `WWW-Authenticate: Bearer`.
+Every route except `GET /healthz`, `GET /.well-known/jwks.json` (public keys, [connectors](#connectors)) and `POST /v1/triggers/{id}/fire` (a [trigger](triggers.md)'s webhook, authenticated by its own HMAC signature instead) needs `Authorization: Bearer <token>`, including unknown routes, so routes cannot be probed anonymously. The presented token is **hashed (SHA-256) and compared against every configured credential's hash** in time that depends only on lengths; the verifier holds hashes, never a plaintext token, and neither tokens nor headers are ever logged. A missing or wrong token gets `401 unauthorized` with `WWW-Authenticate: Bearer`.
 
 **A request's identity comes only from its verified credential, never from anything the request itself says** — there is no `tenant_id` field anywhere in the wire protocol. Each configured credential names a **principal**: a `tenant` (1 to 128 characters, no `/`), a subject `name` (the caller's identity for idempotency scoping and audit), a set of **scopes**, and, optionally, its own repository allowlist narrower than its tenant's. Two ways to configure one:
 
@@ -228,6 +234,11 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/share` | Share it with `{"to": "BRANCH"}` | `{"ok": true}` |
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/lock` | Acquire its writer lock for `b` | `ScratchLock`, or `409 running` |
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/unlock` | Release it if `b` holds it | `{"ok": true}` |
+| `POST /v1/triggers` | Create a [trigger](triggers.md) (`run` on its repository) | `201` `TriggerCreated` |
+| `GET /v1/triggers`, `GET /v1/triggers/{t}` | The tenant's triggers, or one by name or ID | `TriggerList`, `Trigger` |
+| `DELETE /v1/triggers/{t}`; `POST /v1/triggers/{t}/enable`, `/disable`, `/secret`, `/test` | Remove; enable or disable; set or generate its webhook secret; evaluate it without creating anything | `TriggerRemoved`, `Trigger`, `SecretSet`, `TriggerTest` |
+| `GET /v1/triggers/{t}/runs?limit=N` | Its runs, newest first | `TriggerRuns` |
+| `POST /v1/triggers/{id}/fire` | A webhook delivery from GitHub, Slack, Linear or a generic sender; no bearer token, the trigger's signature instead | `FireAck`, or Slack's `{"challenge"}` |
 | `GET /v1/repos/{repo}/scratch/{name}/lock` | Its current holder, if any (needs `read` on a repository the caller's tenant owns; not scoped to an acting branch) | `{"lock": ScratchLock?}` |
 
 ### Requests
@@ -387,7 +398,10 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 |---|---|---|
 | `unauthorized` | 401 | Missing or wrong bearer token |
 | `not_found`, `method_not_allowed` | 404, 405 | No such route or method |
-| `unknown_repo`, `unknown_branch`, `unknown_operation` | 404 | No such thing, or another tenant's (indistinguishable from unknown) |
+| `unknown_repo`, `unknown_branch`, `unknown_operation`, `unknown_trigger` | 404 | No such thing, or another tenant's (indistinguishable from unknown) |
+| `trigger_exists` | 409 | The tenant has a trigger of that name |
+| `precheck_not_allowed` | 403 | A trigger precheck on a repository whose prechecks the operator did not allow |
+| `invalid_signature`, `stale_delivery` | 401 | A trigger webhook whose signature does not match its secret, or whose signed timestamp is outside the replay window |
 | `scope_required` | 403 | The caller's principal lacks a scope this endpoint needs; `detail.scope` |
 | `repo_not_allowed` | 403 | The repository is outside the caller's tenant, or its own narrower allowlist; `detail.repo` |
 | `quota_exceeded` | 429 | A tenant quota (`docs/server.md#quotas`) is at its configured limit; `detail.tenant`, `detail.limit`, `detail.max`, and `detail.reserved` or `detail.spent` |
@@ -458,6 +472,7 @@ Every command runs remotely, with the same flags: `--provider` and its options, 
 | Branches, candidates, event logs, the activity feed | Each repository's `.branchyard/state.db`, or the database with `--database`, written by the engine in transactions | Yes |
 | Operations (with their tenant and admitting principal), idempotency keys and the dispatch queue | `DATA-DIR/state.db` committed with `synchronous=FULL`, or the database's `by_operations` and `by_operation_queue` tables committed with `synchronous_commit = on`, in one transaction before `202`, and at each state change | Yes; queued ones run after the restart and keep counting toward their tenant's `max_running`, running ones become `interrupted` |
 | Cancel requests, `max_duration` deadlines, turn leases, journaled steps, harness process identities | Each repository's `.branchyard/state.db`, or the database | Yes |
+| Triggers and their runs | `DATA-DIR/state.db`'s `triggers` and `trigger_runs`, or the database's `by_triggers` and `by_trigger_runs` | Yes; a run recorded but not fired fires after the restart ([triggers](triggers.md#what-is-durable)) |
 | Webhook delivery cursors | `DATA-DIR/state.db`'s `webhook_cursors` table, or the database's `by_webhook_cursors` | Yes |
 | Each queued operation's priority, tenant and admission time; each tenant's decayed recent claims | The queue's `priority`, `tenant` and `enqueued_ms` columns; `tenant_usage` (`by_tenant_usage`) | Yes ([scheduling](#scheduling)) |
 | Metrics counters, unexported spans | The server process | No: counters restart at zero, as Prometheus expects |
@@ -532,7 +547,7 @@ What it is not yet:
 
 | Crate | Contents |
 |---|---|
-| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown; [`storage_routes.rs`](../crates/branchyard-server/src/storage_routes.rs) for artifacts and scratch areas. [`metrics.rs`](../crates/branchyard-server/src/metrics.rs), [`telemetry.rs`](../crates/branchyard-server/src/telemetry.rs) and [`observe.rs`](../crates/branchyard-server/src/observe.rs) for [observability](observability.md). Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`observability.rs`](../crates/branchyard-server/tests/observability.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs), [`storage.rs`](../crates/branchyard-server/tests/storage.rs) |
+| [`branchyard-server`](../crates/branchyard-server/src/lib.rs) | Configuration, authentication, the operation registry and its SQLite and PostgreSQL stores, the activity feed, routes, TLS and shutdown; [`storage_routes.rs`](../crates/branchyard-server/src/storage_routes.rs) for artifacts and scratch areas. [`metrics.rs`](../crates/branchyard-server/src/metrics.rs), [`telemetry.rs`](../crates/branchyard-server/src/telemetry.rs) and [`observe.rs`](../crates/branchyard-server/src/observe.rs) for [observability](observability.md). Tests: [`api.rs`](../crates/branchyard-server/tests/api.rs), [`observability.rs`](../crates/branchyard-server/tests/observability.rs), [`parity.rs`](../crates/branchyard-server/tests/parity.rs) (opt-ins and delegation endpoints), [`postgres.rs`](../crates/branchyard-server/tests/postgres.rs), [`storage.rs`](../crates/branchyard-server/tests/storage.rs) Triggers and schedules: cron, interval and signed webhooks from GitHub, Slack, Linear or any JSON sender, each event or due time fired once through admission ([triggers](triggers.md)). |
 | [`branchyard-client`](../crates/branchyard-client/src/lib.rs) | Wire types, a blocking HTTP/1.1 client over rustls, an SSE parser, and a reconnecting event stream |
 | [`branchyard-cli`](../crates/branchyard-cli/src/main.rs) | `by serve`, remote mode and `by watch` |
 | [`branchyard-herdr`](../crates/branchyard-herdr/src/main.rs) | The Herdr plugin's binary: the bridge, the branch pane, and the merge, cancel and send actions. Tests: [`bridge.rs`](../crates/branchyard-herdr/tests/bridge.rs) (against `by serve` and a fake `herdr`), [`manifest.rs`](../crates/branchyard-herdr/tests/manifest.rs) |

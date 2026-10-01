@@ -1,6 +1,6 @@
 //! Builds `schema/contract.json`: the JSON Schema for every request and
-//! response type of the server's HTTP API (`crate::api` and
-//! `crate::storage_api`), generated from their Rust definitions with
+//! response type of the server's HTTP API (`crate::api`,
+//! `crate::storage_api` and `crate::triggers`), generated from their Rust definitions with
 //! `schemars` rather than hand-maintained.
 //!
 //! Only behind the `schema` feature: this pulls `schemars::JsonSchema`
@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 
 use crate::api;
 use crate::storage_api;
+use crate::triggers;
 
 /// One schema, generated with its own [`schemars::SchemaGenerator`], keyed
 /// by its root type's name. Each entry's `$defs` (nested types it
@@ -92,6 +93,29 @@ pub fn contract() -> Value {
     entry::<storage_api::LockState>("LockState", &mut types);
     entry::<storage_api::Ack>("Ack", &mut types);
     entry::<storage_api::Empty>("Empty", &mut types);
+    entry::<triggers::When>("When", &mut types);
+    entry::<triggers::EventSource>("EventSource", &mut types);
+    entry::<triggers::Conditions>("Conditions", &mut types);
+    entry::<triggers::Precheck>("Precheck", &mut types);
+    entry::<triggers::RouteSpec>("RouteSpec", &mut types);
+    entry::<triggers::TriggerPolicy>("TriggerPolicy", &mut types);
+    entry::<triggers::TriggerSpec>("TriggerSpec", &mut types);
+    entry::<triggers::Trigger>("Trigger", &mut types);
+    entry::<triggers::TriggerCreated>("TriggerCreated", &mut types);
+    entry::<triggers::TriggerList>("TriggerList", &mut types);
+    entry::<triggers::SecretRequest>("SecretRequest", &mut types);
+    entry::<triggers::SecretSet>("SecretSet", &mut types);
+    entry::<triggers::TriggerTestRequest>("TriggerTestRequest", &mut types);
+    entry::<triggers::TriggerEvent>("TriggerEvent", &mut types);
+    entry::<triggers::PrecheckResult>("PrecheckResult", &mut types);
+    entry::<triggers::TriggerTest>("TriggerTest", &mut types);
+    entry::<triggers::RunState>("RunState", &mut types);
+    entry::<triggers::RunOutcome>("RunOutcome", &mut types);
+    entry::<triggers::TriggerRun>("TriggerRun", &mut types);
+    entry::<triggers::TriggerRuns>("TriggerRuns", &mut types);
+    entry::<triggers::FireAck>("FireAck", &mut types);
+    entry::<triggers::TriggerRemoved>("TriggerRemoved", &mut types);
+    entry::<triggers::TriggerToggle>("TriggerToggle", &mut types);
     Value::Object(Map::from_iter([
         (
             "schema".to_owned(),

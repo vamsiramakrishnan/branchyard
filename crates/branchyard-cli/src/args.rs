@@ -1213,6 +1213,20 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         branch: String,
     },
+    /// Tasks on a schedule or from webhooks: add, list, show, test, enable, disable, rm, runs
+    /// (see docs/triggers.md)
+    #[command(
+        display_order = 503,
+        subcommand_required = true,
+        after_help = crate::trigger_cmd::TRIGGER_EXAMPLES
+    )]
+    Trigger {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: crate::trigger_cmd::TriggerAction,
+    },
     /// Print a shell completion script for by
     #[command(display_order = 600, after_help = COMPLETIONS_EXAMPLES)]
     Completions {

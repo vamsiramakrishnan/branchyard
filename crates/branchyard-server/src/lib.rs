@@ -78,6 +78,7 @@ pub mod serve;
 pub mod storage_routes;
 pub mod store;
 pub mod telemetry;
+pub mod triggers;
 pub mod webhook;
 pub mod work;
 

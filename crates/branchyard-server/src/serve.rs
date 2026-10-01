@@ -245,7 +245,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         ),
         None => None,
     };
-    let pollers = repos
+    let mut pollers: Vec<tokio::task::JoinHandle<()>> = repos
         .values()
         .map(|repo| {
             tokio::spawn(poll(
@@ -266,6 +266,28 @@ pub async fn start(config: Config) -> Result<Running, String> {
         )?,
     };
     let grace = config.shutdown_grace;
+    let triggers = {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = crate::triggers::store::open(&config)?;
+            // A data directory's store is this server's alone: any claim on
+            // a pending run was its predecessor's.
+            if config.database.is_none() {
+                store
+                    .release_claims()
+                    .map_err(|e| format!("triggers: {e}"))?;
+            }
+            Ok::<_, String>(store)
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    };
+    let base_url = format!("{}://{addr}", if tls.is_some() { "https" } else { "http" });
+    let hub = Arc::new(crate::triggers::dispatch::Hub::new(
+        triggers,
+        config.triggers.clone(),
+        base_url,
+    ));
     let app = Arc::new(App {
         repos,
         registry: registry.clone(),
@@ -273,6 +295,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         config,
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),
+        triggers: hub,
     });
     registry
         .start(Arc::new(crate::work::AppExecutor(app.clone())))
@@ -288,6 +311,13 @@ pub async fn start(config: Config) -> Result<Running, String> {
         }
         None => None,
     };
+    // Triggers fire wherever a dispatcher runs: this server or worker.
+    if app.config.triggers.dispatch {
+        pollers.push(crate::triggers::dispatch::spawn(
+            app.clone(),
+            shutdown_rx.clone(),
+        ));
+    }
     let accept = match listener {
         Some(listener) => {
             let router = api::router(app);
