@@ -1081,6 +1081,39 @@
       "modified": false
     },
     {
+      "path": "vendor/orca/src/main/automations/precheck-runner.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/main/automations/precheck-runner.ts",
+      "git_blob": "ab38fd42355e8b7055250e8bf919fadb84df8ecb",
+      "sha256": "d22bed425237dd6df2226a3e0af1d7bd5a21382245e7ade1c18fc181d51c572c",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/main/automations/run-target-resolution.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/main/automations/run-target-resolution.ts",
+      "git_blob": "0fbe694bf26b93118d95c974e43c6b4b04205b54",
+      "sha256": "efeec0f0ad85eee807b8619b2dd4699d26cfaf08258a4b5dfc28c8a8f4dc437f",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
+    },
+    {
+      "path": "vendor/orca/src/shared/automation-precheck.ts",
+      "upstream": "https://github.com/stablyai/orca",
+      "commit": "280733273545f0b3eeedc1be54b14d406239030e",
+      "upstream_path": "src/shared/automation-precheck.ts",
+      "git_blob": "dc48645fb6f36080f898357a097c3c3363e07fd8",
+      "sha256": "42462487a0dec1f9f90da9952f76c5adfd30861de38b759badcb27b4597caacc",
+      "license": "MIT",
+      "use": "port-source",
+      "modified": false
+    },
+    {
       "path": "vendor/emdash/LICENSE.md",
       "upstream": "https://github.com/generalaction/emdash",
       "commit": "873a3e2067f4abc136272ed2b61abea3a2c07bcf",
