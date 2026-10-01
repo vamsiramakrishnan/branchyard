@@ -63,6 +63,16 @@ pub enum Work {
     /// `POST .../branches/{branch}/integrate`, into the parent found at
     /// admission.
     Integrate { branch: String, parent: String },
+    /// `POST .../branches/{branch}/plan/approve`.
+    ApprovePlan {
+        branch: String,
+        request: branchyard_client::knowledge_api::PlanApproveRequest,
+    },
+    /// `POST .../branches/{branch}/plan/reject`.
+    RejectPlan {
+        branch: String,
+        request: branchyard_client::knowledge_api::PlanRejectRequest,
+    },
 }
 
 impl Work {
@@ -75,6 +85,8 @@ impl Work {
             Work::Merge { .. } => OperationKind::Merge,
             Work::Spawn { .. } => OperationKind::Spawn,
             Work::Integrate { .. } => OperationKind::Integrate,
+            Work::ApprovePlan { .. } => OperationKind::ApprovePlan,
+            Work::RejectPlan { .. } => OperationKind::RejectPlan,
         }
     }
 
@@ -186,6 +198,32 @@ impl Work {
                     })
                 };
                 run().map_err(sdk)
+            }
+            Work::ApprovePlan { branch, request } => {
+                let options = TaskOptions {
+                    trace_parent: trace_parent.clone(),
+                    ..plan_send_options(app, repo, &request.send).map_err(api)?
+                };
+                let by = person(principal);
+                yard.approve_plan(&branch, request.edited.as_deref(), &by, &options)
+                    .and_then(|b| finished(vec![b]))
+                    .map_err(sdk)
+            }
+            Work::RejectPlan { branch, request } => {
+                let options = TaskOptions {
+                    trace_parent: trace_parent.clone(),
+                    ..plan_send_options(app, repo, &request.send).map_err(api)?
+                };
+                let by = person(principal);
+                yard.reject_plan(
+                    &branch,
+                    request.reason.as_deref(),
+                    request.replan,
+                    &by,
+                    &options,
+                )
+                .and_then(|b| finished(vec![b]))
+                .map_err(sdk)
             }
             Work::Integrate { branch, parent } => {
                 let run = || {
@@ -436,6 +474,8 @@ pub(crate) fn task_options(
         provision: app.provision(request.provision.clone())?,
         seats: app.seats(request.seats.clone())?,
         workspace: app.workspace(repo)?,
+        plan: request.plan,
+        goal: goal(app, request)?,
         ..app.options(
             repo,
             budget,
@@ -447,6 +487,58 @@ pub(crate) fn task_options(
             provider,
         )
     })
+}
+
+/// Who a plan decision names: the request's principal, through the server.
+fn person(principal: Option<&crate::config::Principal>) -> String {
+    match principal {
+        Some(p) => format!("{} through the server", p.name),
+        None => "a person through the server".into(),
+    }
+}
+
+/// The options of a plan approval's or re-plan's turn: a send's, whose
+/// prompt the plan replaces.
+pub(crate) fn plan_send_options(
+    app: &App,
+    repo: &RepoState,
+    request: &SendRequest,
+) -> Result<TaskOptions, ApiError> {
+    let request = SendRequest {
+        prompt: "plan".into(),
+        ..request.clone()
+    };
+    send_options(app, repo, &request)
+}
+
+/// A task's goal, as the server runs it: its judge is one of the server's
+/// harnesses, launched with the server's command for it.
+pub(crate) fn goal(app: &App, request: &TaskRequest) -> Result<Option<branchyard::Goal>, ApiError> {
+    let Some(goal) = &request.goal else {
+        return Ok(None);
+    };
+    if goal.text.trim().is_empty() {
+        return Err(ApiError::bad_request("goal.text is empty"));
+    }
+    let judge = match &goal.judge {
+        Some(harness) => Some(branchyard::JudgeSpec {
+            harness: harness.clone(),
+            model: None,
+            effort: None,
+            command: app.command(None, &[Some(harness)])?,
+            rubric: None,
+        }),
+        None => None,
+    };
+    Ok(Some(branchyard::Goal {
+        text: goal.text.clone(),
+        rounds: goal
+            .rounds
+            .unwrap_or(branchyard::GOAL_DEFAULT_ROUNDS)
+            .min(20),
+        judge,
+        custom: None,
+    }))
 }
 
 /// A send's options, or why this server refuses it. See also

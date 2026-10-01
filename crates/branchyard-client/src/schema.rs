@@ -18,6 +18,7 @@ use schemars::{schema_for, Schema};
 use serde_json::{Map, Value};
 
 use crate::api;
+use crate::knowledge_api;
 use crate::storage_api;
 use crate::triggers;
 
@@ -43,6 +44,18 @@ pub fn contract() -> Value {
     entry::<api::RuleSpec>("RuleSpec", &mut types);
     entry::<api::PolicySpec>("PolicySpec", &mut types);
     entry::<api::TaskRequest>("TaskRequest", &mut types);
+    entry::<api::GoalRequest>("GoalRequest", &mut types);
+    entry::<knowledge_api::KnowledgeList>("KnowledgeList", &mut types);
+    entry::<knowledge_api::KnowledgeAddRequest>("KnowledgeAddRequest", &mut types);
+    entry::<knowledge_api::KnowledgeDecisionRequest>("KnowledgeDecisionRequest", &mut types);
+    entry::<knowledge_api::KnowledgeEditRequest>("KnowledgeEditRequest", &mut types);
+    entry::<knowledge_api::KnowledgeExport>("KnowledgeExport", &mut types);
+    entry::<knowledge_api::DistillRequest>("DistillRequest", &mut types);
+    entry::<knowledge_api::PlanApproveRequest>("PlanApproveRequest", &mut types);
+    entry::<knowledge_api::PlanRejectRequest>("PlanRejectRequest", &mut types);
+    entry::<branchyard::KnowledgeEntry>("KnowledgeEntry", &mut types);
+    entry::<branchyard::Distilled>("Distilled", &mut types);
+    entry::<branchyard::PlanInfo>("PlanInfo", &mut types);
     entry::<api::SendRequest>("SendRequest", &mut types);
     entry::<api::ForkRequest>("ForkRequest", &mut types);
     entry::<api::ReincarnateRequest>("ReincarnateRequest", &mut types);

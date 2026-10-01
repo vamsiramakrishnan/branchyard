@@ -107,16 +107,19 @@ mod engine;
 mod environments;
 mod fleet;
 mod git;
+mod goal;
 mod graph;
 mod harness;
 mod inbox;
 mod judge;
+mod knowledge;
 mod lock;
 mod names;
 mod ops;
 #[cfg(feature = "postgres")]
 mod pg;
 mod placement;
+mod plan;
 mod policy;
 mod proc;
 mod projection;
@@ -175,6 +178,11 @@ pub use fleet::{
     FleetActivity, FleetCandidate, FleetEntry, JudgeMark, JudgeSpec, OutcomeRecord, Route,
     RouteDecision, RouteOptions, RoutePick, Routed, TaskKind, DEFAULT_EXPLORATION,
 };
+pub use goal::{
+    follow_up_prompt as goal_follow_up_prompt, from_events as goal_from_events,
+    judge_prompt as goal_judge_prompt, parse_goal_verdict, Goal, GoalActivity, GoalCheck, GoalInfo,
+    GoalVerdict, DEFAULT_ROUNDS as GOAL_DEFAULT_ROUNDS,
+};
 pub use graph::{
     Access, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphEdit, GraphNode,
     GraphProposal, SpawnSpec, MAX_EDITS,
@@ -183,6 +191,17 @@ pub use inbox::{DeliveryHook, SteerDelivery};
 pub use judge::{
     deterministic_scores, harness_judge, parse_verdict, prompt as judge_prompt, HarnessJudge,
     Judge, JudgeOptions, JudgedBy, Judgement, Scored, Verdict,
+};
+pub use knowledge::{
+    export as export_knowledge, parse_distilled, DistillTrigger, Distilled, KnowledgeActivity,
+    KnowledgeEdit, KnowledgeEntry, KnowledgeScope, KnowledgeSettings, KnowledgeSource,
+    KnowledgeStatus, NewKnowledge, DEFAULT_BUDGET_TOKENS as KNOWLEDGE_DEFAULT_BUDGET_TOKENS,
+    TEXT_MAX as KNOWLEDGE_TEXT_MAX,
+};
+pub use plan::{
+    approved_prompt, from_events as plan_from_events, parse_tasks as parse_plan_tasks,
+    planning_prompt, read_only as read_only_policy, Plan, PlanActivity, PlanInfo, PlanPhase,
+    PlanTask, READ_ONLY_TOOLS,
 };
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use pull_request::{
@@ -462,6 +481,8 @@ impl Yard {
         let merged = ops::merge(self, branch, target)?;
         // The outcome store learns the merge; it never undoes one.
         let _ = fleet::observe(self, branch, None);
+        // So may the knowledge store, as proposals a person reviews.
+        knowledge::on_end(self, branch, DistillTrigger::Merged);
         Ok(merged)
     }
 
@@ -657,7 +678,8 @@ impl Yard {
         options: &TaskOptions,
         kind: TaskKind,
     ) -> Result<Branch, Error> {
-        fleet::run_with_kind(self, prompt, options, kind)
+        let branch = fleet::run_with_kind(self, prompt, options, kind)?;
+        goal::pursue(self, branch, options)
     }
 
     /// When `branch`'s last turn failed because of its harness and it was
@@ -673,6 +695,115 @@ impl Yard {
     /// `docs/fleet.md`.
     pub fn judge(&self, branches: &[String], options: &JudgeOptions) -> Result<Judgement, Error> {
         judge::judge(self, branches, options)
+    }
+
+    /// How this yard (and its clones) learns and uses repository
+    /// knowledge; see `docs/knowledge.md`. Replaces the settings set
+    /// before; without a call, [`KnowledgeSettings::default`].
+    pub fn use_knowledge(&self, settings: KnowledgeSettings) {
+        *projection::lock(&self.hub.knowledge) = Some(Arc::new(settings));
+    }
+
+    /// The settings [`Yard::use_knowledge`] set, or the defaults.
+    pub fn knowledge_settings(&self) -> Arc<KnowledgeSettings> {
+        projection::lock(&self.hub.knowledge)
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// The repository's knowledge entries, or those of `status`, by id.
+    pub fn knowledge(&self, status: Option<KnowledgeStatus>) -> Result<Vec<KnowledgeEntry>, Error> {
+        knowledge::list(self, status)
+    }
+
+    /// One knowledge entry.
+    pub fn knowledge_entry(&self, id: u64) -> Result<KnowledgeEntry, Error> {
+        knowledge::get(self, id)
+    }
+
+    /// Add an entry written by `by`: adopted, unless `new.propose`.
+    pub fn add_knowledge(&self, new: &NewKnowledge, by: &str) -> Result<KnowledgeEntry, Error> {
+        knowledge::add(self, new, by)
+    }
+
+    /// Adopt entry `id` as `by`: from now on, matching branches are given
+    /// it.
+    pub fn adopt_knowledge(&self, id: u64, by: &str) -> Result<KnowledgeEntry, Error> {
+        knowledge::decide(self, id, KnowledgeStatus::Adopted, by, None)
+    }
+
+    /// Reject entry `id` as `by`, with an optional reason: it is not used,
+    /// and the same text is not proposed again.
+    pub fn reject_knowledge(
+        &self,
+        id: u64,
+        by: &str,
+        reason: Option<&str>,
+    ) -> Result<KnowledgeEntry, Error> {
+        knowledge::decide(self, id, KnowledgeStatus::Rejected, by, reason)
+    }
+
+    /// Change entry `id`'s text or scope; it keeps its status.
+    pub fn edit_knowledge(
+        &self,
+        id: u64,
+        change: &KnowledgeEdit,
+        by: &str,
+    ) -> Result<KnowledgeEntry, Error> {
+        knowledge::edit(self, id, change, by)
+    }
+
+    /// Delete entry `id`, returning what it was.
+    pub fn remove_knowledge(&self, id: u64) -> Result<KnowledgeEntry, Error> {
+        knowledge::remove(self, id)
+    }
+
+    /// Propose knowledge from `branch` now: with `distiller`, its answer,
+    /// else (or when its answer is refused) the deterministic extractor's.
+    /// Nothing is adopted. Recorded on the branch.
+    pub fn distill(
+        &self,
+        branch: &str,
+        distiller: Option<Arc<dyn Judge>>,
+    ) -> Result<Distilled, Error> {
+        knowledge::distill(self, branch, distiller.as_ref(), "asked")
+    }
+
+    /// `branch`'s plan, when it was started with one; see
+    /// `docs/plans-and-goals.md`.
+    pub fn plan(&self, branch: &str) -> Result<PlanInfo, Error> {
+        plan::info(self, branch)
+    }
+
+    /// Approve `branch`'s plan as `by`, or `edited` in its place, and run
+    /// it as the next turn under `options` (its policy, observer, limits);
+    /// then pursue the branch's goal, if it has one.
+    pub fn approve_plan(
+        &self,
+        branch: &str,
+        edited: Option<&str>,
+        by: &str,
+        options: &TaskOptions,
+    ) -> Result<Branch, Error> {
+        plan::approve(self, branch, edited, by, options)
+    }
+
+    /// Reject `branch`'s plan as `by`: the branch fails, or with `replan`,
+    /// another read-only planning turn runs with `reason`.
+    pub fn reject_plan(
+        &self,
+        branch: &str,
+        reason: Option<&str>,
+        replan: bool,
+        by: &str,
+        options: &TaskOptions,
+    ) -> Result<Branch, Error> {
+        plan::reject(self, branch, reason, replan, by, options)
+    }
+
+    /// `branch`'s goal and its latest verdict, when it has one.
+    pub fn goal(&self, branch: &str) -> Result<Option<GoalInfo>, Error> {
+        goal::info(self, branch)
     }
 
     /// Finished branches' outcomes, or those of `kind`, oldest first; they
@@ -971,6 +1102,17 @@ pub struct TaskOptions {
     /// the caller's trace. Not stored with the branch. A server sets it to
     /// its operation's span; see `docs/observability.md`.
     pub trace_parent: Option<String>,
+    /// Plan first: a new branch's first turn runs read-only with a planning
+    /// prompt and the branch then waits, `awaiting_plan_approval`, for
+    /// [`Yard::approve_plan`] or [`Yard::reject_plan`]. Read only when a
+    /// branch is created by `run`, `run_on` or a routed run; see
+    /// `docs/plans-and-goals.md`.
+    pub plan: bool,
+    /// A goal a judge verifies when a new branch's turn ends ready: unmet,
+    /// it gets follow-up turns with what is missing. Read only when a
+    /// branch is created by `run`, `run_on` or a routed run; stored with
+    /// it, except a custom judge.
+    pub goal: Option<Goal>,
 }
 
 /// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.
@@ -1220,6 +1362,18 @@ impl TaskBuilder {
         self
     }
 
+    /// Plan first; see [`TaskOptions::plan`].
+    pub fn plan(mut self, plan: bool) -> Self {
+        self.options.plan = plan;
+        self
+    }
+
+    /// Verify `goal` with a judge; see [`TaskOptions::goal`].
+    pub fn goal(mut self, goal: Goal) -> Self {
+        self.options.goal = Some(goal);
+        self
+    }
+
     /// Replace every option at once.
     pub fn options(mut self, options: TaskOptions) -> Self {
         self.options = options;
@@ -1238,7 +1392,8 @@ impl TaskBuilder {
     /// Errors mean nothing ran: an unknown or missing harness, an invalid
     /// name or base, or unwritable state.
     pub fn run(self) -> Result<Branch, Error> {
-        run::run(&self.yard, &self.prompt, &self.options)
+        let branch = run::run(&self.yard, &self.prompt, &self.options)?;
+        goal::pursue(&self.yard, branch, &self.options)
     }
 
     /// Run the same task on several harnesses in parallel, one branch each,
@@ -1246,7 +1401,8 @@ impl TaskBuilder {
     /// any branch is created. A failure on one branch does not stop the
     /// others; it is recorded in that branch's status.
     pub fn run_on(self, harnesses: &[&str]) -> Result<Vec<Branch>, Error> {
-        run::run_on(&self.yard, &self.prompt, &self.options, harnesses)
+        let branches = run::run_on(&self.yard, &self.prompt, &self.options, harnesses)?;
+        goal::pursue_all(&self.yard, branches, &self.options)
     }
 }
 
@@ -1533,6 +1689,10 @@ pub enum BranchStatus {
     },
     /// The last turn completed and produced a candidate.
     Ready,
+    /// A planning turn proposed a plan, and the branch waits for it to be
+    /// approved, edited or rejected before anything changes; see
+    /// [`Yard::approve_plan`].
+    AwaitingPlanApproval,
     /// The last turn completed without changing any file.
     NoChanges,
     Interrupted,
@@ -1809,6 +1969,11 @@ pub enum Activity {
         /// (never shown); see `docs/connectors.md`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         connectors: Vec<String>,
+        /// The adopted knowledge entries given to the harness in its
+        /// instructions this turn, most specific first; see
+        /// `docs/knowledge.md`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        knowledge: Vec<u64>,
     },
     /// Input from `by` was written into the running turn; see
     /// [`Branch::steer`]. The harness's `steer_accepted` or
@@ -1889,6 +2054,14 @@ pub enum Activity {
     /// The branch was made from a harness session that already existed on
     /// this machine (`by adopt`); its next turn resumes that session.
     Adopted(Box<Adoption>),
+    /// Repository knowledge: the branch was distilled into proposed
+    /// entries. See [`KnowledgeActivity`] and `docs/knowledge.md`.
+    Knowledge(Box<KnowledgeActivity>),
+    /// Plan approval: planning, a proposed plan, its approval, rejection or
+    /// escalation. See [`PlanActivity`] and `docs/plans-and-goals.md`.
+    Plan(Box<PlanActivity>),
+    /// A goal and its judge's verdicts. See [`GoalActivity`].
+    Goal(Box<GoalActivity>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the
@@ -2200,6 +2373,10 @@ pub enum Error {
     BranchExists(String),
     /// No message with this id in the branch's inbox.
     UnknownMessage(u64),
+    /// No knowledge entry with this id.
+    UnknownKnowledge(u64),
+    /// The branch has no plan, or none awaiting approval.
+    NoPlan(String),
     /// Not a usable branch name: lowercase `[a-z0-9._-]`, starting with a
     /// letter or digit, one path segment.
     InvalidName {
@@ -2279,6 +2456,8 @@ impl fmt::Display for Error {
             Error::UnknownBranch(name) => write!(f, "no branch named {name}"),
             Error::BranchExists(name) => write!(f, "branch {name} already exists"),
             Error::UnknownMessage(id) => write!(f, "no message #{id} in this inbox"),
+            Error::UnknownKnowledge(id) => write!(f, "no knowledge entry #{id}"),
+            Error::NoPlan(why) => write!(f, "no plan: {why}"),
             Error::InvalidName { name, reason } => {
                 write!(f, "{name:?} is not a usable branch name: {reason}")
             }
@@ -2347,6 +2526,8 @@ impl Error {
             Error::UnknownBranch(_) => "unknown_branch",
             Error::BranchExists(_) => "branch_exists",
             Error::UnknownMessage(_) => "unknown_message",
+            Error::UnknownKnowledge(_) => "unknown_knowledge",
+            Error::NoPlan(_) => "no_plan",
             Error::InvalidName { .. } => "invalid_name",
             Error::UnknownHarness(_) => "unknown_harness",
             Error::HarnessUnavailable { .. } => "harness_unavailable",

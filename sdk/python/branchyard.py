@@ -502,6 +502,32 @@ def answer(message_id: int, text: str) -> Message:
     return _message(_run(["answer", str(message_id), "--", text]))
 
 
+def approve_plan(branch: str, edited: Optional[str] = None) -> Sent:
+    """Approve a descendant's plan that awaits approval, as proposed or with
+    `edited` in its place, and start the turn that carries it out."""
+    if edited is None:
+        return _make(Sent, _run(["plan", "approve", "--", branch]))
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as file:
+        file.write(edited)
+    try:
+        return _make(Sent, _run(["plan", "approve", "--file", file.name, "--", branch]))
+    finally:
+        os.unlink(file.name)
+
+
+def reject_plan(branch: str, reason: Optional[str] = None, replan: bool = False) -> Sent:
+    """Reject a descendant's plan: it ends, or with `replan=True` it plans
+    again, read-only, with `reason`."""
+    args = ["plan", "reject"]
+    if reason is not None:
+        args += ["--reason", reason]
+    if replan:
+        args.append("--replan")
+    return _make(Sent, _run(args + ["--", branch]))
+
+
 def inbox(unread: bool = False) -> Inbox:
     """Every message addressed to you, oldest first; `unread=True` for only
     what has not yet been delivered to a turn."""

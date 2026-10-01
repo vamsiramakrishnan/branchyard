@@ -350,10 +350,21 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             secrets,
             unused_secrets,
             connectors,
+            knowledge,
         } => {
             let mut parts = Vec::new();
             if let Some(auth) = auth {
                 parts.push(format!("auth {auth}"));
+            }
+            if !knowledge.is_empty() {
+                parts.push(format!(
+                    "knowledge {}",
+                    knowledge
+                        .iter()
+                        .map(|id| format!("#{id}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
             if !connectors.is_empty() {
                 parts.push(format!("connectors {}", connectors.join(", ")));
@@ -446,6 +457,24 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
         Activity::Fleet(activity) => style.paint(
             match activity.as_ref() {
                 branchyard::FleetActivity::FailedOver { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &activity.describe(),
+        ),
+        Activity::Knowledge(activity) => style.paint(Tone::Cyan, &activity.describe()),
+        Activity::Plan(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::PlanActivity::Proposed(_)
+                | branchyard::PlanActivity::Rejected { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &activity.describe(),
+        ),
+        Activity::Goal(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::GoalActivity::Verdict { met: true, .. } => Tone::Green,
+                branchyard::GoalActivity::Verdict { met: false, .. }
+                | branchyard::GoalActivity::Exhausted { .. } => Tone::Yellow,
                 _ => Tone::Cyan,
             },
             &activity.describe(),
@@ -760,6 +789,7 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
         BranchStatus::Merged { target, .. } => (format!("merged into {target}"), Tone::Blue),
         BranchStatus::Waiting => ("waiting".into(), Tone::Dim),
         BranchStatus::Blocked { reason } => (format!("blocked: {reason}"), Tone::Red),
+        BranchStatus::AwaitingPlanApproval => ("awaiting plan approval".into(), Tone::Yellow),
     }
 }
 
@@ -1008,6 +1038,11 @@ pub fn next_commands(info: &BranchInfo) -> Vec<String> {
             format!("by rm {name}"),
         ],
         BranchStatus::Running => vec![format!("by log {name}")],
+        BranchStatus::AwaitingPlanApproval => vec![
+            format!("by plan show {name}"),
+            format!("by plan approve {name} [--edit]"),
+            format!("by plan reject {name} --reason \"...\" [--replan]"),
+        ],
         BranchStatus::Merged { .. } => vec![format!("by rm {name}")],
         BranchStatus::Waiting | BranchStatus::Blocked { .. } => {
             let parent = info.parent.as_deref().map(shell_quote).unwrap_or_default();

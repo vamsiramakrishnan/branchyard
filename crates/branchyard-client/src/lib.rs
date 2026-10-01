@@ -45,6 +45,7 @@
 
 pub mod api;
 pub mod http;
+pub mod knowledge_api;
 #[cfg(feature = "schema")]
 pub mod schema;
 pub mod sse;

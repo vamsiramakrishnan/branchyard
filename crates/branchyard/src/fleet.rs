@@ -327,6 +327,12 @@ pub struct FleetEntry {
     pub environment: Option<String>,
     /// Passed through for other tracks; recorded on the branch, not acted on.
     pub connectors: Vec<String>,
+    /// Plan first: routed branches of this kind start with a read-only
+    /// planning turn and wait for approval; see `docs/plans-and-goals.md`.
+    pub plan: bool,
+    /// The judge of a goal (`--goal`) given to a branch of this kind when
+    /// the task names none.
+    pub goal_judge: Option<JudgeSpec>,
 }
 
 impl Default for FleetEntry {
@@ -340,6 +346,8 @@ impl Default for FleetEntry {
             exploration: DEFAULT_EXPLORATION,
             environment: None,
             connectors: Vec::new(),
+            plan: false,
+            goal_judge: None,
         }
     }
 }
@@ -546,7 +554,10 @@ impl BranchOutcome {
     /// finished a turn.
     pub fn of(status: &BranchStatus) -> Option<BranchOutcome> {
         match status {
-            BranchStatus::Running | BranchStatus::Waiting | BranchStatus::Blocked { .. } => None,
+            BranchStatus::Running
+            | BranchStatus::Waiting
+            | BranchStatus::Blocked { .. }
+            | BranchStatus::AwaitingPlanApproval => None,
             BranchStatus::Ready => Some(BranchOutcome::Ready),
             BranchStatus::Merged { .. } => Some(BranchOutcome::Merged),
             BranchStatus::Interrupted => Some(BranchOutcome::Interrupted),
@@ -1118,6 +1129,7 @@ pub(crate) fn run_routed(
     fan: bool,
 ) -> Result<Routed, Error> {
     let (route, entry) = route(yard, prompt, options, fleet, how, (!fan).then_some(1))?;
+    let options = &entry_options(options, &entry);
     let failover = how.failover.unwrap_or(entry.failover);
     let attempts = route.picks.len() as u32;
     let labels = labels(&route.picks);
@@ -1181,11 +1193,25 @@ pub(crate) fn run_routed(
         failovers.extend(moved);
         branches.push(branch);
     }
+    let branches = crate::goal::pursue_all(yard, branches, options)?;
     Ok(Routed {
         route,
         branches,
         failovers,
     })
+}
+
+/// `options` with what the fleet entry adds: plan first when it says so,
+/// and its goal judge for a goal that names none.
+pub(crate) fn entry_options(options: &TaskOptions, entry: &FleetEntry) -> TaskOptions {
+    let mut options = options.clone();
+    options.plan |= entry.plan;
+    if let (Some(goal), Some(judge)) = (options.goal.as_mut(), &entry.goal_judge) {
+        if goal.judge.is_none() && goal.custom.is_none() {
+            goal.judge = Some(judge.clone());
+        }
+    }
+    options
 }
 
 /// `run`, recording `kind` for the outcome store: the harness is the

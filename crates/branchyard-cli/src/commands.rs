@@ -134,6 +134,10 @@ fn open_yard() -> Result<Yard, branchyard::Error> {
     // `[connectors]`: the gateway its branches' turns are given.
     crate::gateway_cmd::configure(&yard)
         .map_err(|e| branchyard::Error::Unsupported(format!("[connectors]: {e}")))?;
+    // `[knowledge]`: what its branches are given and when they are
+    // distilled (docs/knowledge.md).
+    crate::knowledge_cmd::configure(&yard)
+        .map_err(|e| branchyard::Error::Unsupported(format!("[knowledge]: {e}")))?;
     Ok(yard)
 }
 
@@ -145,20 +149,25 @@ fn now() -> u64 {
 }
 
 /// Console and policy for commands that run a harness.
-struct Live {
-    console: Arc<Console>,
+pub(crate) struct Live {
+    pub(crate) console: Arc<Console>,
     policy: Policy,
 }
 
 impl Live {
     /// `branch` is the provider a send or fork inherits when the flags name
     /// none.
-    fn start(env: &Env, task: &TaskArgs, prefixed: bool, branch: Option<Provider>) -> Live {
+    pub(crate) fn start(
+        env: &Env,
+        task: &TaskArgs,
+        prefixed: bool,
+        branch: Option<Provider>,
+    ) -> Live {
         Live::start_to(env, task, prefixed, false, branch)
     }
 
     /// With `json`, activity goes to stderr so stdout holds only the result.
-    fn start_to(
+    pub(crate) fn start_to(
         env: &Env,
         task: &TaskArgs,
         prefixed: bool,
@@ -201,7 +210,7 @@ impl Live {
         Live { console, policy }
     }
 
-    fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
+    pub(crate) fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
         if !task.require_labels.is_empty() {
             return Err(Failure::Message(
                 "--require-label chooses among a server's workers: use it with --remote".into(),
@@ -246,12 +255,14 @@ impl Live {
             // A local harness inherits this process's environment,
             // `TRACEPARENT` included.
             trace_parent: None,
+            plan: task.plan,
+            goal: crate::plan_cmd::goal(task),
         })
     }
 
     /// Print the closing summary for one branch, once every branch it
     /// delegated to on this process has finished.
-    fn finish(self, env: &Env, result: Result<Branch, branchyard::Error>) -> Outcome {
+    pub(crate) fn finish(self, env: &Env, result: Result<Branch, branchyard::Error>) -> Outcome {
         let branch = match result {
             Ok(branch) => branch,
             Err(error) => {
@@ -278,7 +289,9 @@ impl Live {
 
 /// Wait for every branch these delegated to, in this process or another,
 /// saying which, and return them; `None` if there were none.
-fn wait_for_descendants(branches: &[&Branch]) -> Result<Option<Vec<BranchInfo>>, Failure> {
+pub(crate) fn wait_for_descendants(
+    branches: &[&Branch],
+) -> Result<Option<Vec<BranchInfo>>, Failure> {
     let mut all = Vec::new();
     for branch in branches {
         let running: Vec<String> = branch
@@ -338,6 +351,8 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome
         workspace,
         ..live.options(task)?
     };
+    // `[fleet.<kind>] plan` and `goal_judge` (docs/plans-and-goals.md).
+    let options = crate::plan_cmd::with_fleet(options, task, &prompt);
     // Routed (docs/fleet.md): the router picks the harness and fails over;
     // the branch that ends the chain is the one summarized.
     let result = match (crate::fleet_cmd::is_routed(task), task.kind) {
@@ -413,6 +428,7 @@ pub fn fan(
         workspace,
         ..live.options(task)?
     };
+    let options = crate::plan_cmd::with_fleet(options, task, prompt);
     let result = match routed {
         true => {
             match crate::fleet_cmd::routed(&yard, prompt, &options, task, true, route.attempts) {
@@ -798,6 +814,8 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         if let Some(listening) = listening.as_ref().filter(|l| !l.is_empty()) {
             value["listening"] = serde_json::to_value(listening).unwrap_or_default();
         }
+        // Its plan and goal, when it has them (docs/plans-and-goals.md).
+        crate::plan_cmd::show_json(&info.name, &events, &mut value);
         return print(&json::text(&value));
     }
     let mut extra: Vec<(&str, String)> = line
@@ -807,6 +825,7 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
     if let Some(listening) = listening.filter(|l| !l.is_empty()) {
         extra.push(("listening", crate::ports::lines(&listening).join("; ")));
     }
+    extra.extend(crate::plan_cmd::show_lines(&info.name, &events));
     let mut text = render::details(&info, now(), env.style(), extra);
     text.push_str(&crate::attempts::checkpoint_lines(
         &checkpoints,
@@ -1070,7 +1089,7 @@ pub fn mcp(root: &str, branch: &str) -> Outcome {
 
 /// The delegate for this harness's branch when `by` runs inside a
 /// delegating harness; `None` outside one.
-fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
+pub(crate) fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
     let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
     if set(ENV_TOKEN) {
         return match Delegate::from_env() {
@@ -1088,13 +1107,13 @@ fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
     Ok(None)
 }
 
-fn to_json<T: Serialize>(value: &T) -> String {
+pub(crate) fn to_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).expect("results serialize")
 }
 
 /// Report `error`: `{"error": {"kind", "message"}}` on stdout with
 /// `--json`, else on stderr; exit 1 either way.
-fn fail(json: bool, error: &branchyard::Error) -> Outcome {
+pub(crate) fn fail(json: bool, error: &branchyard::Error) -> Outcome {
     if json {
         let value =
             serde_json::json!({"error": {"kind": error.kind(), "message": error.to_string()}});
@@ -1106,7 +1125,7 @@ fn fail(json: bool, error: &branchyard::Error) -> Outcome {
 }
 
 /// Print a result as JSON or as text.
-fn emit<T: Serialize>(
+pub(crate) fn emit<T: Serialize>(
     json: bool,
     result: Result<T, branchyard::Error>,
     text: impl Fn(&T) -> String,
@@ -1159,6 +1178,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         after: args.after,
         bindings: args.bindings.clone(),
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
+        plan: args.plan,
         ..Spawn::default()
     };
     if let Some(delegate) = harness_delegate(json)? {

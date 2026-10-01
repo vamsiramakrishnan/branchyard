@@ -129,6 +129,164 @@ pub struct TaskArgs {
     pub seed: Option<u64>,
     /// The configuration's `[fleet]`, when it has one (`crate::defaults`).
     pub fleet: Option<branchyard::Fleet>,
+    /// `--plan`: plan first, read-only, and wait for `by plan approve`.
+    pub plan: bool,
+    /// `--goal`: a goal a judge verifies when the branch would be ready.
+    pub goal: Option<String>,
+    /// `--goal-rounds`: follow-up turns at most for an unmet goal.
+    pub goal_rounds: Option<u32>,
+    /// `--goal-judge`: the goal's judge harness.
+    pub goal_judge: Option<String>,
+    /// `--goal-judge-command`: launch the goal judge with this.
+    pub goal_judge_command: Option<Vec<String>>,
+}
+
+const PLAN_EXAMPLES: &str = "\
+Examples:
+  by run \"migrate the config loader\" --plan
+  by plan show migrate-the-config-loader
+  by plan approve migrate-the-config-loader --edit
+  by plan reject migrate-the-config-loader --reason \"keep the old flag\" --replan
+
+See docs/plans-and-goals.md.";
+
+const KNOWLEDGE_EXAMPLES: &str = "\
+Examples:
+  by knowledge review
+  by knowledge add \"Run cargo fmt before finishing\" --path \"crates/**\"
+  by knowledge distill fix-parser
+  by knowledge export --out AGENTS.md
+
+See docs/knowledge.md.";
+
+/// `by plan`'s actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum PlanAction {
+    /// Show a branch's plan, its task list and its phase
+    Show { branch: String },
+    /// Approve the plan and run it as the branch's next turn, with normal permissions
+    Approve {
+        branch: String,
+        /// Edit the plan in your editor first; what you save is what is approved
+        #[arg(long, conflicts_with = "file")]
+        edit: bool,
+        /// Approve this file's text instead of the proposed plan
+        #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+        file: Option<String>,
+        /// The editor for --edit: a known name or a command line that waits until the file is
+        /// closed (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR", requires = "edit")]
+        editor: Option<String>,
+        #[command(flatten)]
+        task: Checked<SendFlags>,
+    },
+    /// Reject the plan: the branch ends, or with --replan it plans again with your reason
+    Reject {
+        branch: String,
+        /// Why; with --replan, the branch's next planning turn gets it
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Plan again (read-only) instead of ending the branch
+        #[arg(long)]
+        replan: bool,
+        #[command(flatten)]
+        task: Checked<SendFlags>,
+    },
+}
+
+/// `by knowledge`'s actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum KnowledgeAction {
+    /// The repository's entries (default: proposed and adopted)
+    List {
+        /// Only entries with this status: proposed, adopted or rejected
+        #[arg(long, value_name = "STATUS", value_parser = knowledge_status, conflicts_with = "all")]
+        status: Option<branchyard::KnowledgeStatus>,
+        /// Every entry, rejected ones too
+        #[arg(long)]
+        all: bool,
+    },
+    /// One entry
+    Show { id: u64 },
+    /// Walk the proposed entries one at a time: adopt, reject, edit or skip each
+    Review {
+        /// The editor for edits (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR")]
+        editor: Option<String>,
+    },
+    /// Adopt entries: from now on, matching branches are given them
+    Adopt {
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<u64>,
+    },
+    /// Reject entries: they are not used, and the same text is not proposed again
+    Reject {
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<u64>,
+        /// Why
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+    },
+    /// Change an entry's text (in your editor without --text) or scope
+    Edit {
+        id: u64,
+        /// The new text
+        #[arg(long, value_name = "TEXT", value_parser = non_blank)]
+        text: Option<String>,
+        /// The path glob it applies to; \"\" for the whole repository
+        #[arg(long, value_name = "GLOB")]
+        path: Option<String>,
+        /// The kind of task it applies to; \"\" for every kind
+        #[arg(long, value_name = "KIND")]
+        kind: Option<String>,
+        /// The editor (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR", conflicts_with = "text")]
+        editor: Option<String>,
+    },
+    /// Add an entry you wrote, adopted (or only proposed, with --propose)
+    Add {
+        #[arg(value_parser = non_blank)]
+        text: String,
+        /// Only for tasks touching files matching this glob, such as crates/parser/**
+        #[arg(long, value_name = "GLOB")]
+        path: Option<String>,
+        /// Only for tasks of this kind
+        #[arg(long, value_name = "KIND", value_parser = task_kind)]
+        kind: Option<branchyard::TaskKind>,
+        /// Add it as proposed, for review, instead of adopted
+        #[arg(long)]
+        propose: bool,
+    },
+    /// Remove an entry
+    Rm { id: u64 },
+    /// Propose entries from a branch now: the corrections sent into it and the review comments
+    /// it addressed, or a distiller harness's proposals
+    Distill {
+        branch: String,
+        /// Ask this harness to distill, read-only on a scratch branch (default: [knowledge]
+        /// distiller, else the deterministic extractor)
+        #[arg(long, value_name = "ID", conflicts_with = "deterministic")]
+        harness: Option<String>,
+        /// Launch the distiller with this instead of its executable, for development and testing
+        #[arg(long, value_name = "CMD", value_parser = command_argv, requires = "harness")]
+        command: Option<Argv>,
+        /// Use only the deterministic extractor, even when [knowledge] names a distiller
+        #[arg(long)]
+        deterministic: bool,
+    },
+    /// Adopted entries as an AGENTS.md-style Markdown file
+    Export {
+        /// Write it here instead of stdout
+        #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+        out: Option<String>,
+    },
+}
+
+fn knowledge_status(text: &str) -> Result<branchyard::KnowledgeStatus, String> {
+    text.parse().map_err(|e: branchyard::Error| match e {
+        branchyard::Error::Unsupported(why) => why,
+        other => other.to_string(),
+    })
 }
 
 /// `by fleet`'s actions.
@@ -228,6 +386,8 @@ pub struct SpawnArgs {
     /// `--connector`, repeatable: the child's grant, narrowed to its
     /// parent's. Empty: its seat's or its parent's.
     pub connectors: Vec<branchyard::connectors::GrantEntry>,
+    /// `--plan`: the child plans first, read-only.
+    pub plan: bool,
     pub json: bool,
 }
 
@@ -883,6 +1043,25 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
+    },
+    /// A branch's plan: show it, approve it (as proposed or edited) or reject it
+    #[command(display_order = 112, subcommand_required = true, after_help = PLAN_EXAMPLES)]
+    Plan {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: PlanAction,
+    },
+    /// Repository knowledge: review, adopt, reject, edit, add, remove or export what agents are
+    /// told
+    #[command(display_order = 113, subcommand_required = true, after_help = KNOWLEDGE_EXAMPLES)]
+    Knowledge {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: KnowledgeAction,
     },
     /// The fleet table's routing: outcome statistics, or what a prompt would be routed to
     #[command(display_order = 207, subcommand_required = true, after_help = FLEET_EXAMPLES)]
@@ -2371,6 +2550,8 @@ pub struct RunFlags {
     delegation: Delegation,
     #[command(flatten)]
     provision: Provision,
+    #[command(flatten)]
+    plan_goal: PlanGoal,
 }
 
 impl Flags for RunFlags {
@@ -2395,7 +2576,42 @@ impl Flags for RunFlags {
         self.launch.apply(&mut task)?;
         self.delegation.apply(&mut task);
         self.provision.apply(&mut task);
+        self.plan_goal.apply(&mut task);
         Ok(task)
+    }
+}
+
+/// Plan approval and goals, for `run` and `fan`; see docs/plans-and-goals.md.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Plan and goal")]
+pub struct PlanGoal {
+    /// Plan first: the first turn runs read-only and proposes a plan, and the branch waits for
+    /// `by plan approve` (or reject) before anything changes
+    #[arg(long)]
+    plan: bool,
+    /// A goal a judge must find evidence of before the branch is done; unmet, it gets follow-up
+    /// turns with what is missing
+    #[arg(long, value_name = "TEXT", value_parser = non_blank)]
+    goal: Option<String>,
+    /// Follow-up turns at most for an unmet goal (default 2), within the budget
+    #[arg(long, value_name = "N", requires = "goal", value_parser = clap::value_parser!(u32).range(0..=20))]
+    goal_rounds: Option<u32>,
+    /// The goal's judge harness, read-only on a scratch branch (default: the [fleet] entry's
+    /// goal_judge; without one, the branch's check and a non-empty diff decide)
+    #[arg(long, value_name = "ID", requires = "goal")]
+    goal_judge: Option<String>,
+    /// Launch the goal judge with this instead of its executable, for development and testing
+    #[arg(long, value_name = "CMD", value_parser = command_argv, requires = "goal_judge")]
+    goal_judge_command: Option<Argv>,
+}
+
+impl PlanGoal {
+    fn apply(self, task: &mut TaskArgs) {
+        task.plan = self.plan;
+        task.goal = self.goal;
+        task.goal_rounds = self.goal_rounds;
+        task.goal_judge = self.goal_judge;
+        task.goal_judge_command = self.goal_judge_command.map(|a| a.0);
     }
 }
 
@@ -2452,6 +2668,8 @@ pub struct FanFlags {
     delegation: Delegation,
     #[command(flatten)]
     provision: Provision,
+    #[command(flatten)]
+    plan_goal: PlanGoal,
 }
 
 impl Flags for FanFlags {
@@ -2469,6 +2687,7 @@ impl Flags for FanFlags {
             launch: self.launch,
             delegation: self.delegation,
             provision: self.provision,
+            plan_goal: self.plan_goal,
         }
         .check()
     }
@@ -2553,6 +2772,7 @@ impl Flags for ForkFlags {
             launch: self.launch,
             delegation: self.delegation,
             provision: self.provision,
+            plan_goal: PlanGoal::default(),
         }
         .check()
     }
@@ -2594,6 +2814,7 @@ impl Flags for ReincarnateFlags {
             launch: self.launch,
             delegation: self.delegation,
             provision: self.provision,
+            plan_goal: PlanGoal::default(),
         }
         .check()
     }
@@ -2660,6 +2881,10 @@ pub struct SpawnGraph {
     /// parent's): CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]]. Repeatable
     #[arg(long = "connector", value_name = "GRANT", value_parser = branchyard::connectors::GrantEntry::parse)]
     connectors: Vec<branchyard::connectors::GrantEntry>,
+    /// Plan first: the child's first turn is read-only and its plan is escalated to the
+    /// parent's inbox; it changes nothing until `by plan approve`
+    #[arg(long)]
+    plan: bool,
 }
 
 impl Flags for SpawnFlags {
@@ -2685,6 +2910,7 @@ impl Flags for SpawnFlags {
             after: self.graph.after.map(Into::into).unwrap_or_default(),
             bindings: self.graph.bindings,
             connectors: self.graph.connectors,
+            plan: self.graph.plan,
             json: self.json,
         })
     }
@@ -3283,6 +3509,11 @@ mod tests {
                 kind: None,
                 seed: None,
                 fleet: None,
+                plan: false,
+                goal: None,
+                goal_rounds: None,
+                goal_judge: None,
+                goal_judge_command: None,
             }
         );
     }

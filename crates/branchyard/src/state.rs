@@ -118,6 +118,13 @@ pub(crate) struct Record {
     /// gateway default. See `crate::connectors`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<crate::connectors::Actor>,
+    /// The branch's plan, when it was started with one: while it is being
+    /// written its turns run read-only. See `crate::plan`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::plan::PlanState>,
+    /// The goal a judge verifies when a turn ends ready. See `crate::goal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<crate::goal::GoalState>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current
@@ -612,15 +619,23 @@ pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
     ) -> Result<Option<SandboxRow>, Error>;
 }
 
-/// [`PortBackend`], [`SandboxBackend`] and the outcome store
-/// ([`crate::fleet::OutcomeBackend`]) together, so a [`Store`] holds one
-/// trait object for them.
+/// [`PortBackend`], [`SandboxBackend`], the outcome store
+/// ([`crate::fleet::OutcomeBackend`]) and the knowledge store
+/// ([`crate::knowledge::KnowledgeBackend`]) together, so a [`Store`] holds
+/// one trait object for them.
 pub(crate) trait Extras:
-    PortBackend + SandboxBackend + crate::fleet::OutcomeBackend
+    PortBackend + SandboxBackend + crate::fleet::OutcomeBackend + crate::knowledge::KnowledgeBackend
 {
 }
 
-impl<T: PortBackend + SandboxBackend + crate::fleet::OutcomeBackend> Extras for T {}
+impl<
+        T: PortBackend
+            + SandboxBackend
+            + crate::fleet::OutcomeBackend
+            + crate::knowledge::KnowledgeBackend,
+    > Extras for T
+{
+}
 
 /// The port a reservation takes: from `start`, the first not in `taken`
 /// for which `usable` holds.
@@ -767,6 +782,11 @@ impl Store {
 
     /// Finished branches' outcomes; see [`crate::fleet::OutcomeBackend`].
     pub fn outcomes(&self) -> &dyn crate::fleet::OutcomeBackend {
+        self.extras.as_ref()
+    }
+
+    /// Repository knowledge; see [`crate::knowledge::KnowledgeBackend`].
+    pub fn knowledge(&self) -> &dyn crate::knowledge::KnowledgeBackend {
         self.extras.as_ref()
     }
 

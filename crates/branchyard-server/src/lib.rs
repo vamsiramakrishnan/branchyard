@@ -70,6 +70,7 @@ pub mod config;
 pub mod connectors;
 pub mod error;
 pub mod feed;
+pub mod knowledge_routes;
 pub mod logging;
 pub mod metrics;
 pub mod observe;

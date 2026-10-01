@@ -18,8 +18,10 @@ mod gateway_cmd;
 mod gh;
 mod init;
 mod json;
+mod knowledge_cmd;
 mod notify;
 mod open;
+mod plan_cmd;
 mod ports;
 mod pr;
 mod pr_threads;
@@ -207,6 +209,8 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             },
             fleet_table()?.as_ref(),
         ),
+        Command::Plan { json, action } => plan_cmd::main(env, target, &action, json),
+        Command::Knowledge { json, action } => knowledge_cmd::main(env, target, &action, json),
         Command::Fleet { json, action } => match action {
             args::FleetAction::Stats { kind } => fleet_cmd::stats(env, target, kind, json),
             args::FleetAction::Route {

@@ -48,6 +48,9 @@ pub enum ActionId {
     Review,
     Browse,
     StopPorts,
+    ApprovePlan,
+    Replan,
+    RejectPlan,
 }
 
 /// What an action asks before it runs.
@@ -217,6 +220,17 @@ fn ready(info: &BranchInfo) -> Result<(), String> {
         (BranchStatus::Ready, Some(_)) => Ok(()),
         _ => Err(format!(
             "only a ready branch merges; {} is {}",
+            info.name,
+            status(info)
+        )),
+    }
+}
+
+fn awaiting_plan(info: &BranchInfo) -> Result<(), String> {
+    match info.status {
+        BranchStatus::AwaitingPlanApproval => Ok(()),
+        _ => Err(format!(
+            "{} has no plan awaiting approval ({})",
             info.name,
             status(info)
         )),
@@ -493,6 +507,44 @@ pub const ACTIONS: &[Action] = &[
         run: Run::Wait(&["workspace", "kill", "--yes", "--", "{branch}"]),
         when: always,
         remote: Remote::No("its processes run on the server, not this machine"),
+    },
+    Action {
+        key: 'a',
+        id: ActionId::ApprovePlan,
+        name: "approve plan",
+        help: "approve the plan and run it as the next turn (by plan approve)",
+        ask: Ask::Confirm {
+            question: "Approve {branch}'s plan as proposed and run it? Its next turn carries it                        out with normal permissions (l shows the plan in the log).",
+        },
+        run: Run::Background(&["plan", "approve", "--", "{branch}"]),
+        when: awaiting_plan,
+        remote: Remote::Yes,
+    },
+    Action {
+        key: 'e',
+        id: ActionId::Replan,
+        name: "re-plan",
+        help: "reject the plan with a reason and plan again, read-only (by plan reject --replan)",
+        ask: Ask::Text {
+            title: "what should {branch}'s plan change?",
+        },
+        run: Run::Background(&[
+            "plan", "reject", "--replan", "--reason", "{text}", "--", "{branch}",
+        ]),
+        when: awaiting_plan,
+        remote: Remote::Yes,
+    },
+    Action {
+        key: 'X',
+        id: ActionId::RejectPlan,
+        name: "reject plan",
+        help: "reject the plan and end the branch (by plan reject)",
+        ask: Ask::Text {
+            title: "reject {branch}'s plan because",
+        },
+        run: Run::Wait(&["plan", "reject", "--reason", "{text}", "--", "{branch}"]),
+        when: awaiting_plan,
+        remote: Remote::Yes,
     },
 ];
 

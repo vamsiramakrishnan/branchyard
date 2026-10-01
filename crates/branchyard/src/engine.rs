@@ -150,7 +150,12 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     let mut recorder = Recorder::fenced(&store, &fence, turn.options.observer.clone());
     let bounds = Bounds {
         budget: delegation::effective_budget(&record, &turn.options.budget),
-        policy: delegation::effective_policy(&record, &turn.options.policy),
+        // A branch writing its plan runs read-only, whatever the caller
+        // passed; a delegating parent's denials still come first.
+        policy: delegation::effective_policy(
+            &record,
+            &crate::plan::policy_for(&record, &turn.options.policy),
+        ),
     };
     let result = (|| {
         recorder.record(Activity::Status(record.info.status.clone()))?;
@@ -225,6 +230,15 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     // changes what happened.
     if result.is_ok() {
         let _ = crate::fleet::observe(turn.yard, &fence.branch, None);
+        // A delegated child's plan awaiting approval goes to its parent.
+        crate::plan::settled(turn.yard, &fence.branch);
+        if matches!(&result, Ok(b) if b.info.status == BranchStatus::Ready) {
+            crate::knowledge::on_end(
+                turn.yard,
+                &fence.branch,
+                crate::knowledge::DistillTrigger::Ready,
+            );
+        }
     }
     result
 }
@@ -374,11 +388,27 @@ fn run(
     // The one path for MCP servers and instructions, the task's and the
     // delegation tools', and for everything else the home needs. Applied
     // before a sandbox exists, so its mount or home transfer carries it.
+    // Adopted repository knowledge that matches the branch, in its
+    // instructions; see `crate::knowledge`.
+    let briefing = crate::knowledge::briefing_for(turn.yard, record);
+    if !briefing.omitted.is_empty() {
+        recorder.record(Activity::Warning(format!(
+            "knowledge {} matched but did not fit the {}-token budget",
+            briefing
+                .omitted
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            turn.yard.knowledge_settings().budget_tokens
+        )))?;
+    }
     let provisioned = match crate::provisioning::prepare(
         record,
         turn.profile,
         projection.as_ref(),
         connectors.as_ref(),
+        Some(&briefing),
         store.dir(),
     ) {
         Ok(provisioned) => provisioned,
@@ -1332,6 +1362,8 @@ pub(crate) fn conclude(
             true => record.checkpoint = None,
         }
     }
+    // A planning turn that completed proposes its plan and waits.
+    crate::plan::conclude(yard, record, recorder, changed)?;
     Ok(())
 }
 

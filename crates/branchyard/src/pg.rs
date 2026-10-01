@@ -272,6 +272,35 @@ CREATE TABLE IF NOT EXISTS by_outcomes (
 CREATE INDEX IF NOT EXISTS by_outcomes_kind ON by_outcomes (repo, kind, recorded_ms);
 ";
 
+/// Tables added after [`TABLES`], each made on its own when the catalog
+/// says it is missing: a name (a table or index), and the statement that
+/// makes it. An opener that finds them all reads only the catalog, so it
+/// takes no lock another engine's transaction could wait behind; one that
+/// finds one missing makes it alone, under the schema's advisory lock,
+/// after checking again.
+const STEPS: &[(&str, &str)] = &[
+    (
+        "by_knowledge",
+        "CREATE TABLE IF NOT EXISTS by_knowledge (
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            repo TEXT NOT NULL,
+            scope_path TEXT,
+            scope_kind TEXT,
+            text TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_ms BIGINT NOT NULL,
+            adopted_by TEXT,
+            decided_ms BIGINT,
+            note TEXT
+        )",
+    ),
+    (
+        "by_knowledge_repo",
+        "CREATE INDEX IF NOT EXISTS by_knowledge_repo ON by_knowledge (repo, id)",
+    ),
+];
+
 fn steer_row(r: &Row) -> SteerRow {
     SteerRow {
         id: uint(r.get::<_, i64>(0)),
@@ -448,7 +477,43 @@ impl Postgres {
                 )))),
             }
         })?;
+        store.make_missing(STEPS)?;
         Ok(store)
+    }
+
+    /// Make each of `steps` the catalog says is missing, one at a time; see
+    /// [`STEPS`].
+    fn make_missing(&self, steps: &[(&str, &str)]) -> Result<(), Error> {
+        let names: Vec<String> = steps.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let missing: Vec<String> = self
+            .query(|client| {
+                client.query(
+                    "SELECT n FROM unnest($1::text[]) WITH ORDINALITY AS t (n, i) \
+                     WHERE to_regclass(n) IS NULL ORDER BY i",
+                    &[&names],
+                )
+            })?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        for (name, statement) in steps {
+            if !missing.iter().any(|m| m == name) {
+                continue;
+            }
+            self.tx(true, |tx| {
+                tx.execute("SELECT pg_advisory_xact_lock(7390184325)", &[])
+                    .map_err(db("schema"))?;
+                let absent: bool = tx
+                    .query_one("SELECT to_regclass($1::text) IS NULL", &[name])
+                    .map_err(db("schema"))?
+                    .get(0);
+                if absent {
+                    tx.batch_execute(statement).map_err(db("schema"))?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Client>> {
@@ -2658,5 +2723,136 @@ impl crate::fleet::OutcomeBackend for Postgres {
             )
         })?;
         rows.iter().map(outcome_row).collect()
+    }
+}
+
+const KNOWLEDGE_COLUMNS: &str = "id, scope_path, scope_kind, text, source, status, created_ms, \
+     adopted_by, decided_ms, note";
+
+fn knowledge_row(r: &Row) -> Result<crate::KnowledgeEntry, Error> {
+    Ok(crate::KnowledgeEntry {
+        id: uint(r.get(0)),
+        scope: crate::KnowledgeScope {
+            path: r.get(1),
+            kind: r
+                .get::<_, Option<String>>(2)
+                .map(|k| k.parse())
+                .transpose()
+                .map_err(|e| Error::State(format!("knowledge kind: {e}")))?,
+        },
+        text: r.get(3),
+        source: decode("knowledge source", &r.get::<_, String>(4))?,
+        status: r
+            .get::<_, String>(5)
+            .parse()
+            .map_err(|e| Error::State(format!("knowledge status: {e}")))?,
+        created_ms: uint(r.get(6)),
+        adopted_by: r.get(7),
+        decided_ms: r.get::<_, Option<i64>>(8).map(uint),
+        note: r.get(9),
+    })
+}
+
+impl crate::knowledge::KnowledgeBackend for Postgres {
+    fn add_knowledge(&self, entry: &crate::KnowledgeEntry) -> Result<crate::KnowledgeEntry, Error> {
+        let source = encode("knowledge source", &entry.source)?;
+        let created = match entry.created_ms {
+            0 => now_ms(),
+            at => at,
+        };
+        let id: i64 = self.tx(true, |tx| {
+            Ok(tx
+                .query_one(
+                    "INSERT INTO by_knowledge (repo, scope_path, scope_kind, text, source, status, \
+                     created_ms, adopted_by, decided_ms, note) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+                    &[
+                        &self.repo,
+                        &entry.scope.path,
+                        &entry.scope.kind.map(|k| k.as_str()),
+                        &entry.text,
+                        &source,
+                        &entry.status.as_str(),
+                        &int(created),
+                        &entry.adopted_by,
+                        &entry.decided_ms.map(int),
+                        &entry.note,
+                    ],
+                )
+                .map_err(db("knowledge"))?
+                .get(0))
+        })?;
+        Ok(crate::KnowledgeEntry {
+            id: uint(id),
+            created_ms: created,
+            ..entry.clone()
+        })
+    }
+
+    fn knowledge(&self, id: u64) -> Result<Option<crate::KnowledgeEntry>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+                &format!(
+                    "SELECT {KNOWLEDGE_COLUMNS} FROM by_knowledge WHERE repo = $1 AND id = $2"
+                ),
+                &[&self.repo, &int(id)],
+            )
+        })?;
+        row.as_ref().map(knowledge_row).transpose()
+    }
+
+    fn knowledge_entries(&self) -> Result<Vec<crate::KnowledgeEntry>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {KNOWLEDGE_COLUMNS} FROM by_knowledge WHERE repo = $1 ORDER BY id"
+                ),
+                &[&self.repo],
+            )
+        })?;
+        rows.iter().map(knowledge_row).collect()
+    }
+
+    fn put_knowledge(
+        &self,
+        entry: &crate::KnowledgeEntry,
+        expected: crate::KnowledgeStatus,
+    ) -> Result<bool, Error> {
+        let source = encode("knowledge source", &entry.source)?;
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE by_knowledge SET scope_path = $3, scope_kind = $4, text = $5, \
+                     source = $6, status = $7, adopted_by = $8, decided_ms = $9, note = $10 \
+                     WHERE repo = $1 AND id = $2 AND status = $11",
+                    &[
+                        &self.repo,
+                        &int(entry.id),
+                        &entry.scope.path,
+                        &entry.scope.kind.map(|k| k.as_str()),
+                        &entry.text,
+                        &source,
+                        &entry.status.as_str(),
+                        &entry.adopted_by,
+                        &entry.decided_ms.map(int),
+                        &entry.note,
+                        &expected.as_str(),
+                    ],
+                )
+                .map_err(db("knowledge"))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn remove_knowledge(&self, id: u64) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "DELETE FROM by_knowledge WHERE repo = $1 AND id = $2",
+                    &[&self.repo, &int(id)],
+                )
+                .map_err(db("knowledge"))?;
+            Ok(changed == 1)
+        })
     }
 }
