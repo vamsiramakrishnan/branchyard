@@ -492,3 +492,24 @@ See [knowledge](knowledge.md) and [plans and goals](plans-and-goals.md); each ha
 | `FleetEntry` | through `connectors` | adds `plan`, `goal_judge` |
 | `Error` | | adds `UnknownKnowledge` (`unknown_knowledge`, HTTP 404) and `NoPlan` (`no_plan`, HTTP 409) |
 | The fake ACP agent | `REPLY_FILE` | adds `REPLY_SEQUENCE <dir>`: the first file's contents, removed, for a judge answering a sequence |
+
+## Added with the harness lifecycle
+
+See [harness lifecycle](harness-lifecycle.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `by harnesses` | the profiles and whether each is on `PATH` | this machine's inventory: installed harnesses with version, login (`verified`, `likely`, `unknown`) and quota, cached a minute (`--refresh`); `--json` prints `Inventory`; the old view is `--profiles`; `--all` unchanged |
+| `by harnesses --on TARGET` | none | `ssh://[user@]host[:port]` or `recipe:NAME` (a fresh machine, destroyed after) |
+| `by harnesses --remote URL` | the server's profiles | its live workers and their inventories (`GET /v1/inventory`; the profiles are `--profiles`) |
+| `by harnesses install\|update ID` | none | the catalog's command, pinned where it can be (`--version`), under `[harnesses] install` and `allow` (`--yes` answers an ask), verified by detecting again; here or `--on ssh://`; refused on a recipe and with `--remote` |
+| `by harnesses login ID` | none | the harness's own login with the terminal (also over `ssh -t`); without one, what to run and where; `--api-key` stores a key 0600 and names it in `[secrets]` |
+| `by harnesses log` | none | every install, update and login, from `harness-events.jsonl` beside the user configuration |
+| `[harnesses]` in `branchyard.toml` | none | `install` (`never`, `ask`, `auto`) and `allow`; a repository may only set `install = "never"`; in `schema/branchyard.config.json` |
+| SDK | none | `branchyard::inventory`: `Inventory`, `HarnessState`, `Login`, `LoginState`, `Evidence`, `Quota`, `DetectOptions`, `detect_local`, `detect_with`, `script`, `parse`, `InventoryCache`, `InstallPolicy`, `InstallMode`, `Permission`, `InstallPlan`, `plan`, `install`, `Installed`, `HarnessLog`, `HarnessEvent`, `HarnessGate`, `LocalGate`, `harness_of`, `key_variables` |
+| `RouteOptions` | `kind`, `seed`, `attempts`, `failover`, `excluded` | adds `harnesses`: the machine's inventory, consulted for candidates run by name |
+| Worker labels | `a-z`, `0-9`, `.`, `_`, `-` | also `:`; a worker adds `harness:<id>` for each harness its inventory says can run |
+| `workers` / `by_workers` | id, host, pid, labels, repos, seen | adds `inventory` (JSON); `OperationStore::beat` takes it; `LiveWorker::inventory` |
+| Task admission on a server | `requires` as requested | adds `harness:<id>` when the task runs harnesses by name and a live worker advertises them ready |
+| Server API and client | `GET /v1/harnesses` | adds `GET /v1/inventory` (`InventoryReport`, `WorkerInventory`), `Client::inventory`; in `schema/contract.json` |
+| Server configuration | `labels` | adds `inventory` (default true) and `--no-inventory`; `Config::inventory_source`, `ops::InventorySource`, `ops::set_inventory_source` |
