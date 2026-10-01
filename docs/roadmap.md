@@ -49,3 +49,23 @@ Written 1 October 2026 from what Waves 1 to 3 left open and the parts of the stu
 | Egress policy | A branch reaches only the hosts its policy allows, through an allowlisting proxy; enforced on Linux in a network namespace where the host allows one, and said plainly where it cannot be; a connector grant adds the gateway; named permission presets replace hand-written rules for the common cases | Codex cloud's and Claude Code's network allowlists |
 | Warm pools | A configured number of prepared worktrees, and sandboxes where the provider can, kept ready per environment and labels, so a task starts without waiting for setup; refilled in the background, measured in `by stats` and `/metrics` | Devin's and Codex's warm starts, Cursor's background agents |
 | Closing gaps | `--provider recipe:NAME` runs a branch on a recipe's machine end to end; email triggers from signed inbound-mail webhooks (Postmark, Mailgun, SendGrid) with a sender allowlist | Manus's mail-in tasks; Orca's recipes |
+
+## Direction: Cowork parity
+
+Set 1 October 2026: Branchyard aims at the capabilities of Claude Cowork, for any harness, locally or on a server. [Cowork parity](cowork-parity.md) compares the two and assigns each gap to a wave. Two rules shape the waves that follow:
+
+- **Ambient, not configured.** Anything Branchyard starts or depends on (a gateway, a proxy, a server, a worker, a sandbox, a recipe machine, an MCP server) announces itself in a registry with its capabilities and a lease, and is found by what it can do, not by a URL in a file. Catalogs (connectors, harnesses, models) come from live registries, pinned and verified, rather than copies.
+- **Harnesses managed like dependencies.** Every machine that runs work reports which harnesses are installed, at which version, and whether each is logged in. Branchyard installs or updates a harness when policy allows, walks the person through logging in once, and routes and splits tasks only to where a harness can actually run, locally or remotely.
+
+## Wave 5
+
+| Track | What it gives you | Learned from |
+|---|---|---|
+| Ambient registry | Services Branchyard starts or uses register with capabilities, health and a lease, and are discovered by capability; `/.well-known/branchyard` describes a server's services; leases expire, so what a crashed owner left is reclaimed; connector and harness catalogs refresh from live registries (the official MCP registry, upstream harness releases) with pins and checksums | aiplex's catalog federation; service registries |
+| Harness lifecycle | `by harnesses` detects what is installed on each machine (local, ssh, worker, recipe, sandbox image): path, version, login state, quota; `install`, `update` and `login` through each harness's own command, verified, under policy; workers advertise the inventory and the router uses it, installing on demand where allowed | Orca's and emdash's agent registries; Codex and Claude Code login flows |
+| Model gateway and one scope | Harness model traffic goes through a Branchyard model gateway on the turn's token: weighted backends, fallbacks, budgets, rate limits and a usage record per call; keys never enter a sandbox; one token carries connector, model, network and delegation scopes, effective access being the seat's ceiling, the person's ceiling and what the person approved | aiplex's LLMPlex and three-dimensional permissions |
+| Approvals and an effect ledger | Per-tool Allow, Ask or Block, answered from `by watch`, the companion or the server; deletion always asks; an administrator can lock policy; side effects outside the worktree (connector writes, pushes) are recorded as begun, confirmed, failed or unknown, so a crash leads to reconciliation, not a blind retry | Cowork's permission modes; aiplex's run ledger |
+
+## Wave 6
+
+Folders that are not repositories; document skills (Word, Excel, PowerPoint, PDF) for any harness; a plugin format and registry; a browser in the sandbox; screening untrusted content for prompt injection; new tasks from the phone; results published as live pages. See [Cowork parity](cowork-parity.md).
