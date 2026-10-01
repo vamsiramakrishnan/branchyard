@@ -136,7 +136,7 @@ A routed branch fails over when its turn ended `failed` **because of its harness
 | Fails over | Never fails over |
 |---|---|
 | The harness could not start or was unavailable (`could not start`, `not found on PATH`) | A check that failed (checks run at merge or judging, not in a turn) |
-| It exited, or the connection closed mid-turn (`the harness exited`, `the turn's outcome is unknown`) | A limit (`budget_exceeded`), a cancel or interrupt (`interrupted`) |
+| It exited, or the connection closed (`the harness exited`, `the turn's outcome is unknown`, a broken pipe writing to it) | A limit (`budget_exceeded`), a cancel or interrupt (`interrupted`) |
 | It did not complete its handshake (`open failed`, `timed out`) | The model refusing, provisioning or a driver refusing the task's configuration, workspace setup, a lost lease, a denial |
 | Rate limits and overload (`429`, `rate limit`, `overloaded`, `quota`) and authentication (`401`, `403`, `invalid api key`, `not logged in`), as the driver reports them | Anything else |
 
