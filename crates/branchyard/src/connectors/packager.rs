@@ -32,9 +32,11 @@ pub trait Packager: Send + Sync + std::fmt::Debug {
     fn index(&self, grants: &Path, bundles: &[Bundle], out: &Path) -> Result<(), String>;
 }
 
-/// Anvil's CLI: `anvil package harness <bundle> --out <dir> --connector <id>` and
-/// `anvil connectors index --grants <file> --out INDEX.md <bundle...>`,
-/// over the bundles found under `root`.
+/// Anvil's CLI: `anvil package harness <bundle> --out <dir> --workspace <root>
+/// --connector <id>` and `anvil connectors index --grants <file> --out
+/// INDEX.md --workspace <root> <bundle...>`, over the bundles found under
+/// `root`. `--workspace` makes Anvil name each bundle by its fleet id (its
+/// folded path under `root`), so the index matches grants for nested bundles.
 #[derive(Clone, Debug)]
 pub struct AnvilPackager {
     /// The command and any leading arguments, such as `["anvil"]` or
@@ -80,6 +82,7 @@ impl Packager for AnvilPackager {
 
     fn package(&self, bundle: &Bundle, out: &Path) -> Result<(), String> {
         let (path, out) = (bundle.path.display().to_string(), out.display().to_string());
+        let root = self.root.display().to_string();
         // The connector id is the folded bundle path, as the fleet serves it.
         self.run(&[
             "package",
@@ -87,6 +90,8 @@ impl Packager for AnvilPackager {
             &path,
             "--out",
             &out,
+            "--workspace",
+            &root,
             "--connector",
             &bundle.id,
         ])
@@ -98,7 +103,17 @@ impl Packager for AnvilPackager {
             .iter()
             .map(|b| b.path.display().to_string())
             .collect();
-        let mut args = vec!["connectors", "index", "--grants", &grants, "--out", &out];
+        let root = self.root.display().to_string();
+        let mut args = vec![
+            "connectors",
+            "index",
+            "--grants",
+            &grants,
+            "--out",
+            &out,
+            "--workspace",
+            &root,
+        ];
         args.extend(paths.iter().map(String::as_str));
         self.run(&args)
     }

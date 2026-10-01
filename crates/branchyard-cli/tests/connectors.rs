@@ -49,8 +49,9 @@ elif args[:1] == ["connect"]:
         claims = claims_of(f.read())
     account = flag("--account") if "--account" in args else "default"
     assert os.path.isdir(args[1]), "the workspace comes first"
-    print("connect %s for %s account %s via %s grants %s" % (
-        args[2], claims["sub"], account, os.environ["ANVIL_GATEWAY_URL"], claims["by_grants"]))
+    print("connect %s for %s account %s via %s grants %s purpose %s" % (
+        args[2], claims["sub"], account, os.environ["ANVIL_GATEWAY_URL"], claims["by_grants"],
+        claims.get("by_purpose")))
 elif args[:2] == ["serve", "mcp"]:
     for var in ["ANVIL_INBOUND_AUTH_MODE", "ANVIL_INBOUND_ISSUER", "ANVIL_INBOUND_AUDIENCE",
                 "ANVIL_INBOUND_JWKS_URI", "ANVIL_AUDIT_FILE", "ANVIL_VAULT_KEY_FILE"]:
@@ -373,6 +374,8 @@ fn the_gateway_runs_supervised_a_granted_turn_calls_it_and_by_log_shows_the_call
     assert!(said.contains("connect github for local:"), "{said}");
     assert!(said.contains("account work"), "{said}");
     assert!(said.contains("grants []"), "{said}");
+    // A connect token, the only one the gateway's connect routes take.
+    assert!(said.contains("purpose connect"), "{said}");
     assert!(!gateway_dir.read_dir().unwrap().any(|e| e
         .unwrap()
         .file_name()

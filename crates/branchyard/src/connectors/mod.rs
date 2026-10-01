@@ -49,6 +49,9 @@ pub const HOME_DIR: &str = ".branchyard/connectors";
 pub const TOKEN_FILE: &str = ".branchyard/gateway-token";
 /// The longest a token lives, whatever the turn's deadline.
 pub const MAX_TTL: Duration = Duration::from_secs(3600);
+/// The longest a connect token lives: ten minutes, which the gateway
+/// enforces too.
+pub const CONNECT_TTL: Duration = Duration::from_secs(600);
 /// A local yard's gateway files, under `.branchyard/`.
 pub const GATEWAY_DIR: &str = "gateway";
 
@@ -123,24 +126,33 @@ impl Gateway {
         }
     }
 
-    /// A token for the person themselves, with no branch and no grant, for
-    /// `anvil connect` (which asks the gateway for an authorization URL for
-    /// `sub`). Lives `ttl`, at most [`MAX_TTL`].
-    pub fn person_token(&self, subject: Option<&str>, ttl: Duration) -> Result<String, Error> {
+    /// The person's connect token, for `anvil connect` (which asks the
+    /// gateway for an authorization URL for `sub`, or stores a key): no
+    /// branch, no turn, no grant, and `by_purpose: "connect"`. The gateway's
+    /// connect routes take only this token, so a harness, which holds a
+    /// turn's token, can never start a connection or replace the person's
+    /// credential; and the gateway refuses it for tools. Lives `ttl`, at most
+    /// [`CONNECT_TTL`]. Never give it to a harness.
+    pub fn connect_token(&self, subject: Option<&str>, ttl: Duration) -> Result<String, Error> {
+        self.keys()?.sign(&self.connect_claims(subject, ttl)?)
+    }
+
+    fn connect_claims(&self, subject: Option<&str>, ttl: Duration) -> Result<Claims, Error> {
         let now = now_secs();
-        let claims = Claims {
+        let ttl = ttl.min(self.max_ttl).min(CONNECT_TTL);
+        Ok(Claims {
             iss: self.issuer.clone(),
             aud: self.url.clone(),
             sub: subject.unwrap_or(&self.subject).to_owned(),
             iat: now,
-            exp: now + ttl.min(self.max_ttl).min(MAX_TTL).as_secs().max(1),
+            exp: now + ttl.as_secs().max(1),
             jti: keys::random_id()?,
             by_tenant: self.tenant.clone(),
             by_branch: String::new(),
             by_turn: String::new(),
             by_grants: Vec::new(),
-        };
-        self.keys()?.sign(&claims)
+            by_purpose: Some(keys::CONNECT_PURPOSE.to_owned()),
+        })
     }
 
     /// A token for the person themselves with `grants` and no branch, for a
@@ -163,6 +175,7 @@ impl Gateway {
             by_branch: String::new(),
             by_turn: String::new(),
             by_grants: grants,
+            by_purpose: None,
         };
         self.keys()?.sign(&claims)
     }
@@ -413,6 +426,7 @@ pub(crate) fn prepare(
         by_branch: gateway.by_branch(&record.info.name),
         by_turn: (record.info.turns + 1).to_string(),
         by_grants: grant,
+        by_purpose: None,
     };
     let token = gateway
         .keys()

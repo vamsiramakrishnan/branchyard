@@ -428,7 +428,7 @@ Quota meters, more trackers, listening ports and adopting sessions ([usage](usag
 | `PullRequestActivity` | ... `threads_resolved` | also `started` (a `PullRequestRef`) |
 | `Activity` | ... `connector_call` | also `adopted`; `adopted` in `by log --json` |
 | `RouteOptions` | `kind`, `seed`, `attempts`, `failover` | also `excluded` |
-| `Gateway` (connectors) | `person_token` (no grant) | also `person_token_granted` |
+| `Gateway` (connectors) | `person_token` (no grant) | `connect_token` (no grant, `by_purpose: "connect"`, at most `CONNECT_TTL`, ten minutes) in its place; also `person_token_granted`. `Claims` gains `by_purpose` (omitted when absent) |
 | `branchyard.toml` | ... `[connectors]` | also `[usage]` (`guard`, `near_percent`, `skip_over`, `claude_five_hour_tokens`, `claude_weekly_tokens`, `[usage.accounts.NAME]` with `harness`, `dir`) and `[trackers.linear\|jira\|gitlab]` (`url`, `gateway_tool`); `schema/branchyard.config.json` regenerated |
 | `by workspace run` | `[BRANCH] [NAME]` | `[BRANCH] [NAME...]`; several names need `--detach`, each gets its own port, and `BRANCHYARD_BRANCH_PORT` |
 | `by watch` header and detail pane | ... | a usage summary (every minute); a `ports` line per listener (every five seconds) |
