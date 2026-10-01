@@ -113,7 +113,7 @@ h2 { font-size: 17px; margin: 20px 0 8px; }
 .s-running, .s-waiting { color: var(--info); }
 .s-ready, .s-merged { color: var(--ok); }
 .s-failed, .s-blocked { color: var(--danger); }
-.s-interrupted, .s-budget_exceeded, .s-stalled { color: var(--warn); }
+.s-interrupted, .s-budget_exceeded, .s-stalled, .s-awaiting_plan_approval { color: var(--warn); }
 .s-no_changes { color: var(--muted); }
 dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
 dl.facts dt { color: var(--muted); }

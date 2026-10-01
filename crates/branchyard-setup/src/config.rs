@@ -106,6 +106,11 @@ pub struct ProjectConfig {
     /// repository's recipe of the same name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub recipes: BTreeMap<String, RecipeConfig>,
+    /// Repository knowledge (docs/knowledge.md): whether adopted entries
+    /// are given to harnesses and within what budget, when branches are
+    /// distilled into proposals, and by which distiller.
+    #[serde(default, skip_serializing_if = "KnowledgeConfig::is_empty")]
+    pub knowledge: KnowledgeConfig,
 }
 
 /// One `[recipes.NAME]`, after Orca's `environmentRecipes` entries: shell
@@ -192,6 +197,55 @@ impl RecipeConfig {
         Ok(())
     }
 }
+
+/// `[knowledge]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeConfig {
+    /// Give matching adopted entries to each turn's harness, in its
+    /// instructions. Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<bool>,
+    /// At most about this many tokens of entries per turn. Default 1500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub budget_tokens: Option<u32>,
+    /// When a branch is distilled into proposed entries on its own: any of
+    /// `merged`, `judged_best` and `ready`. Default `["merged",
+    /// "judged_best"]`; `[]` only on `by knowledge distill`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distill_on: Option<Vec<String>>,
+    /// A harness that distills, read-only on a scratch branch, answering a
+    /// JSON list of proposals. Without one, the deterministic extractor
+    /// proposes the corrections and review comments a branch was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distiller: Option<DistillerConfig>,
+}
+
+impl KnowledgeConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == KnowledgeConfig::default()
+    }
+}
+
+/// `distiller = { harness = "claude-code", model = "small" }`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DistillerConfig {
+    /// The distiller's harness or profile ID.
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The executable and fixed arguments instead of the profile's; for
+    /// development and testing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// The values `[knowledge] distill_on` takes.
+pub const DISTILL_TRIGGERS: &[&str] = &["merged", "judged_best", "ready"];
 
 /// `[usage]`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -351,6 +405,15 @@ pub struct FleetConfig {
     /// connectors; Branchyard does not act on them yet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connectors: Vec<String>,
+    /// Plan first: a new branch of this kind starts with a read-only
+    /// planning turn and waits for `by plan approve` (docs/plans-and-goals.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
+    /// The judge of a `--goal` for this kind of task, when the command names
+    /// none: it runs read-only on a scratch branch and answers a JSON
+    /// verdict (docs/plans-and-goals.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_judge: Option<JudgeConfig>,
 }
 
 /// One candidate: `{ harness = "codex", model = "large", effort = "high" }`.
@@ -439,13 +502,15 @@ impl FleetConfig {
                 );
             }
         }
-        if let Some(judge) = &self.judge {
-            check_harness(&judge.harness).or_else(|why| fail("judge.harness", why))?;
+        for (name, judge) in [("judge", &self.judge), ("goal_judge", &self.goal_judge)] {
+            let Some(judge) = judge else { continue };
+            check_harness(&judge.harness).or_else(|why| fail(&format!("{name}.harness"), why))?;
             check_model_effort(judge.model.as_deref(), judge.effort.as_deref())
-                .or_else(|(what, why)| fail(&format!("judge.{what}"), why))?;
-            check_command(judge.command.as_deref()).or_else(|why| fail("judge.command", why))?;
+                .or_else(|(what, why)| fail(&format!("{name}.{what}"), why))?;
+            check_command(judge.command.as_deref())
+                .or_else(|why| fail(&format!("{name}.command"), why))?;
             if judge.rubric.as_deref().is_some_and(|r| r.trim().is_empty()) {
-                return fail("judge.rubric", "must not be empty".into());
+                return fail(&format!("{name}.rubric"), "must not be empty".into());
             }
         }
         if self
@@ -1250,6 +1315,25 @@ impl ProjectConfig {
             if let Some(workspace) = &project.workspace {
                 workspace.check(&format!("projects.{root:?}.workspace"))?;
             }
+        }
+        if self.knowledge.budget_tokens == Some(0) {
+            return fail("knowledge.budget_tokens", "must be at least 1".into());
+        }
+        for trigger in self.knowledge.distill_on.iter().flatten() {
+            if !DISTILL_TRIGGERS.contains(&trigger.as_str()) {
+                return fail(
+                    "knowledge.distill_on",
+                    format!("{trigger:?} is not one of {}", DISTILL_TRIGGERS.join(", ")),
+                );
+            }
+        }
+        if let Some(distiller) = &self.knowledge.distiller {
+            check_harness(&distiller.harness)
+                .or_else(|why| fail("knowledge.distiller.harness", why))?;
+            check_model_effort(distiller.model.as_deref(), distiller.effort.as_deref())
+                .or_else(|(what, why)| fail(&format!("knowledge.distiller.{what}"), why))?;
+            check_command(distiller.command.as_deref())
+                .or_else(|why| fail("knowledge.distiller.command", why))?;
         }
         for (kind, entry) in &self.fleet {
             if !FLEET_KEYS.contains(&kind.as_str()) {

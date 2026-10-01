@@ -163,6 +163,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             secrets,
             unused_secrets,
             connectors,
+            knowledge,
         } => json!({
             "activity": "provisioned",
             "auth": auth,
@@ -171,6 +172,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "secrets": secrets,
             "unused_secrets": unused_secrets,
             "connectors": connectors,
+            "knowledge": knowledge,
         }),
         Activity::Steered { id, by, text } => json!({
             "activity": "steered",
@@ -244,6 +246,21 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
         Activity::Fleet(activity) => json!({
             "activity": "fleet",
             "fleet": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Knowledge(activity) => json!({
+            "activity": "knowledge",
+            "knowledge": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Plan(activity) => json!({
+            "activity": "plan",
+            "plan": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Goal(activity) => json!({
+            "activity": "goal",
+            "goal": activity,
             "text": activity.describe(),
         }),
     };

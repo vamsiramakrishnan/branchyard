@@ -160,6 +160,8 @@ Triggers ([triggers](docs/triggers.md)): `by trigger add NAME (--cron EXPR [--tz
 
 Routing and judging ([fleet](docs/fleet.md)): `by run|fan [--auto] [--kind KIND] [--seed N]`, `by fan --auto [--attempts N] [--judge]`, `by judge <FAN|BRANCH...> [--harness ID [--command CMD] | --deterministic] [--rubric TEXT] [--pick [--into T] [--discard-others] [--yes]] [--json]`, `by fleet stats [--kind KIND]|route PROMPT [--kind KIND] [--attempts N] [--seed N] [--json]`; local mode only.
 
+Plans and goals ([plans and goals](docs/plans-and-goals.md)): `by run|fan --plan` (and `[fleet.<kind>] plan = true`), `by plan show|approve [--edit [--editor E] | --file FILE]|reject [--reason TEXT] [--replan] BRANCH [--json]`, `by spawn --plan`; `by run|fan --goal TEXT [--goal-rounds N] [--goal-judge ID [--goal-judge-command CMD]]` (and `[fleet.<kind>] goal_judge`). Repository knowledge ([knowledge](docs/knowledge.md)): `by knowledge list [--status S|--all]|show ID|review|adopt ID...|reject ID... [--reason T]|edit ID [--text T] [--path GLOB] [--kind K]|add TEXT [--path GLOB] [--kind K] [--propose]|rm ID|distill BRANCH [--harness ID [--command CMD]|--deterministic]|export [--out FILE]`, each with `--json`, and `[knowledge]` in `branchyard.toml`. All work locally and with `--remote`.
+
 Queue and observability ([observability](docs/observability.md)): `--priority N` (-10 to 10) on `run`, `fan`, `send`, `fork`, `reincarnate` and `spawn` with `--remote`; `by stats [--json]` summarizes branches, turn outcomes and durations, tool and connector calls and cost from the store, and with `--remote` the server's queue by priority.
 
 Connectors ([connectors](docs/connectors.md)): `--connector CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]]` (repeatable) on `run`, `fan`, `send`, `fork` and `spawn`; `by gateway start [--foreground]|stop|status|rotate-key [--keep N]|jwks [--json]`; `by connect CONNECTOR [--account NAME] [--api-key-stdin] [--open]`.
@@ -245,6 +247,18 @@ by run "fix the flaky parser test" --auto --seed 7
 by fan "speed up the parser" --auto --attempts 3 --judge
 by judge speed-up-the-parser --pick --discard-others --yes
 by fleet stats --kind bugfix
+```
+
+## Plans, goals and repository knowledge
+
+`by run --plan` runs the first turn read-only (every write or command is denied through the permission policy, whatever `--yes` says) and the branch waits, `awaiting_plan_approval`, until you `by plan approve` it (as proposed, or `--edit` it in your editor first) or `by plan reject` it (`--replan` plans again with your reason); a delegated child's plan goes to its parent's inbox for approval. `--goal "TEXT"` makes a branch's `ready` conditional: its check must pass on its candidate and its diff must change something, then an optional judge harness must find evidence the goal is met (a strict JSON verdict on a read-only scratch branch); unmet, it gets follow-up turns listing what is missing, within `--goal-rounds` and its budget. Repository knowledge is rules a person adopted: a branch's end (merged, or judged best) proposes entries from the corrections you sent it and the review comments it addressed, `by knowledge review` adopts or rejects each, and adopted entries matching a branch are put into its harness's instructions every turn, most specific first, within a token budget, with their ids in the `provisioned` event. Tested hermetically; no model has planned, judged a goal or followed an entry yet. See [plans and goals](docs/plans-and-goals.md) and [knowledge](docs/knowledge.md).
+
+```sh
+by run "migrate the config loader" --plan --check "cargo test"
+by plan approve migrate-the-config-loader --edit
+by run "speed up the parser" --goal "the 1 MB fixture parses in under 50 ms" --goal-judge codex
+by knowledge review
+by knowledge export --out AGENTS.md
 ```
 
 ## Triggers and schedules
@@ -416,6 +430,8 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Distribution](docs/distribution.md): prebuilt binaries, `install.sh` and a Homebrew formula; installing the skill for Claude Code and Codex, and reproducible plugin/SDK archives.
 - [Remote over ssh](docs/remote-ssh.md) and [environment recipes](docs/recipes.md).
 - [Web companion](docs/companion.md): the page at `/app/`, pairing links, its security model and Web Push.
+- [Repository knowledge](docs/knowledge.md): entries proposed from branches, adopted after review, given to matching harnesses.
+- [Plans and goals](docs/plans-and-goals.md): read-only plans approved before execution, and goals a judge verifies.
 - [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.
 - [Contributing](CONTRIBUTING.md): implementation boundaries and validation workflow.
 

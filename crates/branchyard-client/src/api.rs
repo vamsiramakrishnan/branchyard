@@ -208,6 +208,28 @@ pub struct TaskRequest {
     /// `docs/server.md#scheduling`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+    /// Plan first, like `by run --plan`: the first turn runs read-only and
+    /// the branch waits for `POST .../plan/approve`. See
+    /// `docs/plans-and-goals.md`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plan: bool,
+    /// A goal a judge verifies, like `by run --goal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalRequest>,
+}
+
+/// A task's goal: its text, the follow-up turns it may get, and the judge
+/// harness (one of the server's) that verifies it; without one, the
+/// branch's check and a non-empty diff decide.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalRequest {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -540,6 +562,10 @@ pub enum OperationKind {
     Integrate,
     /// A branch started with `POST .../reincarnate`.
     Reincarnate,
+    /// A plan approved with `POST .../plan/approve`, run as a turn.
+    ApprovePlan,
+    /// A plan rejected with `POST .../plan/reject`.
+    RejectPlan,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

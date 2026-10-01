@@ -152,6 +152,8 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         workspace: new.workspace.map(crate::workspace::WorkspaceState::new),
         sandbox_seed: new.seed,
         actor: new.actor,
+        plan: None,
+        goal: None,
     })
 }
 
@@ -218,6 +220,47 @@ pub(crate) fn abandon(lease: Lease, mut record: Record, why: &Error) {
     let _ = lease.finish(Some(&record), None);
 }
 
+/// Start a new top-level branch's plan and goal, as `options` ask, under
+/// its first turn's lease. A branch that cannot have them is abandoned.
+pub(crate) fn begin_new(
+    yard: &Yard,
+    record: &mut Record,
+    lease: &Lease,
+    profile: &'static Profile,
+    options: &TaskOptions,
+) -> Result<(), Error> {
+    if options.plan {
+        crate::plan::begin(yard, record, lease.fence(), profile)?;
+    }
+    if let Some(goal) = &options.goal {
+        crate::goal::begin(yard, record, lease.fence(), goal)?;
+    }
+    Ok(())
+}
+
+/// The first turn's prompt: the task, or the planning prompt around it.
+pub(crate) fn first_prompt(prompt: &str, options: &TaskOptions) -> String {
+    match options.plan {
+        true => crate::plan::planning_prompt(prompt),
+        false => prompt.to_owned(),
+    }
+}
+
+/// Refuse a plan or goal that cannot work, before anything is created.
+fn check_plan_and_goal(profile: &'static Profile, options: &TaskOptions) -> Result<(), Error> {
+    if options.plan {
+        crate::plan::check_profile(profile)?;
+    }
+    if options
+        .goal
+        .as_ref()
+        .is_some_and(|g| g.text.trim().is_empty())
+    {
+        return Err(Error::Unsupported("a goal needs text".into()));
+    }
+    Ok(())
+}
+
 pub(crate) fn isolated_home(yard: &Yard, options: &TaskOptions, name: &str) -> Option<PathBuf> {
     options.isolated.then(|| yard.store().home(name))
 }
@@ -261,6 +304,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
         options.provider.as_ref(),
         options.unapproved_tools,
     )?;
+    check_plan_and_goal(launch.profile, options)?;
     let grant = root_grant(options, new_home_private(options))?;
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     let base = resolve_base(yard, options.base.as_deref())?;
@@ -287,7 +331,12 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             actor: options.actor.clone(),
         },
     );
-    let (record, lease) = record.inspect_err(|_| store.release(&name))?;
+    let (mut record, lease) = record.inspect_err(|_| store.release(&name))?;
+    if let Err(error) = begin_new(yard, &mut record, &lease, launch.profile, options) {
+        abandon(lease, record, &error);
+        return Err(error);
+    }
+    let first = first_prompt(prompt, options);
     engine::execute(
         Turn {
             yard,
@@ -295,7 +344,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             profile: launch.profile,
             command: launch.command,
             mode: SessionMode::Fresh,
-            prompt,
+            prompt: &first,
             options,
             fork_source: None,
             note: None,
@@ -326,6 +375,9 @@ pub(crate) fn run_on(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    for launch in &launches {
+        check_plan_and_goal(launch.profile, options)?;
+    }
     let grant = root_grant(options, new_home_private(options))?;
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     let base = resolve_base(yard, options.base.as_deref())?;
@@ -337,6 +389,7 @@ pub(crate) fn run_on(
         prompt,
         harnesses,
     )?;
+    let first = first_prompt(prompt, options);
     let mut turns = Vec::new();
     for (index, (name, launch)) in reserved.iter().zip(launches).enumerate() {
         let record = create(
@@ -359,7 +412,16 @@ pub(crate) fn run_on(
                 seed: None,
                 actor: options.actor.clone(),
             },
-        );
+        )
+        .and_then(|(mut record, lease)| {
+            match begin_new(yard, &mut record, &lease, launch.profile, options) {
+                Ok(()) => Ok((record, lease)),
+                Err(error) => {
+                    abandon(lease, record, &error);
+                    Err(error)
+                }
+            }
+        });
         match record {
             Ok((record, lease)) => turns.push((
                 Turn {
@@ -368,7 +430,7 @@ pub(crate) fn run_on(
                     profile: launch.profile,
                     command: launch.command,
                     mode: SessionMode::Fresh,
-                    prompt,
+                    prompt: &first,
                     options,
                     fork_source: None,
                     note: None,
@@ -456,10 +518,14 @@ pub(crate) fn run_attempts(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    for launch in &launches {
+        check_plan_and_goal(launch.profile, options)?;
+    }
     let grant = root_grant(options, new_home_private(options))?;
     for o in &per {
         crate::provisioning::check(o.provision.as_ref(), new_home_private(o))?;
     }
+    let first = first_prompt(prompt, options);
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let labels: Vec<&str> = specs.iter().filter_map(|s| s.label.as_deref()).collect();
@@ -500,7 +566,7 @@ pub(crate) fn run_attempts(
                 actor: options.actor.clone(),
             },
         )
-        .and_then(|(record, lease)| {
+        .and_then(|(mut record, lease)| {
             for activity in &spec.events {
                 let event = crate::RecordedEvent {
                     at_ms: now_ms(),
@@ -510,6 +576,10 @@ pub(crate) fn run_attempts(
                     abandon(lease, record, &error);
                     return Err(error);
                 }
+            }
+            if let Err(error) = begin_new(yard, &mut record, &lease, launch.profile, options) {
+                abandon(lease, record, &error);
+                return Err(error);
             }
             Ok((record, lease))
         });
@@ -521,7 +591,7 @@ pub(crate) fn run_attempts(
                     profile: launch.profile,
                     command: launch.command,
                     mode: SessionMode::Fresh,
-                    prompt,
+                    prompt: &first,
                     options: o,
                     fork_source: None,
                     note: None,
@@ -788,6 +858,18 @@ pub(crate) fn prepare_send(
     options: &TaskOptions,
     idle: bool,
 ) -> Result<Prepared, Error> {
+    prepare_send_with(yard, name, options, idle, false)
+}
+
+/// [`prepare_send`]; `plan` also takes a branch awaiting plan approval, as
+/// an approval or a re-plan does (`crate::plan`). A plain send refuses it.
+pub(crate) fn prepare_send_with(
+    yard: &Yard,
+    name: &str,
+    options: &TaskOptions,
+    idle: bool,
+    plan: bool,
+) -> Result<Prepared, Error> {
     let store = yard.store();
     recover::stale(yard, name)?;
     let mut record = store.read(name)?;
@@ -809,6 +891,12 @@ pub(crate) fn prepare_send(
             return Err(Error::Denied(format!(
                 "{name} never started and is blocked: {reason}; remove or replace the \
                  dependency with a graph proposal to start it"
+            )))
+        }
+        BranchStatus::AwaitingPlanApproval if !plan => {
+            return Err(Error::Denied(format!(
+                "{name}'s plan awaits approval; approve it (by plan approve {name}) or reject \
+                 it (by plan reject {name} [--replan]) before sending it anything"
             )))
         }
         _ => {}

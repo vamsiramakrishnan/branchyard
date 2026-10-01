@@ -17,6 +17,8 @@
 | [Sandbox snapshots](sandbox-snapshots.md) | How does a branch keep its sandbox paused between turns, take a provider snapshot with each checkpoint, and fork, rewind, delegate and fan from it, with git and setup as the fallback? |
 | [Agent Substrate](substrate.md) | How does Branchyard run harnesses in Agent Substrate actors: the bridge and its protocol, per-attempt credentials, git transfer, and what is still unqualified? |
 | [Fleet: routing, judging and failover](fleet.md) | How does `by run` pick a harness, model and effort for each kind of task and learn from outcomes, how does `by judge` score a fan's attempts and propose one, and when does a failed harness fail over to the next? |
+| [Repository knowledge](knowledge.md) | How does Branchyard propose rules from how branches went, how do I review and adopt them, and how are adopted ones given to each matching harness within a budget and traced? |
+| [Plans and goals](plans-and-goals.md) | How does a branch plan read-only and wait for my approval, edits or rejection (or its parent's), and how does a goal get verified by a judge, with follow-up turns until it is met? |
 | [Checkpoints, rewind, try and compare](checkpoints.md) | How do I fork or rewind a branch to any turn, try a branch in my own checkout and take it back out exactly, and compare attempts and pick one? |
 | [Durable execution](durability.md) | What survives a crash, how leases, journaled steps, cancellation and recovery work, what is never replayed, and how the store maps onto PostgreSQL? |
 | [Pull requests](pull-requests.md) | How do I start a branch from a GitHub, Linear, Jira or GitLab issue or a pull request's head, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |

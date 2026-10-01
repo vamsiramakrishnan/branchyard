@@ -474,3 +474,21 @@ Tasks started on a schedule or by a signed webhook; see [triggers](triggers.md).
 | `[recipes.NAME]` in `branchyard.toml` and the user file | none | `create`, `suspend`, `resume`, `destroy`, `doctor`, `description`, `timeout_seconds`; in `schema/branchyard.config.json` |
 | Trust file | `[workspace]` digests by repository root | also recipe digests, keyed `<root>#recipe:<name>` |
 | Releases | none | `release.yml` on a `v*` tag: static Linux and macOS archives, `SHA256SUMS`, attestations, a draft release, the image with harnesses; `install.sh`; a Homebrew template ([distribution](distribution.md#prebuilt-binaries)) |
+
+## Added with knowledge, plans and goals
+
+See [knowledge](knowledge.md) and [plans and goals](plans-and-goals.md); each has its own surface table.
+
+| Surface | Before | Now |
+|---|---|---|
+| Repository knowledge | none | `Yard::knowledge`, `knowledge_entry`, `add_knowledge`, `adopt_knowledge`, `reject_knowledge`, `edit_knowledge`, `remove_knowledge`, `distill`, `use_knowledge` (`KnowledgeEntry`, `KnowledgeScope`, `KnowledgeSource`, `KnowledgeStatus`, `KnowledgeSettings`, `DistillTrigger`, `Distilled`, `export_knowledge`, `parse_distilled`); `by knowledge list\|show\|review\|adopt\|reject\|edit\|add\|rm\|distill\|export`, locally and with `--remote` (a server distills with the extractor only); `/v1/repos/{repo}/knowledge…` and `…/branches/{b}/distill`; the client's `knowledge_api`; no delegation operation |
+| `[knowledge]` in `branchyard.toml` | none | `provision`, `budget_tokens`, `distill_on`, `distiller`; checked strictly; in `schema/branchyard.config.json` |
+| `Activity::Provisioned` | `auth`, `files`, `env`, `secrets`, `unused_secrets`, `connectors` | adds `knowledge`, the entry ids given (left out when none); `by log` prints `knowledge #3, #1` |
+| `Activity::Knowledge`, `Activity::Plan`, `Activity::Goal` | none | `knowledge`, `plan` and `goal` in `by log --json`, a line in `by log`; in `schema/contract.json` |
+| `BranchStatus::AwaitingPlanApproval` (`awaiting_plan_approval`) | none | a branch whose plan waits; `by ls`/`show` say `awaiting plan approval`, `by watch` shows `?`; a plain send is refused (`denied`) until it is decided; notifications ask for you |
+| Plan first | none | `TaskOptions::plan`, `TaskBuilder::plan`, `Spawn::plan`; `by run\|fan\|spawn --plan`, `[fleet.<kind>] plan`; `plan` in a task request and the MCP `spawn` tool |
+| Plan decisions | none | `Yard::plan`, `approve_plan`, `reject_plan`, `plan_from_events`; `by plan show\|approve [--edit\|--file]\|reject [--reason] [--replan]`, locally, remotely and in a harness; `a`, `e`, `X` in `by watch`; `…/plan`, `…/plan/approve`, `…/plan/reject` (operations `approve_plan`, `reject_plan`); `Delegate::approve_plan`, `reject_plan`, the MCP `approve_plan`, `reject_plan` tools, `branchyard.approve_plan`, `reject_plan` |
+| Goals | none | `TaskOptions::goal` (`Goal`, `GoalVerdict`, `parse_goal_verdict`), `TaskBuilder::goal`, `Yard::goal`, `goal_from_events`; `by run\|fan --goal [--goal-rounds N] [--goal-judge ID [--goal-judge-command CMD]]`, `[fleet.<kind>] goal_judge`; `goal` in a task request (`GoalRequest`); `by show` adds `plan` and `goal` |
+| `FleetEntry` | through `connectors` | adds `plan`, `goal_judge` |
+| `Error` | | adds `UnknownKnowledge` (`unknown_knowledge`, HTTP 404) and `NoPlan` (`no_plan`, HTTP 409) |
+| The fake ACP agent | `REPLY_FILE` | adds `REPLY_SEQUENCE <dir>`: the first file's contents, removed, for a judge answering a sequence |

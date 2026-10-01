@@ -67,6 +67,8 @@ impl Judge for HarnessJudge {
             delegation: None,
             seats: None,
             workspace: None,
+            plan: false,
+            goal: None,
             ..self.options.clone()
         };
         let stem = format!("judge {}", candidates.first().map_or("", String::as_str));
@@ -206,6 +208,7 @@ pub fn parse_verdict(text: &str, candidates: &[String]) -> Result<Verdict, Strin
 }
 
 /// Who decided a judgement.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum JudgedBy {
@@ -503,6 +506,10 @@ pub(crate) fn judge(
     };
     if options.record {
         record(yard, &judgement)?;
+        // The pick may teach the repository something, as proposals.
+        if let Some(pick) = &judgement.pick {
+            crate::knowledge::on_end(yard, pick, crate::knowledge::DistillTrigger::JudgedBest);
+        }
     }
     Ok(judgement)
 }

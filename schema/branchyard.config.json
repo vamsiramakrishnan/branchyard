@@ -95,6 +95,10 @@
         "$ref": "#/$defs/RecipeConfig"
       },
       "description": "Environment recipes (docs/recipes.md): `[recipes.NAME]`, scripts\nthat create, suspend, resume and destroy a machine and print how to\nreach it. A repository's recipes run only once you trust them (`by\nrecipe trust NAME`); the user file's need no trust, and replace a\nrepository's recipe of the same name."
+    },
+    "knowledge": {
+      "$ref": "#/$defs/KnowledgeConfig",
+      "description": "Repository knowledge (docs/knowledge.md): whether adopted entries\nare given to harnesses and within what budget, when branches are\ndistilled into proposals, and by which distiller."
     }
   },
   "title": "Branchyard configuration",
@@ -600,6 +604,24 @@
             "type": "string"
           },
           "description": "Connector names, recorded on routed branches for tools that grant\nconnectors; Branchyard does not act on them yet."
+        },
+        "plan": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Plan first: a new branch of this kind starts with a read-only\nplanning turn and waits for `by plan approve` (docs/plans-and-goals.md)."
+        },
+        "goal_judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The judge of a `--goal` for this kind of task, when the command names\nnone: it runs read-only on a scratch branch and answers a JSON\nverdict (docs/plans-and-goals.md)."
         }
       },
       "required": [
@@ -954,6 +976,83 @@
         "create"
       ],
       "description": "One `[recipes.NAME]`, after Orca's `environmentRecipes` entries: shell\ncommands run in the repository root. `create` and `resume` print one\nJSON object saying how to reach the machine; `suspend`, `resume` and\n`destroy` get the machine's record on stdin."
+    },
+    "KnowledgeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provision": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Give matching adopted entries to each turn's harness, in its\ninstructions. Default true."
+        },
+        "budget_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "At most about this many tokens of entries per turn. Default 1500."
+        },
+        "distill_on": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "When a branch is distilled into proposed entries on its own: any of\n`merged`, `judged_best` and `ready`. Default `[\"merged\",\n\"judged_best\"]`; `[]` only on `by knowledge distill`."
+        },
+        "distiller": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistillerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A harness that distills, read-only on a scratch branch, answering a\nJSON list of proposals. Without one, the deterministic extractor\nproposes the corrections and review comments a branch was sent."
+        }
+      },
+      "description": "`[knowledge]`."
+    },
+    "DistillerConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "The distiller's harness or profile ID."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The executable and fixed arguments instead of the profile's; for\ndevelopment and testing."
+        }
+      },
+      "required": [
+        "harness"
+      ],
+      "description": "`distiller = { harness = \"claude-code\", model = \"small\" }`."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

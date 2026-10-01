@@ -105,6 +105,8 @@ pub(crate) struct Hub {
     pub sandbox_provider: Mutex<Option<Arc<dyn branchyard_sandbox::SandboxProvider>>>,
     /// Set by [`crate::Yard::use_connectors`].
     pub connectors: Mutex<Option<Arc<crate::connectors::Gateway>>>,
+    /// Set by [`crate::Yard::use_knowledge`].
+    pub knowledge: Mutex<Option<Arc<crate::KnowledgeSettings>>>,
 }
 
 impl Default for Hub {
@@ -122,6 +124,7 @@ impl Default for Hub {
             scripts_denied: Default::default(),
             sandbox_provider: Default::default(),
             connectors: Default::default(),
+            knowledge: Default::default(),
         }
     }
 }

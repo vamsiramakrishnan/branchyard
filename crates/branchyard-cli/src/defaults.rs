@@ -367,6 +367,17 @@ pub fn fleet(config: &ProjectConfig) -> Result<branchyard::Fleet, String> {
                 exploration: entry.exploration.unwrap_or(branchyard::DEFAULT_EXPLORATION),
                 environment: entry.environment.clone(),
                 connectors: entry.connectors.clone(),
+                plan: entry.plan.unwrap_or(false),
+                goal_judge: match &entry.goal_judge {
+                    Some(j) => Some(branchyard::JudgeSpec {
+                        harness: j.harness.clone(),
+                        model: j.model.clone(),
+                        effort: effort(&format!("{key}.goal_judge"), &j.effort)?,
+                        command: words(&format!("{key}.goal_judge"), &j.command)?,
+                        rubric: j.rubric.clone(),
+                    }),
+                    None => None,
+                },
             },
         );
     }

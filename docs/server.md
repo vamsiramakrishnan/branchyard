@@ -248,6 +248,15 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `GET /v1/app/me` | The caller's own principal | `Me` |
 | `GET /v1/app/push`; `POST`, `DELETE /v1/app/push/subscriptions`; `POST /v1/app/push/test` | The caller's own Web Push subscriptions (`read`) | `PushInfo`, `PushResult` |
 | `GET /v1/repos/{repo}/scratch/{name}/lock` | Its current holder, if any (needs `read` on a repository the caller's tenant owns; not scoped to an acting branch) | `{"lock": ScratchLock?}` |
+| `GET /v1/repos/{repo}/branches/{b}/plan` | `b`'s plan and its phase ([plans](plans-and-goals.md)) | `PlanInfo` |
+| `POST /v1/repos/{repo}/branches/{b}/plan/approve` | Approve `b`'s plan, as proposed or `edited`, and run it as its next turn with `send`'s options; `409 no_plan` when none awaits approval | `202` operation |
+| `POST /v1/repos/{repo}/branches/{b}/plan/reject` | Reject `b`'s plan with a `reason`: it ends, or with `replan` plans again | `202` operation |
+| `GET /v1/repos/{repo}/knowledge?status=S` | The repository's [knowledge](knowledge.md) entries, or those of status `S` | `{"entries": [KnowledgeEntry]}` |
+| `POST /v1/repos/{repo}/knowledge` | Add `{text, scope?, propose?}`, adopted by the caller unless `propose` (`run`) | `KnowledgeEntry` |
+| `GET /v1/repos/{repo}/knowledge/{id}`, `DELETE …` | One entry; remove it (`run`) | `KnowledgeEntry` |
+| `POST /v1/repos/{repo}/knowledge/{id}/adopt`, `/reject` (`{reason?}`), `/edit` (`{text?, path?, kind?}`, `""` clearing) | A person's decision, as the caller (`run`) | `KnowledgeEntry` |
+| `GET /v1/repos/{repo}/knowledge/export` | The adopted entries as an `AGENTS.md`-style file | `{"markdown", "entries"}` |
+| `POST /v1/repos/{repo}/branches/{b}/distill` | Propose entries from `b` with the deterministic extractor (`run`) | `Distilled` |
 
 ### Requests
 
@@ -272,6 +281,8 @@ POST /v1/repos/app/tasks
   "unapproved_tools": false
 }
 ```
+
+A task may also carry `"plan": true` (plan first, read-only, then wait for `…/plan/approve`) and `"goal": {"text", "rounds"?, "judge"?}` (a goal a judge verifies, `judge` naming one of the server's harnesses, launched with its `harness_commands` entry); see [plans and goals](plans-and-goals.md).
 
 Only `prompt` is required. Give `harness` for one branch or `harnesses` for one branch each (`<name>-<harness>`), not both. `policy.mode` is `allow` or `deny` (the default); rules apply first, in order. There is no remote `ask`: the server has no terminal to ask on. `budget.max_seconds` applies per call, like the SDK's `max_duration`. `budget.stall_after_seconds` and `budget.stall_action` (`notify`, the default, or `interrupt`) are the SDK's `Budget::stall_after`/`stall_action` (`docs/lifecycle.md#stall-detection`); a branch's `stalled` field then reflects the same live state a local `by ls` would show. `command` is refused (`403 command_not_allowed`) unless the server allows client commands; without it, the server uses its `harness_commands` entry for the harness, else the profile's executable on its `PATH`. One task runs one command, so harnesses with different configured commands must be separate tasks.
 
@@ -300,7 +311,7 @@ Task, send, fork, reincarnate, merge, spawn and integrate are long operations. T
   "branches": ["flaky"], "cursor": 41, "created_at_ms": 1790000000000 }
 ```
 
-`kind` is `task`, `send`, `fork`, `reincarnate`, `merge`, `spawn` or `integrate`. `priority` is the priority it was admitted at, left out when 0. An operation whose request named `require_labels` carries them as `requires` (sorted, once each), and, once it has waited queued longer than `unclaimable_after` and no live worker serving its repository carries them all, `waiting` says why ([worker labels](#worker-labels)). `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
+`kind` is `task`, `send`, `fork`, `reincarnate`, `merge`, `spawn`, `integrate`, `approve_plan` or `reject_plan`. `priority` is the priority it was admitted at, left out when 0. An operation whose request named `require_labels` carries them as `requires` (sorted, once each), and, once it has waited queued longer than `unclaimable_after` and no live worker serving its repository carries them all, `waiting` says why ([worker labels](#worker-labels)). `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; and `inspection` for a spawn. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
 
 `branches` are the names planned at acceptance. `cursor` is the feed position at acceptance and `end_cursor` the position once the operation's activity was ingested: to watch one operation, stream from `cursor` until the operation finishes and the stream reaches `end_cursor`, keeping entries for its branches. That is what `by --remote … run` does.
 

@@ -377,10 +377,83 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         seats: None,
         require_labels: task.require_labels.clone(),
         priority: task.priority,
+        plan: task.plan,
+        goal: goal_request(task),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
     finish_one(env, remote, &op, task.delegate.is_some())
+}
+
+/// `--goal` and its options as the server takes them: the judge is one of
+/// the server's harnesses, with the server's command.
+fn goal_request(task: &TaskArgs) -> Option<branchyard_client::api::GoalRequest> {
+    task.goal
+        .as_ref()
+        .map(|text| branchyard_client::api::GoalRequest {
+            text: text.clone(),
+            rounds: task.goal_rounds,
+            judge: task.goal_judge.clone(),
+        })
+}
+
+/// `by plan approve` on a server: an operation running the branch's next
+/// turn with the plan, followed like a send.
+pub fn plan_approve(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    edited: Option<&str>,
+    task: &TaskArgs,
+    json: bool,
+) -> Outcome {
+    let (send, notice) = send_request(task, "plan approval")?;
+    let request = branchyard_client::knowledge_api::PlanApproveRequest {
+        edited: edited.map(str::to_owned),
+        send,
+    };
+    let op = remote.repo.approve_plan(branch, &request, &new_key())?;
+    announce(remote, notice, None);
+    plan_finish(env, remote, &op, json)
+}
+
+/// `by plan reject` on a server.
+pub fn plan_reject(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    reason: Option<&str>,
+    replan: bool,
+    task: &TaskArgs,
+    json: bool,
+) -> Outcome {
+    let (send, notice) = send_request(task, "plan rejection")?;
+    let request = branchyard_client::knowledge_api::PlanRejectRequest {
+        reason: reason.map(str::to_owned),
+        replan,
+        send,
+    };
+    let op = remote.repo.reject_plan(branch, &request, &new_key())?;
+    announce(remote, notice, None);
+    plan_finish(env, remote, &op, json)
+}
+
+fn plan_finish(env: &Env, remote: &Remote, op: &Operation, json: bool) -> Outcome {
+    if !json {
+        return finish_one(env, remote, op, false);
+    }
+    let sent = follow_result(env, remote, op).and_then(|result| {
+        result
+            .branches
+            .into_iter()
+            .next()
+            .map(|info| Sent {
+                name: info.name,
+                status: info.status,
+            })
+            .ok_or_else(|| branchyard::Error::State("the server returned no branch".into()))
+    });
+    commands::emit(true, sent, |_| String::new())
 }
 
 /// Follow an operation that runs one branch, then print its summary and
@@ -435,6 +508,8 @@ pub fn fan(
         seats: None,
         require_labels: task.require_labels.clone(),
         priority: task.priority,
+        plan: task.plan,
+        goal: goal_request(task),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -758,6 +833,8 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         seats: plan.seats.clone(),
         require_labels: Vec::new(),
         priority: None,
+        plan: false,
+        goal: None,
     };
     let op = match remote.repo.submit_task(&request, &new_key()) {
         Ok(op) => op,

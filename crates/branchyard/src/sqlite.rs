@@ -230,6 +230,18 @@ CREATE TABLE IF NOT EXISTS outcomes (
     recorded_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS outcomes_kind ON outcomes (kind, recorded_ms);
+CREATE TABLE IF NOT EXISTS knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_path TEXT,
+    scope_kind TEXT,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    adopted_by TEXT,
+    decided_ms INTEGER,
+    note TEXT
+);
 ";
 
 #[derive(Debug)]
@@ -2711,6 +2723,161 @@ impl crate::fleet::OutcomeBackend for Sqlite {
             rows.collect::<Result<Vec<_>, _>>().map_err(e)
         })?;
         rows.into_iter().map(outcome_record).collect()
+    }
+}
+
+const KNOWLEDGE_COLUMNS: &str = "id, scope_path, scope_kind, text, source, status, created_ms, \
+     adopted_by, decided_ms, note";
+
+type KnowledgeColumns = (
+    i64,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+);
+
+fn knowledge_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeColumns> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+    ))
+}
+
+fn knowledge_entry(c: KnowledgeColumns) -> Result<crate::KnowledgeEntry, Error> {
+    Ok(crate::KnowledgeEntry {
+        id: uint(c.0),
+        scope: crate::KnowledgeScope {
+            path: c.1,
+            kind: c
+                .2
+                .map(|k| k.parse())
+                .transpose()
+                .map_err(|e| Error::State(format!("knowledge kind: {e}")))?,
+        },
+        text: c.3,
+        source: decode("knowledge source", &c.4)?,
+        status: c
+            .5
+            .parse()
+            .map_err(|e| Error::State(format!("knowledge status: {e}")))?,
+        created_ms: uint(c.6),
+        adopted_by: c.7,
+        decided_ms: c.8.map(uint),
+        note: c.9,
+    })
+}
+
+impl crate::knowledge::KnowledgeBackend for Sqlite {
+    fn add_knowledge(&self, entry: &crate::KnowledgeEntry) -> Result<crate::KnowledgeEntry, Error> {
+        let source = encode("knowledge source", &entry.source)?;
+        let created = match entry.created_ms {
+            0 => now_ms(),
+            at => at,
+        };
+        let id = self.tx(true, |tx| {
+            tx.execute(
+                "INSERT INTO knowledge (scope_path, scope_kind, text, source, status, created_ms, \
+                 adopted_by, decided_ms, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    entry.scope.path,
+                    entry.scope.kind.map(|k| k.as_str()),
+                    entry.text,
+                    source,
+                    entry.status.as_str(),
+                    int(created),
+                    entry.adopted_by,
+                    entry.decided_ms.map(int),
+                    entry.note
+                ],
+            )
+            .map_err(|e| db("knowledge", e))?;
+            Ok(tx.last_insert_rowid())
+        })?;
+        Ok(crate::KnowledgeEntry {
+            id: uint(id),
+            created_ms: created,
+            ..entry.clone()
+        })
+    }
+
+    fn knowledge(&self, id: u64) -> Result<Option<crate::KnowledgeEntry>, Error> {
+        let found = self.query(|conn| {
+            conn.query_row(
+                &format!("SELECT {KNOWLEDGE_COLUMNS} FROM knowledge WHERE id = ?1"),
+                params![int(id)],
+                knowledge_row,
+            )
+            .optional()
+            .map_err(|e| db("knowledge", e))
+        })?;
+        found.map(knowledge_entry).transpose()
+    }
+
+    fn knowledge_entries(&self) -> Result<Vec<crate::KnowledgeEntry>, Error> {
+        let rows = self.query(|conn| {
+            let e = |error| db("knowledge", error);
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {KNOWLEDGE_COLUMNS} FROM knowledge ORDER BY id"
+                ))
+                .map_err(e)?;
+            let rows = statement.query_map([], knowledge_row).map_err(e)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })?;
+        rows.into_iter().map(knowledge_entry).collect()
+    }
+
+    fn put_knowledge(
+        &self,
+        entry: &crate::KnowledgeEntry,
+        expected: crate::KnowledgeStatus,
+    ) -> Result<bool, Error> {
+        let source = encode("knowledge source", &entry.source)?;
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE knowledge SET scope_path = ?2, scope_kind = ?3, text = ?4, \
+                     source = ?5, status = ?6, adopted_by = ?7, decided_ms = ?8, note = ?9 \
+                     WHERE id = ?1 AND status = ?10",
+                    params![
+                        int(entry.id),
+                        entry.scope.path,
+                        entry.scope.kind.map(|k| k.as_str()),
+                        entry.text,
+                        source,
+                        entry.status.as_str(),
+                        entry.adopted_by,
+                        entry.decided_ms.map(int),
+                        entry.note,
+                        expected.as_str()
+                    ],
+                )
+                .map_err(|e| db("knowledge", e))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn remove_knowledge(&self, id: u64) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute("DELETE FROM knowledge WHERE id = ?1", params![int(id)])
+                .map_err(|e| db("knowledge", e))?;
+            Ok(changed == 1)
+        })
     }
 }
 

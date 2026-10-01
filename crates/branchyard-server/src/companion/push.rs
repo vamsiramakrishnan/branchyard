@@ -181,6 +181,10 @@ impl Tracker {
                     BranchStatus::Blocked { reason } => {
                         ("failed", format!("{branch} is blocked: {reason}"))
                     }
+                    BranchStatus::AwaitingPlanApproval => (
+                        "question",
+                        format!("{branch} has a plan waiting for your approval"),
+                    ),
                 };
                 if self.status.insert(branch.to_owned(), kind) == Some(kind) {
                     return None;
@@ -869,6 +873,13 @@ mod tests {
         let stall = Activity::Stalled { since_ms: 5 };
         assert_eq!(t.observe("app", "a", &stall).unwrap().kind, "stalled");
         assert_eq!(t.observe("app", "a", &stall), None);
+        let plan = t
+            .observe("app", "p", &status(BranchStatus::AwaitingPlanApproval))
+            .unwrap();
+        assert_eq!(
+            (plan.kind, plan.body.as_str()),
+            ("question", "p has a plan waiting for your approval")
+        );
         let message = Activity::Message(branchyard::Message {
             id: 9,
             from: "child".into(),

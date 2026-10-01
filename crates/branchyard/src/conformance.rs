@@ -9,12 +9,14 @@ use std::time::Duration;
 
 use crate::fleet::{BranchOutcome, OutcomeBackend, OutcomeRecord, TaskKind};
 use crate::graph::GraphBackend;
+use crate::knowledge::KnowledgeBackend;
 use crate::state::{
     now_ms, Acquired, Backend, Begun, Fence, Owner, PortBackend, ProcessRow, Record,
     SandboxBackend, SandboxKind, SandboxRow,
 };
 use crate::storage::StorageBackend;
 use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
+use crate::{KnowledgeEntry, KnowledgeScope, KnowledgeSource, KnowledgeStatus};
 
 const TTL: Duration = Duration::from_secs(30);
 
@@ -39,6 +41,10 @@ pub(crate) struct Opened {
     pub outcomes: Arc<dyn OutcomeBackend>,
     /// [`Opened::again`], as [`OutcomeBackend`].
     pub again_outcomes: Box<dyn Fn() -> Arc<dyn OutcomeBackend> + Send + Sync>,
+    /// The same backend, as [`KnowledgeBackend`].
+    pub knowledge: Arc<dyn KnowledgeBackend>,
+    /// [`Opened::again`], as [`KnowledgeBackend`].
+    pub again_knowledge: Box<dyn Fn() -> Arc<dyn KnowledgeBackend> + Send + Sync>,
     _cleanup: Box<dyn std::any::Any>,
 }
 
@@ -79,6 +85,10 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn OutcomeBackend>
     };
+    let open_knowledge = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn KnowledgeBackend>
+    };
     Opened {
         backend: shared.clone(),
         storage: shared.clone(),
@@ -86,6 +96,8 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         ports: shared.clone(),
         outcomes: shared.clone(),
         again_outcomes: Box::new(open_outcomes),
+        knowledge: shared.clone(),
+        again_knowledge: Box::new(open_knowledge),
         sandboxes: shared,
         again: Box::new(open),
         again_ports: Box::new(open_ports),
@@ -131,6 +143,13 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
             Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn OutcomeBackend>
         }
     };
+    let open_knowledge = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || {
+            Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn KnowledgeBackend>
+        }
+    };
     Some(Opened {
         backend: shared.clone(),
         storage: shared.clone(),
@@ -138,6 +157,8 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
         ports: shared.clone(),
         outcomes: shared.clone(),
         again_outcomes: Box::new(open_outcomes),
+        knowledge: shared.clone(),
+        again_knowledge: Box::new(open_knowledge),
         sandboxes: shared,
         again_ports: Box::new(open_ports),
         again_sandboxes: Box::new(open_sandboxes),
@@ -1618,12 +1639,116 @@ pub(crate) fn outcomes(s: Opened) {
     assert_eq!(rows.outcome("a#1").unwrap(), Some(judged));
 }
 
+pub(crate) fn knowledge(s: Opened) {
+    let store = &s.knowledge;
+    assert!(store.knowledge_entries().unwrap().is_empty());
+    let entry = |text: &str, scope: KnowledgeScope, status| KnowledgeEntry {
+        id: 0,
+        scope,
+        text: text.into(),
+        source: KnowledgeSource::Branch {
+            branch: "fix".into(),
+            turn: Some(2),
+            via: "send".into(),
+        },
+        status,
+        created_ms: 0,
+        adopted_by: None,
+        decided_ms: None,
+        note: Some("why".into()),
+    };
+    let a = store
+        .add_knowledge(&entry(
+            "Run fmt",
+            KnowledgeScope::repo(),
+            KnowledgeStatus::Proposed,
+        ))
+        .unwrap();
+    let b = store
+        .add_knowledge(&entry(
+            "Parser rule",
+            KnowledgeScope {
+                path: Some("src/parser/**".into()),
+                kind: Some(TaskKind::Bugfix),
+            },
+            KnowledgeStatus::Adopted,
+        ))
+        .unwrap();
+    assert!(a.id >= 1 && b.id > a.id, "ids grow: {} {}", a.id, b.id);
+    assert!(a.created_ms > 0);
+    // Another engine on the same store reads the same rows, by id.
+    let again = (s.again_knowledge)();
+    assert_eq!(again.knowledge(b.id).unwrap(), Some(b.clone()));
+    assert_eq!(again.knowledge_entries().unwrap(), [a.clone(), b.clone()]);
+    assert_eq!(again.knowledge(b.id + 1000).unwrap(), None);
+    // An update is a compare-and-swap on the status.
+    let adopted = KnowledgeEntry {
+        status: KnowledgeStatus::Adopted,
+        adopted_by: Some("ana".into()),
+        decided_ms: Some(5),
+        text: "Run cargo fmt".into(),
+        ..a.clone()
+    };
+    assert!(!store
+        .put_knowledge(&adopted, KnowledgeStatus::Rejected)
+        .unwrap());
+    assert!(store
+        .put_knowledge(&adopted, KnowledgeStatus::Proposed)
+        .unwrap());
+    assert!(!again
+        .put_knowledge(&adopted, KnowledgeStatus::Proposed)
+        .unwrap());
+    assert_eq!(again.knowledge(a.id).unwrap(), Some(adopted.clone()));
+    // Concurrent adds from two handles get distinct ids.
+    let handles: Vec<_> = (0..2)
+        .map(|n| {
+            let store = (s.again_knowledge)();
+            std::thread::spawn(move || {
+                (0..5)
+                    .map(|i| {
+                        store
+                            .add_knowledge(&KnowledgeEntry {
+                                id: 0,
+                                scope: KnowledgeScope::repo(),
+                                text: format!("rule {n}-{i}"),
+                                source: KnowledgeSource::Person { name: "p".into() },
+                                status: KnowledgeStatus::Proposed,
+                                created_ms: 1,
+                                adopted_by: None,
+                                decided_ms: None,
+                                note: None,
+                            })
+                            .unwrap()
+                            .id
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut ids: Vec<u64> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 10);
+    assert_eq!(store.knowledge_entries().unwrap().len(), 12);
+    // Entries outlive the branches they came from, and delete by id.
+    assert!(s.backend.reserve("fix", &owner("o")).unwrap());
+    granted(s.backend.acquire(&record("fix"), &owner("o"), TTL).unwrap());
+    s.backend.delete("fix").unwrap();
+    assert_eq!(store.knowledge(b.id).unwrap(), Some(b.clone()));
+    assert!(store.remove_knowledge(b.id).unwrap());
+    assert!(!again.remove_knowledge(b.id).unwrap());
+    assert_eq!(store.knowledge(b.id).unwrap(), None);
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
             concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes,
-            outcomes);
+            outcomes, knowledge);
     };
     ($open:expr; $($check:ident),*) => {
         $(

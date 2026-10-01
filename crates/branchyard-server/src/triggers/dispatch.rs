@@ -248,6 +248,9 @@ fn fleet_of(repo: &RepoState) -> Result<Fleet, String> {
                 exploration: entry.exploration.unwrap_or(branchyard::DEFAULT_EXPLORATION),
                 environment: entry.environment.clone(),
                 connectors: entry.connectors.clone(),
+                // A trigger's branch has no one waiting to approve a plan.
+                plan: false,
+                goal_judge: None,
             },
         );
     }

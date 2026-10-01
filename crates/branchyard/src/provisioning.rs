@@ -249,18 +249,22 @@ fn instructions(own: Option<&str>, delegation: Option<&Instructions>) -> Option<
     }
 }
 
-/// The task's own instructions with the connectors' line after them.
+/// The task's own instructions, then the repository knowledge given this
+/// turn, then the connectors' line.
 fn own_instructions(
     own: Option<&str>,
+    knowledge: Option<&str>,
     connectors: Option<&crate::connectors::Prepared>,
 ) -> Option<String> {
-    let own = own.filter(|t| !t.trim().is_empty());
-    match (own, connectors) {
-        (None, None) => None,
-        (Some(text), None) => Some(text.to_owned()),
-        (None, Some(c)) => Some(c.instruction.clone()),
-        (Some(text), Some(c)) => Some(format!("{text}\n\n{}", c.instruction)),
-    }
+    let parts: Vec<&str> = [
+        own.filter(|t| !t.trim().is_empty()),
+        knowledge.filter(|t| !t.trim().is_empty()),
+        connectors.map(|c| c.instruction.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 /// Plan and apply the turn's provisioning. A failure is the turn's failure
@@ -270,6 +274,7 @@ pub(crate) fn prepare(
     profile: &branchyard_harness::profiles::Profile,
     projection: Option<&Projection>,
     connectors: Option<&crate::connectors::Prepared>,
+    knowledge: Option<&crate::knowledge::Briefing>,
     state: &Path,
 ) -> Result<Provisioned, String> {
     let spec = record.provision.clone().unwrap_or_default();
@@ -304,7 +309,12 @@ pub(crate) fn prepare(
         remote_mcp_servers,
         mcp_secrets,
         instructions: instructions(
-            own_instructions(spec.instructions.as_deref(), connectors).as_deref(),
+            own_instructions(
+                spec.instructions.as_deref(),
+                knowledge.and_then(|k| k.text.as_deref()),
+                connectors,
+            )
+            .as_deref(),
             projection.map(|p| &p.instructions),
         ),
         model: spec.model.clone(),
@@ -338,10 +348,12 @@ pub(crate) fn prepare(
     }
     let env: Vec<String> = plan_env.iter().map(|e| e.name.clone()).collect();
     let granted = connectors.map(|c| c.connectors.clone()).unwrap_or_default();
+    let knowledge_ids = knowledge.map(|k| k.ids.clone()).unwrap_or_default();
     let activity = (plan.auth.is_some()
         || !files.is_empty()
         || !env.is_empty()
-        || !plan.unused_secrets.is_empty())
+        || !plan.unused_secrets.is_empty()
+        || !knowledge_ids.is_empty())
     .then(|| Activity::Provisioned {
         auth: plan.auth.clone(),
         files,
@@ -349,6 +361,7 @@ pub(crate) fn prepare(
         secrets: plan.secrets.clone(),
         unused_secrets: plan.unused_secrets.clone(),
         connectors: granted,
+        knowledge: knowledge_ids,
     });
     let scrub = spec
         .secrets

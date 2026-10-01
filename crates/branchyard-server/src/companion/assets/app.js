@@ -187,6 +187,7 @@
       case 'budget_exceeded': return { key: 'budget_exceeded', text: `over budget (${s.limit})` };
       case 'failed': return { key: 'failed', text: `failed: ${s.reason}` };
       case 'merged': return { key: 'merged', text: `merged into ${s.target}` };
+      case 'awaiting_plan_approval': return { key: 'awaiting_plan_approval', text: 'awaiting plan approval' };
       default: return { key: 'unknown', text: s.state || 'unknown' };
     }
   }
@@ -280,6 +281,7 @@
         interrupted: ['interrupted', `${b} was interrupted`],
         failed: ['failed', `${b} failed: ${a.status.reason}`],
         blocked: ['failed', `${b} is blocked: ${a.status.reason}`],
+        awaiting_plan_approval: ['question', `${b} has a plan waiting for your approval`],
       };
       if (!map[st]) return null;
       [kind, text] = map[st];

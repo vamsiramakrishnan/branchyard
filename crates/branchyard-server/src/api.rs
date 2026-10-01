@@ -741,7 +741,9 @@ pub fn router(app: Shared) -> Router {
         // Triggers, and their signed webhook endpoint: `crate::triggers`.
         .merge(crate::triggers::routes::router())
         // The web companion's page, pairing and push: `crate::companion`.
-        .merge(crate::companion::router());
+        .merge(crate::companion::router())
+        // Repository knowledge and plan approval: `knowledge_routes`.
+        .merge(crate::knowledge_routes::router());
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -1053,7 +1055,7 @@ async fn replay_or(
     }
 }
 
-fn idempotency(
+pub(crate) fn idempotency(
     headers: &HeaderMap,
     caller: &Caller,
     route: &str,
@@ -1108,7 +1110,7 @@ fn cursor_param(query: Option<&str>) -> Result<Option<u64>, ApiError> {
     Ok(None)
 }
 
-async fn sync_feed(feed: &Arc<Feed>) -> Result<u64, ApiError> {
+pub(crate) async fn sync_feed(feed: &Arc<Feed>) -> Result<u64, ApiError> {
     let feed = feed.clone();
     blocking(move || feed.sync())
         .await?
@@ -1231,7 +1233,11 @@ fn percent_decode(value: &str) -> String {
 }
 
 /// Admit `work` as an operation: durably enqueued before this returns.
-async fn admit(app: &Shared, new: NewOperation, work: Work) -> Result<Response, ApiError> {
+pub(crate) async fn admit(
+    app: &Shared,
+    new: NewOperation,
+    work: Work,
+) -> Result<Response, ApiError> {
     let value = work.to_value()?;
     let registry = app.registry.clone();
     let (op, replayed) = blocking(move || registry.submit(new, value)).await??;
@@ -1263,7 +1269,7 @@ pub(crate) fn admitted_priority(
 
 /// The request's W3C `traceparent` header, which its operation's trace
 /// continues; see `docs/observability.md`.
-fn incoming_trace(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn incoming_trace(headers: &HeaderMap) -> Option<String> {
     headers
         .get("traceparent")
         .and_then(|v| v.to_str().ok())
@@ -1272,7 +1278,7 @@ fn incoming_trace(headers: &HeaderMap) -> Option<String> {
 }
 
 /// The worker labels a request requires, checked, sorted and once each.
-fn required_labels(labels: &[String]) -> Result<Vec<String>, ApiError> {
+pub(crate) fn required_labels(labels: &[String]) -> Result<Vec<String>, ApiError> {
     if let Some(bad) = labels.iter().find(|l| !crate::store::valid_label(l)) {
         return Err(ApiError::bad_request(format!(
             "require_labels: {bad:?} is not a label (1 to 63 of a-z, 0-9, '.', '_' and '-', \
@@ -1286,7 +1292,7 @@ fn required_labels(labels: &[String]) -> Result<Vec<String>, ApiError> {
 }
 
 /// The operation a request's idempotency key already names, if any.
-async fn replayed(
+pub(crate) async fn replayed(
     app: &Shared,
     caller: &Caller,
     idem: Option<&Idempotency>,
@@ -1395,7 +1401,7 @@ async fn replayed_operation(
 }
 
 /// The branch's record, or `unknown_branch`.
-async fn existing(yard: &Yard, name: &str) -> Result<branchyard::Branch, ApiError> {
+pub(crate) async fn existing(yard: &Yard, name: &str) -> Result<branchyard::Branch, ApiError> {
     let (yard, name) = (yard.clone(), name.to_owned());
     blocking(move || yard.branch(&name))
         .await?
