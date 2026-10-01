@@ -213,6 +213,23 @@ CREATE TABLE IF NOT EXISTS sandboxes (
     PRIMARY KEY (branch, kind, name)
 );
 CREATE INDEX IF NOT EXISTS sandboxes_provider ON sandboxes (kind, provider, used_ms);
+CREATE TABLE IF NOT EXISTS outcomes (
+    id TEXT PRIMARY KEY,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    model TEXT,
+    effort TEXT,
+    outcome TEXT NOT NULL,
+    score REAL,
+    cost_usd REAL,
+    duration_ms INTEGER,
+    turns INTEGER NOT NULL,
+    routed INTEGER NOT NULL,
+    recorded_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS outcomes_kind ON outcomes (kind, recorded_ms);
 ";
 
 #[derive(Debug)]
@@ -2568,6 +2585,130 @@ impl StorageBackend for Sqlite {
                 })
             })
         })
+    }
+}
+
+const OUTCOME_COLUMNS: &str = "id, repository, branch, kind, harness, model, effort, outcome, \
+     score, cost_usd, duration_ms, turns, routed, recorded_ms";
+
+type OutcomeColumns = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+    i64,
+    bool,
+    i64,
+);
+
+fn outcome_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutcomeColumns> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
+        r.get(11)?,
+        r.get(12)?,
+        r.get(13)?,
+    ))
+}
+
+fn outcome_record(c: OutcomeColumns) -> Result<crate::fleet::OutcomeRecord, Error> {
+    Ok(crate::fleet::OutcomeRecord {
+        id: c.0,
+        repo: c.1,
+        branch: c.2,
+        kind: c
+            .3
+            .parse()
+            .map_err(|e| Error::State(format!("outcome kind: {e}")))?,
+        harness: c.4,
+        model: c.5,
+        effort: c.6,
+        outcome: crate::fleet::BranchOutcome::parse(&c.7)?,
+        score: c.8,
+        cost_usd: c.9,
+        duration_ms: c.10.map(uint),
+        turns: u32::try_from(c.11).unwrap_or(0),
+        routed: c.12,
+        recorded_ms: uint(c.13),
+    })
+}
+
+impl crate::fleet::OutcomeBackend for Sqlite {
+    fn put_outcome(&self, row: &crate::fleet::OutcomeRecord) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO outcomes ({OUTCOME_COLUMNS}) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+                ),
+                params![
+                    row.id,
+                    row.repo,
+                    row.branch,
+                    row.kind.as_str(),
+                    row.harness,
+                    row.model,
+                    row.effort,
+                    row.outcome.as_str(),
+                    row.score,
+                    row.cost_usd,
+                    row.duration_ms.map(int),
+                    i64::from(row.turns),
+                    row.routed,
+                    int(row.recorded_ms)
+                ],
+            )
+            .map_err(|e| db("outcome", e))?;
+            Ok(())
+        })
+    }
+
+    fn outcome(&self, id: &str) -> Result<Option<crate::fleet::OutcomeRecord>, Error> {
+        let found = self.query(|conn| {
+            conn.query_row(
+                &format!("SELECT {OUTCOME_COLUMNS} FROM outcomes WHERE id = ?1"),
+                params![id],
+                outcome_row,
+            )
+            .optional()
+            .map_err(|e| db("outcome", e))
+        })?;
+        found.map(outcome_record).transpose()
+    }
+
+    fn outcomes(
+        &self,
+        kind: Option<crate::fleet::TaskKind>,
+    ) -> Result<Vec<crate::fleet::OutcomeRecord>, Error> {
+        let rows = self.query(|conn| {
+            let e = |error| db("outcomes", error);
+            let kind = kind.map(|k| k.as_str().to_owned());
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {OUTCOME_COLUMNS} FROM outcomes WHERE ?1 IS NULL OR kind = ?1 \
+                     ORDER BY recorded_ms, id"
+                ))
+                .map_err(e)?;
+            let rows = statement.query_map(params![kind], outcome_row).map_err(e)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })?;
+        rows.into_iter().map(outcome_record).collect()
     }
 }
 

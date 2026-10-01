@@ -237,16 +237,22 @@ pub(crate) fn compare(
 
 /// The branches `by fan` started as `<name>-<harness>`, oldest first:
 /// top-level branches whose name is `name`, a hyphen and the harness or
-/// profile it runs, all with one prompt.
+/// profile it runs, all with one prompt. A routed fan's repeated harness
+/// is `<name>-<harness>-<n>`.
 pub(crate) fn fan(yard: &Yard, name: &str) -> Result<Vec<String>, Error> {
     let infos = yard.branches()?;
     let siblings: Vec<&BranchInfo> = infos
         .iter()
         .filter(|info| info.depth == 0 && info.parent.is_none())
         .filter(|info| {
-            [&info.harness, &info.profile]
-                .iter()
-                .any(|id| info.name == format!("{name}-{id}"))
+            [&info.harness, &info.profile].iter().any(|id| {
+                let stem = format!("{name}-{id}");
+                info.name == stem
+                    || info
+                        .name
+                        .strip_prefix(&format!("{stem}-"))
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            })
         })
         .collect();
     let Some(first) = siblings.first() else {

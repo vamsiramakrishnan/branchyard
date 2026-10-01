@@ -606,11 +606,15 @@ pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
     ) -> Result<Option<SandboxRow>, Error>;
 }
 
-/// [`PortBackend`] and [`SandboxBackend`] together, so a [`Store`] holds
-/// one trait object for both.
-pub(crate) trait Extras: PortBackend + SandboxBackend {}
+/// [`PortBackend`], [`SandboxBackend`] and the outcome store
+/// ([`crate::fleet::OutcomeBackend`]) together, so a [`Store`] holds one
+/// trait object for them.
+pub(crate) trait Extras:
+    PortBackend + SandboxBackend + crate::fleet::OutcomeBackend
+{
+}
 
-impl<T: PortBackend + SandboxBackend> Extras for T {}
+impl<T: PortBackend + SandboxBackend + crate::fleet::OutcomeBackend> Extras for T {}
 
 /// The port a reservation takes: from `start`, the first not in `taken`
 /// for which `usable` holds.
@@ -752,6 +756,11 @@ impl Store {
 
     /// Kept sandboxes and sandbox snapshots; see [`SandboxBackend`].
     pub fn sandboxes(&self) -> &dyn SandboxBackend {
+        self.extras.as_ref()
+    }
+
+    /// Finished branches' outcomes; see [`crate::fleet::OutcomeBackend`].
+    pub fn outcomes(&self) -> &dyn crate::fleet::OutcomeBackend {
         self.extras.as_ref()
     }
 

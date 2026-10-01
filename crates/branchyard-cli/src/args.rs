@@ -109,6 +109,44 @@ pub struct TaskArgs {
     /// `--issue URL|#N|N`: the GitHub issue that is the task; see
     /// `crate::pr::issue_task`.
     pub issue: Option<String>,
+    /// `--auto`: route through the fleet table, failing over when a harness
+    /// fails. See docs/fleet.md.
+    pub auto: bool,
+    /// Route because the configuration has a `[fleet]` and the command
+    /// names no harness (filled by `crate::defaults`); failover is then the
+    /// entry's.
+    pub implied_auto: bool,
+    /// `--kind`: the task's kind instead of the classifier's.
+    pub kind: Option<branchyard::TaskKind>,
+    /// `--seed`: a reproducible route.
+    pub seed: Option<u64>,
+    /// The configuration's `[fleet]`, when it has one (`crate::defaults`).
+    pub fleet: Option<branchyard::Fleet>,
+}
+
+/// `by fleet`'s actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum FleetAction {
+    /// Recorded outcomes per kind and candidate: runs, merged, judged best, failed, cost, time
+    Stats {
+        /// Only this kind
+        #[arg(long, value_name = "KIND", value_parser = task_kind)]
+        kind: Option<branchyard::TaskKind>,
+    },
+    /// What the router would pick for a prompt, without running anything
+    Route {
+        /// The task
+        prompt: String,
+        /// The task's kind instead of the classifier's
+        #[arg(long, value_name = "KIND", value_parser = task_kind)]
+        kind: Option<branchyard::TaskKind>,
+        /// Attempts, as for `by fan --auto`
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=16))]
+        attempts: Option<u32>,
+        /// Seed the router for a reproducible pick
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+    },
 }
 
 /// Options for `--provider microsandbox`.
@@ -363,6 +401,7 @@ harnesses run as the server's user, with no other isolation.";
 const RUN_EXAMPLES: &str = "\
 Examples:
   by run \"fix the flaky test\" --check \"cargo test -p core\" --yes
+  by run \"fix the flaky test\" --auto --kind bugfix     # routed by [fleet]
   by run \"add a --verbose flag\" -n verbose --harness codex --budget-usd 2
   by run \"port the build\" --provider microsandbox --image ghcr.io/me/claude:1 \\
       --pass-env ANTHROPIC_API_KEY
@@ -371,7 +410,33 @@ Examples:
 const FAN_EXAMPLES: &str = "\
 Examples:
   by fan \"speed up the parser\" --harness claude-code,codex,gemini-cli --check \"cargo test\"
-  by ls";
+  by fan \"fix the parser crash\" --auto --attempts 3 --judge
+  by ls
+
+--auto picks the harnesses from the [fleet] table in branchyard.toml (the
+default when there is a [fleet] and no --harness); --judge then scores the
+attempts and proposes one. See docs/fleet.md.";
+
+const JUDGE_EXAMPLES: &str = "\
+Examples:
+  by judge speed-up-the-parser                  # a fan's branches
+  by judge a b c --harness claude-code --json
+  by judge speed-up-the-parser --pick --discard-others --yes
+
+Runs each attempt's check on its exact candidate, scores it without a model
+(check, diff size, cost, time), and, with a judge harness (--harness, or the
+[fleet] entry's judge), asks it for a JSON verdict on a read-only scratch
+branch. An answer that is not a strict verdict falls back to the
+deterministic score. Local mode only. See docs/fleet.md.";
+
+const FLEET_EXAMPLES: &str = "\
+Examples:
+  by fleet stats
+  by fleet stats --kind bugfix --json
+  by fleet route \"fix the flaky parser test\" --seed 7
+
+The table lives in branchyard.toml as [fleet.<kind>] and [fleet.default];
+see docs/fleet.md.";
 
 const SEND_EXAMPLES: &str = "\
 Examples:
@@ -519,14 +584,15 @@ pub enum Command {
             hide_default_value = true
         )]
         prompt: String,
-        /// Harnesses to run on, one branch each
-        #[arg(
-            long = "harness",
-            value_name = "ID,ID,...",
-            required = true,
-            value_parser = harness_list
-        )]
-        harnesses: List,
+        /// Harnesses to run on, one branch each (default with a [fleet]: routed, as --auto)
+        #[arg(long = "harness", value_name = "ID,ID,...", value_parser = harness_list)]
+        harnesses: Option<List>,
+        /// Branches to start when routed (default: the [fleet] entry's attempts)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=16))]
+        attempts: Option<u32>,
+        /// Then judge the attempts and propose one, as `by judge` does
+        #[arg(long)]
+        judge: bool,
         #[command(flatten)]
         task: Checked<FanFlags>,
     },
@@ -663,6 +729,50 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Score attempts at one task, optionally with a judge harness, and propose or merge one
+    #[command(display_order = 109, after_help = JUDGE_EXAMPLES)]
+    Judge {
+        /// A `by fan`'s name, or the branches to judge
+        #[arg(required = true, value_name = "FAN|BRANCH")]
+        targets: Vec<String>,
+        /// Ask this harness for a verdict (default: the [fleet] entry's judge, if any)
+        #[arg(long, value_name = "ID", conflicts_with = "deterministic")]
+        harness: Option<String>,
+        /// Score without a judge harness, even when the [fleet] names one
+        #[arg(long)]
+        deterministic: bool,
+        /// Launch the judge harness with this instead of its executable, for development and
+        /// testing
+        #[arg(long, value_name = "CMD", value_parser = command_argv, requires = "harness")]
+        command: Option<Argv>,
+        /// More rubric for the judge harness, after the default
+        #[arg(long, value_name = "TEXT")]
+        rubric: Option<String>,
+        /// Merge the proposed pick, as `by compare --pick` does
+        #[arg(long)]
+        pick: bool,
+        /// Local branch to merge the pick into (default: the current branch)
+        #[arg(long, value_name = "TARGET", requires = "pick")]
+        into: Option<String>,
+        /// After the pick merges, remove the other attempts
+        #[arg(long, requires = "pick")]
+        discard_others: bool,
+        /// Do not ask before removing the others
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// The fleet table's routing: outcome statistics, or what a prompt would be routed to
+    #[command(display_order = 207, subcommand_required = true, after_help = FLEET_EXAMPLES)]
+    Fleet {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: FleetAction,
     },
     /// Push a ready branch and open or update its GitHub pull request; --watch feeds CI and
     /// reviews back
@@ -1922,9 +2032,11 @@ impl Provision {
 /// `by run`'s options.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 pub struct RunFlags {
-    /// Harness or profile ID (default: claude-code)
+    /// Harness or profile ID (default: claude-code, or routed when there is a [fleet])
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
+    #[command(flatten)]
+    route: RouteFlags,
     /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
     #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
     issue: Option<String>,
@@ -1949,11 +2061,17 @@ pub struct RunFlags {
 impl Flags for RunFlags {
     type Output = TaskArgs;
     fn check(self) -> Result<TaskArgs, String> {
+        if self.route.auto && self.harness.is_some() {
+            return Err("--auto routes through the [fleet] table; it takes no --harness".into());
+        }
         let mut task = TaskArgs {
             harness: self.harness,
             name: self.name,
             base: self.base,
             issue: self.issue,
+            auto: self.route.auto,
+            kind: self.route.kind,
+            seed: self.route.seed,
             ..TaskArgs::default()
         };
         self.limits.apply(&mut task);
@@ -1965,6 +2083,30 @@ impl Flags for RunFlags {
     }
 }
 
+/// Routing through the fleet table, for `run` and `fan`; see docs/fleet.md.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Routing")]
+pub struct RouteFlags {
+    /// Pick the harness from the [fleet] table in branchyard.toml, learning from outcomes, and
+    /// fail over to the next candidate when a harness fails
+    #[arg(long)]
+    auto: bool,
+    /// The task's kind (default: inferred from the prompt): bugfix, feature, refactor, review,
+    /// research, docs, migration, tests, other
+    #[arg(long, value_name = "KIND", value_parser = task_kind)]
+    kind: Option<branchyard::TaskKind>,
+    /// Seed the router, for a reproducible pick
+    #[arg(long, value_name = "N")]
+    seed: Option<u64>,
+}
+
+fn task_kind(text: &str) -> Result<branchyard::TaskKind, String> {
+    text.parse().map_err(|e: branchyard::Error| match e {
+        branchyard::Error::Unsupported(why) => why,
+        other => other.to_string(),
+    })
+}
+
 /// `by fan`'s options: `run`'s, with `--harness` a list, taken by the
 /// command itself.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
@@ -1972,6 +2114,8 @@ pub struct FanFlags {
     /// Branch name prefix (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
+    #[command(flatten)]
+    route: RouteFlags,
     /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
     #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
     issue: Option<String>,
@@ -1995,6 +2139,7 @@ impl Flags for FanFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: None,
+            route: self.route,
             issue: self.issue,
             name: self.name,
             base: self.base,
@@ -2063,6 +2208,7 @@ impl Flags for ForkFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: None,
+            route: RouteFlags::default(),
             issue: None,
             name: self.name,
             base: None,
@@ -2102,6 +2248,7 @@ impl Flags for ReincarnateFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: self.harness,
+            route: RouteFlags::default(),
             issue: None,
             name: self.name,
             base: None,
@@ -2776,6 +2923,11 @@ mod tests {
                 provision: None,
                 instructions: None,
                 issue: None,
+                auto: false,
+                implied_auto: false,
+                kind: None,
+                seed: None,
+                fleet: None,
             }
         );
     }
@@ -3115,18 +3267,35 @@ mod tests {
     }
 
     #[test]
-    fn fan_requires_a_harness_list() {
+    fn fan_takes_a_harness_list_or_routes() {
         let Command::Fan {
             harnesses, task, ..
         } = parse_str("fan go --harness 'claude-code, codex' --max-turns 2").unwrap()
         else {
             panic!("not fan")
         };
-        assert_eq!(*harnesses, ["claude-code", "codex"]);
+        assert_eq!(*harnesses.unwrap(), ["claude-code", "codex"]);
         assert_eq!(task.harness, None);
         assert_eq!(task.max_turns, Some(2));
-        assert_eq!(kind("fan go"), ErrorKind::MissingRequiredArgument);
-        assert!(err("fan go").contains("--harness <ID,ID,...>"));
+        // Without --harness it routes through [fleet]; the command says so
+        // when there is none.
+        let Command::Fan {
+            harnesses,
+            task,
+            attempts,
+            judge,
+            ..
+        } = parse_str("fan go --auto --kind bugfix --attempts 3 --judge --seed 9").unwrap()
+        else {
+            panic!("not fan")
+        };
+        assert_eq!(harnesses, None);
+        assert!(task.auto && judge);
+        assert_eq!(
+            (task.kind, task.seed, attempts),
+            (Some(branchyard::TaskKind::Bugfix), Some(9), Some(3))
+        );
+        assert!(err("fan go --attempts 0").contains("0"));
         assert!(err("fan go --harness codex,codex").contains("lists codex twice"));
         assert!(err("fan go --harness codex,").contains("empty entry"));
     }

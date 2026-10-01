@@ -38,6 +38,9 @@
 //! - `SH <command>`, one per line: runs the command with `sh -c` in its
 //!   working directory and environment, and replies `sh: <exit status>`
 //!   followed by the command's output, for each line.
+//! - `REPLY_FILE <path>`, on a line of its own, checked before every other
+//!   keyword: replies the file's contents verbatim (or `reply file <path>:
+//!   <error>`) and does nothing else; a judge's canned verdict.
 //! - `INSTRUCTED`: replies `instructed=<bool>`, whether a prompt this
 //!   process received began with Branchyard's instructions preamble. The
 //!   preamble is removed before any keyword is looked for.
@@ -219,6 +222,17 @@ fn main() {
                         instructed = true;
                         text = prompt.trim_start();
                     }
+                }
+                if let Some(path) = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("REPLY_FILE "))
+                {
+                    let path = path.trim();
+                    let reply_text = std::fs::read_to_string(path)
+                        .unwrap_or_else(|e| format!("reply file {path}: {e}"));
+                    chunk(&session, &reply_text);
+                    reply(&id, json!({"stopReason": "end_turn"}));
+                    continue;
                 }
                 if text.contains("INSTRUCTED") {
                     chunk(&session, &format!("instructed={instructed}"));

@@ -221,6 +221,11 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     };
     // Siblings waiting for this branch may start, or be blocked, now.
     graph::settled(turn.yard, &fence.branch, Some(turn.options));
+    // The outcome store learns how the turn ended; best-effort, it never
+    // changes what happened.
+    if result.is_ok() {
+        let _ = crate::fleet::observe(turn.yard, &fence.branch, None);
+    }
     result
 }
 

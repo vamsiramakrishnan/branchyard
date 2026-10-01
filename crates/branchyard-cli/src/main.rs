@@ -9,6 +9,7 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod fleet_cmd;
 mod gh;
 mod init;
 mod json;
@@ -147,8 +148,65 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Fan {
             prompt,
             harnesses,
+            attempts,
+            judge,
             task,
-        } => commands::fan(env, target, &prompt, &harnesses, &task),
+        } => commands::fan(
+            env,
+            target,
+            &prompt,
+            harnesses.as_ref().map(|h| h.0.as_slice()),
+            &task,
+            &commands::FanRoute { attempts, judge },
+        ),
+        Command::Judge {
+            targets,
+            harness,
+            deterministic,
+            command,
+            rubric,
+            pick,
+            into,
+            discard_others,
+            yes,
+            json,
+        } => fleet_cmd::judge(
+            env,
+            target,
+            &fleet_cmd::JudgeArgs {
+                targets,
+                harness,
+                deterministic,
+                command: command.map(|c| c.0),
+                rubric,
+                pick,
+                into,
+                discard_others,
+                yes,
+                json,
+            },
+            fleet_table()?.as_ref(),
+        ),
+        Command::Fleet { json, action } => match action {
+            args::FleetAction::Stats { kind } => fleet_cmd::stats(env, target, kind, json),
+            args::FleetAction::Route {
+                prompt,
+                kind,
+                attempts,
+                seed,
+            } => fleet_cmd::route(
+                target,
+                &prompt,
+                &branchyard::RouteOptions {
+                    kind,
+                    seed,
+                    attempts,
+                    failover: None,
+                },
+                fleet_table()?.as_ref(),
+                json,
+            ),
+        },
         Command::Send {
             branch,
             prompt,
@@ -304,4 +362,11 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Init { .. }
         | Command::Config { .. } => unreachable!("handled before choosing a target"),
     }
+}
+
+/// The `[fleet]` of the configuration under the current directory, for
+/// commands that take no task options.
+fn fleet_table() -> Result<Option<branchyard::Fleet>, Failure> {
+    let cwd = std::env::current_dir()?;
+    defaults::fleet_at(&cwd, &|name| std::env::var(name).ok()).map_err(Failure::Message)
 }
