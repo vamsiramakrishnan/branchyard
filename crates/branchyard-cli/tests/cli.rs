@@ -1545,7 +1545,8 @@ fn help_version_typos_and_exit_codes() {
     assert_eq!(typo.status.code(), Some(2));
     assert!(stdout(&typo).is_empty());
     assert!(
-        stderr(&typo).contains("tip: a similar subcommand exists: 'merge'"),
+        // `review` is close to `mrege` too, so clap lists both.
+        stderr(&typo).contains("tip: some similar subcommands exist: 'review', 'merge'"),
         "{}",
         stderr(&typo)
     );

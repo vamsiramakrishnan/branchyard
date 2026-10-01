@@ -11,7 +11,7 @@ Both front-ends call the same engine, [`branchyard-setup`](../crates/branchyard-
 
 | Topic | Writes | Checked by |
 |---|---|---|
-| `project` | `branchyard.toml` at the repository root, or the user's `~/.config/branchyard/config.toml`: default harness, model, effort, budget, turns, duration, permissions, isolation, check, provider, secrets by name, a server to use, and (project only) a [`[workspace]`](workspace.md) suggested from the repository's lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, Compose file and `.env` files | the configuration parser `by` uses ([below](#configuration)) |
+| `project` | `branchyard.toml` at the repository root, or the user's `~/.config/branchyard/config.toml`: default harness, model, effort, budget, turns, duration, permissions, isolation, check, provider, secrets by name, a server to use, and (project only) a [`[workspace]`](workspace.md) suggested from the repository's lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, Compose file and `.env` files, or imported from another tool's committed configuration ([below](#importing-another-tools-workspace-configuration)) | the configuration parser `by` uses ([below](#configuration)) |
 | `server` | A server configuration (default `.branchyard/server.json`): listen address and TLS, SQLite or PostgreSQL, one credential per tenant (hash only) with its token in a 0600 file under `tokens/`, tenant quotas, allowed providers, delegation, secrets by reference, a signed webhook | `branchyard-server`'s own loader and `Config::validate`, as `by serve --check` runs them |
 | `rig` | A [rig](rigs.md) spec: a lead seat and, by shape, an implementer (two may run), a reviewer denied every editing tool, or two implementers on different harnesses; budgets split so the children fit | `by rig check`'s parser and planner |
 | `deploy` | `compose.yaml` (PostgreSQL 16 and the server), `server.json`, and `secrets/` (client token, database password, both 0600, and a `.gitignore`) | the server's loader with `--insecure-bind`; `docker compose config` when docker is installed |
@@ -132,6 +132,24 @@ With the plugin loaded (`claude --plugin-dir plugins/branchyard`, or `by init pl
 ● Bash(by serve --config .branchyard/server.json --check)   configuration ok
 ```
 
+## Importing another tool's workspace configuration
+
+A repository already set up for emdash, Orca, Superset or Conductor says what a new worktree needs. `by init project` reads that file and suggests the same `[workspace]`, which you review like every other answer; nothing in it runs until you trust it (`by workspace trust`).
+
+| File | Tool | Imported | Not imported |
+|---|---|---|---|
+| `.emdash.json` | emdash | `preservePatterns` as `copy`; `scripts.prepare` then `scripts.setup` as `setup`; `scripts.run`; `scripts.teardown` | `shellSetup` (Branchyard has no per-shell setup for the harness yet) |
+| `orca.yaml` | Orca | `scripts.setup`; `scripts.archive` as `teardown`; the first `defaultTabs` command as the run script | further tabs; `worktree.sharedDirectories` (links, not copies); environment recipes, `issueCommand` |
+| `.superset/config.json` | Superset | `setup`, `run` and `teardown` command lists, in `cwd` when set; `.superset/<key>.sh` when a key is absent | the per-user and `config.local.json` overrides, which are not committed |
+| `.conductor/settings.toml` | Conductor | `[scripts]` `setup`; `archive` as `teardown`; `run`, or the default (else first) `[scripts.run.NAME]` with its `args` and `options.cwd` | the other named run scripts; `run_mode`, `available_in` |
+
+- A multi-line script becomes one setup command per line when each line stands alone, and stays one command when it has shell structure (`if`, loops, continuations, here-documents).
+- Each tool's variables are renamed to Branchyard's: `$EMDASH_PORT`, `$CONDUCTOR_PORT` → `$BRANCHYARD_PORT`; `$EMDASH_ROOT_PATH`, `$ORCA_ROOT_PATH`, `$SUPERSET_ROOT_PATH`, `$CONDUCTOR_ROOT_PATH` → `$BRANCHYARD_ROOT`; `$EMDASH_TASK_PATH`, `$ORCA_WORKTREE_PATH`, `$SUPERSET_WORKSPACE_PATH`, `$CONDUCTOR_WORKSPACE_PATH` → `$BRANCHYARD_WORKTREE`; `$SUPERSET_WORKSPACE_NAME`, `$CONDUCTOR_WORKSPACE_NAME` → `$BRANCHYARD_BRANCH`. Others are left as written.
+- Precedence: a committed file's setup, run script and teardown replace what the lockfiles suggest; with several files, the first in the table's order that gives each part wins, and every file's copy globs are added (a glob `[workspace] copy` would refuse is left out and said).
+- What was left out, and a file that could not be read, appear in the facts as *Not imported*.
+
+The emdash and Orca readers are ports of `emdash-config.ts` (Apache-2.0) and `orca-yaml.ts` (MIT) at pinned revisions (`crates/branchyard-setup/src/import/`, recorded in `patches/ports.json`); Orca's file is read by a small reader for the block subset of YAML, which refuses flow collections, anchors and tags rather than guessing. Superset's and Conductor's are written from their public documentation only: Superset is under the Elastic License 2.0, and nothing of its code, schema or documentation text is copied. Tested on fixtures written for the tests, not on those tools' own repositories.
+
 ## Applying
 
 `--apply` recomputes the plan from the answers, then:
@@ -233,6 +251,7 @@ by config schema                     # the JSON Schema
 
 ## What is tested
 
+- **Imports**: each importer on its own fixtures (mapping, variable renaming, script splitting, refusals of wrong types), the YAML subset reader, the vendored emdash and Orca sources still having the fields the ports read, precedence among several files in the engine, and `by init project --defaults --apply` writing a loadable `branchyard.toml` from each of the four files (`tests/setup.rs`).
 - **Workspace**: the `[workspace]` section's parsing, refusals, digest and precedence, the project topic's detection and plan, and a golden batch (`tests/golden/project-workspace.json`); see [workspace](workspace.md#what-is-tested).
 - **Engine** (`crates/branchyard-setup`): conditions and batching, answer normalization for every kind, detection with a fake probe (installed harnesses, KVM, existing files as defaults), every topic walked batch by batch answering by label and finishing with a valid plan, determinism of the JSON, no generated secret in any response, a pasted secret refused without being repeated, golden first batches, both schemas' freshness, and the embedded skills byte for byte against `plugins/branchyard/skills`.
 - **Command line** (`crates/branchyard-cli/src/args.rs`): `init` parsed into its topic and step for every topic and flag spelling; each conflict and missing requirement a usage error with exit 2 and its message; the help's topics and flags; `config`'s four actions with `--json` before or after them, and its usage errors; completions for five shells and the man page listing `init`, its flags and `config`. `defaults.rs` and the server's `names_config` test that `-c FILE`, `-cFILE`, `--config=FILE`, `--help`, `--version` and `token new` keep their own configuration.
