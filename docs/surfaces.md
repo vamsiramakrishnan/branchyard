@@ -383,3 +383,33 @@ Routing, judging and the outcome store run in local mode; `by --remote` refuses 
 | `by compare --pick --json` | printed the merge line before the JSON | JSON only (locally); `by judge --pick` uses the same code |
 | `by compare --fan NAME` | `NAME-<harness>` | also a routed fan's `NAME-<harness>-<n>` |
 | `outcomes` table (SQLite), `by_outcomes` (PostgreSQL) | none | one row per created top-level branch, kept after removal ([fleet](fleet.md#outcomes)) |
+
+## Added with Wave 2's developer conveniences
+
+Quota meters, more trackers, listening ports and adopting sessions ([usage](usage.md), [pull requests](pull-requests.md#other-trackers), [workspace](workspace.md#listening-ports)). Everything here reads this machine (its session files, its processes, its environment's tokens), so it is local only except where said.
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Usage of each local login's 5-hour and weekly windows | no: the CLI's (`usage.rs`) | `usage [--json]` | runs locally: it reads this machine's files, whatever `--remote` says | no | no | the `by` command, in the harness's own environment |
+| Warn or refuse near a limit; skip a routed candidate | `RouteOptions::excluded` (the reasons the CLI computed) | `[usage] guard`, `near_percent`, `skip_over` on `run`, `fan` | no: routing is local, and the guard is not applied | no | no | no |
+| An issue from Linear, Jira or GitLab | no: the prompt and `IssueLink` (`tracker`, `key`) are recorded | `run`, `fan`, `spawn --issue linear:KEY\|jira:KEY\|gitlab:PATH#N\|URL` | yes: fetched here with the environment's tokens, the prompt sent; the gateway path is local only | the prompt | the prompt | `spawn --issue`, with the harness's environment |
+| Start from a pull request's head | `PullRequestActivity::Started` records it | `run`, `fan --pr N` | no: the head is fetched into this repository | no | no | no |
+| Listening ports of a branch | no: the CLI's (`ports.rs`) | `workspace ports\|browse\|kill`, `show` (`listening`), `workspace show BRANCH` | no: the processes are on the server | no | no | `by workspace ports` with `$BRANCHYARD_BRANCH` |
+| Several run scripts at once | `Yard::workspace_env` | `workspace run BRANCH A B --detach` | no | no | no | the `by` command |
+| Adopt a Claude Code or Codex session | `Yard::adopt(AdoptSpec)`, `Activity::Adopted` (`Adoption`) | `adopt [--list] [SESSION] [--name N] [--harness ID] [--no-diff] [--json]` | no: the session's files and directory are here | no | no | no: refused inside a harness |
+
+| Key in `by watch` | Runs | by --remote |
+|---|---|---|
+| `b` | `workspace browse` on the selected branch, waited for | no |
+| `K` | `workspace kill --yes` after a yes | no |
+
+| Surface | Before | Now |
+|---|---|---|
+| `IssueLink` | `number`, `url`, `title` | also `tracker` and `key`, omitted for GitHub; `schema/contract.json` regenerated |
+| `PullRequestActivity` | ... `threads_resolved` | also `started` (a `PullRequestRef`) |
+| `Activity` | ... `connector_call` | also `adopted`; `adopted` in `by log --json` |
+| `RouteOptions` | `kind`, `seed`, `attempts`, `failover` | also `excluded` |
+| `Gateway` (connectors) | `person_token` (no grant) | also `person_token_granted` |
+| `branchyard.toml` | ... `[connectors]` | also `[usage]` (`guard`, `near_percent`, `skip_over`, `claude_five_hour_tokens`, `claude_weekly_tokens`, `[usage.accounts.NAME]` with `harness`, `dir`) and `[trackers.linear\|jira\|gitlab]` (`url`, `gateway_tool`); `schema/branchyard.config.json` regenerated |
+| `by workspace run` | `[BRANCH] [NAME]` | `[BRANCH] [NAME...]`; several names need `--detach`, each gets its own port, and `BRANCHYARD_BRANCH_PORT` |
+| `by watch` header and detail pane | ... | a usage summary (every minute); a `ports` line per listener (every five seconds) |

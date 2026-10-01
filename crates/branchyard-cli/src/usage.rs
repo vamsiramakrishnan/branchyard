@@ -835,7 +835,19 @@ pub fn claude(
     pricing: &Pricing,
     now_ms: u64,
 ) -> Login {
-    let since = now_ms.saturating_sub(SCAN_HORIZON_MS);
+    claude_since(account, dir, config, pricing, now_ms, SCAN_HORIZON_MS)
+}
+
+/// [`claude`], reading only files modified in the last `horizon_ms`.
+fn claude_since(
+    account: &str,
+    dir: &Path,
+    config: &UsageConfig,
+    pricing: &Pricing,
+    now_ms: u64,
+    horizon_ms: u64,
+) -> Login {
+    let since = now_ms.saturating_sub(horizon_ms);
     let mut files = Vec::new();
     for root in ["projects", "transcripts"] {
         jsonl_files(&dir.join(root), since, &mut files);
@@ -1036,6 +1048,24 @@ pub fn meter(
         out.push(read(&account.harness, name, &dir, config, &pricing, now_ms));
     }
     out
+}
+
+/// What the guard and the router need of a login: only the 5-hour window,
+/// unless a weekly budget makes the week's tokens matter, so a `by run`
+/// reads the last few hours of Claude transcripts, not the week's.
+fn read_for_guard(
+    harness: &str,
+    dir: &Path,
+    config: &UsageConfig,
+    pricing: &Pricing,
+    now_ms: u64,
+) -> Login {
+    match (harness, config.claude_weekly_tokens) {
+        ("claude-code", None) => {
+            claude_since("default", dir, config, pricing, now_ms, 2 * FIVE_HOURS_MS)
+        }
+        _ => read(harness, "default", dir, config, pricing, now_ms),
+    }
 }
 
 fn read(
@@ -1249,7 +1279,7 @@ pub fn check(
         let Some(dir) = default_dir(harness, env) else {
             continue;
         };
-        let login = read(harness, "default", &dir, config, &pricing, now_ms);
+        let login = read_for_guard(harness, &dir, config, &pricing, now_ms);
         if let Some(why) = login.over(near, now_ms) {
             match mode {
                 UsageGuard::Refuse => {
@@ -1287,7 +1317,7 @@ pub fn exclusions(
             .entry(login)
             .or_insert_with(|| {
                 let dir = default_dir(login, env)?;
-                read(login, "default", &dir, config, &pricing, now_ms).over(over, now_ms)
+                read_for_guard(login, &dir, config, &pricing, now_ms).over(over, now_ms)
             })
             .clone();
         if let Some(why) = why {

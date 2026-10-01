@@ -785,7 +785,9 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         let mut value = json::branch(&info);
         value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
         value["merge_readiness"] = readiness;
-        if let Some(listening) = &listening {
+        // Only when something listens, so local and remote `show --json`
+        // agree for a branch with no servers.
+        if let Some(listening) = listening.as_ref().filter(|l| !l.is_empty()) {
             value["listening"] = serde_json::to_value(listening).unwrap_or_default();
         }
         return print(&json::text(&value));

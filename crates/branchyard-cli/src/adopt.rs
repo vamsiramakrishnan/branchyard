@@ -206,8 +206,9 @@ pub fn claude_session(file: &Path) -> Option<Session> {
     (session.turns > 0).then_some(session)
 }
 
-/// One Codex rollout; `None` for a thread Codex started itself.
-pub fn codex_session(file: &Path) -> Option<Session> {
+/// One Codex rollout; `None` for a thread Codex started itself, or (read
+/// no further than its first record) one whose directory `wanted` refuses.
+pub fn codex_session(file: &Path, wanted: &dyn Fn(&str) -> bool) -> Option<Session> {
     let stem = file.file_stem()?.to_str()?;
     let mut session = Session {
         harness: "codex",
@@ -245,6 +246,9 @@ pub fn codex_session(file: &Path) -> Option<Session> {
                     session.id = id.to_owned();
                 }
                 session.cwd = payload["cwd"].as_str().map(str::to_owned).or(session.cwd);
+                if session.cwd.as_deref().is_some_and(|cwd| !wanted(cwd)) {
+                    return None;
+                }
                 let git = &payload["git"];
                 session.commit = git["commit_hash"].as_str().map(str::to_owned);
                 session.git_branch = git["branch"]
@@ -336,7 +340,8 @@ pub fn sessions(root: &Path, env: &dyn Fn(&str) -> Option<String>) -> Vec<Sessio
         for sub in ["sessions", "archived_sessions"] {
             jsonl(&dir.join(sub), &mut files);
         }
-        found.extend(files.iter().filter_map(|f| codex_session(f)));
+        let ours = |cwd: &str| in_repository(cwd, root);
+        found.extend(files.iter().filter_map(|f| codex_session(f, &ours)));
     }
     found.retain(|s| s.cwd.as_deref().is_some_and(|cwd| in_repository(cwd, root)));
     found.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms).then(a.id.cmp(&b.id)));

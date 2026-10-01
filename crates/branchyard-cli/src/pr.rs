@@ -2083,6 +2083,52 @@ mod tests {
     }
 
     #[test]
+    fn other_trackers_prompt_name_and_close_by_their_own_keys() {
+        let linear = Issue {
+            number: 123,
+            title: "Parser panics".into(),
+            body: String::new(),
+            url: "https://linear.app/acme/issue/ENG-123".into(),
+            labels: Vec::new(),
+            tracker: Some(crate::trackers::Tracker::Linear),
+            key: Some("ENG-123".into()),
+        };
+        let prompt = issue_prompt(&linear, "");
+        assert!(prompt.starts_with(
+            "Resolve Linear issue ENG-123: Parser panics\nhttps://linear.app/acme/issue/ENG-123\n"
+        ));
+        assert_eq!(issue_from_prompt(&prompt), Some(linear.link()));
+        assert_eq!(issue_branch_name(&linear), "eng-123-parser-panics");
+        let gitlab = Issue {
+            key: Some("acme/widgets#12".into()),
+            tracker: Some(crate::trackers::Tracker::GitLab),
+            number: 12,
+            ..linear.clone()
+        };
+        assert_eq!(issue_branch_name(&gitlab), "issue-12-parser-panics");
+        assert_eq!(
+            issue_from_prompt(&issue_prompt(&gitlab, "")).map(|l| l.key),
+            Some(Some("acme/widgets#12".into()))
+        );
+        let jira = IssueLink {
+            tracker: Some("jira".into()),
+            key: Some("PROJ-7".into()),
+            ..linear.link()
+        };
+        assert_eq!(closing_line(&linear.link(), true), "Closes ENG-123\n");
+        assert_eq!(
+            closing_line(&jira, true),
+            "Refs PROJ-7 (https://linear.app/acme/issue/ENG-123)\n"
+        );
+        assert!(closing_line(&gitlab.link(), true).starts_with("Related: acme/widgets#12 ("));
+        assert_eq!(closing_line(&issue().link(), true), "Closes #12\n");
+        assert_eq!(
+            log_line(&PullRequestActivity::IssueLinked(linear.link())).0,
+            "issue ENG-123 linked: Parser panics (https://linear.app/acme/issue/ENG-123)"
+        );
+    }
+
+    #[test]
     fn state_folds_the_log_and_undelivered_feedback_comes_back() {
         let pr = PullRequestRef {
             number: 7,

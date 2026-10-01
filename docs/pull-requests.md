@@ -10,7 +10,7 @@ by show issue-42-parser-crash                     # merge readiness
 by open issue-42-parser-crash --editor cursor     # or leave for your editor
 ```
 
-Everything goes through the [GitHub CLI](https://cli.github.com), `gh`, run from argument vectors in the repository, never through a shell. `gh` already handles logins, GitHub Enterprise hosts and choosing the repository from the git remotes, so Branchyard holds no GitHub token and speaks no GitHub API of its own. `by` checks `gh auth status` before its first call and stops with an explanation when `gh` is missing (install it and run `gh auth login`) or not logged in, before anything is pushed. `by pr` refuses to run inside a harness: it pushes with your git and GitHub credentials, so the person or meta-harness that started the branch runs it.
+Everything on GitHub goes through the [GitHub CLI](https://cli.github.com), `gh`, run from argument vectors in the repository, never through a shell. `gh` already handles logins, GitHub Enterprise hosts and choosing the repository from the git remotes, so Branchyard holds no GitHub token and speaks no GitHub API of its own. Issues from Linear, Jira and GitLab are fetched from their APIs ([other trackers](#other-trackers)). `by` checks `gh auth status` before its first call and stops with an explanation when `gh` is missing (install it and run `gh auth login`) or not logged in, before anything is pushed. `by pr` refuses to run inside a harness: it pushes with your git and GitHub credentials, so the person or meta-harness that started the branch runs it.
 
 These commands work in local mode only. `by --remote` refuses `by pr`, `by open` and `by show --refresh` with an `unsupported` error naming the reason: a server's branches live in the server's repository, whose git remote and `gh` login are the server's, and a server's worktrees are on the server. `by run --issue` works remotely: `gh` runs on your machine and the server receives the prompt. See [surfaces](surfaces.md#added-with-pull-requests).
 
@@ -30,6 +30,35 @@ Additional instructions:
 ```
 
 The branch is named `issue-<n>-<slug of the title>` (`issue-<n>-<slug>-2` if that is taken; a fan-out appends each harness as usual), unless `--name` says otherwise. The link is recorded on the branch as an `issue_linked` event, and the header itself is the durable fallback where no event can be recorded (a child spawned inside a harness, a run on a server). The pull request that `by pr` opens for the branch says `Closes #<n>`, or `Closes owner/repo#<n>` when the issue is in another repository.
+
+## Other trackers
+
+`--issue` also takes a Linear, Jira or GitLab issue, by prefix or by URL:
+
+| Tracker | `--issue` | Fetched with | Credentials |
+|---|---|---|---|
+| Linear | `linear:ENG-123`, `https://linear.app/<team>/issue/ENG-123/…` | GraphQL `issue(id:)` at `https://api.linear.app/graphql` (`[trackers.linear] url` or `LINEAR_API_URL` for another) | `LINEAR_API_KEY` (a personal API key, sent as it is) or `LINEAR_ACCESS_TOKEN` (OAuth, as `Bearer`) |
+| Jira | `jira:PROJ-7`, `https://<site>/browse/PROJ-7` | REST v3 `GET /rest/api/3/issue/PROJ-7?fields=summary,description,labels`; the site is the URL's, else `[trackers.jira] url`, else `JIRA_URL` | `JIRA_EMAIL` and `JIRA_API_TOKEN` (HTTP Basic) |
+| GitLab | `gitlab:group/sub/project#12`, `https://<host>/group/project/-/issues/12` | REST v4 `GET /api/v4/projects/<path>/issues/12`; the host is the URL's, else `[trackers.gitlab] url`, else `GITLAB_URL`, else `https://gitlab.com` | `GITLAB_TOKEN` (as `PRIVATE-TOKEN`) |
+
+The prompt is the same as GitHub's, headed by the tracker and its key (`Resolve Linear issue ENG-123: Parser panics`), with the URL, labels and description; Jira's description, in Atlassian Document Format, is rendered as Markdown (Orca's `adf-markdown.ts`, ported under its MIT license: headings, lists with their markers and nesting, code blocks, quotes, rules, and images as links or a visible `*[name]*` placeholder). The branch is named after the key (`eng-123-<slug>`, `proj-7-<slug>`; a GitLab issue `issue-<n>-<slug>`), and the `issue_linked` event and `by show --json`'s `merge_readiness.issue` carry `tracker` and `key` beside the number, URL and title. The mapping of each answer to an issue follows emdash's issue plugins (`packages/plugins/src/issues/impl/{linear,jira,gitlab}/`, Apache-2.0); Linear's query is emdash's summary fields with the labels.
+
+**The pull request names it** with the tracker's own convention: `Closes ENG-123` for Linear (its GitHub integration closes the issue when the pull request merges), `Refs PROJ-7 (<url>)` for Jira (which links a key it sees in a pull request but closes nothing from it), and `Related: group/project#12 (<url>)` for GitLab (a GitHub pull request cannot close a GitLab issue).
+
+**Credentials** are read from the environment when the command runs and sent only in the request's header; they are never printed, logged, recorded in an event or put in the prompt (a test fetches all three and searches every output and the log for them). Without them, a tracker can be reached **through the connector gateway** instead ([connectors](connectors.md)): with `[connectors] gateway` set and
+
+```toml
+[trackers.linear]
+gateway_tool = "linear__get_issue"   # the tool the gateway serves for your Linear connector
+```
+
+`by` signs a five-minute token naming you, granting only `linear:read`, with the yard's key, and calls the tool over MCP Streamable HTTP (`initialize`, then `tools/call` with `{"id": "ENG-123"}`; Jira's tool gets `{"issueIdOrKey": …}`, GitLab's `{"id": <project path>, "issue_iid": …}`). The tool's result, its structured content or its text parsed as JSON, is read as the API's own answer would be (whole, as `{"issue": …}`, or the issue itself). The upstream token stays in the gateway. The tool's name depends on how Anvil compiled the connector, so it is configuration, not built in. The environment wins when both are there.
+
+`[trackers]` takes `url` and `gateway_tool` for each of `linear`, `jira` and `gitlab`, and never a credential; `by config validate` checks the URLs and that a `gateway_tool` has a gateway. With `by --remote`, the issue is fetched on your machine with the environment's credentials, and the server receives the prompt, as for GitHub; the gateway is used in local mode only. `by spawn --issue` inside a harness reads only the harness's environment.
+
+## Starting from a pull request
+
+`by run --pr N ["more instructions"]` (and `by fan --pr N`) starts the branch from GitHub pull request N's head commit: `gh pr view N --json number,title,body,url,headRefName,headRefOid,baseRefName,isCrossRepository,state`, then, if the commit is not here yet, `git fetch origin refs/pull/N/head` (GitHub keeps every pull request's head there, fork or not). The branch is named `pr-<n>-<slug of its title>`, its base is that commit, and its prompt names the pull request (`Continue GitHub pull request #7: Faster parser`, its URL, its head, its description, then your instructions). When the head is a branch of this repository, a `started` event records the pull request (`by log`: `started from pull request #7's head (feature): <url>`), so `by pr` pushes the branch's candidate to that head branch and updates that pull request instead of opening another; a fork's head is not ours to push to, so `by pr` then opens a new one, and `by run` says so. `--pr` takes no `--base` or `--issue`, and runs in local mode only.
 
 ## `by pr`
 
@@ -143,7 +172,8 @@ Every step is an `Activity::PullRequest` event on the branch's log, shown by `by
 
 | `kind` | Fields | `by log` |
 |---|---|---|
-| `issue_linked` | `number`, `url`, `title` | `issue #42 linked: … (url)` |
+| `issue_linked` | `number`, `url`, `title`, and for another tracker `tracker`, `key` | `issue #42 linked: … (url)`, `issue ENG-123 linked: …` |
+| `started` | `number`, `url`, `head`, `base`, `draft` (`--pr`) | `started from pull request #7's head (feature): url` |
 | `checked` | `commit`, `argv`, `passed`, `timed_out`, `output_tail` | ``check `cargo test` passed on 1a2b3c4d5e`` |
 | `pushed` | `remote`, `remote_branch`, `commit`, `forced` | `pushed 1a2b3c4d5e to origin by/feat` |
 | `opened`, `updated` | `number`, `url`, `head`, `base`, `draft` | `pull request #7 opened: url` |
@@ -157,7 +187,7 @@ The CLI folds these (`pr::state`) into the branch's issue, last check, last push
 
 ## Not done
 
-- Only GitHub, through `gh`. GitLab (`glab`) and others would fit the same events.
+- Pull requests only on GitHub, through `gh`. Issues may come from Linear, Jira or GitLab ([other trackers](#other-trackers)), fetched hermetically from local mock servers and a mock gateway in the tests and never from the real services; a GitLab merge request (`glab`) would fit the same events.
 - The watch replies only to the review threads a push addressed, and only to resolve them; it does not answer reviews or comments, request re-review, or merge the pull request; merging stays a person's decision (or `gh pr merge`). Whether a thread was really addressed is judged by the file it is on, not by reading the change.
 - `--draft` applies when the pull request is created; turning a draft ready is `gh pr ready`.
 - Comments from bots are fed back like anyone's; there is no filter by author yet.

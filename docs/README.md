@@ -19,7 +19,8 @@
 | [Fleet: routing, judging and failover](fleet.md) | How does `by run` pick a harness, model and effort for each kind of task and learn from outcomes, how does `by judge` score a fan's attempts and propose one, and when does a failed harness fail over to the next? |
 | [Checkpoints, rewind, try and compare](checkpoints.md) | How do I fork or rewind a branch to any turn, try a branch in my own checkout and take it back out exactly, and compare attempts and pick one? |
 | [Durable execution](durability.md) | What survives a crash, how leases, journaled steps, cancellation and recovery work, what is never replayed, and how the store maps onto PostgreSQL? |
-| [Pull requests](pull-requests.md) | How do I start a branch from a GitHub issue, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |
+| [Pull requests](pull-requests.md) | How do I start a branch from a GitHub, Linear, Jira or GitLab issue or a pull request's head, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |
+| [Usage and adopting sessions](usage.md) | How much of each Claude Code and Codex login's 5-hour and weekly limits is used, how do `by run` and the router avoid a login near its limit, and how do I turn a session already on this machine into a branch? |
 | [Surfaces](surfaces.md) | Which operations and options work in the SDK, `by`, `by --remote`, the HTTP API, the Rust client and delegation, and which are refused where? |
 | [Server and remote mode](server.md) | How do I run `by serve`, call its HTTP API, and drive it with `by --remote`? What is durable, and what is not isolated? |
 | [Distribution](distribution.md) | How do I install the Branchyard skill for Claude Code or Codex, or build reproducible plugin, skill and SDK archives? |
