@@ -85,6 +85,19 @@ impl Doing {
                     call.connector, call.operation, call.decision
                 ));
             }
+            // So is a request through the egress proxy.
+            Activity::Egress(egress) => {
+                if let branchyard::EgressActivity::Decision {
+                    host,
+                    port,
+                    allowed,
+                    ..
+                } = egress.as_ref()
+                {
+                    let verdict = if *allowed { "allowed" } else { "denied" };
+                    self.tool = Some(format!("egress {host}:{port} ({verdict})"));
+                }
+            }
             _ => {}
         }
     }

@@ -15,8 +15,8 @@
 //!
 //! - New branches (`run`, `fan`) take every default: harness, model,
 //!   effort, auth, limits, check, permissions, isolation, provider,
-//!   instructions, MCP servers, and secrets when the branch has a private
-//!   home (isolated or sandboxed).
+//!   instructions, MCP servers, the `[network]` policy, and secrets when
+//!   the branch has a private home (isolated or sandboxed).
 //! - `send`, `fork`, `reincarnate` and `spawn` take only `permissions`: the
 //!   rest would override what the branch or its seat already has.
 //! - `serve` and `worker` take `serve.config` as `--config` ([`apply_serve`]).
@@ -189,6 +189,13 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         task.permissions = match d.permissions {
             Some(PermissionsMode::Ask) => Permissions::Ask,
             Some(PermissionsMode::Yes) => Permissions::Yes,
+            Some(PermissionsMode::ReadOnly) => {
+                Permissions::Preset(branchyard::PolicyPreset::ReadOnly)
+            }
+            Some(PermissionsMode::EditWorktree) => {
+                Permissions::Preset(branchyard::PolicyPreset::EditWorktree)
+            }
+            Some(PermissionsMode::Full) => Permissions::Preset(branchyard::PolicyPreset::Full),
             None => Permissions::Unset,
         };
     }
@@ -278,7 +285,11 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         .provision
         .as_ref()
         .is_some_and(|p| !p.connectors.is_empty());
+    // The network policy, when `--network` gave none.
+    let network = config.network.policy().map_err(|e| e.to_string())?;
+    let flag_network = task.provision.as_ref().is_some_and(|p| p.network.is_some());
     let wanted = d.model.is_some()
+        || (network.is_some() && !flag_network)
         || effort.is_some()
         || d.auth.is_some()
         || !secrets.is_empty()
@@ -307,6 +318,9 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         }
         if spec.connectors.is_empty() {
             spec.connectors = grants;
+        }
+        if spec.network.is_none() {
+            spec.network = network;
         }
     }
     Ok(())

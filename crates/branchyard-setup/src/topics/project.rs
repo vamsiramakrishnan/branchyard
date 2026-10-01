@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use super::{flag, harness_question, list, secret_choices, secret_ref_question, text};
-use crate::config::{self, PermissionsMode, ProjectConfig, ProviderKind};
+use crate::config::{self, ProjectConfig, ProviderKind};
 use crate::interview::{number, Answers, Choice, Condition, Kind, Question, Rule};
 use crate::plan::{ArtifactKind, Plan, PlannedFile};
 use crate::probe::{Facts, Probe};
@@ -101,12 +101,22 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
         )
         .optional()
         .default(match d.permissions {
-            Some(PermissionsMode::Yes) => json!("yes"),
-            Some(PermissionsMode::Ask) | None => json!("ask"),
+            Some(mode) => json!(mode.as_str()),
+            None => json!("ask"),
         })
         .choices(vec![
             Choice::new("ask", "Ask me", "prompt on the terminal for each request (--ask)"),
             Choice::new("yes", "Allow all", "allow every request (--yes); only for trusted tasks"),
+            Choice::new(
+                "read-only",
+                "Read only",
+                "read and search; edits, commands and the web denied (a preset)",
+            ),
+            Choice::new(
+                "edit-worktree",
+                "Edit files",
+                "read, search and edit files; commands and the web denied (a preset)",
+            ),
             Choice::new(Value::Null, "Decide per run", "ask when a terminal is attached, else deny"),
         ]),
         Question::new(

@@ -106,6 +106,8 @@ pub struct RuleSpec {
 }
 
 /// A permission policy: rules in order, then the mode. Defaults to deny.
+/// With a preset, its rules follow these rules and its default replaces
+/// `mode`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +116,10 @@ pub struct PolicySpec {
     pub mode: PolicyMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<RuleSpec>,
+    /// A named preset (`read-only`, `edit-worktree`, `full`) standing for
+    /// its explicit rules; see `docs/egress.md#permission-presets`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<branchyard::PolicyPreset>,
 }
 
 impl PolicySpec {
@@ -121,20 +127,40 @@ impl PolicySpec {
         PolicySpec {
             mode: PolicyMode::Allow,
             rules: Vec::new(),
+            preset: None,
+        }
+    }
+
+    /// Only the preset's rules and default.
+    pub fn preset(preset: branchyard::PolicyPreset) -> Self {
+        PolicySpec {
+            preset: Some(preset),
+            ..PolicySpec::default()
         }
     }
 
     pub fn to_policy(&self) -> Policy {
-        let base = match self.mode {
-            PolicyMode::Allow => Policy::allow_all(),
-            PolicyMode::Deny => Policy::deny_all(),
+        let preset = self.preset.map(|p| p.rules());
+        let default_allow = match &preset {
+            Some(rules) => rules.default_allow,
+            None => self.mode == PolicyMode::Allow,
         };
-        self.rules
+        let base = match default_allow {
+            true => Policy::allow_all(),
+            false => Policy::deny_all(),
+        };
+        let policy = self
+            .rules
             .iter()
             .fold(base, |policy, rule| match rule.allow {
                 true => policy.allow(rule.tool.clone()),
                 false => policy.deny(rule.tool.clone()),
-            })
+            });
+        let Some(preset) = preset else {
+            return policy;
+        };
+        let policy = preset.deny.iter().fold(policy, |p, tool| p.deny(*tool));
+        preset.allow.iter().fold(policy, |p, tool| p.allow(*tool))
     }
 }
 
@@ -753,6 +779,52 @@ mod tests {
     use super::*;
     use branchyard::{BranchStatus, PermissionKey, PermissionRequest};
     use serde_json::json;
+
+    #[test]
+    fn a_preset_follows_the_request_rules_and_sets_the_default() {
+        let spec: PolicySpec = serde_json::from_value(json!({
+            "preset": "edit-worktree",
+            "rules": [{"tool": "Bash", "allow": true}, {"tool": "Write", "allow": false}],
+        }))
+        .unwrap();
+        let policy = spec.to_policy();
+        let decide = |tool: &str| {
+            let request = PermissionRequest {
+                key: PermissionKey("1".into()),
+                tool: tool.into(),
+                input: Value::Null,
+            };
+            matches!(
+                policy.decide("b", &request),
+                branchyard::PermissionDecision::Allow
+            )
+        };
+        // The request's own rules come first.
+        assert!(decide("Bash"));
+        assert!(!decide("Write"));
+        // Then the preset's.
+        assert!(decide("Edit") && decide("Read"));
+        assert!(!decide("WebFetch"));
+        // Its default: deny.
+        assert!(!decide("mcp__other"));
+        let full = PolicySpec::preset(branchyard::PolicyPreset::Full).to_policy();
+        let request = PermissionRequest {
+            key: PermissionKey("1".into()),
+            tool: "anything".into(),
+            input: Value::Null,
+        };
+        assert_eq!(
+            full.decide("b", &request),
+            branchyard::PermissionDecision::Allow
+        );
+        let wire = serde_json::to_value(PolicySpec::preset(branchyard::PolicyPreset::ReadOnly));
+        assert_eq!(
+            wire.unwrap(),
+            json!({"mode": "deny", "preset": "read-only"})
+        );
+        let unknown = serde_json::from_value::<PolicySpec>(json!({"preset": "yolo"}));
+        assert!(unknown.unwrap_err().to_string().contains("unknown variant"));
+    }
 
     #[test]
     fn budgets_refuse_nonpositive_values() {

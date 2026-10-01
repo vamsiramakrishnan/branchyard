@@ -176,6 +176,37 @@
             "type": "string"
           }
         },
+        "network": {
+          "description": "The hosts the seat's harness may reach (docs/egress.md): \"open\",\n\"none\", or { allow = [\"github.com\", \"*.npmjs.org:443\"], enforce =\n\"required\" }. Unset: its parent seat's. Within its parent seat's.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
         "telemetry": {
           "description": "`off`, or an http:// or https:// OTLP collector endpoint.",
           "type": "string"
@@ -205,6 +236,15 @@
         },
         "policy": {
           "$ref": "#/$defs/Policy"
+        },
+        "permission_policy": {
+          "description": "A permission preset: read-only, edit-worktree or full. Its rules\nfollow the seat's own policy; a child seat takes its denials only.",
+          "type": "string",
+          "enum": [
+            "read-only",
+            "edit-worktree",
+            "full"
+          ]
         },
         "delegates_to": {
           "description": "The seats this seat may spawn.",

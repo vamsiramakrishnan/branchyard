@@ -81,6 +81,10 @@
       "$ref": "#/$defs/Connectors",
       "description": "The connector gateway (docs/connectors.md): where it is, which\nbundles it serves, how `by gateway` runs it, and the grants a new\nbranch gets when `--connector` names none."
     },
+    "network": {
+      "$ref": "#/$defs/NetworkConfig",
+      "description": "The hosts a new branch's harness may reach (docs/egress.md), when\n`--network` gives none: an allowlist enforced through Branchyard's\negress proxy. Unset: open."
+    },
     "usage": {
       "$ref": "#/$defs/UsageConfig",
       "description": "Quota meters per login (`by usage`, docs/usage.md): what `by run`\nand `by fan` do when a candidate's login is near its 5-hour or\nweekly limit, and named logins to meter."
@@ -173,7 +177,7 @@
               "type": "null"
             }
           ],
-          "description": "How tool permission requests are answered: `ask` on the terminal,\nor `yes` to allow each one. Unset: decided by whether a terminal is\nattached."
+          "description": "How tool permission requests are answered: `ask` on the terminal,\n`yes` to allow each one, or a preset (`read-only`, `edit-worktree`,\n`full`; docs/egress.md#permission-presets). Unset: decided by\nwhether a terminal is attached."
         },
         "isolated": {
           "type": [
@@ -221,6 +225,21 @@
           "type": "string",
           "const": "yes",
           "description": "Allow every request (`--yes`)."
+        },
+        {
+          "type": "string",
+          "const": "read-only",
+          "description": "The `read-only` preset: read and search; edits, commands and the\nweb denied (`--permissions read-only`)."
+        },
+        {
+          "type": "string",
+          "const": "edit-worktree",
+          "description": "The `edit-worktree` preset: read, search and edit files; commands\nand the web denied."
+        },
+        {
+          "type": "string",
+          "const": "full",
+          "description": "The `full` preset: every request allowed, as `yes`."
         }
       ]
     },
@@ -758,6 +777,41 @@
         }
       },
       "description": "`[connectors]`."
+    },
+    "NetworkConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "HOST[:PORT] rules a new branch's harness may reach, such as\n`\"github.com\"` or `\"*.npmjs.org:443\"`; `[]` allows nothing. Unset:\nevery host (open). A connector grant adds the gateway."
+        },
+        "enforce": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkEnforceMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`best_effort` (the default): where the policy cannot be enforced,\nrun with the proxy's variables and say so. `required`: refuse to\nrun there."
+        }
+      },
+      "description": "`[network]`."
+    },
+    "NetworkEnforceMode": {
+      "type": "string",
+      "enum": [
+        "best_effort",
+        "required"
+      ]
     },
     "UsageConfig": {
       "type": "object",

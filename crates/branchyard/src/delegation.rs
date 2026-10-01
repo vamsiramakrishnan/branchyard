@@ -1731,10 +1731,28 @@ impl Local {
                 })
             }
         }
+        // Its network policy: its seat's (or what it inherited), within
+        // the parent's.
+        let network = branchyard_provision::network::narrow(
+            provision.as_ref().and_then(|p| p.network.as_ref()),
+            caller.provision.as_ref().and_then(|p| p.network.as_ref()),
+        )
+        .map_err(|why| Error::Denied(format!("{} may not grant that: {why}", self.branch)))?;
+        match (&mut provision, network) {
+            (Some(spec), network) => spec.network = network,
+            (None, None) => {}
+            (None, Some(network)) => {
+                provision = Some(crate::Provisioning {
+                    network: Some(network),
+                    ..Default::default()
+                })
+            }
+        }
         crate::provisioning::check(
             provision.as_ref(),
             isolated || crate::placement::sandboxed(caller.provider.as_ref()),
         )?;
+        crate::egress::check(provision.as_ref(), caller.provider.as_ref())?;
         graph::check_bindings(&store, &self.branch, &request.bindings)?;
         let base = match &request.base {
             Some(rev) => Some(run::resolve_base(&self.yard, Some(rev))?),

@@ -50,6 +50,7 @@ pub mod auth;
 pub mod connectors;
 pub mod edit;
 pub mod instructions;
+pub mod network;
 pub mod toml;
 
 mod antigravity;
@@ -113,6 +114,12 @@ pub struct Provisioning {
     /// to its parent's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connectors: Vec<connectors::GrantEntry>,
+    /// Which hosts the harness may reach (`--network`): `open` (unset),
+    /// `none`, or an allowlist, enforced through Branchyard's egress
+    /// proxy; see `docs/egress.md`. A connector grant adds the gateway's
+    /// host. A delegated child's is narrowed to its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<network::Network>,
 }
 
 impl Provisioning {

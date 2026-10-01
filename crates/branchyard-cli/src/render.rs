@@ -442,6 +442,17 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             },
             &format!("connector: {}", call.describe()),
         ),
+        Activity::Egress(egress) => style.paint(
+            match egress.as_ref() {
+                branchyard::EgressActivity::Decision { allowed: true, .. }
+                | branchyard::EgressActivity::Applied {
+                    enforcement: branchyard::EgressEnforcement::Enforced,
+                    ..
+                } => Tone::Cyan,
+                _ => Tone::Yellow,
+            },
+            &egress.describe(),
+        ),
         Activity::Sandbox(event) => style.paint(
             match event.as_ref() {
                 branchyard::SandboxEvent::Started {

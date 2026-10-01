@@ -307,6 +307,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
     check_plan_and_goal(launch.profile, options)?;
     let grant = root_grant(options, new_home_private(options))?;
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
+    crate::egress::check(options.provision.as_ref(), options.provider.as_ref())?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let name = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
@@ -380,6 +381,7 @@ pub(crate) fn run_on(
     }
     let grant = root_grant(options, new_home_private(options))?;
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
+    crate::egress::check(options.provision.as_ref(), options.provider.as_ref())?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
     let reserved = names::reserve(
@@ -524,6 +526,7 @@ pub(crate) fn run_attempts(
     let grant = root_grant(options, new_home_private(options))?;
     for o in &per {
         crate::provisioning::check(o.provision.as_ref(), new_home_private(o))?;
+        crate::egress::check(o.provision.as_ref(), o.provider.as_ref())?;
     }
     let first = first_prompt(prompt, options);
     let base = resolve_base(yard, options.base.as_deref())?;
@@ -981,20 +984,30 @@ pub(crate) fn prepare_send_with(
         let mut spec = same_model(name, &record, asked.clone())?;
         // A delegated child's connectors stay within its parent's grant,
         // whoever sends it.
+        // So does its network policy.
         if let (Some(parent), true) = (&record.info.parent, record.info.depth > 0) {
-            let parent_grant = store
-                .read(parent)
-                .ok()
-                .and_then(|p| p.provision)
-                .map(|p| p.connectors)
+            let parent_spec = store.read(parent).ok().and_then(|p| p.provision);
+            let parent_grant = parent_spec
+                .as_ref()
+                .map(|p| p.connectors.clone())
                 .unwrap_or_default();
             spec.connectors =
                 branchyard_provision::connectors::narrow(Some(&spec.connectors), &parent_grant)
                     .map_err(|why| Error::Denied(format!("{name}: {why}")))?;
+            let asked = spec
+                .network
+                .clone()
+                .or_else(|| record.provision.as_ref().and_then(|p| p.network.clone()));
+            spec.network = branchyard_provision::network::narrow(
+                asked.as_ref(),
+                parent_spec.as_ref().and_then(|p| p.network.as_ref()),
+            )
+            .map_err(|why| Error::Denied(format!("{name}: {why}")))?;
         }
         record.provision = Some(spec);
     }
     crate::provisioning::check(record.provision.as_ref(), record.home.is_some())?;
+    crate::egress::check(record.provision.as_ref(), record.provider.as_ref())?;
     // A delegated child keeps the envelope and seats its parent gave it.
     if let (Some(envelope), 0) = (&options.delegation, record.info.depth) {
         crate::projection::tools(options)?;
@@ -1167,6 +1180,7 @@ pub(crate) fn fork(
     // isolated, or when its provider is a sandbox (`create` gives it one).
     let provision = options.provision.clone().or(parent.provision.clone());
     crate::provisioning::check(provision.as_ref(), private)?;
+    crate::egress::check(provision.as_ref(), provider.as_ref())?;
     let reserved =
         names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
     // A forked session lives in the parent's home when it ran isolated.

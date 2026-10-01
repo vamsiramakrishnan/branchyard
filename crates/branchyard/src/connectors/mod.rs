@@ -291,6 +291,9 @@ impl ConnectorCall {
 /// What a turn's connectors give its harness.
 pub(crate) struct Prepared {
     pub env: Vec<EnvVar>,
+    /// The gateway's URL as the harness is given it, which a restricted
+    /// network policy allows (`crate::egress`).
+    pub gateway_url: String,
     /// One line for the harness's instructions, pointing at `INDEX.md`.
     pub instruction: String,
     pub connectors: Vec<String>,
@@ -439,7 +442,7 @@ pub(crate) fn prepare(
     let guest = |rel: &str| format!("{}/{rel}", guest_home.trim_end_matches('/'));
     Ok(Some(Prepared {
         env: vec![
-            EnvVar::plain(ENV_GATEWAY_URL, url),
+            EnvVar::plain(ENV_GATEWAY_URL, url.clone()),
             EnvVar::plain(ENV_GATEWAY_TOKEN_FILE, guest(TOKEN_FILE)),
         ],
         instruction: format!(
@@ -449,6 +452,7 @@ pub(crate) fn prepare(
             guest(&format!("{HOME_DIR}/INDEX.md"))
         ),
         connectors: names,
+        gateway_url: url,
         files: vec![format!("{HOME_DIR}/"), TOKEN_FILE.to_owned()],
         _token: TokenFile(token_path),
     }))

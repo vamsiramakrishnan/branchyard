@@ -112,9 +112,20 @@
           "items": {
             "$ref": "#/$defs/RuleSpec"
           }
+        },
+        "preset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyPreset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
         }
       },
-      "description": "A permission policy: rules in order, then the mode. Defaults to deny.",
+      "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`.",
       "title": "PolicySpec",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$defs": {
@@ -142,6 +153,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         }
       }
     },
@@ -376,9 +407,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -404,6 +446,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -741,6 +803,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -969,6 +1042,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "Seats": {
           "type": "object",
@@ -1731,9 +1836,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -1759,6 +1875,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -1862,6 +1998,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -2090,6 +2237,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         }
       }
     },
@@ -2285,9 +2464,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -2313,6 +2503,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -2416,6 +2626,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -2644,6 +2865,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         }
       }
     },
@@ -3380,9 +3633,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -3408,6 +3672,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -3511,6 +3795,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -3739,6 +4034,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         }
       }
     },
@@ -3938,9 +4265,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -3966,6 +4304,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -4303,6 +4661,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -4531,6 +4900,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         }
       }
     },
@@ -4718,9 +5119,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -4746,6 +5158,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -5083,6 +5515,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -5311,6 +5754,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         }
       }
     },
@@ -5525,9 +6000,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -5553,6 +6039,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "After": {
           "oneOf": [
@@ -6013,9 +6519,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -6041,6 +6558,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         }
       }
     },
@@ -8781,6 +9318,19 @@
             {
               "type": "object",
               "properties": {
+                "egress": {
+                  "$ref": "#/$defs/EgressActivity"
+                }
+              },
+              "required": [
+                "egress"
+              ],
+              "additionalProperties": false,
+              "description": "The turn's egress policy and how it was applied, and each\ndestination the egress proxy allowed or denied. See\n[`EgressActivity`] and `docs/egress.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "adopted": {
                   "$ref": "#/$defs/Adoption"
                 }
@@ -11379,6 +11929,115 @@
             "decision"
           ],
           "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
+        },
+        "EgressActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "policy": {
+                  "type": "string",
+                  "description": "The policy in one line (`none`, or its rules)."
+                },
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The rules in force this turn, the gateway's included."
+                },
+                "enforcement": {
+                  "$ref": "#/$defs/Enforcement"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why it is not enforced, when it is not."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "applied"
+                }
+              },
+              "required": [
+                "kind",
+                "policy",
+                "allow",
+                "enforcement"
+              ],
+              "description": "The turn's policy and how it was applied; once per turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "description": "`CONNECT`, or the plain HTTP request's method."
+                },
+                "host": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0,
+                  "maximum": 65535
+                },
+                "allowed": {
+                  "type": "boolean"
+                },
+                "rule": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The rule that allowed it."
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why it was refused, or why an allowed one failed."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "decision"
+                }
+              },
+              "required": [
+                "kind",
+                "method",
+                "host",
+                "port",
+                "allowed"
+              ],
+              "description": "One destination the proxy decided."
+            }
+          ],
+          "description": "What the egress proxy did, recorded on the branch."
+        },
+        "Enforcement": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "enforced",
+              "description": "The harness's only network is the proxy."
+            },
+            {
+              "type": "string",
+              "const": "advisory",
+              "description": "The harness was given the proxy's variables; a tool that ignores\nthem is not held to the policy."
+            },
+            {
+              "type": "string",
+              "const": "not_applied",
+              "description": "Nothing was applied: the provider cannot confine its sandboxes or\nroute them to the proxy."
+            }
+          ],
+          "description": "How a turn's egress policy was applied."
         },
         "Adoption": {
           "type": "object",
@@ -12404,6 +13063,19 @@
             {
               "type": "object",
               "properties": {
+                "egress": {
+                  "$ref": "#/$defs/EgressActivity"
+                }
+              },
+              "required": [
+                "egress"
+              ],
+              "additionalProperties": false,
+              "description": "The turn's egress policy and how it was applied, and each\ndestination the egress proxy allowed or denied. See\n[`EgressActivity`] and `docs/egress.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "adopted": {
                   "$ref": "#/$defs/Adoption"
                 }
@@ -15002,6 +15674,115 @@
             "decision"
           ],
           "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
+        },
+        "EgressActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "policy": {
+                  "type": "string",
+                  "description": "The policy in one line (`none`, or its rules)."
+                },
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The rules in force this turn, the gateway's included."
+                },
+                "enforcement": {
+                  "$ref": "#/$defs/Enforcement"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why it is not enforced, when it is not."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "applied"
+                }
+              },
+              "required": [
+                "kind",
+                "policy",
+                "allow",
+                "enforcement"
+              ],
+              "description": "The turn's policy and how it was applied; once per turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "description": "`CONNECT`, or the plain HTTP request's method."
+                },
+                "host": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0,
+                  "maximum": 65535
+                },
+                "allowed": {
+                  "type": "boolean"
+                },
+                "rule": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The rule that allowed it."
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why it was refused, or why an allowed one failed."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "decision"
+                }
+              },
+              "required": [
+                "kind",
+                "method",
+                "host",
+                "port",
+                "allowed"
+              ],
+              "description": "One destination the proxy decided."
+            }
+          ],
+          "description": "What the egress proxy did, recorded on the branch."
+        },
+        "Enforcement": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "enforced",
+              "description": "The harness's only network is the proxy."
+            },
+            {
+              "type": "string",
+              "const": "advisory",
+              "description": "The harness was given the proxy's variables; a tool that ignores\nthem is not held to the policy."
+            },
+            {
+              "type": "string",
+              "const": "not_applied",
+              "description": "Nothing was applied: the provider cannot confine its sandboxes or\nroute them to the proxy."
+            }
+          ],
+          "description": "How a turn's egress policy was applied."
         },
         "Adoption": {
           "type": "object",
@@ -18372,6 +19153,19 @@
             {
               "type": "object",
               "properties": {
+                "egress": {
+                  "$ref": "#/$defs/EgressActivity"
+                }
+              },
+              "required": [
+                "egress"
+              ],
+              "additionalProperties": false,
+              "description": "The turn's egress policy and how it was applied, and each\ndestination the egress proxy allowed or denied. See\n[`EgressActivity`] and `docs/egress.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "adopted": {
                   "$ref": "#/$defs/Adoption"
                 }
@@ -20971,6 +21765,115 @@
           ],
           "description": "A gateway call, from one line of its audit log. Fields are Anvil's;\nany it does not write are absent."
         },
+        "EgressActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "policy": {
+                  "type": "string",
+                  "description": "The policy in one line (`none`, or its rules)."
+                },
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The rules in force this turn, the gateway's included."
+                },
+                "enforcement": {
+                  "$ref": "#/$defs/Enforcement"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why it is not enforced, when it is not."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "applied"
+                }
+              },
+              "required": [
+                "kind",
+                "policy",
+                "allow",
+                "enforcement"
+              ],
+              "description": "The turn's policy and how it was applied; once per turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "description": "`CONNECT`, or the plain HTTP request's method."
+                },
+                "host": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0,
+                  "maximum": 65535
+                },
+                "allowed": {
+                  "type": "boolean"
+                },
+                "rule": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The rule that allowed it."
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why it was refused, or why an allowed one failed."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "decision"
+                }
+              },
+              "required": [
+                "kind",
+                "method",
+                "host",
+                "port",
+                "allowed"
+              ],
+              "description": "One destination the proxy decided."
+            }
+          ],
+          "description": "What the egress proxy did, recorded on the branch."
+        },
+        "Enforcement": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "enforced",
+              "description": "The harness's only network is the proxy."
+            },
+            {
+              "type": "string",
+              "const": "advisory",
+              "description": "The harness was given the proxy's variables; a tool that ignores\nthem is not held to the policy."
+            },
+            {
+              "type": "string",
+              "const": "not_applied",
+              "description": "Nothing was applied: the provider cannot confine its sandboxes or\nroute them to the proxy."
+            }
+          ],
+          "description": "How a turn's egress policy was applied."
+        },
         "Adoption": {
           "type": "object",
           "properties": {
@@ -22782,9 +23685,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -22810,6 +23724,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -23147,6 +24081,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -23375,6 +24320,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "Seats": {
           "type": "object",
@@ -24128,9 +25105,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -24156,6 +25144,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -24493,6 +25501,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -24721,6 +25740,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "Seats": {
           "type": "object",
@@ -25493,9 +26544,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -25521,6 +26583,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -25858,6 +26940,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -26086,6 +27179,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "Seats": {
           "type": "object",
@@ -26854,9 +27979,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -26882,6 +28018,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -27219,6 +28375,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -27447,6 +28614,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "Seats": {
           "type": "object",
@@ -28364,9 +29563,20 @@
               "items": {
                 "$ref": "#/$defs/RuleSpec"
               }
+            },
+            "preset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PolicyPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A named preset (`read-only`, `edit-worktree`, `full`) standing for\nits explicit rules; see `docs/egress.md#permission-presets`."
             }
           },
-          "description": "A permission policy: rules in order, then the mode. Defaults to deny."
+          "description": "A permission policy: rules in order, then the mode. Defaults to deny.\nWith a preset, its rules follow these rules and its default replaces\n`mode`."
         },
         "PolicyMode": {
           "type": "string",
@@ -28392,6 +29602,26 @@
             "tool",
             "allow"
           ]
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "Envelope": {
           "type": "object",
@@ -28729,6 +29959,17 @@
                 "$ref": "#/$defs/GrantEntry"
               },
               "description": "Connectors the harness may call through the connector gateway, and\nwhat it may do with each (`--connector`); see `docs/connectors.md`.\nNeeds a private home, like secrets. A delegated child's is narrowed\nto its parent's."
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Network"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -28957,6 +30198,38 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "Network": {
+          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "Seats": {
           "type": "object",

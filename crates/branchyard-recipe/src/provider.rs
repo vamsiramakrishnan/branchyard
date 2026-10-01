@@ -251,6 +251,9 @@ impl SandboxProvider for RecipeProvider {
         Capabilities {
             exec: true,
             pause: self.recipe.can_pause(),
+            // The machine is the recipe's; nothing here confines its network
+            // (docs/egress.md).
+            egress: false,
             ..Capabilities::default()
         }
     }

@@ -8,6 +8,10 @@
 //! needs a POSIX shell with `sleep`, `cat` and `printf`, and a Linux
 //! `/proc`. They do not check isolation: a local provider passes them.
 //!
+//! [`egress_confinement`] runs `python3` in the sandbox when the provider
+//! declares [`crate::Capabilities::egress`]; a provider that does not must
+//! refuse [`SandboxProvider::exec_confined`] instead.
+//!
 //! A provider that cannot show host directories to a sandbox at all, such
 //! as one whose sandboxes run on another machine, is checked with
 //! [`Setup::without_mounts`]: its sandboxes are created without mounts and
@@ -131,6 +135,7 @@ pub fn run_all(provider: &dyn SandboxProvider, setup: &Setup) {
     teardown_names_survivors(provider, setup);
     drop_tears_down(provider, setup);
     stop_ends_processes(provider, setup);
+    egress_confinement(provider, setup);
 }
 
 /// Destroys its sandbox when dropped.
@@ -458,4 +463,83 @@ pub fn stop_ends_processes(provider: &dyn SandboxProvider, setup: &Setup) {
     provider.stop(&sandbox.name).expect("stop");
     let status = process.wait().expect("wait after stop");
     assert!(!status.success(), "a stopped process succeeded: {status}");
+}
+
+/// The port the confined process's listener takes in its own namespace.
+const CONFINED_PORT: u16 = 3128;
+
+/// A provider that declares [`crate::Capabilities::egress`] starts a
+/// process that cannot reach a listener on this host's loopback, but
+/// reaches the listener [`SandboxProvider::exec_confined`] hands back. One
+/// that does not declare it refuses `exec_confined` as unsupported, never
+/// running the process unconfined.
+pub fn egress_confinement(provider: &dyn SandboxProvider, setup: &Setup) {
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    let sandbox = Sandbox::ensure(provider, setup, "egress");
+    let declared = provider.capabilities().egress;
+    let outside = TcpListener::bind("127.0.0.1:0").expect("bind a host listener");
+    let outside_port = outside.local_addr().expect("its address").port();
+    let code = format!(
+        "import socket\n\
+         def reach(port):\n\
+         \x20   try:\n\
+         \x20       return socket.create_connection((\"127.0.0.1\", port), timeout=5)\n\
+         \x20   except OSError:\n\
+         \x20       return None\n\
+         print(\"outside-reached\" if reach({outside_port}) else \"outside-blocked\", flush=True)\n\
+         s = reach({CONFINED_PORT})\n\
+         if s:\n\
+         \x20   s.sendall(b\"through the listener\\n\")\n\
+         \x20   s.close()\n\
+         \x20   print(\"listener-reached\", flush=True)\n"
+    );
+    let mut exec = setup.exec("");
+    exec.argv = vec!["python3".into(), "-c".into(), code];
+    let confined = provider.exec_confined(&sandbox.name, &exec, CONFINED_PORT);
+    if !declared {
+        match confined {
+            Err(ProviderError::Unsupported(unsupported)) => {
+                assert_eq!(unsupported.operation, crate::Operation::Egress);
+                return;
+            }
+            Err(other) => panic!("exec_confined without egress: expected unsupported, got {other}"),
+            Ok(_) => panic!("exec_confined ran a process the provider says it cannot confine"),
+        }
+    }
+    let (mut process, listener) = confined.unwrap_or_else(|e| panic!("exec_confined: {e}"));
+    drop(process.take_stdin());
+    let (sender, received) = mpsc::channel();
+    thread::spawn(move || {
+        let read = listener.accept().map(|(mut stream, _)| {
+            let mut text = String::new();
+            let _ = stream.read_to_string(&mut text);
+            text
+        });
+        let _ = sender.send(read);
+    });
+    let out = drain(process.take_stdout().expect("stdout is piped"));
+    let err = drain(process.take_stderr().expect("stderr is piped"));
+    let through = received
+        .recv_timeout(setup.timeout)
+        .unwrap_or_else(|_| panic!("nothing reached the confined process's listener"))
+        .expect("accept on the confined listener");
+    let status = process.wait().expect("wait");
+    let (out, err) = (out.join().unwrap(), err.join().unwrap());
+    assert_eq!(through, "through the listener\n");
+    assert!(
+        status.success(),
+        "the confined script failed: {status}, {err}"
+    );
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        ["outside-blocked", "listener-reached"],
+        "stderr: {err}"
+    );
+    outside.set_nonblocking(true).expect("nonblocking");
+    assert!(
+        outside.accept().is_err(),
+        "a confined process reached this host's loopback"
+    );
 }

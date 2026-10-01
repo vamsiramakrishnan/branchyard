@@ -179,6 +179,18 @@
           "description": "allow every request (--yes); only for trusted tasks"
         },
         {
+          "value": "read-only",
+          "label": "Read only",
+          "description": "read and search; edits, commands and the web denied (a preset)"
+        },
+        {
+          "value": "edit-worktree",
+          "label": "Edit files",
+          "description": "read, search and edit files; commands and the web denied (a preset)"
+        }
+      ],
+      "more_choices": [
+        {
           "value": null,
           "label": "Decide per run",
           "description": "ask when a terminal is attached, else deny"

@@ -234,6 +234,11 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "activity": "connector_call",
             "connector_call": call,
         }),
+        Activity::Egress(egress) => json!({
+            "activity": "egress",
+            "egress": egress,
+            "text": egress.describe(),
+        }),
         Activity::Adopted(adoption) => json!({
             "activity": "adopted",
             "adopted": adoption,

@@ -103,6 +103,7 @@ mod compare;
 mod conformance;
 pub mod connectors;
 mod delegation;
+mod egress;
 mod engine;
 mod environments;
 mod fleet;
@@ -151,6 +152,9 @@ pub use adopt::{AdoptSpec, Adoption};
 pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
 };
+pub use branchyard_provision::network::{
+    narrow as network_narrow, Enforce as NetworkEnforce, HostRule as NetworkRule, Network,
+};
 pub use branchyard_provision::{
     Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport, SecretFrom,
     SecretSource, Telemetry, Via,
@@ -166,6 +170,7 @@ pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
 };
+pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
 pub use environments::{
     EnvironmentBuild, EnvironmentInfo, EnvironmentInput, EnvironmentOrigin, EnvironmentSnapshot,
     EnvironmentState, EnvironmentUse, Pruned as EnvironmentsPruned,
@@ -203,6 +208,7 @@ pub use plan::{
     planning_prompt, read_only as read_only_policy, Plan, PlanActivity, PlanInfo, PlanPhase,
     PlanTask, READ_ONLY_TOOLS,
 };
+pub use policy::{PolicyPreset, PresetRules, EDIT_TOOLS, SHELL_TOOLS, WEB_TOOLS};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use pull_request::{
     slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
@@ -2051,6 +2057,10 @@ pub enum Activity {
     /// gateway's audit log: allowed, denied, or refused for want of
     /// confirmation. See `docs/connectors.md`.
     ConnectorCall(Box<connectors::ConnectorCall>),
+    /// The turn's egress policy and how it was applied, and each
+    /// destination the egress proxy allowed or denied. See
+    /// [`EgressActivity`] and `docs/egress.md`.
+    Egress(Box<EgressActivity>),
     /// The branch was made from a harness session that already existed on
     /// this machine (`by adopt`); its next turn resumes that session.
     Adopted(Box<Adoption>),
