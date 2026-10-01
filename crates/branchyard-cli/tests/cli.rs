@@ -1379,12 +1379,18 @@ fn artifact_and_scratch_commands_follow_the_delegation_tree() {
 }
 
 /// A harness builds a graph of its children with `by graph` in its shell
-/// and with the Python module; both reach the same operation.
+/// and with the Python module; both reach the same operation. A child whose
+/// prerequisite is still running is created `waiting` (`b`, after `a`, in
+/// the same proposal); one whose prerequisite has already settled starts at
+/// once (`c`, applied after the script has waited for `b`). The script waits
+/// for `b` first so that `c`'s state does not depend on how fast `a` and `b`
+/// ran: without the wait, `c` was `waiting` or `running` by timing alone.
 #[test]
 fn a_harness_applies_a_graph_with_by_and_python() {
     let repo = Repo::new();
     let edits = r#"[{"kind":"spawn","prompt":"WRITE a.txt=1","name":"a"},{"kind":"spawn","prompt":"WRITE b.txt=1","name":"b","depends_on":["a"]}]"#;
     let script = "import branchyard as b; g = b.graph(); print('python rev', g.revision); \
+                  b.wait('b', timeout=60, poll=0.05); \
                   a = b.apply_graph([{'kind': 'spawn', 'prompt': 'WRITE c.txt=1', 'name': 'c', \
                   'depends_on': ['b']}], g.revision); \
                   print('python applied', a.revision, a.spawned[0].status['state'], a.spawned[0].depends_on); \
@@ -1406,7 +1412,7 @@ fn a_harness_applies_a_graph_with_by_and_python() {
         "\"revision\": 0",
         "\"state\": \"waiting\"",
         "python rev 1",
-        "python applied 2 waiting ['b']",
+        "python applied 2 running ['b']",
         "python waited ready b",
         "python stale stale_revision",
         "\"kind\": \"denied\"",
