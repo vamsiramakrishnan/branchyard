@@ -227,7 +227,7 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// Replace what legitimately differs between two repositories: their
-/// paths, commit IDs, task IDs and times.
+/// paths, commit IDs, task IDs, times and ages.
 fn normalize(text: &str, root: &Path) -> String {
     let text = text.replace(&root.display().to_string(), "<root>");
     // A table's AGE column is relative to when each side ran, which can
@@ -239,6 +239,14 @@ fn normalize(text: &str, root: &Path) -> String {
             mask_age(line)
         } else {
             line.to_owned()
+        };
+        // `by show`'s "created 10s ago" is relative too.
+        let line = match line.trim_start().strip_prefix("created") {
+            Some(rest) if rest.ends_with(" ago") => {
+                let indent = line.len() - line.trim_start().len();
+                format!("{}created <age>", &line[..indent])
+            }
+            _ => line,
         };
         let line = match line.get(..24) {
             Some(stamp) if stamp.as_bytes()[10] == b'T' && stamp.ends_with('Z') => {
