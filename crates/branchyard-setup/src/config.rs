@@ -133,6 +133,51 @@ pub struct ProjectConfig {
     /// must not choose where your tasks are sent.
     #[serde(default, skip_serializing_if = "SyncSection::is_empty")]
     pub sync: SyncSection,
+    /// Your approvals for tools and connector operations
+    /// (docs/effects.md#approvals): allow, ask, block or stage, by pattern
+    /// and by effect class. Within a seat's, and never below an
+    /// administrator's on a server.
+    #[serde(default, skip_serializing_if = "ApprovalsConfig::is_empty")]
+    pub approvals: ApprovalsConfig,
+}
+
+/// `[approvals]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalsConfig {
+    /// Pattern to `allow`, `ask`, `block` or `stage`: a tool name glob
+    /// (`"Bash"`, `"mcp__*"`) or `connector:operation`
+    /// (`"github:issues.*"`, `"gmail:*"`). The most specific pattern wins.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rules: BTreeMap<String, String>,
+    /// Effect class (`reversible`, `compensable`, `irreversible`) to a
+    /// decision, for operations no rule names. Defaults: reversible
+    /// `allow`, compensable `ask`, irreversible `stage`; a deletion always
+    /// asks.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub classes: BTreeMap<String, String>,
+}
+
+impl ApprovalsConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == ApprovalsConfig::default()
+    }
+
+    /// The policy, checked; `None` when nothing is set.
+    pub fn policy(
+        &self,
+    ) -> Result<Option<branchyard_provision::approvals::ApprovalPolicy>, ConfigError> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        branchyard_provision::approvals::ApprovalPolicy::from_strings(
+            self.rules.clone(),
+            self.classes.clone(),
+            None,
+        )
+        .map(Some)
+        .map_err(|e| ConfigError(format!("approvals: {e}")))
+    }
 }
 
 /// `[sync]`; see docs/sync.md.
@@ -711,6 +756,19 @@ pub struct Connectors {
     /// sandboxed branches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    /// Whether each turn calls the gateway through the effect ledger's
+    /// proxy, which decides approvals and writes every effectful call to
+    /// the ledger before it is made (docs/effects.md). Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_proxy: Option<bool>,
+    /// The address each turn's ledger proxy binds (default `127.0.0.1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_listen: Option<String>,
+    /// How a sandboxed harness reaches its ledger proxy: a host address
+    /// its guest routes to. Without it, a sandboxed turn calls the gateway
+    /// directly and its effects reach the ledger only from the audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_sandbox_host: Option<String>,
 }
 
 impl Connectors {
@@ -1845,6 +1903,15 @@ impl ProjectConfig {
             split_words(anvil).map_err(|e| ConfigError(format!("connectors.anvil: {e}")))?;
         }
         self.connectors.grant_entries()?;
+        if let Some(listen) = &self.connectors.effects_listen {
+            if listen.parse::<std::net::IpAddr>().is_err() {
+                return fail(
+                    "connectors.effects_listen",
+                    format!("{listen:?} is not an IP address"),
+                );
+            }
+        }
+        self.approvals.policy()?;
         self.network.policy()?;
         self.models.check()?;
         if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {
@@ -2488,6 +2555,26 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
             let grants: Vec<String> = c.grants.iter().map(|g| toml_string(g)).collect();
             out.push_str(&format!("grants = [{}]\n", grants.join(", ")));
         }
+        if let Some(enabled) = c.effects_proxy {
+            out.push_str(&format!("effects_proxy = {enabled}\n"));
+        }
+        for (key, value) in [
+            ("effects_listen", &c.effects_listen),
+            ("effects_sandbox_host", &c.effects_sandbox_host),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!("{key} = {}\n", toml_string(value)));
+            }
+        }
+    }
+    if !config.approvals.is_empty() {
+        out.push_str(
+            "\n# Your approvals: allow, ask, block or stage, by tool or connector:operation and\n\
+             # by effect class. See docs/effects.md.\n",
+        );
+        let table: BTreeMap<&str, &ApprovalsConfig> =
+            [("approvals", &config.approvals)].into_iter().collect();
+        out.push_str(&toml::to_string(&table).unwrap_or_default());
     }
     let n = &config.network;
     if !n.is_empty() {
@@ -2641,6 +2728,12 @@ sandbox_gateway = "http://192.168.127.1:8931/mcp"
 bundles = "connectors"
 anvil = "node /opt/anvil/bin-anvil.js"
 grants = ["github:read", "linear@work:write:issues.*"]
+effects_proxy = true
+effects_listen = "127.0.0.1"
+effects_sandbox_host = "192.168.127.1"
+[approvals]
+rules = { "github:issues.*" = "allow", "Bash" = "ask", "gmail:*" = "stage" }
+classes = { compensable = "allow" }
 "#;
 
     #[test]
@@ -2735,6 +2828,40 @@ grants = ["github:read", "linear@work:write:issues.*"]
             ),
             ("[models]\nlisten = 1\n", "expected a string"),
             ("[models]\nkeys = 1\n", "keys"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn approvals_are_checked_and_become_a_policy() {
+        let config = parse(FULL).unwrap();
+        let policy = config.approvals.policy().unwrap().unwrap();
+        assert_eq!(
+            policy.rules["github:issues.*"],
+            branchyard_provision::approvals::Approval::Allow
+        );
+        assert_eq!(config.connectors.effects_proxy, Some(true));
+        assert_eq!(ApprovalsConfig::default().policy().unwrap(), None);
+        for (text, needle) in [
+            (
+                "[approvals]\nrules = { \"Bash\" = \"maybe\" }\n",
+                "approvals",
+            ),
+            (
+                "[approvals]\nclasses = { loud = \"ask\" }\n",
+                "effect class",
+            ),
+            (
+                "[approvals]\nrules = { \"github:\" = \"ask\" }\n",
+                "approval pattern",
+            ),
+            ("[approvals]\nlock = true\n", "lock"),
+            (
+                "[connectors]\neffects_listen = \"here\"\n",
+                "connectors.effects_listen",
+            ),
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");

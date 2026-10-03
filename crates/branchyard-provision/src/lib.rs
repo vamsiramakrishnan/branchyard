@@ -46,6 +46,7 @@
 //!   written with mode 0600. Nothing in this crate prints or logs.
 
 pub mod apply;
+pub mod approvals;
 pub mod auth;
 pub mod connectors;
 pub mod edit;
@@ -128,6 +129,12 @@ pub struct Provisioning {
     /// on it, within its parent's models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<models::ModelAccess>,
+    /// The seat's or rig's approval policy for tools and connector
+    /// operations (allow, ask, block or stage); see `docs/effects.md`. A
+    /// delegated child's is held within its parent's: it may only be
+    /// stricter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals: Option<approvals::ApprovalPolicy>,
 }
 
 impl Provisioning {

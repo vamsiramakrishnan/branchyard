@@ -156,6 +156,34 @@ Examples:
 
 See docs/plans-and-goals.md.";
 
+const APPROVALS_EXAMPLES: &str = "\
+Examples:
+  by approvals
+  by approvals allow 7Q2M9K4D
+  by approvals deny 7Q2M9K4D --reason \"not before the board meets\"
+  by approvals ls --all --json
+
+See docs/effects.md.";
+
+const EFFECTS_EXAMPLES: &str = "\
+Examples:
+  by effects
+  by effects --branch board-update --json
+  by effects show 5H3XK2PA
+  by effects promote 5H3XK2PA
+  by effects reconcile
+
+See docs/effects.md.";
+
+const UNDO_EXAMPLES: &str = "\
+Examples:
+  by undo board-update --to 3 --plan
+  by undo board-update --to 3
+  by undo board-update --to 3 --only 5H3XK2PA 9TQ0WZ1R
+  by undo board-update --yes
+
+See docs/effects.md.";
+
 const KNOWLEDGE_EXAMPLES: &str = "\
 Examples:
   by knowledge review
@@ -164,6 +192,103 @@ Examples:
   by knowledge export --out AGENTS.md
 
 See docs/knowledge.md.";
+
+/// `by approvals`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct ApprovalsArgs {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    #[command(subcommand)]
+    pub action: Option<ApprovalsAction>,
+}
+
+/// `by effects`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct EffectsArgs {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Only this branch's
+    #[arg(long, value_name = "BRANCH")]
+    pub branch: Option<String>,
+    #[command(subcommand)]
+    pub action: Option<EffectsAction>,
+}
+
+/// `by undo`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct UndoArgs {
+    pub branch: String,
+    /// Go back to this checkpoint (default: the branch's base, 0); effects of later turns are
+    /// planned
+    #[arg(long, value_name = "TURN")]
+    pub to: Option<u32>,
+    /// Print the plan and change nothing
+    #[arg(long)]
+    pub plan: bool,
+    /// Undo only these upstream effects (ids or their ends)
+    #[arg(long, value_name = "ID", num_args = 1..)]
+    pub only: Vec<String>,
+    /// Undo every reversible effect without asking
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+    /// Print JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `by approvals`' actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum ApprovalsAction {
+    /// List the approvals waiting (the default)
+    Ls {
+        /// Answered ones too
+        #[arg(long)]
+        all: bool,
+    },
+    /// Allow it: the waiting call or tool goes ahead, a staged effect is performed
+    Allow {
+        /// The approval's id, or the end of it
+        #[arg(required_unless_present = "branch")]
+        id: Option<String>,
+        /// The oldest approval waiting on this branch instead
+        #[arg(long, value_name = "BRANCH", conflicts_with = "id")]
+        branch: Option<String>,
+        /// Why, recorded with the answer
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        reason: Option<String>,
+    },
+    /// Deny it: the call or tool is refused, a staged effect is discarded
+    Deny {
+        /// The approval's id, or the end of it
+        #[arg(required_unless_present = "branch")]
+        id: Option<String>,
+        /// The oldest approval waiting on this branch instead
+        #[arg(long, value_name = "BRANCH", conflicts_with = "id")]
+        branch: Option<String>,
+        /// Why, recorded with the answer
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        reason: Option<String>,
+    },
+}
+
+/// `by effects`' actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum EffectsAction {
+    /// One entry and the events it is projected from
+    Show {
+        /// The entry's id, or the end of it
+        id: String,
+    },
+    /// Perform a staged effect for real: promote its draft, or make the held call
+    Promote {
+        /// The entry's id, or the end of it
+        id: String,
+    },
+    /// Settle entries whose outcome is unknown through their operation's lookup
+    Reconcile,
+}
 
 /// `by plan`'s actions.
 #[derive(Subcommand, Clone, Debug, PartialEq)]
@@ -1052,6 +1177,10 @@ pub enum Command {
         /// Then remove the branch, running its workspace teardown, as `by rm` does
         #[arg(long)]
         rm: bool,
+        /// Also perform the branch's staged effects (drafts and held calls), as approving
+        /// each would
+        #[arg(long)]
+        promote_effects: bool,
     },
     /// A branch's workspace: trust its scripts, show it, or run a named script in it
     #[command(display_order = 110, subcommand_required = true, after_help = WORKSPACE_EXAMPLES)]
@@ -1195,6 +1324,17 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Approvals waiting for an answer: list them, allow or deny one
+    #[command(display_order = 114, after_help = APPROVALS_EXAMPLES)]
+    Approvals(ApprovalsArgs),
+    /// The effect ledger: what branches did outside the machine; show, promote or reconcile
+    /// an entry
+    #[command(display_order = 115, after_help = EFFECTS_EXAMPLES)]
+    Effects(EffectsArgs),
+    /// Undo a branch: rewind its files and conversation, and undo what it did upstream where
+    /// the upstream allows
+    #[command(display_order = 116, after_help = UNDO_EXAMPLES)]
+    Undo(UndoArgs),
     /// A branch's plan: show it, approve it (as proposed or edited) or reject it
     #[command(display_order = 112, subcommand_required = true, after_help = PLAN_EXAMPLES)]
     Plan {
@@ -5188,7 +5328,8 @@ mod tests {
             Command::Merge {
                 branch: "b".into(),
                 into: None,
-                rm: false
+                rm: false,
+                promote_effects: false
             }
         );
         assert_eq!(
@@ -5196,7 +5337,8 @@ mod tests {
             Command::Merge {
                 branch: "b".into(),
                 into: Some("release".into()),
-                rm: false
+                rm: false,
+                promote_effects: false
             }
         );
         assert_eq!(
@@ -5212,7 +5354,8 @@ mod tests {
             Command::Merge {
                 branch: "b".into(),
                 into: None,
-                rm: true
+                rm: true,
+                promote_effects: false
             }
         );
     }

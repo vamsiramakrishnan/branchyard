@@ -179,15 +179,15 @@ fn accept(
 }
 
 /// A request from the harness.
-struct Request {
-    method: String,
-    target: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
+pub(crate) struct Request {
+    pub method: String,
+    pub target: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
 }
 
 impl Request {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
@@ -195,7 +195,7 @@ impl Request {
     }
 }
 
-fn read_request(
+pub(crate) fn read_request(
     reader: &mut BufReader<TcpStream>,
     out: &mut TcpStream,
 ) -> Result<Option<Request>, String> {
@@ -323,7 +323,7 @@ fn route(target: &str) -> Option<(Api, String, Option<String>)> {
 }
 
 /// The token the harness presented: `x-api-key`, or a bearer token.
-fn presented(request: &Request) -> Option<&str> {
+pub(crate) fn presented(request: &Request) -> Option<&str> {
     request.header("x-api-key").or_else(|| {
         request
             .header("authorization")
@@ -335,7 +335,7 @@ fn presented(request: &Request) -> Option<&str> {
     })
 }
 
-fn same(a: &str, b: &str) -> bool {
+pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len()
         && a.bytes()
             .zip(b.bytes())

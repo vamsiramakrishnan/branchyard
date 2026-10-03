@@ -210,6 +210,17 @@
         "$ref": "#/$defs/FileCeiling"
       }
     },
+    "approvals": {
+      "description": "The administrator's locked approval policy and each principal's\n(docs/effects.md#approvals).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileApprovals"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "aging_seconds": {
       "description": "Seconds an operation waits queued before its effective priority\nrises by one, so low-priority work cannot starve; 0 turns aging\noff. Default 60. See docs/server.md#scheduling.",
       "type": [
@@ -567,6 +578,28 @@
             "string",
             "null"
           ]
+        },
+        "effects_proxy": {
+          "description": "Call the gateway through each turn's effect-ledger proxy, which\ndecides approvals and writes every effectful call to the ledger\nbefore it is made (docs/effects.md). Default true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "effects_listen": {
+          "description": "The address each turn's ledger proxy binds. Default `127.0.0.1`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ip"
+        },
+        "effects_sandbox_host": {
+          "description": "How a sandboxed harness reaches its ledger proxy (a host address\nits guest routes to). Without it, a sandboxed turn calls the\ngateway directly and its effects reach the ledger only from the\naudit log.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -834,6 +867,61 @@
           "items": {
             "type": "string"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FileApprovals": {
+      "description": "`approvals`: the administrator's locked policy and the people's\n(docs/effects.md#approvals).",
+      "type": "object",
+      "properties": {
+        "admin": {
+          "description": "Locked: nothing below it can loosen it, and only it may change how\ndeletions are treated.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileApprovalPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "people": {
+          "description": "Each principal's policy, by its name.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/FileApprovalPolicy"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FileApprovalPolicy": {
+      "description": "One approval policy.",
+      "type": "object",
+      "properties": {
+        "rules": {
+          "description": "Pattern to `allow`, `ask`, `block` or `stage`: a tool name glob\n(`Bash`), or `connector:operation` (`github:issues.*`).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "classes": {
+          "description": "Effect class (`reversible`, `compensable`, `irreversible`) to a\ndecision, for operations no rule names.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "deletion": {
+          "description": "How deletions are treated; honoured only in `admin`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

@@ -100,6 +100,8 @@ pub const SYNC_CORRUPT: &str = "branchyard_sync_corrupt_total";
 pub const SYNC_ERRORS: &str = "branchyard_sync_errors_total";
 pub const SYNC_PENDING: &str = "branchyard_sync_pending";
 pub const SYNC_LAG: &str = "branchyard_sync_lag_seconds";
+pub const EFFECTS: &str = "branchyard_effects";
+pub const APPROVALS_PENDING: &str = "branchyard_approvals_pending";
 
 /// Every family this server exposes, in the order it is written.
 pub const FAMILIES: &[Family] = &[
@@ -214,6 +216,16 @@ pub const FAMILIES: &[Family] = &[
         WORKER_SEEN,
         Kind::Gauge,
         "Seconds since each live worker last recorded itself alive.",
+    ),
+    family(
+        EFFECTS,
+        Kind::Gauge,
+        "Entries in each repository's effect ledger, by class (reversible, compensable, irreversible) and state.",
+    ),
+    family(
+        APPROVALS_PENDING,
+        Kind::Gauge,
+        "Approvals waiting for an answer in each repository.",
     ),
     family(
         POOL_SLOTS,
@@ -640,6 +652,37 @@ pub fn pool_gauges(snapshot: &mut Snapshot, repo: &str, slots: &[branchyard::Poo
             n as f64,
         );
     }
+}
+
+/// The effect ledger's gauges read at scrape time: `repo`'s entries by
+/// class and state (only pairs that occur), and its waiting approvals
+/// (zero included).
+pub fn effect_gauges(
+    snapshot: &mut Snapshot,
+    repo: &str,
+    entries: &[branchyard::effects::EffectEntry],
+    pending: usize,
+) {
+    let mut counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for entry in entries {
+        *counts
+            .entry((entry.class.as_str(), entry.state.as_str()))
+            .or_default() += 1;
+    }
+    for ((class, state), n) in counts {
+        set(
+            snapshot,
+            EFFECTS,
+            &[("repo", repo), ("class", class), ("state", state)],
+            n as f64,
+        );
+    }
+    set(
+        snapshot,
+        APPROVALS_PENDING,
+        &[("repo", repo)],
+        pending as f64,
+    );
 }
 
 /// Count what a keeper's fill of `repo`'s pool did.

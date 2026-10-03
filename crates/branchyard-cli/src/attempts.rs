@@ -167,6 +167,11 @@ pub(crate) fn rewind_in(
     as_json: bool,
 ) -> Outcome {
     let handle = yard.branch(branch)?;
+    // Rewinding past effectful turns leaves the world as it is: say so,
+    // with what `by undo` could do (docs/effects.md).
+    if let Some(note) = crate::effects_cmd::rewind_note(yard, branch, to) {
+        eprint!("{note}");
+    }
     if !yes {
         let list = handle.checkpoints()?;
         let later: Vec<String> = list

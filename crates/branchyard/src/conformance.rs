@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+use crate::effects::EffectBackend;
 use crate::fleet::{BranchOutcome, OutcomeBackend, OutcomeRecord, TaskKind};
 use crate::graph::GraphBackend;
 use crate::knowledge::KnowledgeBackend;
@@ -54,6 +55,10 @@ pub(crate) struct Opened {
     pub usage: Arc<dyn UsageBackend>,
     /// [`Opened::again`], as [`UsageBackend`].
     pub again_usage: Box<dyn Fn() -> Arc<dyn UsageBackend> + Send + Sync>,
+    /// The same backend, as [`EffectBackend`].
+    pub effects: Arc<dyn EffectBackend>,
+    /// [`Opened::again`], as [`EffectBackend`].
+    pub again_effects: Box<dyn Fn() -> Arc<dyn EffectBackend> + Send + Sync>,
     _cleanup: Box<dyn std::any::Any>,
 }
 
@@ -106,7 +111,13 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn UsageBackend>
     };
+    let open_effects = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn EffectBackend>
+    };
     Opened {
+        effects: shared.clone(),
+        again_effects: Box::new(open_effects),
         pool: shared.clone(),
         again_pool: Box::new(open_pool),
         usage: shared.clone(),
@@ -181,7 +192,14 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
         let scope = scope.clone();
         move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn UsageBackend>
     };
+    let open_effects = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn EffectBackend>
+    };
     Some(Opened {
+        effects: shared.clone(),
+        again_effects: Box::new(open_effects),
         pool: shared.clone(),
         again_pool: Box::new(open_pool),
         usage: shared.clone(),
@@ -1657,6 +1675,224 @@ pub(crate) fn usage(s: Opened) {
     assert_eq!(s.usage.usage_since(3_000).unwrap(), [c, other]);
 }
 
+/// The effect ledger and approval asks: see [`effects_backend`].
+pub(crate) fn effects(s: Opened) {
+    let again = s.again_effects;
+    effects_backend(s.effects, &*again);
+}
+
+/// One backend of the effect ledger and asks: entries open once, move only
+/// from the states named, keep their events in order, and project from
+/// them exactly as stored; a second handle sees the same; asks are
+/// answered once, whoever answers first.
+pub(crate) fn effects_backend(
+    ledger: Arc<dyn EffectBackend>,
+    again: &(dyn Fn() -> Arc<dyn EffectBackend> + Send + Sync),
+) {
+    use crate::effects::{
+        project, ApprovalAsk, ApprovalRecord, AskAbout, AskAnswer, EffectClass, EffectEntry,
+        EffectMove, EffectState, Undo, UndoKind,
+    };
+    let entry = |id: &str, branch: &str, at: u64| EffectEntry {
+        id: id.into(),
+        task: "root".into(),
+        branch: branch.into(),
+        turn: 2,
+        subject: "local:me".into(),
+        connector: "slack".into(),
+        operation: "chat_post".into(),
+        operation_id: None,
+        account: Some("work".into()),
+        class: EffectClass::Irreversible,
+        state: EffectState::Begun,
+        request_digest: "blake3:00".into(),
+        undo: None,
+        compensate: None,
+        undo_unavailable: None,
+        approval: Some(ApprovalRecord {
+            by: "policy".into(),
+            at_ms: at,
+            surface: "policy".into(),
+            allowed: true,
+            reason: None,
+        }),
+        decided: None,
+        undo_approval: None,
+        deletion: false,
+        staged: None,
+        lookup: None,
+        declared: false,
+        detail: None,
+        upstream_key: None,
+        created_ms: at,
+        updated_ms: at,
+    };
+    let a = entry("01A", "app", 1_000);
+    let b = entry("01B", "other", 2_000);
+    ledger.open_effect(&a).unwrap();
+    ledger.open_effect(&b).unwrap();
+    // Opened once.
+    assert!(ledger.open_effect(&a).is_err());
+    let other = again();
+    assert_eq!(other.effect("01A").unwrap(), Some(a.clone()));
+    assert_eq!(other.effects(None).unwrap(), [a.clone(), b.clone()]);
+    assert_eq!(
+        other.effects(Some("other")).unwrap(),
+        std::slice::from_ref(&b)
+    );
+    assert_eq!(other.effect("nope").unwrap(), None);
+
+    // Moves only from the named states, from either handle.
+    let confirm = EffectMove {
+        class: Some(EffectClass::Reversible),
+        operation_id: Some("chat.postMessage".into()),
+        undo: Some(Undo {
+            operation: "chat.delete".into(),
+            tool: "slack__chat_delete".into(),
+            arguments: serde_json::json!({"ts": "1.2"}),
+            kind: UndoKind::Inverse,
+            deadline_ms: Some(9_000),
+        }),
+        compensate: Some(Undo {
+            operation: "chat.update".into(),
+            tool: "slack__chat_update".into(),
+            arguments: serde_json::json!({"ts": "1.2", "text": "(retracted)"}),
+            kind: UndoKind::Compensate,
+            deadline_ms: None,
+        }),
+        declared: Some(true),
+        ..EffectMove::to(EffectState::Confirmed)
+    };
+    assert_eq!(
+        ledger
+            .move_effect("01A", &[EffectState::Staged], &confirm, 3_000)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        ledger.move_effect("missing", &[], &confirm, 3_000).unwrap(),
+        None
+    );
+    let confirmed = other
+        .move_effect("01A", &[EffectState::Begun], &confirm, 3_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(confirmed.state, EffectState::Confirmed);
+    assert_eq!(confirmed.class, EffectClass::Reversible);
+    assert_eq!(confirmed.updated_ms, 3_000);
+    assert_eq!(confirmed.approval, a.approval, "kept when not changed");
+    assert_eq!(confirmed.operation_id.as_deref(), Some("chat.postMessage"));
+    assert_eq!(
+        confirmed.compensation_at(3_000).map(|c| c.tool.as_str()),
+        Some("slack__chat_update")
+    );
+    // A second finish loses.
+    let failed = EffectMove::to(EffectState::Failed);
+    assert_eq!(
+        ledger
+            .move_effect("01A", &[EffectState::Begun], &failed, 3_500)
+            .unwrap(),
+        None
+    );
+    let undone = ledger
+        .move_effect(
+            "01A",
+            &[EffectState::Confirmed, EffectState::UndoFailed],
+            &EffectMove::to(EffectState::Undone).detail("deleted"),
+            4_000,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(undone.state, EffectState::Undone);
+    assert_eq!(undone.undo, confirmed.undo);
+    // The events, in order, project to what is stored.
+    let events = again().effect_events("01A").unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(events.windows(2).all(|w| w[0].seq < w[1].seq));
+    assert_eq!(events[2].at_ms, 4_000);
+    assert_eq!(project(&events), Some(undone.clone()));
+    assert_eq!(ledger.effect("01A").unwrap(), Some(undone));
+    assert_eq!(ledger.effect_events("01B").unwrap().len(), 1);
+
+    // Many movers race one entry: exactly one wins.
+    let c = entry("01C", "app", 5_000);
+    ledger.open_effect(&c).unwrap();
+    let won: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let handle = again();
+                scope.spawn(move || {
+                    handle
+                        .move_effect(
+                            "01C",
+                            &[EffectState::Begun],
+                            &EffectMove::to(EffectState::Unknown).detail(format!("{i}")),
+                            6_000,
+                        )
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(won.iter().filter(|w| **w).count(), 1, "{won:?}");
+    assert_eq!(ledger.effect_events("01C").unwrap().len(), 2);
+
+    // Asks: stored, listed waiting, answered once.
+    let ask = |id: &str, at: u64| ApprovalAsk {
+        id: id.into(),
+        branch: "app".into(),
+        turn: 2,
+        subject: "local:me".into(),
+        about: AskAbout::Tool {
+            tool: "Bash".into(),
+        },
+        effect: None,
+        resolved: None,
+        request: Some(serde_json::json!({"command": "ls"})),
+        created_ms: at,
+        deadline_ms: Some(at + 60_000),
+        answer: None,
+    };
+    let (first, second) = (ask("Q1", 1_000), ask("Q2", 2_000));
+    ledger.put_ask(&second).unwrap();
+    ledger.put_ask(&first).unwrap();
+    assert!(ledger.put_ask(&first).is_err());
+    assert_eq!(other.asks(true).unwrap(), [first.clone(), second.clone()]);
+    let yes = AskAnswer {
+        allow: true,
+        by: "ana".into(),
+        surface: "api".into(),
+        at_ms: 3_000,
+        reason: None,
+    };
+    let no = AskAnswer {
+        allow: false,
+        by: "parent".into(),
+        surface: "parent".into(),
+        at_ms: 3_001,
+        reason: Some("no".into()),
+    };
+    let (answered, won) = other.answer_ask("Q1", &yes).unwrap().unwrap();
+    assert!(won);
+    assert_eq!(answered.answer, Some(yes.clone()));
+    let (kept, won) = ledger.answer_ask("Q1", &no).unwrap().unwrap();
+    assert!(!won);
+    assert_eq!(kept.answer, Some(yes));
+    assert_eq!(ledger.answer_ask("nope", &no).unwrap(), None);
+    assert_eq!(ledger.asks(true).unwrap(), [second]);
+    assert_eq!(again().asks(false).unwrap().len(), 2);
+    assert_eq!(ledger.ask("Q1").unwrap().unwrap().answer.unwrap().by, "ana");
+}
+
+#[test]
+fn effects_in_memory() {
+    let memory: Arc<dyn EffectBackend> = Arc::new(crate::effects::memory::Memory::default());
+    let shared = memory.clone();
+    effects_backend(memory, &move || shared.clone());
+}
+
 pub(crate) fn outcomes(s: Opened) {
     let rows = &s.outcomes;
     let row = |id: &str, kind, outcome, at| OutcomeRecord {
@@ -1921,7 +2157,7 @@ macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
             concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes,
-            outcomes, knowledge, pools, usage);
+            outcomes, knowledge, pools, usage, effects);
     };
     ($open:expr; $($check:ident),*) => {
         $(

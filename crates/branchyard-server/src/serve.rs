@@ -625,6 +625,9 @@ fn open_state(config: &Config) -> Result<Opened, String> {
             yard.use_models(gateway);
         }
         yard.use_ceilings(config.ceilings.clone());
+        // The administrator's locked approvals and the people's
+        // (docs/effects.md#approvals).
+        yard.use_approvals(config.approvals.clone());
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(
@@ -759,6 +762,19 @@ async fn poll(
             // The gateway's newest calls, as connector_call events.
             if let Err(e) = yard.ingest_connector_audit() {
                 tracing::warn!(error = %e, "reading the connector gateway's audit log");
+            }
+            // Effects whose outcome is unknown, looked up through the
+            // gateway on the recovery interval (docs/effects.md).
+            if recover {
+                match yard.reconcile_effects() {
+                    Ok(report) if !report.settled.is_empty() => tracing::info!(
+                        settled = report.settled.len(),
+                        still_unknown = report.unknown.len(),
+                        "reconciled the effect ledger"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "reconciling the effect ledger"),
+                }
             }
             (feed.sync(), recovered)
         })

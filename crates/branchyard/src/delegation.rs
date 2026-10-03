@@ -593,6 +593,25 @@ impl Delegate {
         }
     }
 
+    /// Answer a descendant's approval ask (`docs/effects.md`): allow or
+    /// deny the tool or connector call its turn waits on, or a staged
+    /// effect it holds. Only an ancestor may; it is recorded as answered
+    /// by this branch, through `parent`.
+    pub fn answer_approval(
+        &self,
+        id: &str,
+        allow: bool,
+        reason: Option<&str>,
+    ) -> Result<crate::effects::ApprovalAsk, Error> {
+        match &self.via {
+            Via::Local(local) => local.answer_approval(id, allow, reason),
+            Via::Remote(_) => self.typed(
+                "answer_approval",
+                json!({"id": id, "allow": allow, "reason": reason}),
+            ),
+        }
+    }
+
     /// Reject a descendant's plan: the descendant fails, or with `replan`,
     /// it plans again with `reason` (that turn started when this returns).
     pub fn reject_plan(
@@ -970,6 +989,7 @@ fn narrowed(policy: &Policy, deny: &[String]) -> Policy {
     Policy {
         rules,
         fallback: policy.fallback.clone(),
+        preset: policy.preset,
     }
 }
 
@@ -1765,6 +1785,22 @@ impl Local {
                 })
             }
         }
+        // Its approvals: its seat's (or what it inherited), within the
+        // parent's; only ever stricter (docs/effects.md).
+        let approvals = branchyard_provision::approvals::narrow(
+            provision.as_ref().and_then(|p| p.approvals.as_ref()),
+            caller.provision.as_ref().and_then(|p| p.approvals.as_ref()),
+        );
+        match (&mut provision, approvals) {
+            (Some(spec), approvals) => spec.approvals = approvals,
+            (None, None) => {}
+            (None, Some(approvals)) => {
+                provision = Some(crate::Provisioning {
+                    approvals: Some(approvals),
+                    ..Default::default()
+                })
+            }
+        }
         crate::provisioning::check(
             provision.as_ref(),
             isolated || crate::placement::sandboxed(caller.provider.as_ref()),
@@ -2096,6 +2132,29 @@ impl Local {
             name: info.name,
             status: info.status,
         })
+    }
+
+    fn answer_approval(
+        &self,
+        id: &str,
+        allow: bool,
+        reason: Option<&str>,
+    ) -> Result<crate::effects::ApprovalAsk, Error> {
+        let ask = self.yard.approval(id);
+        let target = ask.as_ref().map(|a| a.branch.clone()).unwrap_or_default();
+        let result = ask.and_then(|ask| {
+            self.require_descendant(&ask.branch, false)?;
+            self.yard
+                .answer_approval(&ask.id, allow, &self.branch, "parent", reason)
+        });
+        self.note("answer_approval", &target, &result, |ask| {
+            format!(
+                "{} approval {}",
+                if allow { "allowed" } else { "denied" },
+                ask.id
+            )
+        });
+        result
     }
 
     fn approve_plan(&self, branch: &str, edited: Option<&str>) -> Result<Sent, Error> {
@@ -2556,6 +2615,15 @@ struct ApprovePlanArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AnswerApprovalArgs {
+    id: String,
+    allow: bool,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RejectPlanArgs {
     branch: String,
     #[serde(default)]
@@ -2686,6 +2754,10 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "approve_plan" => {
             let args: ApprovePlanArgs = parse(tool, arguments)?;
             to_json(&local.approve_plan(&args.branch, args.edited.as_deref())?)
+        }
+        "answer_approval" => {
+            let args: AnswerApprovalArgs = parse(tool, arguments)?;
+            to_json(&local.answer_approval(&args.id, args.allow, args.reason.as_deref())?)
         }
         "reject_plan" => {
             let args: RejectPlanArgs = parse(tool, arguments)?;

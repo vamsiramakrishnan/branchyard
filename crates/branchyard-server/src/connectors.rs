@@ -66,6 +66,13 @@ pub fn gateway_for(config: &Config, repo: &str) -> Option<Gateway> {
             command: c.anvil.clone(),
             root: c.bundles.clone(),
         }),
+        effects: branchyard::connectors::EffectsProxy {
+            enabled: c.effects_proxy.unwrap_or(true),
+            listen: c
+                .effects_listen
+                .unwrap_or(std::net::Ipv4Addr::LOCALHOST.into()),
+            sandbox_host: c.effects_sandbox_host.clone(),
+        },
     })
 }
 

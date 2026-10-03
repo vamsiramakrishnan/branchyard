@@ -133,6 +133,7 @@ Before a granted turn starts, and before its sandbox exists ([provisioning](prov
 4. The token is written to `~/.branchyard/gateway-token` (0600) and removed when the turn ends.
 5. The harness gets `ANVIL_GATEWAY_URL` and `ANVIL_GATEWAY_TOKEN_FILE` (its home's path as it sees it, `/branchyard/home/...` in a Microsandbox guest), and one line in its instructions: *Connectors (github) are available through Branchyard's gateway: before using one, read …/INDEX.md and follow it; never ask for or use upstream credentials.*
 6. The `provisioned` event lists the connectors, the two variable names and the files; never the token.
+7. `ANVIL_GATEWAY_URL` is the turn's **effect-ledger proxy**, on loopback, in front of the gateway: it decides each effectful call's approval and writes it to the ledger before forwarding it, with the entry's id as the idempotency key; everything else passes through as it is. The token's audience stays the gateway's URL. `[connectors] effects_proxy = false` turns it off; a sandboxed turn needs `effects_sandbox_host` (and `effects_listen`) to reach it, or calls the gateway directly and says so. See [effects](effects.md#begun-before-the-call).
 
 Packaging is behind the `Packager` trait ([`packager.rs`](../crates/branchyard/src/connectors/packager.rs)); `AnvilPackager` runs Anvil's command, and the tests use fakes.
 
@@ -171,6 +172,8 @@ The gateway's audit log is read from where the last read stopped (`.branchyard/g
 
 A crash between recording a line and moving the cursor records that one line again on the next read.
 
+Each line also feeds the [effect ledger](effects.md#the-audit-log-as-a-second-source): one naming an entry's idempotency key settles an `unknown` entry, and one that says its effect class without a ledger entry is recorded as a call that went around the proxy (once, however often it is read).
+
 ### Sandboxes
 
 A sandboxed harness cannot reach the host's loopback, so a sandboxed branch with a grant gets `[connectors] sandbox_gateway` (server: `connectors.sandbox_gateway`) as `ANVIL_GATEWAY_URL`, and fails its turn naming that setting when there is none. The token's audience stays the gateway's canonical URL, which is what Anvil checks.
@@ -182,7 +185,7 @@ The target rule is that **a sandboxed branch may reach only the gateway**. It is
 
 ### Egress
 
-A local branch can be held to the gateway: `--network none --connector github:read` runs its harness under an [egress policy](egress.md) that allows nothing but the gateway. A turn with a grant adds the host and port of the gateway URL it is given to its policy's rules, for that turn only; the branch's stored policy stays as set. On Linux where unprivileged namespaces are allowed, the harness's only network is then the egress proxy, so the gateway is all it reaches. The packaged SDKs reach the gateway through `HTTPS_PROXY` and `HTTP_PROXY`, which the turn sets, with `NO_PROXY` empty so a gateway on loopback goes through the proxy too.
+A local branch can be held to the gateway: `--network none --connector github:read` runs its harness under an [egress policy](egress.md) that allows nothing but the gateway. A turn with a grant adds the host and port of the gateway URL it is given to its policy's rules, for that turn only; the branch's stored policy stays as set. That URL is the turn's effect-ledger proxy, so a confined harness reaches the gateway only through the ledger. On Linux where unprivileged namespaces are allowed, the harness's only network is then the egress proxy, so the gateway is all it reaches. The packaged SDKs reach the gateway through `HTTPS_PROXY` and `HTTP_PROXY`, which the turn sets, with `NO_PROXY` empty so a gateway on loopback goes through the proxy too.
 
 ### Delegation, rigs and the server
 
@@ -212,6 +215,7 @@ Built in Anvil (ADR-0029 there, `docs/branchyard.md`): the `branchyard` inbound 
 
 ## What is not done
 
+- Effects, approvals and undo are Branchyard's side only until Anvil declares effects; see [effects](effects.md#what-is-not-done).
 - Egress enforcement for sandboxes (above), and any check of the sandbox addresses on a KVM host or a Substrate cluster.
 - A real harness using a connector: the end-to-end test drives the packaged SDK from the fake agent's shell.
 - One gateway per host for several local repositories: each local yard runs its own (`by gateway` per repository) with its own issuer and keys.

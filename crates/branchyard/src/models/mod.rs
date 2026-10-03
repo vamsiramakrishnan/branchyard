@@ -30,9 +30,9 @@
 //! speaks an API no backend serves, runs **direct**, its provider's hosts
 //! added to its egress policy, and says so ([`ModelActivity::Direct`]).
 
-mod gateway;
+pub(crate) mod gateway;
 pub mod pricing;
-mod upstream;
+pub(crate) mod upstream;
 mod usage;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};

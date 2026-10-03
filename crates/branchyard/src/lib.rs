@@ -104,6 +104,7 @@ mod compare;
 mod conformance;
 pub mod connectors;
 mod delegation;
+pub mod effects;
 mod egress;
 mod engine;
 mod environments;
@@ -2076,6 +2077,9 @@ pub enum StallAction {
 pub struct Policy {
     rules: Vec<Rule>,
     fallback: Fallback,
+    /// The preset this policy came from, whose approvals are the last
+    /// layer connector operations resolve through (`docs/effects.md`).
+    preset: Option<PolicyPreset>,
 }
 
 /// Answers `(branch, request)` for requests no rule decides.
@@ -2151,6 +2155,7 @@ impl Policy {
         Policy {
             rules: Vec::new(),
             fallback: Fallback::Allow,
+            preset: None,
         }
     }
 
@@ -2158,6 +2163,7 @@ impl Policy {
         Policy {
             rules: Vec::new(),
             fallback: Fallback::Deny,
+            preset: None,
         }
     }
 
@@ -2168,6 +2174,7 @@ impl Policy {
         Policy {
             rules: Vec::new(),
             fallback: Fallback::Ask(Arc::new(ask)),
+            preset: None,
         }
     }
 
@@ -2206,6 +2213,18 @@ impl Policy {
         self
     }
 
+    /// The preset this policy stands for, when it came from one.
+    pub fn preset(&self) -> Option<PolicyPreset> {
+        self.preset
+    }
+
+    /// Remember that this policy stands for `preset`, whose approvals
+    /// connector operations then resolve through.
+    pub fn with_preset(mut self, preset: Option<PolicyPreset>) -> Self {
+        self.preset = preset;
+        self
+    }
+
     /// Decide one request: the first matching rule, else the fallback.
     pub fn decide(&self, branch: &str, request: &PermissionRequest) -> PermissionDecision {
         self.decide_with_source(branch, request).0
@@ -2235,6 +2254,18 @@ pub enum DecisionSource {
     /// The engine, which could not deliver the policy's answer and
     /// interrupted the turn instead.
     Engine,
+    /// The approval policy, which tightened what the policy allowed: a
+    /// block, or an ask a person (or the ask's expiry) answered. See
+    /// `docs/effects.md`.
+    Approval {
+        resolved: effects::Resolved,
+        /// The ask, when one was asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<String>,
+        /// Who answered it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+    },
 }
 
 /// Something that happened on a branch, as recorded and observed.
@@ -2400,6 +2431,10 @@ pub enum Activity {
     /// The person's ceiling narrowed what the turn may reach. See
     /// [`AccessActivity`].
     Access(Box<AccessActivity>),
+    /// Approvals and the effect ledger: a person asked and answering, a
+    /// call blocked, an entry begun, confirmed, staged, reconciled or
+    /// undone. See [`effects::EffectActivity`] and `docs/effects.md`.
+    Effect(Box<effects::EffectActivity>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

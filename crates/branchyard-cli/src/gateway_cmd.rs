@@ -114,6 +114,16 @@ fn local_gateway(yard: &Yard, config: &Connectors, found: &Found) -> Result<Gate
         root: bundles(yard.root(), config),
     };
     let mut gateway = Gateway::local(yard, found.url(), Arc::new(packager))?;
+    // Each turn's effect-ledger proxy (docs/effects.md).
+    if let Some(enabled) = config.effects_proxy {
+        gateway.effects.enabled = enabled;
+    }
+    if let Some(listen) = config.effects_listen.as_deref() {
+        gateway.effects.listen = listen
+            .parse()
+            .map_err(|_| Failure::Message(format!("connectors.effects_listen: {listen:?}")))?;
+    }
+    gateway.effects.sandbox_host = config.effects_sandbox_host.clone();
     gateway.sandbox_url = config.sandbox_gateway.clone().or_else(|| match found {
         Found::Registered(service) => service.text("sandbox_url").map(str::to_owned),
         Found::Pinned(_) => None,
@@ -220,6 +230,9 @@ fn gateway_command(
         public_url: None,
     })
 }
+
+/// How often the gateway's supervisor reconciles the effect ledger.
+const RECONCILE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub fn main(target: &Target, action: &GatewayAction, as_json: bool) -> Outcome {
     local_only(target, "by gateway")?;
@@ -466,11 +479,23 @@ fn supervise(
     // A record a stopped supervisor left, and its gateway with it.
     let _ = yard.reclaim_services();
     let reader = yard.clone();
+    // The effect ledger is reconciled on this timer too (docs/effects.md):
+    // unknown outcomes looked up through the gateway it supervises.
+    let reconciled = std::sync::atomic::AtomicU64::new(0);
     let supervisor = Supervisor::start(
         command,
         log.to_path_buf(),
         Box::new(move || {
             let _ = reader.ingest_connector_audit();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = reconciled.load(std::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(last) >= RECONCILE_EVERY.as_secs() {
+                reconciled.store(now, std::sync::atomic::Ordering::Relaxed);
+                let _ = reader.reconcile_effects();
+            }
         }),
     )?;
     eprintln!(

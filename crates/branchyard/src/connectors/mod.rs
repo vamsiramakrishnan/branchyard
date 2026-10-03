@@ -86,6 +86,35 @@ pub struct Gateway {
     /// The longest a token lives; at most [`MAX_TTL`].
     pub max_ttl: Duration,
     pub packager: Arc<dyn Packager>,
+    /// How each turn's ledger proxy runs in front of the gateway
+    /// (`docs/effects.md`).
+    pub effects: EffectsProxy,
+}
+
+/// Where each turn's effect-ledger proxy listens: the harness is given it
+/// as the gateway, and it forwards to the gateway after writing each
+/// effectful call to the ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectsProxy {
+    /// Whether turns get the proxy. Without it, the ledger is fed only
+    /// from the gateway's audit log, after the fact.
+    pub enabled: bool,
+    /// What it binds (default loopback).
+    pub listen: std::net::IpAddr,
+    /// How a sandboxed harness reaches it (a host address a Microsandbox
+    /// guest routes to). Without it, a sandboxed turn calls the gateway
+    /// directly, and says so.
+    pub sandbox_host: Option<String>,
+}
+
+impl Default for EffectsProxy {
+    fn default() -> EffectsProxy {
+        EffectsProxy {
+            enabled: true,
+            listen: std::net::Ipv4Addr::LOCALHOST.into(),
+            sandbox_host: None,
+        }
+    }
 }
 
 impl Gateway {
@@ -106,6 +135,7 @@ impl Gateway {
             branch_scope: None,
             max_ttl: MAX_TTL,
             packager,
+            effects: EffectsProxy::default(),
         })
     }
 
@@ -119,7 +149,7 @@ impl Gateway {
         self.keys()?.jwks()
     }
 
-    fn by_branch(&self, branch: &str) -> String {
+    pub(crate) fn by_branch(&self, branch: &str) -> String {
         match &self.branch_scope {
             Some(scope) => format!("{scope}/{branch}"),
             None => branch.to_owned(),
@@ -185,6 +215,50 @@ impl Gateway {
         };
         self.keys()?.sign(&claims)
     }
+}
+
+/// A token for `record`'s branch outside a turn, with its grant, for the
+/// calls the ledger makes on its behalf (a lookup, an inverse, a
+/// promotion): `by_turn` is `turn`, the effect's own, and it lives at most
+/// five minutes. The gateway and the token, or why there is none.
+pub(crate) fn branch_token(
+    yard: &Yard,
+    record: &Record,
+    turn: u32,
+) -> Result<(Arc<Gateway>, String), String> {
+    let gateway = yard
+        .connectors()
+        .ok_or("this yard has no connector gateway ([connectors] gateway)")?;
+    let grant = record
+        .provision
+        .as_ref()
+        .map(|p| p.connectors.clone())
+        .unwrap_or_default();
+    let actor = record.actor.clone().unwrap_or_else(|| Actor {
+        subject: gateway.subject.clone(),
+        tenant: gateway.tenant.clone(),
+    });
+    let now = now_secs();
+    let ttl = gateway
+        .max_ttl
+        .min(Duration::from_secs(300))
+        .as_secs()
+        .max(1);
+    let claims = turn_claims(
+        &gateway.issuer,
+        &gateway.url,
+        actor,
+        gateway.by_branch(&record.info.name),
+        turn,
+        (now, now + ttl),
+        grant,
+        &crate::access::TokenScopes::default(),
+    )?;
+    let token = gateway
+        .keys()
+        .and_then(|keys| keys.sign(&claims))
+        .map_err(|e| format!("could not sign a gateway token: {e}"))?;
+    Ok((gateway, token))
 }
 
 /// `.branchyard/gateway` of the repository at `root`.
@@ -654,6 +728,10 @@ pub fn ingest(yard: &Yard) -> Result<usize, Error> {
                 };
                 store.append(&branch, &event, None)?;
                 recorded += 1;
+                // The effect ledger's second source: see `effects::audit`.
+                if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                    crate::effects::audit::observe(yard, &branch, at_ms, &value);
+                }
             }
         }
         cursor.offset += read as u64;

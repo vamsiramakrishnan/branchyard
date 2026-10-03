@@ -181,6 +181,9 @@ pub(crate) fn check(spec: Option<&Provisioning>, private_home: bool) -> Result<(
     for entry in &spec.connectors {
         entry.check().or_else(refuse)?;
     }
+    if let Some(approvals) = &spec.approvals {
+        approvals.check().or_else(refuse)?;
+    }
     if !spec.connectors.is_empty() && !private_home {
         return refuse(
             "connectors are placed only into a home private to the branch; run it --isolated \

@@ -140,6 +140,10 @@ pub(crate) fn configure(yard: Yard) -> Result<Yard, branchyard::Error> {
     // `[connectors]`: the gateway its branches' turns are given.
     crate::gateway_cmd::configure(&yard)
         .map_err(|e| branchyard::Error::Unsupported(format!("[connectors]: {e}")))?;
+    // `[approvals]`: your policy for tools and connector operations
+    // (docs/effects.md).
+    crate::effects_cmd::configure(&yard)
+        .map_err(|e| branchyard::Error::Unsupported(format!("[approvals]: {e}")))?;
     // `[models]`: the model gateway its branches' turns may use
     // (docs/model-gateway.md).
     crate::models_cmd::configure(&yard)
@@ -896,6 +900,10 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         if let Some((summary, _)) = crate::models_cmd::summary(&events) {
             value["models"] = summary;
         }
+        // Its effects and waiting approvals (docs/effects.md).
+        if let Some((summary, _)) = crate::effects_cmd::summary(&events) {
+            value["effects"] = summary;
+        }
         return print(&json::text(&value));
     }
     let mut extra: Vec<(&str, String)> = line
@@ -910,6 +918,9 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
     }
     if let Some((_, text)) = crate::models_cmd::summary(&events) {
         extra.push(("models", text));
+    }
+    if let Some((_, text)) = crate::effects_cmd::summary(&events) {
+        extra.push(("effects", text));
     }
     if let Some(listening) = listening.filter(|l| !l.is_empty()) {
         extra.push(("listening", crate::ports::lines(&listening).join("; ")));

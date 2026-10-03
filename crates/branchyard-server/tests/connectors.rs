@@ -41,6 +41,9 @@ fn connectors(f: &Fixture) -> ConnectorsConfig {
         run_gateway: false,
         listen: None,
         vault_key: None,
+        effects_proxy: None,
+        effects_listen: None,
+        effects_sandbox_host: None,
     }
 }
 

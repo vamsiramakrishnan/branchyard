@@ -461,13 +461,18 @@ pub(crate) fn joining_fork(
     Ok(joining)
 }
 
-/// The extension point for the effect ledger (`docs/effects.md`): the
-/// ledger's entries for attempt `branch` as of the commit about to be made,
-/// as JSON lines, written to `.task/effects.jsonl`. `None` while there is
-/// no ledger, which leaves an empty file. The ledger fills this in; nothing
-/// else here needs to change.
-pub fn effects_snapshot(_yard: &Yard, _branch: &str) -> Option<Vec<u8>> {
-    None
+/// The effect ledger's entries (`docs/effects.md`) for attempt `branch` as
+/// of the commit about to be made, as JSON lines, written to
+/// `.task/effects.jsonl`. `None` when the ledger cannot be read, which
+/// leaves an empty file; the ledger stays the source of truth.
+pub fn effects_snapshot(yard: &Yard, branch: &str) -> Option<Vec<u8>> {
+    let entries = yard.effects(Some(branch)).ok()?;
+    let mut out = Vec::new();
+    for entry in &entries {
+        serde_json::to_writer(&mut out, entry).ok()?;
+        out.push(b'\n');
+    }
+    Some(out)
 }
 
 /// The conversation files in `commit`'s `.task/conversation/`, in turn
