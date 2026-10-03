@@ -691,6 +691,7 @@ dependencies = [
  "branchyard-server",
  "branchyard-setup",
  "branchyard-substrate",
+ "branchyard-sync",
  "branchyard-workspace",
  "clap",
  "clap_complete",
@@ -839,6 +840,7 @@ dependencies = [
  "branchyard",
  "branchyard-client",
  "branchyard-setup",
+ "branchyard-sync",
  "clap",
  "futures-util",
  "hex",
@@ -900,6 +902,24 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "branchyard-sync"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "branchyard",
+ "branchyard-client",
+ "branchyard-sync",
+ "httparse",
+ "ring",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

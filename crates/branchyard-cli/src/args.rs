@@ -836,6 +836,23 @@ holding each key), the routes by model, and daily and monthly budgets. A
 branch on the gateway gets its own gateway each turn, on the turn's token; the
 key never reaches the harness. See docs/model-gateway.md.";
 
+const SYNC_EXAMPLES: &str = "\
+Examples:
+  by sync                          # push and pull every branch that changed
+  by sync fix-login                # one branch
+  by sync status                   # the remote, each task's state and lag, the counters
+  by sync pull 3f2a9c01be47.fix-login
+  by sync gc --dry-run
+  by sync scrub --sample 500
+  by sync hold fix-login --reason \"audit 42\"
+
+[sync] in your user configuration (~/.config/branchyard/config.toml) says where:
+remote = \"gs://bucket/prefix\" (or s3://, az://, file:///, git+https://),
+encrypt = \"passphrase\" or \"kms://...\", interval, bandwidth, retention. Objects are
+written first and each task's manifest is swapped by compare-and-swap; two
+machines that moved one branch apart keep both, the second as
+refs/heads/conflict/<device>/<n>. See docs/sync.md.";
+
 const SERVICES_EXAMPLES: &str = "\
 Examples:
   by services                      # this repository's live services
@@ -1620,6 +1637,14 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<ServicesAction>,
     },
+    /// Sync tasks to durable storage: push and pull a branch, or every branch that changed
+    #[command(
+        display_order = 407,
+        after_help = SYNC_EXAMPLES,
+        args_conflicts_with_subcommands = true,
+        subcommand_negates_reqs = true
+    )]
+    Sync(SyncArgs),
     /// Refresh the connector and harness catalogs from live registries, or show what is cached
     #[command(display_order = 406, subcommand_required = true, after_help = CATALOG_EXAMPLES)]
     Catalog {
@@ -1628,6 +1653,74 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: CatalogAction,
+    },
+}
+
+/// `by sync`'s arguments, parsed in a function of their own (it keeps
+/// the stack frame of `Command`'s parser small).
+#[derive(Args, Clone, Debug, PartialEq, Eq)]
+pub struct SyncArgs {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// A branch, or a task ID (`<repository key>.<branch>`); every branch when omitted
+    pub task: Option<String>,
+    #[command(subcommand)]
+    pub action: Option<SyncAction>,
+}
+
+/// `by sync ...`; see docs/sync.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum SyncAction {
+    /// The remote, this machine's device name, each task's state and lag, what is queued, and
+    /// the counters
+    Status,
+    /// Bring a task from the remote: create or fast-forward its refs here
+    Pull {
+        /// A branch, or a task ID from `by sync ls`
+        task: String,
+    },
+    /// The tasks in the remote
+    Ls,
+    /// Collect garbage: objects no manifest references, after their grace period; tasks past
+    /// their retention unless held
+    Gc {
+        /// Say what would be deleted, and delete nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Read a sample of objects back and check each against its name; repair chunks from here
+    Scrub {
+        /// Objects to read (all of them when larger than their number)
+        #[arg(long, default_value_t = 100)]
+        sample: usize,
+        /// The sample's seed, to repeat one
+        #[arg(long)]
+        seed: Option<u64>,
+    },
+    /// Put a task on legal hold (never deleted or collected), or release it
+    Hold {
+        /// A branch, or a task ID
+        task: String,
+        /// Why, recorded with the hold
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Release the hold instead
+        #[arg(long)]
+        release: bool,
+    },
+    /// Delete a task from the remote (refused under a legal hold); `gc` reclaims its objects
+    Rm {
+        /// A branch, or a task ID
+        task: String,
+    },
+    /// Rotate the tenant key: a new key version, every object's data key rewrapped, the old
+    /// versions retired
+    RotateKey {
+        /// Wrap the keys from now on with this instead: `passphrase` (the new one in
+        /// BRANCHYARD_SYNC_NEW_PASSPHRASE) or a kms:// URL
+        #[arg(long, value_name = "WRAPPER")]
+        to: Option<String>,
     },
 }
 
@@ -3628,6 +3721,12 @@ fn command_listing(cmd: &clap::Command) -> String {
     text
 }
 
+/// The stack [`parse_from`] parses on: clap's derived parser for every
+/// command is one function whose unoptimized frame outgrew the 2 MiB a
+/// spawned thread (a test, a worker) gets, so it never depends on the
+/// caller's stack.
+const PARSE_STACK: usize = 8 << 20;
+
 /// Parse `by`'s command line, program name first.
 pub fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
@@ -3635,6 +3734,16 @@ where
     T: Into<OsString> + Clone,
 {
     let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
+    std::thread::Builder::new()
+        .name("by-args".into())
+        .stack_size(PARSE_STACK)
+        .spawn(move || parse_argv(argv))
+        .expect("could not start the argument parser's thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn parse_argv(argv: Vec<OsString>) -> Result<Cli, clap::Error> {
     let mut cmd = command();
     let matches = cmd
         .try_get_matches_from_mut(argv.iter().cloned())
@@ -4868,6 +4977,34 @@ mod tests {
                 all: false,
                 action: None,
             }
+        );
+        assert_eq!(
+            parse_str("sync fix-login --json").unwrap(),
+            Command::Sync(SyncArgs {
+                json: true,
+                task: Some("fix-login".into()),
+                action: None,
+            })
+        );
+        assert_eq!(
+            parse_str("sync gc --dry-run").unwrap(),
+            Command::Sync(SyncArgs {
+                json: false,
+                task: None,
+                action: Some(SyncAction::Gc { dry_run: true }),
+            })
+        );
+        assert_eq!(
+            parse_str("sync hold t --reason audit --release").unwrap(),
+            Command::Sync(SyncArgs {
+                json: false,
+                task: None,
+                action: Some(SyncAction::Hold {
+                    task: "t".into(),
+                    reason: Some("audit".into()),
+                    release: true,
+                }),
+            })
         );
         assert_eq!(
             parse_str("services gc --json").unwrap(),

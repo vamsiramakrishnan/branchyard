@@ -61,6 +61,9 @@ pub struct Running {
     /// repository's own (docs/registry.md); deregistered when shutdown
     /// begins.
     services: Vec<branchyard::services::Registration>,
+    /// The replicators, stopped and drained once more after the last
+    /// operation (docs/sync.md).
+    sync: Option<Arc<crate::sync::ServerSync>>,
 }
 
 /// How a shutdown went.
@@ -154,6 +157,9 @@ impl Running {
         let interrupted = tokio::task::spawn_blocking(move || registry.close())
             .await
             .unwrap_or(0);
+        if let Some(sync) = self.sync {
+            let _ = tokio::task::spawn_blocking(move || sync.finish()).await;
+        }
         if let Some(path) = &self.unix {
             let _ = std::fs::remove_file(path);
         }
@@ -324,7 +330,17 @@ pub async fn start(config: Config) -> Result<Running, String> {
         }
         false => None,
     };
+    let sync = {
+        let (config, repos) = (config.clone(), repos.clone());
+        tokio::task::spawn_blocking(move || crate::sync::ServerSync::open(&config, &repos))
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    if let Some(sync) = &sync {
+        sync.start()?;
+    }
     let app = Arc::new(App {
+        sync: sync.clone(),
         companion,
         repos,
         registry: registry.clone(),
@@ -418,6 +434,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         metrics,
         pools,
         services,
+        sync,
     })
 }
 

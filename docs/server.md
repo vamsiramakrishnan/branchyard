@@ -461,6 +461,8 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `cursor_out_of_range` | 400 | Stream cursor past the feed's end; `detail.head` |
 | `detached_head` | 409 | Merge without a target while the served repository's HEAD is detached |
 | `shutting_down` | 503 | The server is stopping |
+| `sync_lease_held` | (operation) | With `sync`: another runner holds the lease on one of the operation's branches; the message names it ([sync](sync.md#servers)) |
+| `sync_unavailable` | (operation) | With `sync`: the remote could not grant the lease, so the operation did not run |
 | `interrupted` | (operation) | The server stopped before the operation finished, or its worker's claim expired after it started |
 | `internal`, `git_error`, `io_error`, `state_error`, `harness_error`, `not_a_repository` | 500 | Server-side failure |
 | `branch_exists`, `no_candidate`, `target_moved`, `conflict`, `dirty_target`, `already_merged`, `running`, `fenced` | 409 | SDK refusals; `target_moved` has `detail.expected`/`actual`, `conflict` has `detail.files`. `running`: another engine, such as a local `by`, runs a turn on the branch. `fenced`: the engine lost the branch's lease to another |
@@ -591,6 +593,20 @@ The operation store also keeps the fleet's [service registry](registry.md): `ser
 - `GET /.well-known/branchyard` (no token): the server, its API, its JWKS (`/.well-known/jwks.json`, with connectors), and the kinds, capabilities and health of its live services, without endpoints or owners.
 - `GET /v1/services[?kind=K]` (`read`): every record with endpoints, owners and leases. `by --remote URL services`.
 - `POST /v1/services` (`admin`): register or renew (`RegisterServiceRequest`); a model gateway registers itself this way. Never with anything to reclaim. `DELETE /v1/services/{id}` and `POST /v1/services/gc` (`admin`).
+
+## Sync
+
+With `sync` in the configuration file, a server or worker replicates its repositories' branches to durable storage ([sync](sync.md)):
+
+```json
+"sync": { "remote": "s3://tasks/team?endpoint=https://minio.internal:9000", "encrypt": "passphrase", "passphrase_file": "/etc/branchyard/sync.pass", "interval": "30s", "lease_seconds": 60 }
+```
+
+- Before an operation on existing branches it pulls each branch's task (creating or fast-forwarding its refs; a clean worktree follows) and takes the task's lease, renewed while the operation runs and registered in the repository's service registry as `sync_lease`. Another runner's lease fails the operation with `sync_lease_held`; a remote that cannot grant one, with `sync_unavailable`.
+- A replicator per repository pushes changed refs every `interval` (checkpoints as turns end), from `<data_dir>/sync/<repo>.db`; an operation's branches are queued when it ends. At shutdown the replicators stop and push what is queued once more.
+- `/metrics` adds the `branchyard_sync_*` families ([observability](observability.md#metrics)).
+
+The keys are `[sync]`'s ([sync](sync.md#quick-start)) and `lease_seconds` (default 60), in `schema/server.config.json`. A remote is opened once per repository at start; a wrong passphrase or KMS key stops the server from starting.
 
 ## Security
 

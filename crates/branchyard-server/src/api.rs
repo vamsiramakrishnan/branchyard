@@ -62,6 +62,9 @@ pub struct App {
     /// The web companion, when the operator turned it on; see
     /// `crate::companion`.
     pub companion: Option<Arc<crate::companion::Companion>>,
+    /// Sync to durable storage, when the configuration has `sync`; see
+    /// `crate::sync`.
+    pub sync: Option<Arc<crate::sync::ServerSync>>,
 }
 
 #[derive(Clone)]
@@ -906,6 +909,9 @@ pub(crate) async fn render_metrics(app: Shared) -> Response {
                     crate::metrics::pool_gauges(&mut snapshot, &repo.name, &slots);
                 }
             }
+        }
+        if let Some(sync) = &app.sync {
+            crate::metrics::sync_series(&mut snapshot, &sync.observe());
         }
         Ok::<_, std::io::Error>(crate::metrics::encode(&snapshot))
     })

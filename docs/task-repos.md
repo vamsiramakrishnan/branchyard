@@ -1,6 +1,6 @@
 # Task repositories and sync
 
-> **Status.** Design, 3 October 2026, for Wave 6. This page is the contract the task-repository and sync work build to.
+> **Status.** Design, 3 October 2026, for Wave 6. This page is the contract the task-repository and sync work build to. **Sync is built** (3 October 2026, branch `agent/sync-16`) for today's branches and any `SyncSource`, tested hermetically: see [sync](sync.md) for the layout in the bucket, the protocol, and what each backend was and was not tested against.
 
 Every task Branchyard runs is a git repository: code or not, in a repository or in a folder you granted. Each turn is a commit, each attempt a branch, and accepting one is a merge. The conversation is committed beside the files, so rewinding a task rewinds both. What the task did outside the machine is in the [effect ledger](effects.md), which says plainly what can be undone there and what cannot.
 
@@ -42,6 +42,22 @@ Built the way large storage systems are, and small enough to run on a laptop:
 10. **Retention and holds.** Per-task retention, legal holds that block deletion, and a tenant quota; deleting a task deletes its manifest and lets GC reclaim what nothing else shares.
 11. **Observable.** Bytes up and down, objects, swap conflicts, retries, lag behind remote per task, in `/metrics` and `by sync status`.
 
+## Sync: what is built
+
+Every principle above is built in the crate `branchyard-sync` and described in [sync](sync.md):
+
+- 1, local first: a SQLite outbox per repository (`.branchyard/sync.db`), a replicator in `by serve` and `by worker`, and `by sync`.
+- 2 and 3: packs of only what the remote lacks, chunks, chunk indexes and segments under content-derived names; one manifest per task swapped with `put_if_absent` or `put_if_match` on each backend's generation.
+- 4: a ref-by-ref merge; divergence recorded as `refs/heads/conflict/<device>/<n>`, once.
+- 5: lease objects with an epoch, renewed by a keeper thread, registered as `sync_lease` services; a server runs a branch only under its lease.
+- 6: a data key per object (AES-256-GCM or ChaCha20-Poly1305), wrapped by a tenant key from a passphrase (PBKDF2-HMAC-SHA256: Argon2id is not in `Cargo.lock`) or Cloud KMS, AWS KMS or Key Vault; keyed BLAKE3 names; rotation by rewrapping.
+- 7: every read checked against its name; `by sync scrub` samples and repairs chunks from a local copy.
+- 8: resumable uploads (S3 multipart, GCS sessions, Azure blocks, directory parts), retries with full jitter, a concurrency bound and a bandwidth budget.
+- 9 and 10: two-phase mark and sweep with a grace period, a sweep lock that waits for active writers, retention, legal holds and a quota.
+- 11: `by sync status` and `branchyard_sync_*` in `/metrics`.
+
+Limits, honestly: no test has reached a real cloud service or emulator (in-process stand-ins implement each API's conditional semantics and check its signatures; the conformance test runs against MinIO, fake-gcs-server and Azurite when configured). The git backend stores each object as a ref and has no sizes, so quotas do not apply to it. Tasks are today's branches until the task-repository work implements `SyncSource` ([how](sync.md#task-repositories)).
+
 ## Backends
 
 One `ObjectStore` interface: `get`, `get_range`, `put_if_absent`, `put_if_match(generation)`, `list(prefix)`, `delete_if_match`, `resumable_put`. Backends:
@@ -59,7 +75,8 @@ The directory backend is the reference implementation and runs the conformance s
 ## Surfaces
 
 - `[sync] remote = "gs://my-bucket/branchyard"`, `encrypt = "kms://…" | "passphrase"`, `interval`, `bandwidth`.
-- `by sync [TASK]`, `by sync status`, `by sync pull TASK`, `by sync gc`.
+- `by sync [TASK]`, `by sync status`, `by sync pull TASK`, `by sync gc`; built, with `ls`, `scrub`, `hold`, `rm` and `rotate-key` ([sync](sync.md)).
+- `[sync]` also takes `concurrency`, `retention`, `grace`, `quota`, `algorithm`, `passphrase_file` and `device`, in the user file only; a server's configuration takes the same as `sync`, with `lease_seconds`.
 - `by task new|ls|show|open|rewind|fork|accept|rm`, and the same over HTTP and in the UI.
 - A server with `[sync]` pulls a task it is asked to run, runs it under the lease, and pushes as it goes; a phone or another machine sees it.
 

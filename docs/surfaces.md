@@ -610,6 +610,25 @@ See [harness lifecycle](harness-lifecycle.md).
 | Server API and client | `GET /v1/harnesses` | adds `GET /v1/inventory` (`InventoryReport`, `WorkerInventory`), `Client::inventory`; in `schema/contract.json` |
 | Server configuration | `labels` | adds `inventory` (default true) and `--no-inventory`; `Config::inventory_source`, `ops::InventorySource`, `ops::set_inventory_source` |
 
+## Added with sync
+
+See [sync](sync.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `by sync [TASK] [--json]` | none | push and pull one branch (or task ID), or every branch: import what the remote has, fast-forward, record divergence as `refs/heads/conflict/<device>/<n>`, upload what it lacks, swap the manifest |
+| `by sync status`, `ls`, `pull TASK` | none | the remote, device, encryption, each task's state and lag, the queue and counters; the remote's tasks; bring a task here |
+| `by sync gc [--dry-run]`, `scrub [--sample N] [--seed S]` | none | two-phase collection with grace, retention and holds; read a sample back and check it against its names |
+| `by sync hold TASK [--reason R] [--release]`, `rm TASK`, `rotate-key [--to WRAPPER]` | none | legal holds; delete a task from the remote; rotate the tenant key |
+| `[sync]` in the user configuration | design only | `remote`, `encrypt`, `passphrase_file`, `algorithm`, `interval`, `bandwidth`, `concurrency`, `retention`, `grace`, `quota`, `device`; refused in a repository's `branchyard.toml`; in `schema/branchyard.config.json` |
+| `BRANCHYARD_SYNC_PASSPHRASE`, `BRANCHYARD_SYNC_NEW_PASSPHRASE`, `BRANCHYARD_SYNC_CA_FILE` | none | the passphrase, the new one for `rotate-key --to passphrase`, extra CA certificates for a private endpoint |
+| `.branchyard/sync.db` | none | the outbox: queue, task states, resumable uploads, recent outcomes, counters; 0600 |
+| Server configuration | none | `sync` (the same keys and `lease_seconds`); operations pull first and run under the task's lease (`sync_lease_held`, `sync_unavailable`); `<data_dir>/sync/<repo>.db`; in `schema/server.config.json` |
+| `/metrics` | none | `branchyard_sync_bytes_total`, `_objects_total`, `_swaps_total`, `_swap_conflicts_total`, `_retries_total`, `_divergences_total`, `_corrupt_total`, `_errors_total`, `branchyard_sync_pending`, `branchyard_sync_lag_seconds` |
+| Service registry | no `sync_lease` | a held task lease, with `task`, `attempt`, `remote` and `epoch` |
+| Crate | none | `branchyard-sync`: `ObjectStore` and its backends (`file`, `s3`, `gcs`, `azure`, `git`, `memory`), `store::conformance`, `Remote`, `Settings`, `TaskState`, `SyncReport`, `plan`, `SyncSource`, `BranchSource`, `ChunkId`, `Segment`, `manifest::Manifest`, `seal::{Sealer, Encryption, Algorithm, rotate}`, `kms::{Wrapper, Passphrase, GcpKms, AwsKms, AzureKeyVault}`, `lease::{LeaseKeeper, LeaseRecord}`, `gc::GcReport`, `scrub::ScrubReport`, `outbox::Outbox`, `replicator::{Replicator, SourceProvider, Status}`, `yard::YardTasks`, `SyncConfig`; `testing` (feature) for the stand-ins |
+| Engine | a checked-out ref was never moved by sync | (sync only) a clean worktree follows a fast-forward pulled from the remote |
+
 ## Added with the ambient registry
 
 See [registry](registry.md).

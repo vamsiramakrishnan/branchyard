@@ -265,6 +265,17 @@
           "type": "null"
         }
       ]
+    },
+    "sync": {
+      "description": "Sync served repositories' branches to durable storage\n(docs/sync.md): the remote, its encryption, how often and how fast.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileSync"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -908,6 +919,99 @@
         }
       },
       "additionalProperties": false
+    },
+    "FileSync": {
+      "description": "`sync`: the same keys as `[sync]` in branchyard.toml, and the lease.",
+      "type": "object",
+      "properties": {
+        "remote": {
+          "description": "`gs://bucket/prefix`, `s3://bucket/prefix` (`?endpoint=` for R2 or\nMinIO), `az://account/container/prefix`, `file:///path`, or\n`git+https://`, `git+ssh://`, `git+file://`.",
+          "type": "string"
+        },
+        "encrypt": {
+          "description": "`none` (the default), `passphrase` (from\nBRANCHYARD_SYNC_PASSPHRASE or `passphrase_file`), or a `kms://` URL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "passphrase_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "algorithm": {
+          "description": "`aes-256-gcm` (the default) or `chacha20-poly1305`, for a new\nencrypted remote.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "interval": {
+          "description": "How often to look for changes to push, such as `30s`. Default `1m`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bandwidth": {
+          "description": "Bytes a second, up and down together, such as `10MB/s`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "concurrency": {
+          "description": "Objects in flight at once. Default 8.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "retention": {
+          "description": "Delete a task this long after its last change, such as `90d`,\nunless held.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "grace": {
+          "description": "How long an unreferenced object waits before collection. Default\n`24h`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quota": {
+          "description": "The stored bytes the remote may hold, such as `50GB`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device": {
+          "description": "This server's name in conflict branches and leases. Default: the\nhost name and a random suffix.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lease_seconds": {
+          "description": "Seconds a task's lease lasts between renewals. Default 60.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "remote"
+      ]
     }
   }
 }

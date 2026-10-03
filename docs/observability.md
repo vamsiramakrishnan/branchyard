@@ -48,6 +48,16 @@ The format is Prometheus text exposition 0.0.4 (`text/plain; version=0.0.4`), wr
 | `branchyard_pool_fill_seconds` | histogram | `repo` | Time a keeper took to make one slot (worktree and environment) |
 | `branchyard_pool_slots_discarded_total` | counter | `repo` | Slots a keeper removed: stale, or left by a stopped process |
 | `branchyard_start_seconds` | histogram | `pool` (`hit`, `miss`, `none`) | Start latency of a task's new branches: from the operation's admission to the harness's first prompt, by whether the worktree came from a warm pool |
+| `branchyard_sync_bytes_total` | counter | `repo`, `direction` (`up`, `down`) | Bytes this process's [sync](sync.md) sent to and read from the remote |
+| `branchyard_sync_objects_total` | counter | `repo`, `direction` | Objects written to and read from the remote |
+| `branchyard_sync_swaps_total` | counter | `repo` | Task manifests swapped into the remote |
+| `branchyard_sync_swap_conflicts_total` | counter | `repo` | Swaps that lost to another writer, then merged and tried again |
+| `branchyard_sync_retries_total` | counter | `repo` | Remote requests tried again after a transient failure |
+| `branchyard_sync_divergences_total` | counter | `repo` | Divergences recorded as conflict branches |
+| `branchyard_sync_corrupt_total` | counter | `repo` | Objects refused because they did not match their name |
+| `branchyard_sync_errors_total` | counter | `repo` | Task syncs that failed and were queued to try again |
+| `branchyard_sync_pending` | gauge | `repo` | Tasks queued in the sync outbox |
+| `branchyard_sync_lag_seconds` | gauge | `repo` | How long the oldest queued change has waited to reach the remote |
 
 Histogram buckets are 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800 and 3600 seconds, except `branchyard_start_seconds`: 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300 and 1800 seconds.
 
@@ -118,4 +128,5 @@ Locally it reads the repository's store: branches by status, turns and cost by h
 - `crates/branchyard-server/tests/observability.rs` (3, over real HTTP with the fake ACP agent): priority checked, capped and inherited; `/metrics` off by default, `401`/`403`, the metrics token reading nothing else, the counters after a task, and the separate listener; an operation traced from an incoming `traceparent` through admission, claim and run to its turn, with the harness seeing the operation's span as `TRACEPARENT`.
 - `crates/branchyard-server/tests/webhook.rs`: a delivery carries the operation's `traceparent`, and deliveries are counted.
 - `crates/branchyard-server/tests/pools.rs` (1): the pool metrics over real HTTP after a miss and a hit.
+- `crates/branchyard-server/tests/sync.rs` (1): the sync series over real HTTP after two pushes.
 - `crates/branchyard-cli/src/stats_cmd.rs` (2, one for pool hits, misses and start latency) and `crates/branchyard-cli/tests/remote.rs` (1): the summary's arithmetic and rendering; `--priority` reaching the server's queue, `by --remote stats` showing it, and `by stats` locally.
