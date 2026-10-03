@@ -541,6 +541,8 @@ struct Run<'a> {
     spent: Mutex<f64>,
     counts: Mutex<(usize, usize)>,
     stopped: AtomicBool,
+    /// The task whose attempts the items are.
+    task_id: String,
 }
 
 /// One attempt's outcome: the branches it used, their cost, and the
@@ -573,6 +575,7 @@ impl Run<'_> {
     ) -> Result<(Branch, Vec<Branch>), Error> {
         let mut task = self.options.task.clone();
         task.plan = false;
+        task.join_task = Some(self.task_id.clone());
         if let Some(left) = self.remaining() {
             task.budget.max_usd = Some(task.budget.max_usd.map_or(left, |m| m.min(left)));
         }
@@ -915,6 +918,16 @@ pub(crate) fn run(
             _ => queue.push_back((index, item)),
         }
     }
+    // One task for the map, its items the attempts; kept across resumes.
+    let task_id = match fs::read_to_string(dir.join("task")) {
+        Ok(id) if !id.trim().is_empty() => id.trim().to_owned(),
+        _ => {
+            let joining = crate::tasks::joining(yard, &spec.prompt, &options.task, "map")?;
+            crate::tasks::save(&yard.root, &joining.task)?;
+            write_atomic(&dir.join("task"), &format!("{}\n", joining.task.id))?;
+            joining.task.id
+        }
+    };
     let rows_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -931,6 +944,7 @@ pub(crate) fn run(
         ),
         counts: Mutex::new((done, failed)),
         stopped: AtomicBool::new(false),
+        task_id,
     };
     let workers = (spec.concurrency as usize).min(queue.len());
     let queue = Mutex::new(queue);

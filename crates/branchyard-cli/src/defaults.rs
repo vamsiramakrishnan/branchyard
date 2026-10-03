@@ -91,6 +91,15 @@ pub fn apply(
         Command::Fork { task, .. } => apply_task(&config, task, Scope::Continue)?,
         Command::Reincarnate { task, .. } => apply_task(&config, task, Scope::Continue)?,
         Command::Spawn { spawn, .. } => apply_task(&config, &mut spawn.task, Scope::Continue)?,
+        Command::Task(task) => match &mut task.action {
+            crate::args::TaskAction::New(new) => {
+                apply_task(&config, &mut new.task, Scope::NewBranch)?
+            }
+            crate::args::TaskAction::Fork(fork) => {
+                apply_task(&config, &mut fork.flags, Scope::Continue)?
+            }
+            _ => {}
+        },
         _ => {}
     }
     apply_globals(&config, &mut globals);

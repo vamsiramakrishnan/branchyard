@@ -39,6 +39,7 @@ mod services_cmd;
 mod setup_io;
 mod ssh_remote;
 mod stats_cmd;
+mod task_cmd;
 mod trackers;
 mod trigger_cmd;
 mod usage;
@@ -287,6 +288,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             task,
             ..
         } => commands::fork_at(env, target, &branch, turn, &prompt, &task),
+        Command::Task(task) => task_cmd::main(env, target, &task.action, task.json),
         Command::Rewind {
             branch,
             to,

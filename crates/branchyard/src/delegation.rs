@@ -1808,6 +1808,7 @@ impl Local {
                 // (`crate::graph`).
                 seed: None,
                 actor: caller.actor.clone(),
+                task: None,
             },
         )?;
         record.info.status = BranchStatus::Waiting;

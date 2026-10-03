@@ -227,7 +227,7 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// Replace what legitimately differs between two repositories: their
-/// paths, commit IDs and times.
+/// paths, commit IDs, task IDs and times.
 fn normalize(text: &str, root: &Path) -> String {
     let text = text.replace(&root.display().to_string(), "<root>");
     // A table's AGE column is relative to when each side ran, which can
@@ -246,7 +246,7 @@ fn normalize(text: &str, root: &Path) -> String {
             }
             _ => line.to_owned(),
         };
-        out.push_str(&hex_runs(&line));
+        out.push_str(&task_ids(&hex_runs(&line)));
         out.push('\n');
     }
     out
@@ -266,6 +266,32 @@ fn mask_age(line: &str) -> String {
     } else {
         line.to_owned()
     }
+}
+
+/// Task IDs (ULIDs: 26 characters of Crockford's base 32, as words)
+/// become `<task>`.
+fn task_ids(line: &str) -> String {
+    let ulid = |c: char| c.is_ascii_digit() || (c.is_ascii_uppercase() && !"ILOU".contains(c));
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if i == 0 || !chars[i - 1].is_ascii_alphanumeric() {
+            let mut j = i;
+            while j < chars.len() && ulid(chars[j]) {
+                j += 1;
+            }
+            let bounded = j == chars.len() || !chars[j].is_ascii_alphanumeric();
+            if bounded && j - i == 26 {
+                out.push_str("<task>");
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Runs of 7 or more hex digits containing a digit become `<sha>`.
@@ -1565,6 +1591,45 @@ fn compare_works_remotely_and_local_only_commands_say_so() {
             text(&refused.stderr)
         );
     }
+}
+
+#[test]
+fn a_servers_tasks_are_listed_and_shown_remotely() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let args = with_agent(&["run", "WRITE a.txt=1", "--name", "one", "--yes"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let ran = server.by(&dir.0, &args);
+    assert!(ran.status.success(), "{}", text(&ran.stderr));
+    let listed = server.by(&dir.0, &["task", "ls", "--json"]);
+    assert!(listed.status.success(), "{}", text(&listed.stderr));
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let tasks = listed.as_array().unwrap();
+    assert_eq!(tasks.len(), 1, "{listed}");
+    assert_eq!(tasks[0]["attempts"][0]["name"], "one");
+    assert_eq!(tasks[0]["attempts"][0]["conversation"][0], "1.jsonl");
+    let id = tasks[0]["id"].as_str().unwrap();
+    let shown: Value =
+        serde_json::from_slice(&server.by(&dir.0, &["task", "show", id, "--json"]).stdout).unwrap();
+    assert_eq!(shown["id"], id);
+    // By an attempt's name too, and in `by show`.
+    let table = text(&server.by(&dir.0, &["task", "ls"]).stdout);
+    assert!(
+        table.contains(id) && table.contains("1 (1 ready)"),
+        "{table}"
+    );
+    let show: Value =
+        serde_json::from_slice(&server.by(&dir.0, &["show", "one", "--json"]).stdout).unwrap();
+    assert_eq!(show["task"]["id"], id);
+    // What only the server's host can do says so.
+    let refused = server.by(&dir.0, &["task", "rm", id, "--yes"]);
+    assert!(!refused.status.success());
+    assert!(
+        text(&refused.stderr).contains("on the server's host"),
+        "{}",
+        text(&refused.stderr)
+    );
 }
 
 #[test]

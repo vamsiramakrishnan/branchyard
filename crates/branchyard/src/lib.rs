@@ -145,6 +145,7 @@ mod state;
 mod steer;
 mod storage;
 mod tarball;
+pub mod tasks;
 mod workspace;
 
 use std::fmt;
@@ -1326,6 +1327,11 @@ pub struct TaskOptions {
     /// branch is created by `run`, `run_on` or a routed run; stored with
     /// it, except a custom judge.
     pub goal: Option<Goal>,
+    /// The task a new top-level branch joins as another attempt (its ID);
+    /// `None` starts a task of its own (a fan's branches share one, and a
+    /// fork joins its parent's). Read only when a branch is created; see
+    /// [`tasks`].
+    pub join_task: Option<String>,
 }
 
 /// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.
@@ -2112,6 +2118,35 @@ impl Default for Policy {
 }
 
 impl Policy {
+    /// One line saying what the rules allow and deny, and what happens to
+    /// everything else: a task's record of the policy it ran under.
+    pub fn summary(&self) -> String {
+        let tools = |allow: bool| {
+            self.rules
+                .iter()
+                .filter(|r| r.allow == allow)
+                .map(|r| r.tool.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut parts = Vec::new();
+        for (allow, word) in [(true, "allow"), (false, "deny")] {
+            let listed = tools(allow);
+            if !listed.is_empty() {
+                parts.push(format!("{word} {listed}"));
+            }
+        }
+        parts.push(
+            match self.fallback {
+                Fallback::Allow => "allow the rest",
+                Fallback::Deny => "deny the rest",
+                Fallback::Ask(_) => "ask about the rest",
+            }
+            .into(),
+        );
+        parts.join("; ")
+    }
+
     pub fn allow_all() -> Self {
         Policy {
             rules: Vec::new(),
