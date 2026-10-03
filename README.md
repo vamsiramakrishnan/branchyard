@@ -440,6 +440,8 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Web companion](docs/companion.md): the page at `/app/`, pairing links, its security model and Web Push.
 - [Repository knowledge](docs/knowledge.md): entries proposed from branches, adopted after review, given to matching harnesses.
 - [Plans and goals](docs/plans-and-goals.md): read-only plans approved before execution, and goals a judge verifies.
+- [Effects, approvals and undo](docs/effects.md): the effect ledger, approval policy, staged effects and what undo can and cannot do upstream (design).
+- [Task repositories and sync](docs/task-repos.md): every task a git repository, synced to cloud storage (design).
 - [Egress policy](docs/egress.md): the hosts a branch may reach, through an allowlisting proxy, enforced in a network namespace on Linux; and permission presets.
 - [Model gateway](docs/model-gateway.md): a harness's model calls through Branchyard on the turn's token, with the key held back, weighted backends, fallbacks, rate limits, budgets and exact cost; and one scope for connectors, models, network and delegation.
 - [Wide map](docs/map.md): one prompt over every item of a list, a branch each, answers checked against a JSON schema and collected into a table.
