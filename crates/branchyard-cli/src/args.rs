@@ -1644,15 +1644,7 @@ pub enum Command {
         args_conflicts_with_subcommands = true,
         subcommand_negates_reqs = true
     )]
-    Sync {
-        /// Print JSON
-        #[arg(long, global = true)]
-        json: bool,
-        /// A branch, or a task ID (`<repository key>.<branch>`); every branch when omitted
-        task: Option<String>,
-        #[command(subcommand)]
-        action: Option<SyncAction>,
-    },
+    Sync(SyncArgs),
     /// Refresh the connector and harness catalogs from live registries, or show what is cached
     #[command(display_order = 406, subcommand_required = true, after_help = CATALOG_EXAMPLES)]
     Catalog {
@@ -1662,6 +1654,19 @@ pub enum Command {
         #[command(subcommand)]
         action: CatalogAction,
     },
+}
+
+/// `by sync`'s arguments, parsed in a function of their own (it keeps
+/// the stack frame of `Command`'s parser small).
+#[derive(Args, Clone, Debug, PartialEq, Eq)]
+pub struct SyncArgs {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// A branch, or a task ID (`<repository key>.<branch>`); every branch when omitted
+    pub task: Option<String>,
+    #[command(subcommand)]
+    pub action: Option<SyncAction>,
 }
 
 /// `by sync ...`; see docs/sync.md.
@@ -4959,23 +4964,23 @@ mod tests {
         );
         assert_eq!(
             parse_str("sync fix-login --json").unwrap(),
-            Command::Sync {
+            Command::Sync(SyncArgs {
                 json: true,
                 task: Some("fix-login".into()),
                 action: None,
-            }
+            })
         );
         assert_eq!(
             parse_str("sync gc --dry-run").unwrap(),
-            Command::Sync {
+            Command::Sync(SyncArgs {
                 json: false,
                 task: None,
                 action: Some(SyncAction::Gc { dry_run: true }),
-            }
+            })
         );
         assert_eq!(
             parse_str("sync hold t --reason audit --release").unwrap(),
-            Command::Sync {
+            Command::Sync(SyncArgs {
                 json: false,
                 task: None,
                 action: Some(SyncAction::Hold {
@@ -4983,7 +4988,7 @@ mod tests {
                     reason: Some("audit".into()),
                     release: true,
                 }),
-            }
+            })
         );
         assert_eq!(
             parse_str("services gc --json").unwrap(),

@@ -161,8 +161,13 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         // Live catalogs are cached for this user; no repository or server.
         Command::Catalog { json, action } => return catalog_cmd::live(&action, json),
         // Sync runs on this machine's repository, against its own remote.
-        Command::Sync { json, task, action } => {
-            return sync_cmd::main(globals, task.as_deref(), action.as_ref(), json)
+        Command::Sync(sync) => {
+            return sync_cmd::main(
+                globals,
+                sync.task.as_deref(),
+                sync.action.as_ref(),
+                sync.json,
+            )
         }
         // The catalog is built in; no repository or server is involved.
         Command::Connectors {
@@ -491,7 +496,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Usage { .. }
         | Command::Remote { .. }
         | Command::Catalog { .. }
-        | Command::Sync { .. }
+        | Command::Sync(_)
         | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
     }
 }
