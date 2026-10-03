@@ -752,7 +752,7 @@ impl ModelCall {
 pub(crate) enum Prepared {
     /// Through this turn's gateway.
     Gateway {
-        gateway: TurnGateway,
+        gateway: Box<TurnGateway>,
         env: Vec<(String, String)>,
         /// Variables taken out of the harness's environment: provider
         /// credentials it must not hold.
@@ -966,6 +966,26 @@ pub(crate) fn prepare(
     };
     let running = TurnGateway::start(listener, Arc::new(turn))
         .map_err(|e| format!("could not start the model gateway: {e}"))?;
+    // Announced like the turn's egress proxy (docs/registry.md), by what it
+    // serves; nothing to reclaim, since it lives and dies with this process.
+    let service = crate::services::Service::new(
+        crate::services::KIND_MODEL_GATEWAY,
+        crate::services::ServiceOwner::this_process().for_branch(&record.info.name),
+    )
+    .with("branch", record.info.name.as_str())
+    .with(
+        "apis",
+        served
+            .iter()
+            .map(|a| a.as_str().to_owned())
+            .collect::<Vec<_>>(),
+    )
+    .with("models", access.allow.clone())
+    .with_endpoint(crate::services::Endpoint::url(url.clone()));
+    let running = running.registered(
+        yard.register_service(service, crate::services::DEFAULT_TTL)
+            .ok(),
+    );
     let mut env = Vec::new();
     if gateway.serves(Api::Anthropic) {
         env.push(("ANTHROPIC_BASE_URL".to_owned(), format!("{url}/anthropic")));
@@ -977,7 +997,7 @@ pub(crate) fn prepare(
     }
     env.push((ENV_GATEWAY.to_owned(), url.clone()));
     Ok(Some(Prepared::Gateway {
-        gateway: running,
+        gateway: Box::new(running),
         env,
         scrub: SCRUB.to_vec(),
         activity: ModelActivity::Gateway {

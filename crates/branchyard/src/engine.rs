@@ -432,7 +432,7 @@ fn run(
             egress_extra.extend(crate::egress::gateway_rule(&url));
             model_env = env;
             model_scrub = scrub;
-            model_gateway = Some(gateway);
+            model_gateway = Some(*gateway);
         }
     }
     let _audit = connectors

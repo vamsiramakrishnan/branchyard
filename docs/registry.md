@@ -1,6 +1,6 @@
 # Ambient registry
 
-Branchyard starts and depends on many things: a connector gateway, a turn's egress proxy, a server, workers, sandboxes, recipe machines, pool keepers, and soon a model gateway. Each one announces itself in a registry with what it can do and a lease. Consumers find it by capability, not by a URL in a file. When its owner stops, the lease runs out and what Branchyard started for it is reclaimed. This is the rule "Ambient, not configured" from the [roadmap](roadmap.md#direction-cowork-parity).
+Branchyard starts and depends on many things: a connector gateway, a turn's egress proxy, a server, workers, sandboxes, recipe machines, pool keepers and a turn's model gateway. Each one announces itself in a registry with what it can do and a lease. Consumers find it by capability, not by a URL in a file. When its owner stops, the lease runs out and what Branchyard started for it is reclaimed. This is the rule "Ambient, not configured" from the [roadmap](roadmap.md#direction-cowork-parity).
 
 Status: **built and tested hermetically** (2 October 2026, branch `agent/ambient-15`). The connector gateway, egress proxies, sandboxes, recipe machines, pool keepers, `by serve` and workers register. The live catalogs read the official MCP registry and npm. See [What is not done](#what-is-not-done).
 
@@ -62,12 +62,13 @@ A killed owner on this host is known gone at once, so its services are reclaimed
 | `connector_gateway` | `by gateway start` (the supervisor, with the Anvil process it runs) | the gateway process and, when started in the background, the supervisor's process group |
 | `connector_gateway` (adopted) | `by gateway start` when something it did not start already listens at the pinned URL; lease ten minutes, owned by no process | none |
 | `egress_proxy` | each turn with a restricted network, while it runs; the proxy's loopback URL, or the network namespace it serves | none: it lives in the engine's process |
+| `model_gateway` | each turn on the model gateway, while it runs; its URL, with `branch`, `apis` and `models` | none: it lives in the engine's process |
 | `sandbox`, `recipe_machine` | each turn on a sandbox or a recipe's machine, from when it has one until it is released | `sandbox` |
 | `pool_keeper` | each `PoolKeeper` (`by serve`, `by worker`) | `pool_slots` |
 | `server` | `by serve`, in its fleet's registry and in each served repository's | none |
 | `worker` | every process that claims queued operations: its row in the workers table, read as a service | none (its claims are reaped by the queue) |
 
-A model gateway registers itself over HTTP (below), or with `Yard::register_service` on the same machine.
+A turn's model gateway registers as `model_gateway` with its branch, the APIs it serves (`apis`) and the models it allows (`models`), and leaves when the turn ends; it has nothing to reclaim, since it runs in the turn's process. A model gateway run elsewhere registers itself over HTTP (below), or with `Yard::register_service` on the same machine.
 
 ## Stores
 
@@ -136,4 +137,3 @@ Nothing is fetched unless asked: no command on the hot path reads the network, a
 - A server's own connector gateway (`run_gateway`) and MCP servers Branchyard starts for a turn (`by mcp`) do not register yet.
 - The live harness catalog covers npm-installed harnesses only; harnesses installed by script (`curl ... | sh`) have no registry to read.
 - The catalog fetcher does not go through an HTTP proxy.
-- The model gateway is built separately; it registers as `model_gateway` through the API or the SDK.

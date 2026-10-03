@@ -66,6 +66,8 @@ pub struct TurnGateway {
     address: SocketAddr,
     in_flight: Arc<(Mutex<usize>, Condvar)>,
     thread: Option<JoinHandle<()>>,
+    /// Its entry in the registry, removed when the gateway stops.
+    service: Option<crate::services::Registration>,
 }
 
 impl TurnGateway {
@@ -85,7 +87,14 @@ impl TurnGateway {
             address,
             in_flight,
             thread: Some(thread),
+            service: None,
         })
+    }
+
+    /// Keep `service`, the gateway's registry entry, for as long as it runs.
+    pub(crate) fn registered(mut self, service: Option<crate::services::Registration>) -> Self {
+        self.service = service;
+        self
     }
 
     /// What this turn's calls have cost so far.
@@ -104,6 +113,8 @@ impl TurnGateway {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
         }
+        // Gone from the registry before it stops answering.
+        self.service.take();
         // Wake the accept loop.
         let mut wake = self.address;
         if wake.ip().is_unspecified() {
