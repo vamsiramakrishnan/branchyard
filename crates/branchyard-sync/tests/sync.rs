@@ -1016,6 +1016,54 @@ fn a_checked_out_ref_moves_only_when_its_worktree_is_clean() {
 }
 
 #[test]
+fn a_remote_deletion_of_a_checked_out_ref_is_not_pushed_back() {
+    let w = world();
+    let store = w.file_store();
+    let a = w.machine("a");
+    let b = w.empty("b");
+    let c1 = commit_on(&a, "feature", "one", &[("f", "1\n")]);
+    let ra = w.remote(store.clone(), "a");
+    let rb = w.remote(store.clone(), "b");
+    let (mut sa, mut sb) = (TaskState::default(), TaskState::default());
+    ra.sync(&source(&a, "feature"), &mut sa).unwrap();
+    rb.sync(&source(&b, "feature"), &mut sb).unwrap();
+    git(&a, &["checkout", "--quiet", "feature"]);
+    // The other machine deletes the branch's head, and the remote follows.
+    git(&b, &["update-ref", "-d", "refs/heads/feature"]);
+    let report = rb.sync(&source(&b, "feature"), &mut sb).unwrap();
+    assert_eq!(report.deleted, vec!["refs/heads/main"]);
+    let deleted_at = ra.manifest("feature").unwrap().unwrap().0.seq;
+    // Here it is checked out: left, and reported behind (the manifest is
+    // unchanged, so nothing is swapped).
+    let report = ra.sync(&source(&a, "feature"), &mut sa).unwrap();
+    assert_eq!(report.behind, vec!["refs/heads/main"]);
+    assert!(!report.swapped, "{report:?}");
+    assert_eq!(head(&a, "refs/heads/feature").as_deref(), Some(c1.as_str()));
+    // The next sync must not take the surviving ref for a new one and push
+    // it back.
+    let report = ra.sync(&source(&a, "feature"), &mut sa).unwrap();
+    assert!(report.pushed.is_empty(), "{report:?}");
+    assert_eq!(report.behind, vec!["refs/heads/main"]);
+    let (m, _) = ra.manifest("feature").unwrap().unwrap();
+    assert!(!m.refs.contains_key("refs/heads/main"), "{m:?}");
+    assert_eq!(m.seq, deleted_at);
+    // Nor when the same sync swaps the manifest for another change.
+    git(&a, &["update-ref", "refs/branchyard/feature/1/turn-1", &c1]);
+    let report = ra.sync(&source(&a, "feature"), &mut sa).unwrap();
+    assert!(report.swapped, "{report:?}");
+    assert_eq!(report.pushed, vec!["refs/branchyard/1/turn-1"]);
+    let report = ra.sync(&source(&a, "feature"), &mut sa).unwrap();
+    assert!(report.pushed.is_empty(), "{report:?}");
+    let (m, _) = ra.manifest("feature").unwrap().unwrap();
+    assert!(!m.refs.contains_key("refs/heads/main"), "{m:?}");
+    // Once the worktree leaves the branch, the deletion is applied here.
+    git(&a, &["checkout", "--quiet", "--detach"]);
+    let report = ra.sync(&source(&a, "feature"), &mut sa).unwrap();
+    assert!(report.behind.is_empty(), "{report:?}");
+    assert_eq!(head(&a, "refs/heads/feature"), None);
+}
+
+#[test]
 fn transient_failures_are_retried_with_backoff() {
     let w = world();
     let s3 = branchyard_sync::testing::s3::MockS3::start("b", 50);

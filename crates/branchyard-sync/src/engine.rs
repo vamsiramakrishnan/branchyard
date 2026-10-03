@@ -864,7 +864,7 @@ impl Remote {
                     if m.writer.commit == commit {
                         // Our swap landed; its response was lost.
                         report.swapped = true;
-                        self.settle(state, m);
+                        self.settle(state, m, &report.behind);
                         report.seq = m.seq;
                         return Ok(());
                     }
@@ -933,7 +933,7 @@ impl Remote {
                     && watermark == next.ledger_watermark;
                 if unchanged || (remote.is_none() && next.refs.is_empty() && segments.is_empty()) {
                     if let Some(m) = &remote {
-                        self.settle(state, m);
+                        self.settle(state, m, &report.behind);
                         report.seq = m.seq;
                     }
                     report.behind.sort();
@@ -1064,7 +1064,7 @@ impl Remote {
                         report.swapped = true;
                         report.seq = next.seq;
                         merge_names(&mut report.pushed, &plan.pushed);
-                        self.settle(state, &next);
+                        self.settle(state, &next, &report.behind);
                         state
                             .remote_chunks
                             .extend(new_chunks.iter().map(ChunkId::hex));
@@ -1089,8 +1089,20 @@ impl Remote {
         result.map(|_| report)
     }
 
-    fn settle(&self, state: &mut TaskState, manifest: &Manifest) {
-        state.base = manifest.refs.clone();
+    /// Agree on `manifest` as the base, except for the refs in `behind`:
+    /// a remote change this machine has not applied (a ref checked out
+    /// here that the remote moved or deleted) keeps its prior base entry
+    /// until it is applied. Taking the remote's value as the base would
+    /// make the unapplied local ref look like a local change: a deletion
+    /// would be pushed back as a new ref, undoing it.
+    fn settle(&self, state: &mut TaskState, manifest: &Manifest, behind: &[String]) {
+        let prior = std::mem::replace(&mut state.base, manifest.refs.clone());
+        for name in behind {
+            match prior.get(name) {
+                Some(oid) => state.base.insert(name.clone(), oid.clone()),
+                None => state.base.remove(name),
+            };
+        }
         state.seq = manifest.seq;
         state.synced_ms = Some(self.clock.now());
         state
