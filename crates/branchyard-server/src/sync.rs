@@ -11,6 +11,12 @@
 //! - **While it runs**, a replicator per repository looks for changed
 //!   refs every `interval` and pushes them (checkpoints land as turns
 //!   end), so a phone or another machine sees the work as it goes.
+//! - **If a lease is lost** while it runs (a renewal finds another
+//!   runner took it over), the run is stopped: its branches' turns are
+//!   cancelled, naming the loss, the task is fenced so the replicator no
+//!   longer pushes it, and the operation fails with `409
+//!   sync_lease_lost` instead of returning its result. The fence lifts
+//!   when this server takes the task's lease again.
 //! - **After it**, the operation's branches are queued and the replicator
 //!   woken, then the leases are released.
 //!
@@ -52,6 +58,13 @@ impl std::fmt::Debug for ServerSync {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ServerSync({:?})", self.repos.keys().collect::<Vec<_>>())
     }
+}
+
+/// A task's lease, held for an operation on one of its branches.
+pub struct HeldLease {
+    pub branch: String,
+    pub task: String,
+    pub keeper: LeaseKeeper,
 }
 
 /// Why an operation could not start.
@@ -151,8 +164,9 @@ impl ServerSync {
 
     /// Pull each branch's task and take its lease, for an operation on
     /// `branches` of `repo`. The leases are held until the returned
-    /// keepers are dropped.
-    pub fn begin(&self, repo: &str, branches: &[String]) -> Result<Vec<LeaseKeeper>, Refusal> {
+    /// keepers are dropped. A task fenced after an earlier loss is pushed
+    /// again once its lease is taken.
+    pub fn begin(&self, repo: &str, branches: &[String]) -> Result<Vec<HeldLease>, Refusal> {
         let Some(r) = self.repos.get(repo) else {
             return Ok(Vec::new());
         };
@@ -181,9 +195,21 @@ impl ServerSync {
                 Kind::LeaseHeld => Refusal::Held(e.message),
                 _ => Refusal::Unavailable(format!("the lease on {task} could not be taken: {e}")),
             })?;
-            keepers.push(keeper);
+            r.replicator.unfence(&task);
+            keepers.push(HeldLease {
+                branch: branch.clone(),
+                task,
+                keeper,
+            });
         }
         Ok(keepers)
+    }
+
+    /// Stop pushing `task` of `repo`: this server lost its lease on it.
+    pub fn fence(&self, repo: &str, task: &str, reason: &str) {
+        if let Some(r) = self.repos.get(repo) {
+            r.replicator.fence(task, reason);
+        }
     }
 
     /// Queue an operation's branches and wake the replicator.

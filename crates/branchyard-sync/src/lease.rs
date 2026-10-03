@@ -9,7 +9,9 @@
 //!   renewal that finds another generation means the lease was taken
 //!   after it ran out: the holder has lost it and must stop.
 //!   [`LeaseKeeper`] renews from a thread of its own every third of the
-//!   lease and records a loss.
+//!   lease and records a loss, and why ([`LeaseKeeper::lost_reason`]); the
+//!   runner polls it and stops (a server cancels the run, see
+//!   `docs/sync.md#servers`).
 //! - **Release.** Delete it, conditional on the generation.
 //!
 //! Each lease carries an epoch, one more on every take-over, which a
@@ -213,6 +215,7 @@ pub struct LeaseKeeper {
     remote: Arc<Remote>,
     lease: Arc<Mutex<Option<Lease>>>,
     lost: Arc<AtomicBool>,
+    reason: Arc<Mutex<Option<String>>>,
     stop: Arc<Stop>,
     thread: Option<JoinHandle<()>>,
     registration: Option<Registration>,
@@ -246,13 +249,19 @@ impl LeaseKeeper {
         };
         let lease = Arc::new(Mutex::new(Some(lease)));
         let lost = Arc::new(AtomicBool::new(false));
+        let reason = Arc::new(Mutex::new(None));
         let stop = Arc::new(Stop {
             stopped: Mutex::new(false),
             wake: Condvar::new(),
         });
         let thread = {
-            let (remote, lease, lost, stop) =
-                (remote.clone(), lease.clone(), lost.clone(), stop.clone());
+            let (remote, lease, lost, reason, stop) = (
+                remote.clone(),
+                lease.clone(),
+                lost.clone(),
+                reason.clone(),
+                stop.clone(),
+            );
             std::thread::Builder::new()
                 .name("by-sync-lease".into())
                 .spawn(move || loop {
@@ -270,7 +279,7 @@ impl LeaseKeeper {
                         match remote.renew_lease(held) {
                             Ok(()) => {}
                             Err(e) if e.is(Kind::LeaseHeld) => {
-                                lost.store(true, Ordering::SeqCst);
+                                record_loss(&remote, held, &e, &lost, &reason);
                                 *slot = None;
                                 return;
                             }
@@ -285,6 +294,7 @@ impl LeaseKeeper {
             remote,
             lease,
             lost,
+            reason,
             stop,
             thread: Some(thread),
             registration,
@@ -295,6 +305,19 @@ impl LeaseKeeper {
     /// failed to land in time). A runner that lost its lease stops.
     pub fn lost(&self) -> bool {
         self.lost.load(Ordering::SeqCst)
+    }
+
+    /// Why the lease was lost (and who holds it now, when the remote says),
+    /// once it was.
+    pub fn lost_reason(&self) -> Option<String> {
+        if !self.lost() {
+            return None;
+        }
+        self.reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .or_else(|| Some("the lease was lost".into()))
     }
 
     pub fn record(&self) -> Option<LeaseRecord> {
@@ -311,7 +334,7 @@ impl LeaseKeeper {
         match slot.as_mut() {
             Some(lease) => self.remote.renew_lease(lease).inspect_err(|e| {
                 if e.is(Kind::LeaseHeld) {
-                    self.lost.store(true, Ordering::SeqCst);
+                    record_loss(&self.remote, lease, e, &self.lost, &self.reason);
                 }
             }),
             None => Err(Error::new(Kind::LeaseHeld, "the lease was lost")),
@@ -331,6 +354,26 @@ impl Drop for LeaseKeeper {
         }
         drop(self.registration.take());
     }
+}
+
+/// Record that `lease` was lost, naming who holds it now when the remote
+/// says.
+fn record_loss(
+    remote: &Remote,
+    lease: &Lease,
+    error: &Error,
+    lost: &AtomicBool,
+    reason: &Mutex<Option<String>>,
+) {
+    let now = match remote.lease_state(&lease.record.task, &lease.record.attempt) {
+        Ok(Some(held)) => format!(
+            "; {} on {} holds it now (epoch {})",
+            held.holder, held.device, held.epoch
+        ),
+        _ => String::new(),
+    };
+    *reason.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{}{now}", error.message));
+    lost.store(true, Ordering::SeqCst);
 }
 
 /// A unique holder name for this process.

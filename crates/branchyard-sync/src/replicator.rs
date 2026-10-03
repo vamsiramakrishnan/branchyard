@@ -79,6 +79,8 @@ pub struct Replicator {
     flushed: Mutex<Snapshot>,
     rng: Mutex<SplitMix>,
     rounds: Mutex<u64>,
+    /// Tasks not to push, and why: a runner lost its lease on them.
+    fenced: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 /// The longest a failing task waits between tries.
@@ -101,6 +103,7 @@ impl Replicator {
             flushed: Mutex::new(Snapshot::default()),
             rng: Mutex::new(SplitMix::new(crate::util::random_seed())),
             rounds: Mutex::new(0),
+            fenced: Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -153,8 +156,42 @@ impl Replicator {
         Ok(sources.len())
     }
 
-    /// Sync one task now, recording the outcome.
+    /// Stop pushing `task` (it stays queued) until [`Replicator::unfence`]:
+    /// a runner here lost its lease on it, so what it did after the loss
+    /// must not reach the remote while another runner holds it.
+    pub fn fence(&self, task: &str, reason: &str) {
+        self.fenced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(task.to_owned(), reason.to_owned());
+    }
+
+    /// Push `task` again (its lease was taken again).
+    pub fn unfence(&self, task: &str) {
+        self.fenced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(task);
+    }
+
+    /// Why `task` is fenced, when it is.
+    pub fn fenced(&self, task: &str) -> Option<String> {
+        self.fenced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(task)
+            .cloned()
+    }
+
+    /// Sync one task now, recording the outcome. A fenced task is refused
+    /// ([`Kind::LeaseHeld`]) and left queued.
     pub fn sync_task(&self, task: &str) -> Result<SyncReport> {
+        if let Some(reason) = self.fenced(task) {
+            return Err(Error::new(
+                crate::error::Kind::LeaseHeld,
+                format!("{task} is not pushed: {reason}"),
+            ));
+        }
         let key = self.key();
         let started = self.clock.now();
         let source = self
@@ -218,6 +255,9 @@ impl Replicator {
     pub fn drain(&self) -> Result<DrainReport> {
         let mut report = DrainReport::default();
         for pending in self.outbox.due(&self.key(), self.clock.now())? {
+            if self.fenced(&pending.task).is_some() {
+                continue;
+            }
             match self.sync_task(&pending.task) {
                 Ok(r) => report.synced.push(r),
                 Err(e) => report.failed.push((pending.task.clone(), e.to_string())),

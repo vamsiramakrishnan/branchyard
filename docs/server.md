@@ -480,6 +480,7 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `shutting_down` | 503 | The server is stopping |
 | `sync_lease_held` | (operation) | With `sync`: another runner holds the lease on one of the operation's branches; the message names it ([sync](sync.md#servers)) |
 | `sync_unavailable` | (operation) | With `sync`: the remote could not grant the lease, so the operation did not run |
+| `sync_lease_lost` | (operation) | With `sync`: while the operation ran, another runner took over the lease on one of its branches; the run was cancelled and its result not accepted, and the message names the new holder ([sync](sync.md#servers)) |
 | `interrupted` | (operation) | The server stopped before the operation finished, or its worker's claim expired after it started |
 | `internal`, `git_error`, `io_error`, `state_error`, `harness_error`, `not_a_repository` | 500 | Server-side failure |
 | `branch_exists`, `no_candidate`, `target_moved`, `conflict`, `dirty_target`, `already_merged`, `running`, `fenced` | 409 | SDK refusals; `target_moved` has `detail.expected`/`actual`, `conflict` has `detail.files`. `running`: another engine, such as a local `by`, runs a turn on the branch. `fenced`: the engine lost the branch's lease to another |
@@ -619,7 +620,7 @@ With `sync` in the configuration file, a server or worker replicates its reposit
 "sync": { "remote": "s3://tasks/team?endpoint=https://minio.internal:9000", "encrypt": "passphrase", "passphrase_file": "/etc/branchyard/sync.pass", "interval": "30s", "lease_seconds": 60 }
 ```
 
-- Before an operation on existing branches it pulls each branch's task (creating or fast-forwarding its refs; a clean worktree follows) and takes the task's lease, renewed while the operation runs and registered in the repository's service registry as `sync_lease`. Another runner's lease fails the operation with `sync_lease_held`; a remote that cannot grant one, with `sync_unavailable`.
+- Before an operation on existing branches it pulls each branch's task (creating or fast-forwarding its refs; a clean worktree follows) and takes the task's lease, renewed while the operation runs and registered in the repository's service registry as `sync_lease`. Another runner's lease fails the operation with `sync_lease_held`; a remote that cannot grant one, with `sync_unavailable`. A lease lost while the operation runs cancels its turns and fails it with `sync_lease_lost`, and the task is not pushed again until this server holds its lease once more.
 - A replicator per repository pushes changed refs every `interval` (checkpoints as turns end), from `<data_dir>/sync/<repo>.db`; an operation's branches are queued when it ends. At shutdown the replicators stop and push what is queued once more.
 - `/metrics` adds the `branchyard_sync_*` families ([observability](observability.md#metrics)).
 
