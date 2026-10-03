@@ -498,52 +498,33 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
         .stderr(Stdio::null());
     let mut process = watch.spawn().unwrap();
     let mut keys = process.stdin.take().unwrap();
-    // Everything drawn so far, read as it comes, so each key is typed only
-    // once the dashboard is ready for it rather than after a guessed delay.
-    let screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    // Every row the terminal has shown, recorded whenever the cursor
+    // leaves it: ratatui redraws only changed cells, and several frames
+    // can arrive in one read, so neither the raw stream nor a screen per
+    // read holds every phrase. Keys are typed once the screen is ready.
+    let screens = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let reader = {
-        let screen = screen.clone();
+        let screens = screens.clone();
         let mut out = process.stdout.take().unwrap();
         std::thread::spawn(move || {
             use std::io::Read;
+            let mut term = Screen::new(30, 120);
             let mut buf = [0u8; 4096];
             while let Ok(n) = out.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
-                screen.lock().unwrap().extend_from_slice(&buf[..n]);
+                let rows = term.feed(&buf[..n]);
+                screens.lock().unwrap().extend(rows);
             }
         })
     };
-    let drawn = || screen.lock().unwrap().len();
-    // Cells are drawn with cursor moves between them, so compare the
-    // printable characters only: escapes and spaces removed on both sides.
-    let printable = |raw: &str| {
-        let mut out = String::new();
-        let mut chars = raw.chars().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                '\x1b' => match chars.next() {
-                    Some('[') => while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {},
-                    Some(']') => {
-                        while let Some(c) = chars.next() {
-                            if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                },
-                c if c.is_whitespace() || c.is_control() => {}
-                c => out.push(c),
-            }
-        }
-        out
-    };
+    let drawn = || screens.lock().unwrap().len();
     let shows_after = |from: usize, text: &str| {
-        let seen = screen.lock().unwrap();
-        printable(&String::from_utf8_lossy(&seen[from.min(seen.len())..]))
-            .contains(&printable(text))
+        let screens = screens.lock().unwrap();
+        screens[from.min(screens.len())..]
+            .iter()
+            .any(|screen| screen.contains(text))
     };
     let wait_for = |from: usize, text: &str| {
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -552,17 +533,9 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
             std::thread::sleep(Duration::from_millis(20));
         }
     };
-    // The alternate screen is entered after raw mode, so keys typed once a
-    // row is drawn there are not flushed with the cooked-mode buffer.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let entered = loop {
-        if let Some(at) = String::from_utf8_lossy(&screen.lock().unwrap()).find("\x1b[?1049h") {
-            break at;
-        }
-        assert!(Instant::now() < deadline, "the dashboard never started");
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    wait_for(entered, "ready");
+    // The dashboard draws after entering raw mode, so keys typed once a
+    // ready row is shown are not flushed with the cooked-mode buffer.
+    wait_for(0, "ready");
     // A follow-up first: `s`, a line of text, Enter; it runs in the
     // background while the dashboard carries on.
     keys.write_all(b"sWRITE x.txt=2\r").unwrap();
@@ -606,18 +579,37 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
     drop(keys);
     let status = process.wait().unwrap();
     reader.join().unwrap();
-    let screen = String::from_utf8_lossy(&screen.lock().unwrap()).into_owned();
-    assert!(status.success(), "{screen}");
-    // ratatui redraws only changed cells, so look for whole runs only.
+    let screens = screens.lock().unwrap();
+    assert!(
+        status.success(),
+        "{}",
+        screens.last().cloned().unwrap_or_default()
+    );
+    // The send ran in the background with its output kept: its notice
+    // can be replaced before a frame shows it, so look for the log.
+    let logs: Vec<_> = fs::read_dir(repo.root.join(".branchyard/watch"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("w-send-"))
+        .collect();
+    assert_eq!(logs.len(), 1, "{logs:?}");
     for expected in [
         "running: by send w 'WRITE x.txt=2'",
-        "the background; output in",
         "┌ merge w ─",
         "candidate ",
         "merged w into main (",
         "◆ merged into main",
     ] {
-        assert!(screen.contains(expected), "{expected:?} missing:\n{screen}");
+        assert!(
+            screens.iter().any(|screen| screen.contains(expected)),
+            "{expected:?} never shown; last screen drawn:\n{}",
+            screens
+                .iter()
+                .rev()
+                .find(|s| !s.trim().is_empty())
+                .cloned()
+                .unwrap_or_default()
+        );
     }
 }
 
@@ -1925,4 +1917,150 @@ fn compare_try_and_pick_after_a_fan() {
     let left = repo.json(&["ls", "--json"]);
     assert_eq!(left.as_array().unwrap().len(), 1);
     assert_eq!(left[0]["name"], b);
+}
+
+/// Just enough of a terminal to read ratatui's output: absolute cursor
+/// moves, clears, carriage returns and newlines; colours and modes are
+/// ignored, and every character is one cell wide. Bytes that end in the
+/// middle of a character or an escape wait for the next read.
+struct Screen {
+    cells: Vec<Vec<char>>,
+    row: usize,
+    col: usize,
+    pending: Vec<u8>,
+    seen: Vec<String>,
+}
+
+impl Screen {
+    fn new(rows: usize, cols: usize) -> Screen {
+        Screen {
+            cells: vec![vec![' '; cols]; rows],
+            row: 0,
+            col: 0,
+            pending: Vec::new(),
+            seen: Vec::new(),
+        }
+    }
+
+    /// Takes the bytes read; returns the rows shown since the last call,
+    /// each as it was when the cursor left it, then every row as it is.
+    fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(bytes);
+        let valid = match std::str::from_utf8(&self.pending) {
+            Ok(_) => self.pending.len(),
+            Err(e) => e.valid_up_to(),
+        };
+        let text = String::from_utf8(self.pending[..valid].to_vec()).unwrap();
+        let used = self.apply(&text);
+        self.pending.drain(..used);
+        let mut rows = std::mem::take(&mut self.seen);
+        rows.extend(self.cells.iter().map(|row| row.iter().collect::<String>()));
+        rows
+    }
+
+    /// Applies what it can; returns how many bytes it used, stopping
+    /// before an escape sequence that is not complete yet.
+    fn apply(&mut self, text: &str) -> usize {
+        let mut chars = text.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            match c {
+                '\x1b' => match chars.next() {
+                    None => return at,
+                    Some((_, '[')) => {
+                        let mut params = String::new();
+                        let mut last = None;
+                        for (_, c) in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                last = Some(c);
+                                break;
+                            }
+                            params.push(c);
+                        }
+                        if last.is_none() {
+                            return at;
+                        }
+                        self.csi(&params, last);
+                    }
+                    Some((_, ']')) => {
+                        let mut ended = false;
+                        while let Some((_, c)) = chars.next() {
+                            if c == '\x07'
+                                || (c == '\x1b' && chars.next_if(|&(_, c)| c == '\\').is_some())
+                            {
+                                ended = true;
+                                break;
+                            }
+                        }
+                        if !ended {
+                            return at;
+                        }
+                    }
+                    Some(_) => {}
+                },
+                '\r' => {
+                    self.leave();
+                    self.col = 0;
+                }
+                '\n' => {
+                    self.leave();
+                    self.row += 1;
+                }
+                c if c.is_control() => {}
+                c => {
+                    if let Some(cell) = self
+                        .cells
+                        .get_mut(self.row)
+                        .and_then(|r| r.get_mut(self.col))
+                    {
+                        *cell = c;
+                    }
+                    self.col += 1;
+                }
+            }
+        }
+        text.len()
+    }
+
+    /// Records the row the cursor is leaving.
+    fn leave(&mut self) {
+        if let Some(row) = self.cells.get(self.row) {
+            self.seen.push(row.iter().collect());
+        }
+    }
+
+    fn csi(&mut self, params: &str, last: Option<char>) {
+        let numbers: Vec<usize> = params
+            .split(';')
+            .map(|n| n.trim_start_matches('?').parse().unwrap_or(0))
+            .collect();
+        match last {
+            Some('H' | 'f') => {
+                self.leave();
+                self.row = numbers.first().copied().unwrap_or(1).max(1) - 1;
+                self.col = numbers.get(1).copied().unwrap_or(1).max(1) - 1;
+            }
+            Some('J') if numbers.first() == Some(&2) || params.is_empty() => {
+                self.leave();
+                for row in &mut self.cells {
+                    row.fill(' ');
+                }
+            }
+            Some('K') => {
+                if let Some(row) = self.cells.get_mut(self.row) {
+                    for cell in row.iter_mut().skip(self.col) {
+                        *cell = ' ';
+                    }
+                }
+            }
+            // Leaving the alternate screen shows the primary one again.
+            Some('l') if params == "?1049" => {
+                self.leave();
+                for row in &mut self.cells {
+                    self.seen.push(row.iter().collect());
+                    row.fill(' ');
+                }
+            }
+            _ => {}
+        }
+    }
 }
