@@ -14,7 +14,6 @@
 //! Counters are added to the outbox's totals after each drain, so `by
 //! sync status` shows what every process did.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -303,54 +302,63 @@ impl Replicator {
     /// Scan and drain every `interval` on a thread of its own, until the
     /// handle is dropped.
     pub fn spawn(self: Arc<Self>, interval: Duration) -> Result<ReplicatorHandle> {
-        let stop = Arc::new((Mutex::new(false), Condvar::new()));
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = Arc::new((Mutex::new(Signal::default()), Condvar::new()));
         let thread = {
-            let (stop, running) = (stop.clone(), running.clone());
+            let signal = signal.clone();
             std::thread::Builder::new()
                 .name("by-sync".into())
-                .spawn(move || {
-                    loop {
-                        if let Err(e) = self.scan().and_then(|_| self.drain()) {
-                            eprintln!("branchyard sync: {e}");
-                        }
-                        let (lock, wake) = &*stop;
-                        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        let (guard, _) = wake
-                            .wait_timeout(guard, interval)
-                            .unwrap_or_else(|e| e.into_inner());
-                        if *guard {
-                            break;
-                        }
+                .spawn(move || loop {
+                    if let Err(e) = self.scan().and_then(|_| self.drain()) {
+                        eprintln!("branchyard sync: {e}");
                     }
-                    running.store(false, Ordering::SeqCst);
+                    let (lock, wake) = &*signal;
+                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    // A wake-up that came while the round ran is not lost.
+                    let (mut guard, _) = wake
+                        .wait_timeout_while(guard, interval, |s| !s.stop && !s.woken)
+                        .unwrap_or_else(|e| e.into_inner());
+                    if guard.stop {
+                        break;
+                    }
+                    guard.woken = false;
                 })
                 .map_err(|e| Error::local(format!("sync thread: {e}")))?
         };
         Ok(ReplicatorHandle {
-            stop,
+            signal,
             thread: Some(thread),
         })
     }
 }
 
+#[derive(Default)]
+struct Signal {
+    stop: bool,
+    woken: bool,
+}
+
 /// Stops the replicator's thread when dropped.
 pub struct ReplicatorHandle {
-    stop: Arc<(Mutex<bool>, Condvar)>,
+    signal: Arc<(Mutex<Signal>, Condvar)>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl ReplicatorHandle {
     /// Run a round now instead of waiting for the interval.
     pub fn wake(&self) {
-        self.stop.1.notify_all();
+        self.signal
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .woken = true;
+        self.signal.1.notify_all();
     }
 }
 
 impl Drop for ReplicatorHandle {
     fn drop(&mut self) {
-        *self.stop.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
-        self.stop.1.notify_all();
+        self.signal.0.lock().unwrap_or_else(|e| e.into_inner()).stop = true;
+        self.signal.1.notify_all();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }

@@ -235,12 +235,12 @@ impl Remote {
         for prefix in CONTENT_PREFIXES {
             listing.extend(self.store.list(prefix)?);
         }
-        let (old, candidates_generation) = match self.read(CANDIDATES) {
-            Ok((plain, g)) => (serde_json::from_slice::<Candidates>(&plain)?, Some(g)),
-            Err(e) if e.is(Kind::NotFound) => (Candidates::default(), None),
+        // The collector holds the sweep lock, so it alone writes the marks.
+        let old = match self.read(CANDIDATES) {
+            Ok((plain, _)) => serde_json::from_slice::<Candidates>(&plain)?,
+            Err(e) if e.is(Kind::NotFound) => Candidates::default(),
             Err(e) => return Err(e),
         };
-        let _ = candidates_generation;
         let grace = self.settings.grace.as_millis() as u64;
         let mut next = Candidates::default();
         let mut sweep: Vec<(String, Candidate)> = Vec::new();

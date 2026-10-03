@@ -62,7 +62,6 @@ impl Remote {
         chunk_dirs: &[std::path::PathBuf],
     ) -> Result<ScrubReport> {
         let mut report = ScrubReport::default();
-        let sealer = self.sealer();
         let mut listing = Vec::new();
         for prefix in CONTENT_PREFIXES {
             listing.extend(self.store.list(prefix)?);
@@ -122,7 +121,6 @@ impl Remote {
                 Err(e) => return Err(e),
             }
         }
-        let _ = sealer;
         report.missing.sort();
         report.missing.dedup();
         Ok(report)
