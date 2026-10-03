@@ -1810,3 +1810,51 @@ fn plan_and_knowledge_commands_work_against_a_server() {
     let refused = by(&["knowledge", "distill", "told", "--harness", "gemini-cli"]);
     assert!(!refused.status.success());
 }
+
+#[test]
+fn by_services_lists_a_servers_fleet_and_the_local_registry_finds_by_serve() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let mut server = Served::start(&dir.0, &[("app", &there)], &[]);
+    // Over the API: the server itself and its dispatcher, as a worker.
+    let out = server.by(&dir.0, &["services", "--json"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let kinds: Vec<&str> = listed["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"server") && kinds.contains(&"worker"),
+        "{kinds:?}"
+    );
+    let out = server.by(&dir.0, &["services", "--kind", "server"]);
+    assert!(
+        text(&out.stdout).contains(&server.url),
+        "{}",
+        text(&out.stdout)
+    );
+    // On this machine, without --remote: the repository's own registry
+    // has the server that serves it.
+    let local = command(BY, &there)
+        .args(["services", "--kind", "server", "--json"])
+        .output()
+        .unwrap();
+    assert!(local.status.success(), "{}", text(&local.stderr));
+    let here: Value = serde_json::from_slice(&local.stdout).unwrap();
+    assert_eq!(
+        here["services"][0]["endpoints"][0]["url"],
+        server.url.as_str()
+    );
+    assert_eq!(here["services"][0]["capabilities"]["repo"], "app");
+    // A clean stop deregisters it.
+    server.stop();
+    let after = command(BY, &there)
+        .args(["services", "--kind", "server", "--json"])
+        .output()
+        .unwrap();
+    let after: Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert_eq!(after["services"], serde_json::json!([]));
+}

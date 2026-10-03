@@ -49,6 +49,9 @@ pub fn contract() -> Value {
     entry::<api::MapRequest>("MapRequest", &mut types);
     entry::<api::MapResumeRequest>("MapResumeRequest", &mut types);
     entry::<api::MapList>("MapList", &mut types);
+    entry::<api::RegisterServiceRequest>("RegisterServiceRequest", &mut types);
+    entry::<api::ServiceList>("ServiceList", &mut types);
+    entry::<api::WellKnown>("WellKnown", &mut types);
     entry::<branchyard::MapReport>("MapReport", &mut types);
     entry::<knowledge_api::KnowledgeList>("KnowledgeList", &mut types);
     entry::<knowledge_api::KnowledgeAddRequest>("KnowledgeAddRequest", &mut types);

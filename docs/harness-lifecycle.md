@@ -84,6 +84,8 @@ by harnesses install codex --yes
 by harnesses update codex --version 0.200.0 --yes --on ssh://me@build.example
 ```
 
+`by catalog refresh` reads the npm registry's latest release of every catalog harness installed with `npm install -g`, pinned with its integrity hash and cached with a checksum ([live catalogs](registry.md#live-catalogs)). `by harnesses` then notes a newer release beside an installed harness, and `by harnesses update ID` without `--version` names it. Nothing is fetched unless asked, and the cached release is only a suggestion: `--version` takes it.
+
 `install` and `update` run the catalog's install command for the harness: the first one whose programs the machine has (`npm install -g @openai/codex`, else `curl ... | sh`, else `brew install --cask codex`). `install` of a harness already there does nothing; `update` runs it again.
 
 **Pins.** A package manager's command (`npm`, `bun`, `pnpm`) is pinned to the version the harness's default profile was checked against (`codex-cli 0.157.1` gives `@openai/codex@0.157.1`), or to `--version`. A piped installer takes no version, so it runs unpinned and `by` says so; `--version` with one is refused.

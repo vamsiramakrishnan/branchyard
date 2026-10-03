@@ -111,6 +111,8 @@ pub(crate) struct Hub {
     pub models: Mutex<Option<Arc<crate::models::Gateway>>>,
     /// Set by [`crate::Yard::use_ceilings`].
     pub ceilings: Mutex<Arc<std::collections::BTreeMap<String, crate::Ceiling>>>,
+    /// Opened by [`crate::Yard::services`].
+    pub services: Mutex<Option<Arc<crate::services::LocalRegistry>>>,
 }
 
 impl Default for Hub {
@@ -131,6 +133,7 @@ impl Default for Hub {
             knowledge: Default::default(),
             models: Default::default(),
             ceilings: Default::default(),
+            services: Default::default(),
         }
     }
 }
