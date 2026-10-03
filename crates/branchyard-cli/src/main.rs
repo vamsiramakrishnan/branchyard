@@ -20,6 +20,7 @@ mod harness_cmd;
 mod init;
 mod json;
 mod knowledge_cmd;
+mod live_catalog;
 mod map_cmd;
 mod notify;
 mod open;
@@ -33,6 +34,7 @@ mod render;
 mod review;
 mod review_format;
 mod rig;
+mod services_cmd;
 mod setup_io;
 mod ssh_remote;
 mod stats_cmd;
@@ -154,6 +156,8 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         Command::Usage { json } => return usage::show(env, json),
         // The ssh connection itself, not a server's API.
         Command::Remote { json, action } => return ssh_remote::command(globals, &action, json),
+        // Live catalogs are cached for this user; no repository or server.
+        Command::Catalog { json, action } => return catalog_cmd::live(&action, json),
         // The catalog is built in; no repository or server is involved.
         Command::Connectors {
             json,
@@ -448,6 +452,12 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::inbox(target, as_branch, unread, json),
         Command::Rig { json, action } => commands::rig(env, target, &action.into_args(json)),
         Command::Gateway { json, action } => gateway_cmd::main(target, &action, json),
+        Command::Services {
+            json,
+            kind,
+            all,
+            action,
+        } => services_cmd::main(env, target, action.as_ref(), kind.as_deref(), all, json),
         Command::Connect {
             connector,
             account,
@@ -473,6 +483,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Config { .. }
         | Command::Usage { .. }
         | Command::Remote { .. }
+        | Command::Catalog { .. }
         | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
     }
 }

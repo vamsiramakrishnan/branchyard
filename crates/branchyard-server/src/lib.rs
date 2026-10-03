@@ -78,6 +78,7 @@ pub mod metrics;
 pub mod observe;
 pub mod ops;
 pub mod serve;
+mod services_routes;
 pub mod storage_routes;
 pub mod store;
 pub mod telemetry;

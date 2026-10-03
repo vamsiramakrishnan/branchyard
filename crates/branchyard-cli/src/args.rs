@@ -824,6 +824,32 @@ Examples:
   by config validate ~/.config/branchyard/config.toml
   by config schema > branchyard.config.json";
 
+const SERVICES_EXAMPLES: &str = "\
+Examples:
+  by services                      # this repository's live services
+  by services --kind connector_gateway --json
+  by services --all                # with those that left or were reclaimed
+  by services gc                   # reclaim what a stopped owner left
+  by --remote https://by.example services   # a server's fleet
+
+Services register themselves with what they can do and a lease their owner
+renews; consumers find them by capability. A service whose owner stopped is
+reclaimed: a leaked process stopped, a sandbox or recipe machine recovered
+and destroyed, pool slots removed. Nothing Branchyard did not start is ever
+stopped. See docs/registry.md.";
+
+const CATALOG_EXAMPLES: &str = "\
+Examples:
+  by catalog refresh               # the MCP registry and npm, cached and verified
+  by catalog refresh --only harnesses
+  by catalog status --json
+
+Nothing is fetched unless you ask: catalog/connectors.toml and
+catalog/harnesses.toml stay the pinned baseline, and what a refresh adds is
+cached with its ETag and checksum under ~/.cache/branchyard/catalog (or
+$BRANCHYARD_CATALOG_DIR). A cache whose checksum does not verify is refused.
+See docs/registry.md.";
+
 const GATEWAY_EXAMPLES: &str = "\
 Examples:
   by gateway start                 # in the background; its log in .branchyard/gateway/
@@ -1556,6 +1582,72 @@ pub enum Command {
         #[arg(long)]
         open: bool,
     },
+    /// What Branchyard started or found (gateways, proxies, servers, workers, sandboxes, pool
+    /// keepers), with health, lease and owner; gc reclaims what expired
+    #[command(display_order = 405, after_help = SERVICES_EXAMPLES)]
+    Services {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        /// Only services of this kind, such as connector_gateway or server
+        #[arg(long, value_name = "KIND")]
+        kind: Option<String>,
+        /// Also those that left or were reclaimed (kept for an hour)
+        #[arg(long)]
+        all: bool,
+        #[command(subcommand)]
+        action: Option<ServicesAction>,
+    },
+    /// Refresh the connector and harness catalogs from live registries, or show what is cached
+    #[command(display_order = 406, subcommand_required = true, after_help = CATALOG_EXAMPLES)]
+    Catalog {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
+}
+
+/// `by services ...`; see docs/registry.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum ServicesAction {
+    /// Expire services whose lease ran out or whose owner is gone, and reclaim what Branchyard
+    /// started for them
+    Gc,
+}
+
+/// `by catalog ...`; see docs/registry.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum CatalogAction {
+    /// Fetch the official MCP registry's servers and the npm registry's latest harness
+    /// versions, verify them and cache them with their checksums
+    Refresh {
+        /// The MCP registry's base URL
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "BRANCHYARD_MCP_REGISTRY",
+            default_value = "https://registry.modelcontextprotocol.io"
+        )]
+        mcp_registry: String,
+        /// The npm registry's base URL
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "BRANCHYARD_NPM_REGISTRY",
+            default_value = "https://registry.npmjs.org"
+        )]
+        npm_registry: String,
+        /// The most pages of the MCP registry to read (100 servers each)
+        #[arg(long, value_name = "N", default_value = "20")]
+        max_pages: usize,
+        /// Only the connectors, or only the harnesses
+        #[arg(long, value_name = "WHICH", value_parser = ["connectors", "harnesses"])]
+        only: Option<String>,
+    },
+    /// What the cache holds, where it came from, and whether its checksums verify
+    Status,
 }
 
 /// `by gateway ...`; see docs/connectors.md.
@@ -4701,6 +4793,33 @@ mod tests {
                 action: ConnectorsAction::Catalog
             }
         );
+        assert_eq!(
+            parse_str("services --kind connector_gateway --json").unwrap(),
+            Command::Services {
+                json: true,
+                kind: Some("connector_gateway".into()),
+                all: false,
+                action: None,
+            }
+        );
+        assert_eq!(
+            parse_str("services gc --json").unwrap(),
+            Command::Services {
+                json: true,
+                kind: None,
+                all: false,
+                action: Some(ServicesAction::Gc),
+            }
+        );
+        assert!(matches!(
+            parse_str("catalog refresh --only harnesses --npm-registry http://127.0.0.1:1")
+                .unwrap(),
+            Command::Catalog {
+                action: CatalogAction::Refresh { ref only, ref npm_registry, max_pages: 20, .. },
+                ..
+            } if only.as_deref() == Some("harnesses") && npm_registry == "http://127.0.0.1:1"
+        ));
+        assert!(err("catalog refresh --only models").contains("invalid value"));
         assert!(err("diff b --json").contains("unexpected argument '--json'"));
     }
 

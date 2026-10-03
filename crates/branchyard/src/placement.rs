@@ -329,7 +329,7 @@ fn register_sandbox(
         .with_reclaim(Reclaim::Sandbox {
             root: yard.root.clone(),
             branch: branch.clone(),
-            provider,
+            provider: Box::new(provider),
             sandbox: name.to_owned(),
         });
     yard.register_service(service, crate::services::DEFAULT_TTL)

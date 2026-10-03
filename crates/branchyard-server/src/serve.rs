@@ -57,6 +57,10 @@ pub struct Running {
     /// One keeper per repository whose workspace has a warm pool this
     /// process's labels keep; stopped when shutdown begins.
     pools: Vec<branchyard::PoolKeeper>,
+    /// This server's records in the fleet's registry and in each served
+    /// repository's own (docs/registry.md); deregistered when shutdown
+    /// begins.
+    services: Vec<branchyard::services::Registration>,
 }
 
 /// How a shutdown went.
@@ -125,6 +129,8 @@ impl Running {
         let mut begun = self.shutdown.subscribe();
         let _ = begun.wait_for(|stop| *stop).await;
         drop(self.pools);
+        let services = self.services;
+        let _ = tokio::task::spawn_blocking(move || drop(services)).await;
         for poller in self.pollers {
             poller.abort();
         }
@@ -364,6 +370,24 @@ pub async fn start(config: Config) -> Result<Running, String> {
         ));
     }
     let pools = keep_pools(&app);
+    let services = match worker {
+        true => Vec::new(),
+        false => {
+            let app = app.clone();
+            let url = match &unix {
+                Some(path) => format!("unix:{}", path.display()),
+                None => format!("{}://{addr}", if tls.is_some() { "https" } else { "http" }),
+            };
+            tokio::task::spawn_blocking(move || announce(&app, &url))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    };
+    pollers.push(tokio::spawn(reap_services(
+        app.clone(),
+        app.config.recover_interval,
+        shutdown_rx.clone(),
+    )));
     let accept = match listener {
         Some(listener) => {
             let router = api::router(app);
@@ -393,7 +417,90 @@ pub async fn start(config: Config) -> Result<Running, String> {
         _gateway: gateway,
         metrics,
         pools,
+        services,
     })
+}
+
+/// A store that is the fleet registry of `Registry`'s operation store, for
+/// a [`branchyard::services::Registration`] to renew in.
+struct Fleet(Arc<Registry>);
+
+impl branchyard::services::ServiceStore for Fleet {
+    fn transact(
+        &self,
+        f: &mut (dyn FnMut(&mut dyn branchyard::services::Rows) -> std::io::Result<()> + Send),
+    ) -> std::io::Result<()> {
+        self.0.services().transact(f)
+    }
+}
+
+/// Register this server in the fleet's registry and in each served
+/// repository's own, so that a `by` on this machine finds it there
+/// (`by services --kind server`). A record that cannot be written is
+/// logged, never fatal.
+fn announce(app: &Arc<App>, url: &str) -> Vec<branchyard::services::Registration> {
+    use branchyard::services::{
+        Clock, Endpoint, Registration, Service, ServiceOwner, DEFAULT_TTL, KIND_SERVER,
+    };
+    let endpoint = match url.strip_prefix("unix:") {
+        Some(path) => Endpoint::Unix { path: path.into() },
+        None => Endpoint::url(url),
+    };
+    let service = |owner: ServiceOwner| {
+        Service::new(KIND_SERVER, owner)
+            .with("version", env!("CARGO_PKG_VERSION"))
+            .with("repos", app.repos.keys().cloned().collect::<Vec<_>>())
+            .with("labels", app.config.labels.clone())
+            .with("connectors", app.config.connectors.is_some())
+            .with("well_known", "/.well-known/branchyard")
+            .with_endpoint(endpoint.clone())
+    };
+    let mut held = Vec::new();
+    match Registration::start(
+        Arc::new(Fleet(app.registry.clone())),
+        service(ServiceOwner::this_process()),
+        DEFAULT_TTL,
+        Clock::system(),
+    ) {
+        Ok(registration) => held.push(registration),
+        Err(e) => tracing::warn!(error = %e, "registering this server in the fleet's registry"),
+    }
+    for repo in app.repos.values() {
+        match repo.yard.register_service(
+            service(ServiceOwner::this_process()).with("repo", repo.name.clone()),
+            DEFAULT_TTL,
+        ) {
+            Ok(registration) => held.push(registration),
+            Err(e) => tracing::warn!(
+                repo = %repo.name,
+                error = %e,
+                "registering this server in the repository's registry"
+            ),
+        }
+    }
+    held
+}
+
+/// Every `every`, expire and reclaim the fleet registry's records whose
+/// lease ran out (each served repository's own are reaped by its
+/// recovery, in [`poll`]).
+async fn reap_services(app: Arc<App>, every: Duration, mut shutdown: watch::Receiver<bool>) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(every) => {}
+            _ = shutdown.changed() => return,
+        }
+        let shared = app.clone();
+        match tokio::task::spawn_blocking(move || crate::services_routes::reap(&shared)).await {
+            Ok(Ok(reaped)) => {
+                for r in reaped {
+                    tracing::info!(service = %r.service.id, kind = %r.service.kind, outcome = ?r.outcome, "reaped a service");
+                }
+            }
+            Ok(Err(e)) => tracing::warn!(error = %e, "reaping the fleet's services"),
+            Err(e) => tracing::warn!(error = %e, "reaping the fleet's services"),
+        }
+    }
 }
 
 /// Keep the warm pool of every served repository whose workspace has one

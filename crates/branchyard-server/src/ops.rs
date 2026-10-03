@@ -242,6 +242,12 @@ fn interrupted(message: &str) -> ErrorBody {
 
 pub const STOPPED: &str = "the server stopped before this operation finished; \
      a turn it left running is recovered as interrupted when its repository is next opened";
+/// How long after its last beat a worker counts as live: what
+/// [`Registry::live_workers`] reads, and a worker's lease as a service.
+pub fn live_window() -> Duration {
+    BEAT * 3
+}
+
 pub const WORKER_LOST: &str = "the worker running this operation stopped before it \
      finished; a turn it left running is recovered as interrupted, and nothing is run again";
 
@@ -301,6 +307,11 @@ impl Registry {
     /// Workers seen alive recently, for metrics.
     pub fn live_workers(&self) -> io::Result<Vec<crate::store::LiveWorker>> {
         self.store.workers(BEAT * 3)
+    }
+
+    /// The fleet's service registry, in the operation store's database.
+    pub fn services(&self) -> &dyn branchyard::services::ServiceStore {
+        self.store.services()
     }
 
     /// This worker's harness inventory, once detected.

@@ -371,7 +371,7 @@ pub enum Reclaim {
     Sandbox {
         root: PathBuf,
         branch: String,
-        provider: crate::Provider,
+        provider: Box<crate::Provider>,
         sandbox: String,
     },
     /// The warm pool slots of the repository at `root`: reclaimed as
@@ -394,6 +394,17 @@ impl Reclaim {
                 leader_start: start.clone(),
             }),
             start,
+        })
+    }
+
+    /// The process group this process leads, if it leads one (a
+    /// supervisor started in a group of its own): what a reaper stops what
+    /// is left of once this process is gone.
+    pub fn own_group() -> Option<ProcessGroup> {
+        let pid = std::process::id();
+        (crate::proc::group(pid)? == pid).then(|| ProcessGroup {
+            pgid: pid,
+            leader_start: crate::proc::own_start().to_owned(),
         })
     }
 

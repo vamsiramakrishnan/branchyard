@@ -2794,6 +2794,1036 @@
         }
       }
     },
+    "RegisterServiceRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The record's ID; a fresh one when absent. Registering the same ID\nagain renews it."
+        },
+        "kind": {
+          "type": "string",
+          "description": "Such as `model_gateway` or `connector_gateway`."
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Capability"
+          },
+          "default": {}
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Endpoint"
+          },
+          "default": []
+        },
+        "health": {
+          "$ref": "#/$defs/Health",
+          "default": "healthy"
+        },
+        "weight": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Among equally healthy records, heavier ones are resolved first\n(default 1)."
+        },
+        "ttl_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The lease, in seconds (default 30, at least 1, at most a day)."
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "description": "`POST /v1/services`: register a service in the server's fleet\nregistry, or renew one this caller registered (the same `id`). Needs\nthe `admin` scope. What is registered this way never carries anything\nfor the server to reclaim. See `docs/registry.md`.",
+      "title": "RegisterServiceRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Capability": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer",
+              "format": "int64"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "One typed capability value."
+        },
+        "Endpoint": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "url"
+                }
+              },
+              "required": [
+                "type",
+                "url"
+              ],
+              "description": "An `http://` or `https://` URL."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "unix"
+                }
+              },
+              "required": [
+                "type",
+                "path"
+              ],
+              "description": "A Unix domain socket."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "in_process"
+                }
+              },
+              "required": [
+                "type",
+                "name"
+              ],
+              "description": "Inside its owner process: reached through it, not by address."
+            }
+          ],
+          "description": "Where a service is reached."
+        },
+        "Health": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "healthy"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "degraded",
+              "description": "Working, but worse than it should: resolved after healthy ones."
+            },
+            {
+              "type": "string",
+              "const": "starting",
+              "description": "Not ready yet: resolved only when nothing better is."
+            },
+            {
+              "type": "string",
+              "const": "unhealthy",
+              "description": "Never resolved."
+            }
+          ],
+          "description": "How a service says it is doing."
+        }
+      }
+    },
+    "ServiceList": {
+      "type": "object",
+      "properties": {
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Service"
+          }
+        }
+      },
+      "required": [
+        "services"
+      ],
+      "description": "`GET /v1/services`: the fleet's services (workers among them), and\n`POST /v1/services/gc`: those it expired and reclaimed.",
+      "title": "ServiceList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Service": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "capabilities": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Capability"
+              },
+              "default": {}
+            },
+            "endpoints": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Endpoint"
+              },
+              "default": []
+            },
+            "owner": {
+              "$ref": "#/$defs/ServiceOwner"
+            },
+            "health": {
+              "$ref": "#/$defs/Health",
+              "default": "healthy"
+            },
+            "weight": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Among equally healthy records, heavier ones are resolved first.",
+              "default": 1
+            },
+            "reclaim": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Reclaim"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "$ref": "#/$defs/ServiceState"
+            },
+            "registered_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "renewed_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "lease_until_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "changed_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When its state last changed.",
+              "default": 0
+            },
+            "seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The registry's change counter at its last change.",
+              "default": 0
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it expired, or what reclaiming it did."
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "owner",
+            "state"
+          ],
+          "description": "One registered service."
+        },
+        "Capability": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer",
+              "format": "int64"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "One typed capability value."
+        },
+        "Endpoint": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "url"
+                }
+              },
+              "required": [
+                "type",
+                "url"
+              ],
+              "description": "An `http://` or `https://` URL."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "unix"
+                }
+              },
+              "required": [
+                "type",
+                "path"
+              ],
+              "description": "A Unix domain socket."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "in_process"
+                }
+              },
+              "required": [
+                "type",
+                "name"
+              ],
+              "description": "Inside its owner process: reached through it, not by address."
+            }
+          ],
+          "description": "Where a service is reached."
+        },
+        "ServiceOwner": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Unique per registrant: only it renews or deregisters the record."
+            },
+            "host": {
+              "type": "string",
+              "description": "Host and boot, as the engine names a lease's holder; empty for a\nregistrant on another machine (one that registered over HTTP).",
+              "default": ""
+            },
+            "pid": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "default": 0
+            },
+            "start": {
+              "type": "string",
+              "description": "The process's start time, so a reused pid is never mistaken for it.",
+              "default": ""
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch it serves, when it serves one."
+            },
+            "operation": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The server operation it serves, when it serves one."
+            },
+            "principal": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The server principal that registered it over HTTP."
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "description": "Who registered a service and keeps its lease: a process, and what it\nserves."
+        },
+        "Health": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "healthy"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "degraded",
+              "description": "Working, but worse than it should: resolved after healthy ones."
+            },
+            {
+              "type": "string",
+              "const": "starting",
+              "description": "Not ready yet: resolved only when nothing better is."
+            },
+            {
+              "type": "string",
+              "const": "unhealthy",
+              "description": "Never resolved."
+            }
+          ],
+          "description": "How a service says it is doing."
+        },
+        "Reclaim": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "host": {
+                  "type": "string"
+                },
+                "pid": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "start": {
+                  "type": "string"
+                },
+                "group": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ProcessGroup"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "const": "process"
+                }
+              },
+              "required": [
+                "type",
+                "host",
+                "pid",
+                "start"
+              ],
+              "description": "A process this host started: stopped only while its pid still has\nthis start time; with a group, what is left of the group too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string"
+                },
+                "branch": {
+                  "type": "string"
+                },
+                "provider": {
+                  "$ref": "#/$defs/Provider"
+                },
+                "sandbox": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "sandbox"
+                }
+              },
+              "required": [
+                "type",
+                "root",
+                "branch",
+                "provider",
+                "sandbox"
+              ],
+              "description": "A sandbox or recipe machine a branch's turn made: recovered through\nthe engine's recovery (which brings its work back), then destroyed\nthrough its provider unless kept for the branch's next turn."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "pool_slots"
+                }
+              },
+              "required": [
+                "type",
+                "root"
+              ],
+              "description": "The warm pool slots of the repository at `root`: reclaimed as\nrecovery reclaims them (a slot whose filler is gone is removed)."
+            }
+          ],
+          "description": "What Branchyard started for a service, and so reclaims when its lease\nexpires. Only ever recorded by Branchyard itself for what it started:\na record registered over a server's API never carries one."
+        },
+        "ProcessGroup": {
+          "type": "object",
+          "properties": {
+            "pgid": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "leader_start": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pgid",
+            "leader_start"
+          ],
+          "description": "A process group: its ID, and its leader's start time."
+        },
+        "Provider": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "local"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A local process as your user; no isolation. The default."
+            },
+            {
+              "$ref": "#/$defs/SandboxOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "microsandbox"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A Microsandbox microVM per turn, booted from an image that has the\nharness installed. Needs a build with the `microsandbox` feature and\na Linux host with KVM."
+            },
+            {
+              "$ref": "#/$defs/SubstrateOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "substrate"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
+            }
+          ],
+          "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
+        },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
+        "SandboxOptions": {
+          "type": "object",
+          "properties": {
+            "image": {
+              "type": "string",
+              "description": "OCI image reference. The harness executable must be installed in it\nand on its `PATH`, or named by an absolute guest path in\n[`TaskOptions::command`]."
+            },
+            "cpus": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint8",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "memory_mib": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
+              "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
+            }
+          },
+          "required": [
+            "image"
+          ],
+          "description": "A sandboxed harness's image, limits and credentials."
+        },
+        "SubstrateOptions": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "description": "The `Control` API, as `https://host:port`, or `http://host:port` on\nloopback or with [`SubstrateOptions::insecure`]."
+            },
+            "router": {
+              "type": "string",
+              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+            },
+            "atespace": {
+              "type": "string",
+              "description": "The atespace actors are created in. Empty means `default`.",
+              "default": ""
+            },
+            "template": {
+              "type": "string",
+              "description": "An actor template that runs `branchyard-bridge` with the public half\nof [`SubstrateOptions::key`], with git and the harness installed."
+            },
+            "key": {
+              "type": "string",
+              "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed in the actor. Empty means `/workspace`.",
+              "default": ""
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` in the actor. Empty means `/branchyard/home`.",
+              "default": ""
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process into the actor, such as\n`ANTHROPIC_API_KEY`. Names are stored with the branch; values are\nnot.",
+              "default": []
+            },
+            "ca": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "PEM certificate authorities for a TLS `Control` API, and for the\nrouter unless [`SubstrateOptions::router_ca`] is set. Unset trusts\nthe public roots bundled at build time.",
+              "default": null
+            },
+            "client_cert": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A PEM client certificate and key for the `Control` API (mutual TLS).",
+              "default": null
+            },
+            "client_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "router_ca": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "PEM certificate authorities for a TLS router.",
+              "default": null
+            },
+            "insecure": {
+              "type": "boolean",
+              "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
+              "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "endpoint",
+            "router",
+            "template",
+            "key"
+          ],
+          "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
+        },
+        "ServiceState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "live",
+              "description": "Registered; live while its lease lasts."
+            },
+            {
+              "type": "string",
+              "const": "left",
+              "description": "Deregistered by its owner: nothing to reclaim."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its lease ran out, or its owner is gone; reclaim pending."
+            },
+            {
+              "type": "string",
+              "const": "reclaiming",
+              "description": "A reaper is reclaiming it."
+            },
+            {
+              "type": "string",
+              "const": "reclaimed",
+              "description": "Reclaimed, or there was nothing to reclaim."
+            }
+          ],
+          "description": "Where a record is in its life."
+        }
+      }
+    },
+    "WellKnown": {
+      "type": "object",
+      "properties": {
+        "service": {
+          "type": "string",
+          "description": "`branchyard`."
+        },
+        "version": {
+          "type": "string"
+        },
+        "api": {
+          "type": "string",
+          "description": "The API's base path, `/v1`."
+        },
+        "jwks_uri": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The connector gateway's verification keys, when the server has\nconnectors."
+        },
+        "services_uri": {
+          "type": "string",
+          "description": "The full list, with endpoints and owners, for a caller with the\n`read` scope."
+        },
+        "repos": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The served repositories' names."
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Scopes a token may carry."
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServiceSummary"
+          }
+        }
+      },
+      "required": [
+        "service",
+        "version",
+        "api",
+        "services_uri",
+        "repos",
+        "scopes",
+        "services"
+      ],
+      "description": "`GET /.well-known/branchyard`: what this server is, where its API and\nkeys are, and which services its fleet has live. Public.",
+      "title": "WellKnown",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ServiceSummary": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "capabilities": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Capability"
+              }
+            },
+            "health": {
+              "$ref": "#/$defs/Health"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "capabilities",
+            "health"
+          ],
+          "description": "One service as `GET /.well-known/branchyard` describes it, to anyone:\nwhat it is and can do, not where it is or who runs it."
+        },
+        "Capability": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer",
+              "format": "int64"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "One typed capability value."
+        },
+        "Health": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "healthy"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "degraded",
+              "description": "Working, but worse than it should: resolved after healthy ones."
+            },
+            {
+              "type": "string",
+              "const": "starting",
+              "description": "Not ready yet: resolved only when nothing better is."
+            },
+            {
+              "type": "string",
+              "const": "unhealthy",
+              "description": "Never resolved."
+            }
+          ],
+          "description": "How a service says it is doing."
+        }
+      }
+    },
     "MapReport": {
       "type": "object",
       "properties": {

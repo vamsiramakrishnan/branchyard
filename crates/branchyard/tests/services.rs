@@ -158,6 +158,8 @@ fn processes_registering_at_once_on_one_file_all_land() {
 /// then print its pid and wait to be killed. Run only as a child.
 #[test]
 #[ignore = "a child process of the reclamation test"]
+// The leaked process is meant to outlive this one, which is killed.
+#[allow(clippy::zombie_processes)]
 fn owner_child() {
     let Some(root) = std::env::var_os("BY_CHILD_ROOT") else {
         return;
@@ -344,7 +346,7 @@ fn an_expired_recipe_machine_is_destroyed_through_its_recorded_destroy() {
     .with_reclaim(Reclaim::Sandbox {
         root: f.root.clone(),
         branch: "ghost".into(),
-        provider: Provider::Recipe(options.clone()),
+        provider: Box::new(Provider::Recipe(options.clone())),
         sandbox: "by-ghost-1".into(),
     });
     service.lease_until_ms = u64::MAX / 2;

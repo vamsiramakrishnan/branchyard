@@ -79,6 +79,19 @@ pub(crate) fn start_time(pid: u32) -> Option<String> {
     }
 }
 
+/// The process group `pid` is in; Linux only.
+pub(crate) fn group(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        stat(pid)?.get(2)?.parse().ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Whether the process recorded as `pid` started at `start` is still
 /// running.
 pub(crate) fn alive(pid: u32, start: &str) -> bool {

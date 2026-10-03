@@ -432,6 +432,17 @@ fn inventory_text(found: &Inventory, style: Style) -> String {
         match h.ready() {
             Ok(()) => text.push_str(&format!("  {}: {}\n", h.id, h.login.detail)),
             Err(why) => text.push_str(&format!("  {}: cannot run: {why}\n", h.id)),
+        } // What `by catalog refresh` found on npm, never fetched here.
+        if let Some(latest) = crate::live_catalog::latest(&h.id) {
+            if h.version
+                .as_deref()
+                .is_none_or(|v| !v.contains(&latest.latest))
+            {
+                text.push_str(&format!(
+                    "  {}: npm's latest {} is {} (by harnesses update {} --version {})\n",
+                    h.id, latest.package, latest.latest, h.id, latest.latest
+                ));
+            }
         }
     }
     text.push_str(&format!(
@@ -499,6 +510,15 @@ fn change_harness(
                 machine.name()
             )),
         };
+    }
+    if let (InstallAction::Update, None, Some(latest)) =
+        (action, &change.version, crate::live_catalog::latest(id))
+    {
+        eprintln!(
+            "by: npm's latest {} is {}, as `by catalog refresh` cached it; pass --version {} to \
+             take it",
+            latest.package, latest.latest, latest.latest
+        );
     }
     let plan = inventory::plan(id, action, change.version.as_deref(), &before.tools)
         .map_err(Failure::Message)?;
