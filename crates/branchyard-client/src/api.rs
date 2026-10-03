@@ -864,6 +864,77 @@ pub struct InventoryReport {
 /// A merge on the wire: [`branchyard::Merged`]'s own serde form.
 pub type MergedInfo = Merged;
 
+/// `POST /v1/services`: register a service in the server's fleet
+/// registry, or renew one this caller registered (the same `id`). Needs
+/// the `admin` scope. What is registered this way never carries anything
+/// for the server to reclaim. See `docs/registry.md`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RegisterServiceRequest {
+    /// The record's ID; a fresh one when absent. Registering the same ID
+    /// again renews it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Such as `model_gateway` or `connector_gateway`.
+    pub kind: String,
+    #[serde(default)]
+    pub capabilities: std::collections::BTreeMap<String, branchyard::services::Capability>,
+    #[serde(default)]
+    pub endpoints: Vec<branchyard::services::Endpoint>,
+    #[serde(default)]
+    pub health: branchyard::services::Health,
+    /// Among equally healthy records, heavier ones are resolved first
+    /// (default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u32>,
+    /// The lease, in seconds (default 30, at least 1, at most a day).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+}
+
+/// `GET /v1/services`: the fleet's services (workers among them), and
+/// `POST /v1/services/gc`: those it expired and reclaimed.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServiceList {
+    pub services: Vec<branchyard::services::Service>,
+}
+
+/// One service as `GET /.well-known/branchyard` describes it, to anyone:
+/// what it is and can do, not where it is or who runs it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServiceSummary {
+    pub id: String,
+    pub kind: String,
+    pub capabilities: std::collections::BTreeMap<String, branchyard::services::Capability>,
+    pub health: branchyard::services::Health,
+}
+
+/// `GET /.well-known/branchyard`: what this server is, where its API and
+/// keys are, and which services its fleet has live. Public.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WellKnown {
+    /// `branchyard`.
+    pub service: String,
+    pub version: String,
+    /// The API's base path, `/v1`.
+    pub api: String,
+    /// The connector gateway's verification keys, when the server has
+    /// connectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    /// The full list, with endpoints and owners, for a caller with the
+    /// `read` scope.
+    pub services_uri: String,
+    /// The served repositories' names.
+    pub repos: Vec<String>,
+    /// Scopes a token may carry.
+    pub scopes: Vec<String>,
+    pub services: Vec<ServiceSummary>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

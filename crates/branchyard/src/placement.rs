@@ -300,6 +300,40 @@ pub(crate) struct Placement {
     /// The turn's egress proxy, kept until the harness is gone; a
     /// confined local harness is started in its own network namespace.
     egress: Option<crate::egress::Egress>,
+    /// The sandbox's record in the repository's service registry while the
+    /// turn holds it: what a reaper recovers and destroys if this process
+    /// stops. Deregistered once the sandbox is released or discarded.
+    service: Option<crate::services::Registration>,
+}
+
+/// Register the turn's sandbox `name` in the repository's service
+/// registry, owned by this process for `record`'s branch, with what
+/// reclaims it: the branch's recovery, then its provider's destroy.
+fn register_sandbox(
+    yard: &Yard,
+    record: &Record,
+    name: &str,
+) -> Option<crate::services::Registration> {
+    use crate::services::{Reclaim, Service, ServiceOwner, KIND_RECIPE_MACHINE, KIND_SANDBOX};
+    let provider = record.provider.clone()?;
+    let kind = match &provider {
+        Provider::Local => return None,
+        Provider::Recipe(_) => KIND_RECIPE_MACHINE,
+        _ => KIND_SANDBOX,
+    };
+    let branch = &record.info.name;
+    let service = Service::new(kind, ServiceOwner::this_process().for_branch(branch))
+        .with("provider", snapshots::provider_name(&provider))
+        .with("branch", branch.as_str())
+        .with("sandbox", name)
+        .with_reclaim(Reclaim::Sandbox {
+            root: yard.root.clone(),
+            branch: branch.clone(),
+            provider: Box::new(provider),
+            sandbox: name.to_owned(),
+        });
+    yard.register_service(service, crate::services::DEFAULT_TTL)
+        .ok()
 }
 
 enum Kind {
@@ -466,6 +500,7 @@ impl Placement {
                     kind: Kind::Local(harness::environment(record.home.as_deref())),
                     started: None,
                     egress: None,
+                    service: None,
                 })
             }
             Some(Provider::Substrate(options)) => {
@@ -527,6 +562,7 @@ impl Placement {
             STEP_SANDBOX,
             &json!({ "created": true, "sandbox": acquired.name }),
         );
+        let service = register_sandbox(yard, record, &acquired.name);
         Ok(Placement {
             cwd: WORKSPACE.into(),
             started: Some(SandboxEvent::Started {
@@ -535,6 +571,7 @@ impl Placement {
                 origin: acquired.origin,
             }),
             egress: None,
+            service,
             kind: Kind::Sandbox {
                 provider,
                 name: acquired.name,
@@ -697,6 +734,7 @@ impl Placement {
             Ok(acquired) => acquired,
             Err(error) => return fail(&mut actor, error),
         };
+        let service = register_sandbox(yard, record, &name);
         let workdir = PathBuf::from(&how.workdir);
         let guest_home = PathBuf::from(&how.home);
         let pushed = (|| -> Result<Pushed, String> {
@@ -749,6 +787,7 @@ impl Placement {
                 origin: acquired.origin,
             }),
             egress: None,
+            service,
             kind: Kind::Substrate(actor),
         })
     }
@@ -863,6 +902,14 @@ impl Placement {
     /// it. A Substrate actor's worktree and home come back first. Returns
     /// what to record.
     pub fn release(&mut self, yard: &Yard, record: &Record, fence: &Fence) -> Vec<Activity> {
+        let said = self.release_sandbox(yard, record, fence);
+        // Destroyed, or kept for the next turn in the sandbox store: no
+        // longer this turn's to reclaim.
+        self.service = None;
+        said
+    }
+
+    fn release_sandbox(&mut self, yard: &Yard, record: &Record, fence: &Fence) -> Vec<Activity> {
         match &mut self.kind {
             Kind::Local(_) => Vec::new(),
             Kind::Sandbox {
@@ -1005,7 +1052,7 @@ fn substrate_config(options: &SubstrateOptions) -> branchyard_substrate::Config 
 }
 
 /// A provider for `options`; `signed` includes the bridge key.
-fn substrate_provider(
+pub(crate) fn substrate_provider(
     options: &SubstrateOptions,
     signed: bool,
 ) -> Result<SubstrateProvider, String> {
@@ -1070,7 +1117,10 @@ pub(crate) fn recover(
 
 /// Destroy the Microsandbox sandbox `name` a stopped engine left, through
 /// `provider`, and say what happened.
-fn destroy_orphan(provider: Result<Arc<dyn SandboxProvider>, String>, name: &str) -> String {
+pub(crate) fn destroy_orphan(
+    provider: Result<Arc<dyn SandboxProvider>, String>,
+    name: &str,
+) -> String {
     let destroyed = provider.and_then(|provider| {
         let existed = provider.inspect(name).map_err(|e| e.to_string())?.is_some();
         provider.destroy(name).map_err(|e| e.to_string())?;

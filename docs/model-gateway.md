@@ -88,6 +88,7 @@ When a turn of a branch on the gateway starts, before its harness does:
 5. The harness gets `ANTHROPIC_BASE_URL` (`http://127.0.0.1:PORT/anthropic`) and `ANTHROPIC_API_KEY` when a backend speaks Anthropic's API, `OPENAI_BASE_URL` (`…/openai/v1`) and `OPENAI_API_KEY` when one speaks OpenAI's, and `BRANCHYARD_MODEL_GATEWAY` (the gateway's address). Both keys are the token. `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY`, `OPENAI_ORG_ID` and `AZURE_OPENAI_API_KEY` are taken out of its environment.
 6. A restricted network policy gets the gateway's host and port for this turn ([egress](egress.md#the-connector-gateway)); the provider's hosts need not be allowed.
 7. A `model` event says where its models go: `models through the gateway at http://127.0.0.1:PORT (claude-*)`.
+8. The gateway registers in the [registry](registry.md) as `model_gateway`, with its branch, `apis` and `models`, and leaves it when the turn ends.
 
 When the turn ends the gateway stops taking calls, waits up to five seconds for calls in flight, and what the turn's calls cost is added to the branch's cost.
 

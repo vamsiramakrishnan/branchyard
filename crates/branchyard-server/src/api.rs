@@ -104,7 +104,7 @@ impl Caller {
     }
 }
 
-fn scope_required(scope: &str) -> ApiError {
+pub(crate) fn scope_required(scope: &str) -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
         "scope_required",
@@ -770,11 +770,15 @@ pub fn router(app: Shared) -> Router {
         // Repository knowledge and plan approval: `knowledge_routes`.
         .merge(crate::knowledge_routes::router())
         // Wide maps: `map_routes`.
-        .merge(crate::map_routes::router());
+        .merge(crate::map_routes::router())
+        // The fleet's service registry: `services_routes`.
+        .merge(crate::services_routes::router());
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/.well-known/jwks.json", get(jwks))
+        // What this server is and which services it has: `services_routes`.
+        .merge(crate::services_routes::public())
         .route("/metrics", get(metrics_route))
         .merge(v1)
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
@@ -976,7 +980,7 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
     // metrics token).
     if matches!(
         request.uri().path(),
-        "/healthz" | "/.well-known/jwks.json" | "/metrics"
+        "/healthz" | "/.well-known/jwks.json" | "/.well-known/branchyard" | "/metrics"
     ) {
         return next.run(request).await;
     }

@@ -609,3 +609,25 @@ See [harness lifecycle](harness-lifecycle.md).
 | Task admission on a server | `requires` as requested | adds `harness:<id>` when the task runs harnesses by name and a live worker advertises them ready |
 | Server API and client | `GET /v1/harnesses` | adds `GET /v1/inventory` (`InventoryReport`, `WorkerInventory`), `Client::inventory`; in `schema/contract.json` |
 | Server configuration | `labels` | adds `inventory` (default true) and `--no-inventory`; `Config::inventory_source`, `ops::InventorySource`, `ops::set_inventory_source` |
+
+## Added with the ambient registry
+
+See [registry](registry.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `by services [--kind K] [--all] [--json]` | none | this repository's registered services with state, health, lease, owner, endpoint and capabilities; with `--remote`, the server's fleet |
+| `by services gc [--json]` | none | expire services whose lease ran out or whose owner is gone and reclaim what Branchyard started for them |
+| `by catalog refresh [--mcp-registry URL] [--npm-registry URL] [--max-pages N] [--only connectors\|harnesses] [--json]` | none | read the official MCP registry and npm, cache with ETags and checksums (`BRANCHYARD_CATALOG_DIR`, `BRANCHYARD_MCP_REGISTRY`, `BRANCHYARD_NPM_REGISTRY`) |
+| `by catalog status [--json]` | none | what is cached, from where, verified against its checksums; refused when they do not match |
+| `by connectors catalog` | the static catalog | the static catalog, then the cached MCP registry entries (`"live": true`, `version`, `same_as`) |
+| `by harnesses`, `by harnesses update ID` | no upstream versions | a newer npm release noted, from the cache |
+| `[connectors] gateway` | required for connectors | optional: an explicit pin; without it `by gateway start` picks a port and registers the gateway, and consumers resolve it |
+| `by gateway start` | refused without `gateway`; "running elsewhere" when something listened | picks a port when nothing is pinned; adopts a gateway it did not start at a pinned URL (`adopted`) |
+| `by gateway status --json` | URL from the configuration | adds `source` (`pinned` or `registry`) and `service` |
+| `GET /.well-known/branchyard` | none | public: `WellKnown` (version, API, `jwks_uri`, repositories, scopes, live services' kinds and capabilities) |
+| `GET /v1/services`, `POST /v1/services`, `DELETE /v1/services/{id}`, `POST /v1/services/gc` | none | the fleet's registry: list (`read`), register or renew, deregister, reap (`admin`) |
+| `.branchyard/registry.db` | none | the repository's registry, 0600; `BRANCHYARD_REGISTRY` names another file |
+| server store | no services | `services` (SQLite), `by_services` and `by_service_seq` (PostgreSQL) |
+| Rust client | none | `services`, `register_service`, `deregister_service`, `reclaim_services`, `well_known`; `RegisterServiceRequest`, `ServiceList`, `ServiceSummary`, `WellKnown` in `schema/contract.json` |
+| SDK | none | `branchyard::services`: `Service`, `Capability`, `Endpoint`, `ServiceOwner`, `Health`, `ServiceState`, `Reclaim`, `ProcessGroup`, `Query`, `Clock`, `ServiceStore`, `Rows`, `LocalRegistry`, `Registration`, `resolve`, `candidates`, `expire`, `reap`, `reclaim_process`, `watch`, `Outcome`, `Reaped`, `conformance`; `Yard::services`, `register_service`, `resolve_service`, `reclaim_services`, `has_services` |

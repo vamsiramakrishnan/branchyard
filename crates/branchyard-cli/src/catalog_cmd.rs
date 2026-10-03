@@ -133,8 +133,24 @@ pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
 /// `by connectors catalog`.
 pub fn connectors(env: &Env, as_json: bool) -> Outcome {
     let entries = catalog::connectors();
+    // What `by catalog refresh` cached, verified; a cache that does not
+    // verify is refused, and the pinned baseline stands alone.
+    let live = match crate::live_catalog::load(&crate::live_catalog::dir()) {
+        Ok(loaded) => loaded.and_then(|l| l.connectors).unwrap_or_default(),
+        Err(why) => {
+            eprintln!("by: the live connector catalog was refused: {why}");
+            Vec::new()
+        }
+    };
     if as_json {
-        let value = serde_json::to_value(entries).expect("catalog entries");
+        let mut value = serde_json::to_value(entries).expect("catalog entries");
+        if let Value::Array(list) = &mut value {
+            for entry in &live {
+                let mut item = serde_json::to_value(entry).expect("a live entry");
+                item["live"] = json!(true);
+                list.push(item);
+            }
+        }
         return print(&json::text(&value));
     }
     let columns = [
@@ -187,7 +203,29 @@ pub fn connectors(env: &Env, as_json: bool) -> Outcome {
             ]
         })
         .collect();
+    let mut cells = cells;
+    cells.extend(live.iter().map(|e| {
+        vec![
+            Cell::toned(&e.id, Tone::Cyan),
+            Cell::plain(&e.kind),
+            Cell::plain(&e.auth),
+            Cell::plain(match e.credentials.is_empty() {
+                true => "-".to_owned(),
+                false => e.credentials.join(", "),
+            }),
+            Cell::plain(match &e.same_as {
+                Some(same) => format!("(= {same}) {}", e.description),
+                None => e.description.clone(),
+            }),
+        ]
+    }));
     let mut text = table(&columns, &cells, env.style());
+    if !live.is_empty() {
+        text.push_str(&format!(
+            "\n{} more from the MCP registry, pinned at the version `by catalog refresh` read.",
+            live.len()
+        ));
+    }
     text.push_str(&format!(
         "\n{} connectors, from emdash's MCP catalog (catalog/connectors.toml): the starting list \
          Anvil adopts connectors from. None is granted to a branch by being listed; see \
@@ -195,4 +233,94 @@ pub fn connectors(env: &Env, as_json: bool) -> Outcome {
         entries.len()
     ));
     print(&text)
+}
+
+/// `by catalog refresh|status`.
+pub fn live(action: &crate::args::CatalogAction, as_json: bool) -> Outcome {
+    use crate::args::CatalogAction;
+    use crate::commands::Failure;
+    use crate::live_catalog::{self, Sources};
+    let dir = live_catalog::dir();
+    match action {
+        CatalogAction::Refresh {
+            mcp_registry,
+            npm_registry,
+            max_pages,
+            only,
+        } => {
+            let done = live_catalog::refresh(
+                &dir,
+                &Sources {
+                    mcp_registry,
+                    npm_registry,
+                    max_pages: *max_pages,
+                    connectors: only.as_deref() != Some("harnesses"),
+                    harnesses: only.as_deref() != Some("connectors"),
+                },
+            )
+            .map_err(Failure::Message)?;
+            if as_json {
+                return print(&json::text(
+                    &serde_json::to_value(&done).expect("a summary"),
+                ));
+            }
+            let mut out = String::new();
+            if let Some(n) = done.connectors {
+                out.push_str(&format!("connectors  {n} from {mcp_registry}\n"));
+            }
+            if let Some(n) = done.harnesses {
+                out.push_str(&format!(
+                    "harnesses   {n} latest releases from {npm_registry}\n"
+                ));
+            }
+            out.push_str(&format!(
+                "requests    {} ({} not modified)\ncached in   {}\n",
+                done.requests,
+                done.not_modified,
+                done.dir.display()
+            ));
+            print(&out)
+        }
+        CatalogAction::Status => {
+            let loaded = live_catalog::load(&dir).map_err(Failure::Message)?;
+            let Some(loaded) = loaded else {
+                return match as_json {
+                    true => print(&json::text(&json!({"dir": dir, "cached": false}))),
+                    false => print(&format!(
+                        "nothing cached in {}; the pinned catalogs stand alone (by catalog \
+                         refresh)\n",
+                        dir.display()
+                    )),
+                };
+            };
+            if as_json {
+                return print(&json::text(&json!({
+                    "dir": dir,
+                    "cached": true,
+                    "verified": true,
+                    "manifest": loaded.manifest,
+                    "connectors": loaded.connectors,
+                    "harnesses": loaded.harnesses,
+                })));
+            }
+            let mut out = format!("cache       {} (checksums verified)\n", dir.display());
+            for (what, part) in [
+                ("connectors", &loaded.manifest.connectors),
+                ("harnesses", &loaded.manifest.harnesses),
+            ] {
+                if let Some(part) = part {
+                    out.push_str(&format!(
+                        "{what:<11} {} from {} (sha256 {})\n",
+                        part.count,
+                        part.registry,
+                        &part.sha256[..16]
+                    ));
+                }
+            }
+            for h in loaded.harnesses.iter().flatten() {
+                out.push_str(&format!("  {} {}@{}\n", h.id, h.package, h.latest));
+            }
+            print(&out)
+        }
+    }
 }

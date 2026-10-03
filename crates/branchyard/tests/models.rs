@@ -496,6 +496,24 @@ fn a_harness_calls_both_providers_through_its_gateway_and_never_holds_the_key() 
     let (url, allowed) = gateway.expect("a gateway activity");
     assert!(url.starts_with("http://127.0.0.1:"), "{url}");
     assert_eq!(allowed, ["claude-sonnet-*", "gpt-5"]);
+    // The gateway announced itself in the registry for its turn, by what it
+    // serves, and left when the turn ended (docs/registry.md).
+    use branchyard::services::ServiceStore;
+    let announced: Vec<_> = f
+        .yard
+        .services()
+        .unwrap()
+        .all()
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.kind == branchyard::services::KIND_MODEL_GATEWAY)
+        .collect();
+    assert_eq!(announced.len(), 1, "{announced:?}");
+    let service = &announced[0];
+    assert_eq!(service.owner.branch.as_deref(), Some("both"));
+    assert_eq!(service.url(), Some(url.as_str()));
+    assert!(service.state.ended(), "{service:?}");
+    assert!(service.reclaim.is_none(), "nothing to reclaim: {service:?}");
 }
 
 #[test]

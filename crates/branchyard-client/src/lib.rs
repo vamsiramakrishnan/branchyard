@@ -252,6 +252,46 @@ impl Client {
         self.get("/v1/inventory")
     }
 
+    /// The fleet's services, of `kind` when given (`GET /v1/services`).
+    pub fn services(
+        &self,
+        kind: Option<&str>,
+    ) -> Result<Vec<branchyard::services::Service>, Error> {
+        let path = match kind {
+            Some(kind) => format!("/v1/services?kind={}", encode(kind)),
+            None => "/v1/services".to_owned(),
+        };
+        Ok(self.get::<api::ServiceList>(&path)?.services)
+    }
+
+    /// Register a service in the fleet's registry, or renew one this
+    /// caller registered (`POST /v1/services`; the `admin` scope).
+    pub fn register_service(
+        &self,
+        request: &api::RegisterServiceRequest,
+    ) -> Result<branchyard::services::Service, Error> {
+        self.post("/v1/services", request, &new_key())
+    }
+
+    /// Deregister a service this caller registered (`DELETE
+    /// /v1/services/{id}`; the `admin` scope).
+    pub fn deregister_service(&self, id: &str) -> Result<branchyard::services::Service, Error> {
+        self.delete(&format!("/v1/services/{}", encode(id)))
+    }
+
+    /// Expire and reclaim the fleet's services whose lease ran out
+    /// (`POST /v1/services/gc`; the `admin` scope).
+    pub fn reclaim_services(&self) -> Result<Vec<branchyard::services::Service>, Error> {
+        Ok(self
+            .post::<api::ServiceList>("/v1/services/gc", &serde_json::json!({}), &new_key())?
+            .services)
+    }
+
+    /// `GET /.well-known/branchyard`, which needs no token.
+    pub fn well_known(&self) -> Result<api::WellKnown, Error> {
+        self.get("/.well-known/branchyard")
+    }
+
     pub fn operation(&self, id: &str) -> Result<Operation, Error> {
         self.get(&format!("/v1/operations/{}", encode(id)))
     }

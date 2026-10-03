@@ -427,6 +427,19 @@ fn recovery_brings_back_the_work_of_an_engine_that_died_and_destroys_its_machine
         .trim_end_matches(".json")
         .to_owned();
     assert!(f.root.join(".branchyard/transfer").join(&machine).is_dir());
+    // The machine is in the repository's service registry, owned by the
+    // engine that made it, with what reclaims it.
+    let registry =
+        branchyard::services::LocalRegistry::open(f.root.join(".branchyard/registry.db")).unwrap();
+    let listed = branchyard::services::ServiceStore::all(&registry)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.kind == branchyard::services::KIND_RECIPE_MACHINE)
+        .expect("the machine, registered");
+    assert_eq!(listed.text("sandbox"), Some(machine.as_str()));
+    assert_eq!(listed.owner.pid, child.id());
+    assert_eq!(listed.owner.branch.as_deref(), Some("crashy"));
+    assert_eq!(listed.state, branchyard::services::ServiceState::Live);
     child.kill().unwrap();
     child.wait().unwrap();
     // Unlike a bridge, ssh leaves the harness running on the machine when
@@ -475,4 +488,14 @@ fn recovery_brings_back_the_work_of_an_engine_that_died_and_destroys_its_machine
     assert!(recorded(&f).is_empty());
     assert!(!f.root.join(".branchyard/transfer").join(&machine).exists());
     assert!(yard.recover().unwrap().is_empty());
+    // Its record was reaped when the yard opened: recovery had destroyed
+    // the machine already, so the reaper found it gone.
+    let row = branchyard::services::ServiceStore::get(&registry, &listed.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, branchyard::services::ServiceState::Reclaimed);
+    assert_eq!(
+        row.note.as_deref(),
+        Some(format!("machine {machine} was already gone").as_str())
+    );
 }

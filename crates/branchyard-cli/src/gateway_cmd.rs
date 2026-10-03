@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 
 use branchyard::connectors::gateway::{self, Background, GatewayCommand, Supervisor};
 use branchyard::connectors::{self, AnvilPackager, Gateway, KeyRing};
+use branchyard::services::{
+    Endpoint, Health, Query, Reclaim, Service, ServiceOwner, ServiceStore, KIND_CONNECTOR_GATEWAY,
+};
 use branchyard::Yard;
 use branchyard_setup::config::{split_words, Connectors};
 use serde_json::json;
@@ -27,23 +30,66 @@ use crate::{json, setup_io};
 /// The default command for Anvil.
 const ANVIL: &str = "anvil";
 
-/// `[connectors]` as the yard at `root` uses it: `None` without a gateway,
-/// or inside a harness on a branch (whose `by` acts through its engine).
-fn config(root: &Path) -> Result<Option<Connectors>, Failure> {
+/// The variable a background `by gateway start` gives the supervisor it
+/// starts: the URL it chose, when none is pinned.
+const ENV_URL: &str = "BRANCHYARD_GATEWAY_URL";
+
+/// `[connectors]` as the yard at `root` has it, perhaps without a gateway
+/// URL (the default when nothing is configured); `None` inside a harness
+/// on a branch (whose `by` acts through its engine).
+fn settings(root: &Path) -> Result<Option<Connectors>, Failure> {
     if std::env::var_os("BRANCHYARD_BRANCH").is_some_and(|v| !v.is_empty()) {
         return Ok(None);
     }
     let located = setup_io::locate(root);
     if !located.project_exists && !located.user.is_file() {
-        return Ok(None);
+        return Ok(Some(Connectors::default()));
     }
     let effective = setup_io::load(root, None).map_err(|e| {
         Failure::Message(format!(
             "{e}\n(fix it, or check it with `by config validate`)"
         ))
     })?;
-    let connectors = effective.config.connectors;
-    Ok(connectors.gateway.is_some().then_some(connectors))
+    Ok(Some(effective.config.connectors))
+}
+
+/// Where the yard's gateway is: `[connectors] gateway`, an explicit pin,
+/// or else the live gateway registered for this yard (its issuer) in the
+/// repository's service registry. See docs/registry.md.
+enum Found {
+    Pinned(String),
+    Registered(Box<Service>),
+}
+
+impl Found {
+    fn url(&self) -> &str {
+        match self {
+            Found::Pinned(url) => url,
+            Found::Registered(service) => service.url().unwrap_or_default(),
+        }
+    }
+
+    fn source(&self) -> &'static str {
+        match self {
+            Found::Pinned(_) => "pinned",
+            Found::Registered(_) => "registry",
+        }
+    }
+}
+
+fn find(yard: &Yard, config: &Connectors) -> Result<Option<Found>, Failure> {
+    if let Some(url) = &config.gateway {
+        return Ok(Some(Found::Pinned(url.clone())));
+    }
+    if !yard.has_services() {
+        return Ok(None);
+    }
+    let issuer = connectors::local_issuer(yard.root())?;
+    let query = Query::kind(KIND_CONNECTOR_GATEWAY).require("issuer", issuer);
+    Ok(yard
+        .resolve_service(&query)?
+        .filter(|s| s.url().is_some())
+        .map(|s| Found::Registered(Box::new(s))))
 }
 
 fn anvil_command(config: &Connectors) -> Result<Vec<String>, Failure> {
@@ -62,31 +108,36 @@ fn bundles(root: &Path, config: &Connectors) -> PathBuf {
         .map_or_else(|| root.join("connectors"), PathBuf::from)
 }
 
-fn local_gateway(yard: &Yard, config: &Connectors) -> Result<Gateway, Failure> {
-    let url = config.gateway.clone().unwrap_or_default();
+fn local_gateway(yard: &Yard, config: &Connectors, found: &Found) -> Result<Gateway, Failure> {
     let packager = AnvilPackager {
         command: anvil_command(config)?,
         root: bundles(yard.root(), config),
     };
-    let mut gateway = Gateway::local(yard, &url, Arc::new(packager))?;
-    gateway.sandbox_url = config.sandbox_gateway.clone();
+    let mut gateway = Gateway::local(yard, found.url(), Arc::new(packager))?;
+    gateway.sandbox_url = config.sandbox_gateway.clone().or_else(|| match found {
+        Found::Registered(service) => service.text("sandbox_url").map(str::to_owned),
+        Found::Pinned(_) => None,
+    });
     Ok(gateway)
 }
 
-/// The gateway `[connectors]` configures for the repository at `root`, if
-/// any, for a call `by` makes as you (`--issue` through a tracker's
-/// connector; see `crate::trackers`).
+/// The gateway the yard at `root` has, pinned or registered, if any, for
+/// a call `by` makes as you (`--issue` through a tracker's connector; see
+/// `crate::trackers`).
 pub fn configured(yard: &Yard) -> Result<Option<Gateway>, Failure> {
-    match config(yard.root())? {
-        Some(config) if config.gateway.is_some() => Ok(Some(local_gateway(yard, &config)?)),
-        _ => Ok(None),
+    let Some(config) = settings(yard.root())? else {
+        return Ok(None);
+    };
+    match find(yard, &config)? {
+        Some(found) => Ok(Some(local_gateway(yard, &config, &found)?)),
+        None => Ok(None),
     }
 }
 
-/// Give `yard` the gateway `[connectors]` configures, if any.
+/// Give `yard` its gateway, pinned or registered, if it has one.
 pub fn configure(yard: &Yard) -> Result<(), Failure> {
-    if let Some(config) = config(yard.root())? {
-        yard.use_connectors(local_gateway(yard, &config)?);
+    if let Some(gateway) = configured(yard)? {
+        yard.use_connectors(gateway);
     }
     Ok(())
 }
@@ -100,16 +151,31 @@ fn local_only(target: &Target, what: &str) -> Result<(), Failure> {
     }
 }
 
-fn require(yard: &Yard) -> Result<(Connectors, Gateway), Failure> {
-    let config = config(yard.root())?.ok_or_else(|| {
+fn inside_harness() -> Failure {
+    Failure::Message("a harness on a branch reaches the gateway through its turn's token".into())
+}
+
+fn require(yard: &Yard) -> Result<(Connectors, Gateway, Found), Failure> {
+    let config = settings(yard.root())?.ok_or_else(inside_harness)?;
+    let found = find(yard, &config)?.ok_or_else(|| {
         Failure::Message(
-            "no connector gateway is configured; set [connectors] gateway (and bundles, anvil) \
-             in branchyard.toml (docs/connectors.md)"
+            "no connector gateway runs for this repository and none is pinned; `by gateway \
+             start` starts one, or set [connectors] gateway in branchyard.toml \
+             (docs/connectors.md)"
                 .into(),
         )
     })?;
-    let gateway = local_gateway(yard, &config)?;
-    Ok((config, gateway))
+    let gateway = local_gateway(yard, &config, &found)?;
+    Ok((config, gateway, found))
+}
+
+/// A URL on a free loopback port, for a gateway nothing pins.
+fn free_url() -> Result<String, Failure> {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map_err(|e| Failure::Message(format!("could not find a free port: {e}")))?
+        .port();
+    Ok(format!("http://127.0.0.1:{port}/mcp"))
 }
 
 /// The gateway process for this yard, its keys made first.
@@ -164,8 +230,10 @@ pub fn main(target: &Target, action: &GatewayAction, as_json: bool) -> Outcome {
         GatewayAction::Stop => match Background::running(&dir) {
             Some(running) => {
                 running.stop(&dir)?;
-                // What it wrote before it stopped.
+                // What it wrote before it stopped, and its record (a
+                // supervisor stopped by a signal leaves it live).
                 let _ = yard.ingest_connector_audit();
+                let _ = yard.reclaim_services();
                 say(
                     as_json,
                     json!({"stopped": true, "pid": running.pid}),
@@ -180,7 +248,7 @@ pub fn main(target: &Target, action: &GatewayAction, as_json: bool) -> Outcome {
         },
         GatewayAction::Status => status(&yard, &dir, as_json),
         GatewayAction::RotateKey { keep } => {
-            let (_, gw) = require(&yard)?;
+            let (_, gw, _) = require(&yard)?;
             let mut ring = gw.keys()?;
             let kid = ring.rotate(*keep)?;
             ring.save(&gw.key_file, gw.jwks_file.as_deref())?;
@@ -194,7 +262,7 @@ pub fn main(target: &Target, action: &GatewayAction, as_json: bool) -> Outcome {
             )
         }
         GatewayAction::Jwks => {
-            let (_, gw) = require(&yard)?;
+            let (_, gw, _) = require(&yard)?;
             print(&json::text(&gw.jwks()?))
         }
     }
@@ -208,7 +276,7 @@ fn say(as_json: bool, value: serde_json::Value, text: &str) -> Outcome {
 }
 
 fn start(yard: &Yard, dir: &Path, foreground: bool, as_json: bool) -> Outcome {
-    let (config, gw) = require(yard)?;
+    let config = settings(yard.root())?.ok_or_else(inside_harness)?;
     if let Some(running) = Background::running(dir) {
         return say(
             as_json,
@@ -219,27 +287,46 @@ fn start(yard: &Yard, dir: &Path, foreground: bool, as_json: bool) -> Outcome {
             ),
         );
     }
+    // The URL: the one a background start chose for this supervisor, the
+    // pinned one, or a free loopback port.
+    let chosen = std::env::var(ENV_URL).ok().filter(|u| !u.is_empty());
+    let found = match chosen {
+        Some(url) => Found::Pinned(url),
+        None => match find(yard, &config)? {
+            Some(Found::Registered(service)) => {
+                let url = service.url().unwrap_or_default().to_owned();
+                if gateway::listening(&url) {
+                    return say(
+                        as_json,
+                        json!({"started": false, "url": url, "service": service.id}),
+                        &format!("a gateway for this repository already runs at {url}\n"),
+                    );
+                }
+                Found::Pinned(free_url()?)
+            }
+            Some(found) => found,
+            None => Found::Pinned(free_url()?),
+        },
+    };
+    let gw = local_gateway(yard, &config, &found)?;
+    // Something already listens at the pinned URL, not started here:
+    // adopt it, so that it is found by what it is, but never reclaim it.
+    if config.gateway.is_some() && !foreground && gateway::listening(&gw.url) {
+        let service = adopt(yard, &config, &gw)?;
+        return say(
+            as_json,
+            json!({"started": false, "adopted": true, "url": gw.url, "service": service.id}),
+            &format!(
+                "a gateway this repository did not start listens at {}; adopted it as {} \
+                 (never stopped by Branchyard)\n",
+                gw.url, service.id
+            ),
+        );
+    }
     let command = gateway_command(yard, &config, &gw)?;
     let log = dir.join("gateway.log");
     if foreground {
-        Background::this_process(&gw.url, &log).save(dir)?;
-        let reader = yard.clone();
-        let _supervisor = Supervisor::start(
-            command,
-            log.clone(),
-            Box::new(move || {
-                let _ = reader.ingest_connector_audit();
-            }),
-        )?;
-        eprintln!(
-            "by: the gateway serves {} at {}; its log is {} (interrupt to stop)",
-            bundles(yard.root(), &config).display(),
-            gw.url,
-            log.display()
-        );
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
-        }
+        return supervise(yard, &config, &gw, command, &log);
     }
     // In the background: this same command, in the foreground, in a
     // process group of its own that `by gateway stop` ends.
@@ -252,6 +339,7 @@ fn start(yard: &Yard, dir: &Path, foreground: bool, as_json: bool) -> Outcome {
     Command::new(exe)
         .args(["gateway", "start", "--foreground"])
         .current_dir(yard.root())
+        .env(ENV_URL, &gw.url)
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out)
@@ -275,7 +363,8 @@ fn start(yard: &Yard, dir: &Path, foreground: bool, as_json: bool) -> Outcome {
     let listening = gateway::listening(&gw.url);
     say(
         as_json,
-        json!({"started": true, "pid": started.pid, "url": gw.url, "listening": listening, "log": log}),
+        json!({"started": true, "pid": started.pid, "url": gw.url, "listening": listening,
+               "log": log, "source": found.source()}),
         &match listening {
             true => format!(
                 "the gateway runs at {} (pid {}); log {}\n",
@@ -293,10 +382,145 @@ fn start(yard: &Yard, dir: &Path, foreground: bool, as_json: bool) -> Outcome {
     )
 }
 
+/// How long an adopted gateway's record lasts: nothing renews it but the
+/// next `by gateway start` or `status` that finds it listening.
+const ADOPTED_TTL: Duration = Duration::from_secs(600);
+
+/// Register the gateway listening at `gw.url` that this repository did not
+/// start: owned by no process (so never thought gone), with nothing to
+/// reclaim, for [`ADOPTED_TTL`].
+fn adopt(yard: &Yard, config: &Connectors, gw: &Gateway) -> Result<Service, Failure> {
+    let id = format!(
+        "connector_gateway-adopted-{}",
+        gateway::host_port(&gw.url).map_or(0, |(_, port)| port)
+    );
+    let mut service = describe(
+        yard,
+        config,
+        gw,
+        ServiceOwner::remote(id.clone(), "adopted"),
+    )
+    .with_id(id)
+    .with("adopted", true);
+    service.owner.principal = None;
+    let now = now_ms();
+    service.lease_until_ms = now + ADOPTED_TTL.as_millis() as u64;
+    Ok(yard.services()?.register(&service, now)?)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The gateway at `gw.url` as a service: what it serves, for whom, and
+/// where.
+fn describe(yard: &Yard, config: &Connectors, gw: &Gateway, owner: ServiceOwner) -> Service {
+    let served: Vec<String> = connectors::packager::discover(&bundles(yard.root(), config))
+        .map(|b| b.into_iter().map(|b| b.id).collect())
+        .unwrap_or_default();
+    let mut service = Service::new(KIND_CONNECTOR_GATEWAY, owner)
+        .with("issuer", gw.issuer.clone())
+        .with("connectors", served)
+        .with("protocol", "mcp-streamable-http")
+        .with("root", yard.root().display().to_string())
+        .with_endpoint(Endpoint::url(gw.url.clone()));
+    if let Some(url) = &gw.sandbox_url {
+        service = service.with("sandbox_url", url.clone());
+    }
+    service
+}
+
+/// The gateway process `pid` as what to reclaim: with this supervisor's
+/// group when it leads one (started in the background), so what is left
+/// of the group goes too.
+fn reclaim_of(pid: Option<u32>) -> Option<Reclaim> {
+    match Reclaim::process(pid?, false)? {
+        Reclaim::Process {
+            host, pid, start, ..
+        } => Some(Reclaim::Process {
+            host,
+            pid,
+            start,
+            group: Reclaim::own_group(),
+        }),
+        other => Some(other),
+    }
+}
+
+/// `by gateway start --foreground`: supervise the gateway in this process
+/// until interrupted, registered in the repository's service registry
+/// with the gateway process to reclaim should this process stop without
+/// stopping it.
+fn supervise(
+    yard: &Yard,
+    config: &Connectors,
+    gw: &Gateway,
+    command: GatewayCommand,
+    log: &Path,
+) -> Outcome {
+    let dir = connectors::local_dir(yard.root());
+    Background::this_process(&gw.url, log).save(&dir)?;
+    // A record a stopped supervisor left, and its gateway with it.
+    let _ = yard.reclaim_services();
+    let reader = yard.clone();
+    let supervisor = Supervisor::start(
+        command,
+        log.to_path_buf(),
+        Box::new(move || {
+            let _ = reader.ingest_connector_audit();
+        }),
+    )?;
+    eprintln!(
+        "by: the gateway serves {} at {}; its log is {} (interrupt to stop)",
+        bundles(yard.root(), config).display(),
+        gw.url,
+        log.display()
+    );
+    let registration = yard.register_service(
+        describe(yard, config, gw, ServiceOwner::this_process()).with_health(Health::Starting),
+        branchyard::services::DEFAULT_TTL,
+    );
+    let registration = match registration {
+        Ok(registration) => Some(registration),
+        Err(e) => {
+            eprintln!("by: could not register the gateway in the service registry: {e}");
+            None
+        }
+    };
+    let mut reclaimed: Option<u32> = None;
+    let mut health = Health::Starting;
+    loop {
+        if let Some(registration) = &registration {
+            let pid = supervisor.pid();
+            if pid != reclaimed {
+                let reclaim = reclaim_of(pid);
+                if registration.update(|s| s.reclaim = reclaim.clone()).is_ok() {
+                    reclaimed = pid;
+                }
+            }
+            let now = match pid.is_some() && gateway::listening(&gw.url) {
+                true => Health::Healthy,
+                false => Health::Starting,
+            };
+            if now != health && registration.set_health(now).is_ok() {
+                health = now;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
 fn status(yard: &Yard, dir: &Path, as_json: bool) -> Outcome {
-    let (config, gw) = require(yard)?;
+    let (config, gw, found) = require(yard)?;
     let running = Background::running(dir);
     let listening = gateway::listening(&gw.url);
+    let service = match &found {
+        Found::Registered(service) => Some(service.id.clone()),
+        Found::Pinned(_) => None,
+    };
     let root = bundles(yard.root(), &config);
     let served = connectors::packager::discover(&root);
     let kids = KeyRing::load(&gw.key_file)
@@ -305,6 +529,8 @@ fn status(yard: &Yard, dir: &Path, as_json: bool) -> Outcome {
     if as_json {
         return print(&json::text(&json!({
             "url": gw.url,
+            "source": found.source(),
+            "service": service,
             "sandbox_url": gw.sandbox_url,
             "issuer": gw.issuer,
             "running": running.as_ref().map(|r| json!({"pid": r.pid, "log": r.log})),
@@ -316,7 +542,7 @@ fn status(yard: &Yard, dir: &Path, as_json: bool) -> Outcome {
             "audit_file": gw.audit_file,
         })));
     }
-    let mut out = format!("gateway   {}\n", gw.url);
+    let mut out = format!("gateway   {} ({})\n", gw.url, found.source());
     out.push_str(&match (&running, listening) {
         (Some(r), true) => format!(
             "running   pid {}, listening; log {}\n",
@@ -372,7 +598,7 @@ pub fn connect(
     local_only(target, "by connect")?;
     connectors::check_connector(connector).map_err(Failure::Message)?;
     let yard = commands::open()?;
-    let (config, gw) = require(&yard)?;
+    let (config, gw, _) = require(&yard)?;
     let token = gw.connect_token(None, connectors::CONNECT_TTL)?;
     let dir = connectors::local_dir(yard.root());
     let file = dir.join(format!("connect-{}.token", std::process::id()));
