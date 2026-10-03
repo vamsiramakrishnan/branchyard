@@ -53,6 +53,7 @@ pub mod store;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod util;
+pub mod yard;
 
 pub use config::SyncConfig;
 pub use engine::{Remote, Settings, SyncReport};

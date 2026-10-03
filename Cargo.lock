@@ -691,6 +691,7 @@ dependencies = [
  "branchyard-server",
  "branchyard-setup",
  "branchyard-substrate",
+ "branchyard-sync",
  "branchyard-workspace",
  "clap",
  "clap_complete",

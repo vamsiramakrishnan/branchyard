@@ -177,6 +177,14 @@ impl BranchSource {
         })
     }
 
+    /// Sync under `task` instead of the branch's own name (a repository's
+    /// branches are keyed by the repository, see [`crate::yard`]).
+    pub fn with_task_id(mut self, task: &str) -> Result<BranchSource> {
+        crate::manifest::check_task_id(task)?;
+        self.task = task.to_owned();
+        Ok(self)
+    }
+
     /// The git directory of the repository at `root` (its `.git`, or the
     /// directory a `.git` file points at).
     pub fn git_dir_of(root: &Path) -> Result<PathBuf> {
