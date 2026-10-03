@@ -654,7 +654,8 @@ fn an_encrypted_bucket_reveals_no_plaintext_names_or_hashes() {
     let rotation = ra.rotate_key(&old, Some(&new)).unwrap();
     assert_eq!(rotation.new_version, 2);
     assert!(rotation.rewrapped >= 4, "{rotation:?}");
-    assert_eq!(rotation.retired, vec![1]);
+    // The version it superseded stays for the grace period (see the next test).
+    assert!(rotation.retired.is_empty(), "{rotation:?}");
     let rc = w.remote_with(
         store.clone(),
         "c",
@@ -684,6 +685,68 @@ fn an_encrypted_bucket_reveals_no_plaintext_names_or_hashes() {
         1,
         "the same objects, under the same names"
     );
+}
+
+#[test]
+fn a_rotation_keeps_the_keys_writers_that_opened_before_it_still_use() {
+    let w = world();
+    let store = w.file_store();
+    let a = w.machine("a");
+    let b = w.machine("b");
+    let key = || {
+        Passphrase::new("one passphrase")
+            .unwrap()
+            .with_iterations(100)
+    };
+    let ra = w.remote_with(store.clone(), "a", passphrase("one passphrase"), |_| {});
+    // Machine b opens the remote before the rotation: it seals under
+    // version 1.
+    let rb = w.remote_with(store.clone(), "b", passphrase("one passphrase"), |_| {});
+    commit_on(&a, "first", "one", &[("f", "1\n")]);
+    ra.sync(&source(&a, "first"), &mut TaskState::default())
+        .unwrap();
+    let rotation = ra.rotate_key(&key(), None).unwrap();
+    assert_eq!(rotation.new_version, 2);
+    assert!(rotation.retired.is_empty(), "{rotation:?}");
+    // b uploads after the rotation's scan, still with version 1 (it read
+    // the keyring under a minute ago); its manifest is published under the
+    // keyring's current version, read just before the swap.
+    let c2 = commit_on(&b, "second", "two", &[("g", "2\n")]);
+    rb.sync(&source(&b, "second"), &mut TaskState::default())
+        .unwrap();
+    let sealed_under = |prefix: &str| -> Vec<u32> {
+        files(&w.root.join("bucket"))
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .filter_map(|(_, v)| branchyard_sync::seal::Sealer::version_of(v))
+            .collect()
+    };
+    assert!(sealed_under("packs/").contains(&1), "the late pack");
+    assert_eq!(rb.sealer().current_version(), Some(2));
+    // Everything b wrote stays readable to a machine opening it now.
+    let rc = w.remote_with(store.clone(), "c", passphrase("one passphrase"), |_| {});
+    let c = w.empty("c");
+    rc.pull(&source(&c, "second"), &mut TaskState::default())
+        .unwrap();
+    assert_eq!(head(&c, "refs/heads/second").as_deref(), Some(c2.as_str()));
+    // A rotation once the grace period has passed rewraps those objects,
+    // then retires version 1 (and keeps 2, superseded only now).
+    w.advance(ra.settings().grace + Duration::from_secs(1));
+    let rotation = ra.rotate_key(&key(), None).unwrap();
+    assert_eq!(rotation.new_version, 3);
+    assert_eq!(rotation.retired, vec![1]);
+    assert!(sealed_under("packs/").iter().all(|v| *v == 3));
+    let rd = w.remote_with(store.clone(), "d", passphrase("one passphrase"), |_| {});
+    let d = w.empty("d");
+    for task in ["first", "second"] {
+        rd.pull(&source(&d, task), &mut TaskState::default())
+            .unwrap();
+    }
+    // b, which has not loaded version 3, reads the keyring again when it
+    // meets it.
+    rb.pull(&source(&b, "first"), &mut TaskState::default())
+        .unwrap();
+    assert_eq!(rb.sealer().current_version(), Some(3));
 }
 
 #[test]

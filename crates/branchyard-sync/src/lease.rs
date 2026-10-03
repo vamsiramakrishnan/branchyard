@@ -99,7 +99,7 @@ impl Remote {
         check_task_id(task)?;
         check_attempt(attempt)?;
         let key = self.lease_key_of(task, attempt);
-        let sealer = self.sealer();
+        let sealer = self.write_sealer()?;
         let skew = self.settings.skew.as_millis() as u64;
         for _ in 0..4 {
             let now = self.clock.now();
@@ -169,7 +169,7 @@ impl Remote {
         let mut record = lease.record.clone();
         record.renewed_ms = now;
         record.expires_ms = now + lease.ttl.as_millis() as u64;
-        let sealer = self.sealer();
+        let sealer = self.write_sealer()?;
         match self.store.put_if_match(
             &lease.key,
             &sealer.seal(&lease.key, &serde_json::to_vec(&record)?)?,

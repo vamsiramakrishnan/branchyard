@@ -81,7 +81,7 @@ const USAGE: &str = "gc/usage";
 
 impl Remote {
     fn write_framed(&self, key: &str, data: &[u8]) -> Result<()> {
-        let framed = self.sealer().seal(key, data)?;
+        let framed = self.write_sealer()?.seal(key, data)?;
         match self.store.stat(key)? {
             Some(entry) => self
                 .store
@@ -97,7 +97,9 @@ impl Remote {
             holder: self.settings.device.clone(),
             expires_ms: now + self.settings.writer_ttl.as_millis() as u64,
         };
-        let framed = self.sealer().seal(SWEEP, &serde_json::to_vec(&record)?)?;
+        let framed = self
+            .write_sealer()?
+            .seal(SWEEP, &serde_json::to_vec(&record)?)?;
         match self.read(SWEEP) {
             Err(e) if e.is(Kind::NotFound) => match self.store.put_if_absent(SWEEP, &framed) {
                 Ok(g) => Ok(Some(g)),

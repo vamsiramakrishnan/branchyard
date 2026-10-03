@@ -180,6 +180,11 @@ pub struct Plan {
 
 pub const CONFLICT_PREFIX: &str = "refs/heads/conflict/";
 
+/// How often a writer reads the keyring again, at least: well under the
+/// shortest grace period (15 minutes), after which a superseded key
+/// version can be retired.
+pub const KEYS_CHECK_MS: u64 = 60_000;
+
 /// How long the collector's count of the tenant's bytes is used.
 const USAGE_MAX_AGE_MS: u64 = 3_600_000;
 
@@ -307,6 +312,10 @@ impl Default for Options {
 pub struct Remote {
     pub(crate) store: Arc<Managed>,
     pub(crate) sealer: Mutex<Sealer>,
+    /// What opens the keyring, to read it again after a rotation.
+    encryption: Encryption,
+    /// When the keyring was last read.
+    keys_checked_ms: std::sync::atomic::AtomicU64,
     pub(crate) settings: Settings,
     pub(crate) clock: Clock,
     pub(crate) retrier: Arc<Retrier>,
@@ -362,6 +371,8 @@ impl Remote {
         let sealer =
             crate::seal::open_keyring(managed.as_ref(), &options.encryption, options.clock.now())?;
         Ok(Remote {
+            keys_checked_ms: std::sync::atomic::AtomicU64::new(options.clock.now()),
+            encryption: options.encryption,
             store: managed,
             sealer: Mutex::new(sealer),
             settings: options.settings,
@@ -411,10 +422,42 @@ impl Remote {
         wrapper: &dyn crate::kms::Wrapper,
         to: Option<&dyn crate::kms::Wrapper>,
     ) -> Result<crate::seal::Rotation> {
-        let (sealer, report) =
-            crate::seal::rotate(self.store.as_ref(), wrapper, to, self.clock.now())?;
+        let (sealer, report) = crate::seal::rotate(
+            self.store.as_ref(),
+            wrapper,
+            to,
+            self.clock.now(),
+            self.settings.grace.as_millis() as u64,
+        )?;
         self.set_sealer(sealer);
         Ok(report)
+    }
+
+    /// Read the keyring again, and take its current key version when it
+    /// moved (another process rotated the key). True when it moved.
+    pub fn refresh_keys(&self) -> Result<bool> {
+        let file = crate::seal::read_keyring(self.store.as_ref())?;
+        self.keys_checked_ms
+            .store(self.clock.now(), std::sync::atomic::Ordering::SeqCst);
+        if self.sealer().matches(&file) {
+            return Ok(false);
+        }
+        self.set_sealer(crate::seal::sealer_for(&file, &self.encryption)?);
+        Ok(true)
+    }
+
+    /// The sealer to write with: the keyring is read again when it was
+    /// last read longer ago than [`KEYS_CHECK_MS`], so a process sealing
+    /// under a version a rotation superseded moves off it well within the
+    /// grace period before that version can be retired.
+    pub(crate) fn write_sealer(&self) -> Result<Sealer> {
+        let checked = self
+            .keys_checked_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if self.clock.now() >= checked + KEYS_CHECK_MS {
+            self.refresh_keys()?;
+        }
+        Ok(self.sealer())
     }
 
     /// The most requests that were in flight at once.
@@ -427,7 +470,15 @@ impl Remote {
     /// Read a framed object and open it.
     pub(crate) fn read(&self, key: &str) -> Result<(Vec<u8>, Generation)> {
         let object = self.store.get(key)?;
-        let plain = self.sealer().open(key, &object.data).inspect_err(|e| {
+        let mut opened = self.sealer().open(key, &object.data);
+        if let Err(e) = &opened {
+            // Sealed under a version this process has not loaded: a
+            // rotation since the keyring was read. Read it again.
+            if e.is(Kind::Refused) && self.refresh_keys()? {
+                opened = self.sealer().open(key, &object.data);
+            }
+        }
+        let plain = opened.inspect_err(|e| {
             if e.is(Kind::Corrupt) {
                 Stats::add(&self.stats.corrupt, 1);
             }
@@ -457,7 +508,7 @@ impl Remote {
         data: &[u8],
         check_first: bool,
     ) -> Result<(String, String, u64)> {
-        let sealer = self.sealer();
+        let sealer = self.write_sealer()?;
         let name = sealer.name(kind, &blake3::hash(data));
         let key = key_of(&name);
         if check_first {
@@ -548,7 +599,7 @@ impl Remote {
     /// order (take the sweep lock, then look for writers), at most one of
     /// the two proceeds.
     pub fn begin_write(&self) -> Result<Mark> {
-        let sealer = self.sealer();
+        let sealer = self.write_sealer()?;
         let nonce = crate::util::hex(&crate::util::random_bytes(8)?);
         let key = format!(
             "locks/writers/{}-{nonce}",
@@ -599,7 +650,7 @@ impl Remote {
             holder: self.settings.device.clone(),
             expires_ms: now + ttl,
         };
-        let sealer = self.sealer();
+        let sealer = self.write_sealer()?;
         match self.store.put_if_match(
             &mark.key,
             &sealer.seal(&mark.key, &serde_json::to_vec(&record)?)?,
@@ -1103,6 +1154,13 @@ impl Remote {
                     }
                     continue;
                 }
+                // Publish under the keyring's current version, read now: a
+                // rotation since this round began is taken up here. The
+                // objects already stored stay readable under their
+                // version, which is retired only after the grace period,
+                // by a rotation that sees them and rewraps them.
+                self.refresh_keys()?;
+                let sealer = self.sealer();
                 let key = manifest_key(&sealer.task_dir(&task));
                 let framed = sealer.seal(&key, &next.encode()?)?;
                 let swapped = match &generation {
@@ -1166,7 +1224,7 @@ impl Remote {
     /// until the hold is released.
     pub fn hold(&self, task: &str, reason: &str, by: &str) -> Result<()> {
         check_task_id(task)?;
-        let sealer = self.sealer();
+        let sealer = self.write_sealer()?;
         let key = hold_key(&sealer.task_dir(task));
         let hold = Hold {
             task: task.to_owned(),

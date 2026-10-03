@@ -28,7 +28,10 @@
 //! key sealed under the current version. Keys are derived from those
 //! secrets with HKDF-SHA256. Rotation adds a version, rewraps every
 //! object's data key under it (the data and the names stay), then drops
-//! the old versions: see [`rotate`].
+//! the versions no object uses that were superseded longer ago than the
+//! grace period: see [`rotate`]. A writer re-reads the keyring before it
+//! publishes a manifest, and at least once a minute before other writes,
+//! so none is still sealing under a version by the time it can go.
 
 use std::collections::BTreeMap;
 
@@ -96,6 +99,13 @@ pub struct KeyVersion {
     pub wrapper: String,
     pub wrapped: String,
     pub created_ms: u64,
+    /// When a newer version became current. A version is retired only a
+    /// grace period after this, so a writer still sealing under it (one
+    /// that opened the keyring before the rotation) has re-read the
+    /// keyring, and its objects are there to be seen, before the version
+    /// can go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_ms: Option<u64>,
 }
 
 /// `keyring.json`.
@@ -190,6 +200,17 @@ impl Sealer {
         match &self.mode {
             Mode::Plain => None,
             Mode::Sealed { current, .. } => Some(*current),
+        }
+    }
+
+    /// Whether this sealer seals under `file`'s current version and holds
+    /// every version `file` lists (a plain sealer, a plain keyring).
+    pub fn matches(&self, file: &KeyringFile) -> bool {
+        match &self.mode {
+            Mode::Plain => file.encryption == "none",
+            Mode::Sealed { current, keks, .. } => {
+                *current == file.current && file.keys.iter().all(|k| keks.contains_key(&k.version))
+            }
         }
     }
 
@@ -416,6 +437,16 @@ pub fn open_keyring(
     }
 }
 
+/// Read `keyring.json`.
+pub fn read_keyring(store: &dyn ObjectStore) -> Result<KeyringFile> {
+    Ok(serde_json::from_slice(&store.get(KEYRING)?.data)?)
+}
+
+/// The sealer `file` describes, opened with `encryption`.
+pub fn sealer_for(file: &KeyringFile, encryption: &Encryption) -> Result<Sealer> {
+    sealer_from(file, encryption)
+}
+
 fn new_keyring(encryption: &Encryption, now_ms: u64) -> Result<(KeyringFile, Sealer)> {
     Ok(match encryption {
         Encryption::None => (
@@ -456,6 +487,7 @@ fn new_keyring(encryption: &Encryption, now_ms: u64) -> Result<(KeyringFile, Sea
                         wrapper: wrapper.describe(),
                         wrapped: wrapper.wrap(&secret)?,
                         created_ms: now_ms,
+                        superseded_ms: None,
                     }],
                     names: Some(b64(&aead_seal(&k, b"names", &names)?)),
                     names_version: 1,
@@ -536,13 +568,25 @@ pub struct Rotation {
 /// Rotate the tenant key: add a version (its secret wrapped by `to`, or
 /// by `wrapper` when `to` is `None`, which also changes the passphrase or
 /// KMS key), rewrap every object's data key under it, then drop the
-/// versions nothing uses. Safe to run again after a stop: each step is a
-/// conditional write, and objects already rewrapped are skipped.
+/// versions nothing uses that were superseded at least `grace_ms` ago.
+/// Safe to run again after a stop: each step is a conditional write, and
+/// objects already rewrapped are skipped.
+///
+/// The version this rotation supersedes is never retired by it. Another
+/// process that opened the keyring before the rotation still seals under
+/// that version, and could store an object after the scan for versions
+/// in use and before the keyring is swapped; retiring it then would leave
+/// that object unreadable. Writers re-read the keyring before publishing
+/// a manifest and at least once a minute otherwise, so by the time a
+/// version has been superseded for the grace period (longer than any
+/// upload, at least 15 minutes) none still seals under it, and every
+/// object sealed under it is there for the scan to see.
 pub fn rotate(
     store: &dyn ObjectStore,
     wrapper: &dyn Wrapper,
     to: Option<&dyn Wrapper>,
     now_ms: u64,
+    grace_ms: u64,
 ) -> Result<(Sealer, Rotation)> {
     let to = to.unwrap_or(wrapper);
     // 1. A new version, with the names key sealed under it.
@@ -565,12 +609,14 @@ pub fn rotate(
             let secret = wrapper.unwrap(&existing.wrapped)?;
             existing.wrapped = to.wrap(&secret)?;
             existing.wrapper = to.describe();
+            existing.superseded_ms.get_or_insert(now_ms);
         }
         file.keys.push(KeyVersion {
             version,
             wrapper: to.describe(),
             wrapped: to.wrap(&secret)?,
             created_ms: now_ms,
+            superseded_ms: None,
         });
         file.current = version;
         file.names = Some(b64(&aead_seal(&k, b"names", names)?));
@@ -624,7 +670,8 @@ pub fn rotate(
             }
         }
     }
-    // 3. Retire versions no object uses any more.
+    // 3. Retire versions no object uses any more, superseded longer ago
+    //    than the grace period.
     loop {
         let mut in_use = std::collections::BTreeSet::new();
         for entry in store.list("")? {
@@ -643,8 +690,13 @@ pub fn rotate(
         let retired: Vec<u32> = file
             .keys
             .iter()
+            .filter(|k| {
+                k.version != current
+                    && !in_use.contains(&k.version)
+                    && k.superseded_ms
+                        .is_some_and(|at| at.saturating_add(grace_ms) <= now_ms)
+            })
             .map(|k| k.version)
-            .filter(|v| *v != current && !in_use.contains(v))
             .collect();
         if retired.is_empty() {
             break;
@@ -671,6 +723,8 @@ mod tests {
     use super::*;
     use crate::kms::Passphrase;
     use crate::store::memory::MemoryStore;
+
+    const GRACE: u64 = 15 * 60 * 1000;
 
     fn passphrase(p: &str) -> Encryption {
         Encryption::Envelope {
@@ -757,10 +811,11 @@ mod tests {
                 )
                 .unwrap();
         }
-        let (rotated, report) = rotate(&store, &old, Some(&new), 5).unwrap();
+        let (rotated, report) = rotate(&store, &old, Some(&new), 5, GRACE).unwrap();
         assert_eq!(report.new_version, 2);
         assert_eq!(report.rewrapped, 3);
-        assert_eq!(report.retired, vec![1]);
+        // The version just superseded stays for the grace period.
+        assert!(report.retired.is_empty(), "{report:?}");
         // The new passphrase opens everything; names did not change.
         let s2 = open_keyring(&store, &passphrase("second passphrase"), 0).unwrap();
         assert_eq!(s2.current_version(), Some(2));
@@ -782,8 +837,70 @@ mod tests {
                 .kind,
             Kind::Refused
         );
-        // Running it again is harmless.
-        let (_, again) = rotate(&store, &new, None, 6).unwrap();
+        // Running it again is harmless; once the grace period has passed,
+        // the version superseded then is retired (not the one superseded
+        // now).
+        let (_, again) = rotate(&store, &new, None, 6, GRACE).unwrap();
         assert_eq!((again.new_version, again.rewrapped), (3, 3));
+        assert!(again.retired.is_empty(), "{again:?}");
+        let (_, later) = rotate(&store, &new, None, 5 + GRACE, GRACE).unwrap();
+        assert_eq!((later.new_version, later.rewrapped), (4, 3));
+        assert_eq!(later.retired, vec![1]);
+        let file = read_keyring(&store).unwrap();
+        assert_eq!(
+            file.keys.iter().map(|k| k.version).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn a_writer_that_opened_the_keyring_before_a_rotation_stays_readable() {
+        let store = MemoryStore::new();
+        let wrapper = Passphrase::new("passphrase").unwrap().with_iterations(10);
+        // A writer opens the remote: it seals under version 1.
+        let writer = open_keyring(&store, &passphrase("passphrase"), 0).unwrap();
+        store
+            .put_if_absent(
+                "chunks/aa/early",
+                &writer.seal("chunks/aa/early", b"early").unwrap(),
+            )
+            .unwrap();
+        // A rotation runs to the end on another machine: version 2 is
+        // current, every object it saw rewrapped, the keyring swapped.
+        let (_, report) = rotate(&store, &wrapper, None, 10, GRACE).unwrap();
+        assert_eq!((report.new_version, report.rewrapped), (2, 1));
+        // The writer has not re-read the keyring yet: what it stores now
+        // (after the rotation's scan for versions in use) is sealed under
+        // version 1, and must stay readable.
+        store
+            .put_if_absent(
+                "chunks/aa/late",
+                &writer.seal("chunks/aa/late", b"late").unwrap(),
+            )
+            .unwrap();
+        let reader = open_keyring(&store, &passphrase("passphrase"), 0).unwrap();
+        for (key, plain) in [
+            ("chunks/aa/early", b"early".as_slice()),
+            ("chunks/aa/late", b"late"),
+        ] {
+            assert_eq!(
+                reader.open(key, &store.get(key).unwrap().data).unwrap(),
+                plain,
+                "{key}"
+            );
+        }
+        // The writer, re-reading the keyring, sees it is stale and takes
+        // the current version.
+        let file = read_keyring(&store).unwrap();
+        assert!(!writer.matches(&file));
+        assert!(reader.matches(&file));
+        // A rotation after the grace period rewraps the late object, and
+        // only then is version 1 retired.
+        let (_, report) = rotate(&store, &wrapper, None, 10 + GRACE, GRACE).unwrap();
+        assert_eq!(report.retired, vec![1]);
+        let reader = open_keyring(&store, &passphrase("passphrase"), 0).unwrap();
+        let late = store.get("chunks/aa/late").unwrap().data;
+        assert_eq!(Sealer::version_of(&late), Some(3));
+        assert_eq!(reader.open("chunks/aa/late", &late).unwrap(), b"late");
     }
 }

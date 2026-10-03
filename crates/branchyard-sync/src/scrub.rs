@@ -132,7 +132,7 @@ impl Remote {
         name: &str,
         chunk_dirs: &[std::path::PathBuf],
     ) -> Result<bool> {
-        let sealer = self.sealer();
+        let sealer = self.write_sealer()?;
         for dir in chunk_dirs {
             let Ok(shards) = std::fs::read_dir(dir) else {
                 continue;
