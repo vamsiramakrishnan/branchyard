@@ -180,6 +180,9 @@ pub struct Plan {
 
 pub const CONFLICT_PREFIX: &str = "refs/heads/conflict/";
 
+/// How long the collector's count of the tenant's bytes is used.
+const USAGE_MAX_AGE_MS: u64 = 3_600_000;
+
 /// Merge the local refs with the remote's, ref by ref, from the last
 /// agreed `base`. `is_ancestor(a, b)` says whether `a` is `b` or behind it.
 pub fn plan(
@@ -309,6 +312,9 @@ pub struct Remote {
     pub(crate) retrier: Arc<Retrier>,
     pub(crate) stats: Arc<Stats>,
     pub(crate) journal: Arc<dyn UploadJournal>,
+    /// `(when, bytes)` of each object this process stored, so a quota
+    /// check counts what was written since the collector's last count.
+    pub(crate) uploaded: Mutex<Vec<(u64, u64)>>,
 }
 
 /// A remote's task, as listed.
@@ -363,6 +369,7 @@ impl Remote {
             retrier,
             stats,
             journal: options.journal,
+            uploaded: Mutex::new(Vec::new()),
         })
     }
 
@@ -463,7 +470,7 @@ impl Remote {
             .store
             .resumable_put(&key, &framed, self.journal.as_ref())
         {
-            Ok(_) => {}
+            Ok(_) => self.note_upload(framed.len() as u64),
             Err(e) if e.is(Kind::Precondition) => {}
             Err(e) => return Err(e),
         }
@@ -614,21 +621,75 @@ impl Remote {
         let _ = self.store.delete_if_match(&mark.key, &mark.generation);
     }
 
-    /// Bytes the tenant stores: from the collector's last count when it is
-    /// under an hour old, else counted now.
+    /// Record an object this process stored, for [`Remote::usage`].
+    fn note_upload(&self, bytes: u64) {
+        let now = self.clock.now();
+        let mut uploaded = self.uploaded.lock().unwrap_or_else(|e| e.into_inner());
+        // Older than any count still used: no longer needed.
+        uploaded
+            .retain(|(at, _)| at + USAGE_MAX_AGE_MS + self.settings.skew.as_millis() as u64 > now);
+        uploaded.push((now, bytes));
+    }
+
+    /// Bytes the tenant stores: the collector's last count when it is
+    /// under an hour old, plus what this process stored since (allowing
+    /// for clock skew); else counted now.
     pub fn usage(&self) -> Result<u64> {
+        self.estimate_usage().map(|(bytes, _)| bytes)
+    }
+
+    /// [`Remote::usage`], and whether it was counted now.
+    fn estimate_usage(&self) -> Result<(u64, bool)> {
         if let Ok((plain, _)) = self.read("gc/usage") {
             if let Ok(usage) = serde_json::from_slice::<crate::gc::Usage>(&plain) {
-                if usage.at_ms + 3_600_000 > self.clock.now() {
-                    return Ok(usage.bytes);
+                if usage.at_ms + USAGE_MAX_AGE_MS > self.clock.now() {
+                    let since = usage
+                        .at_ms
+                        .saturating_sub(self.settings.skew.as_millis() as u64);
+                    let ours: u64 = self
+                        .uploaded
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .filter(|(at, _)| *at >= since)
+                        .map(|(_, bytes)| bytes)
+                        .sum();
+                    return Ok((usage.bytes + ours, false));
                 }
             }
         }
+        Ok((self.count_usage()?, true))
+    }
+
+    /// Bytes the tenant stores, counted now by listing every content
+    /// object.
+    pub fn count_usage(&self) -> Result<u64> {
         let mut bytes = 0;
         for prefix in CONTENT_PREFIXES {
             bytes += self.store.list(prefix)?.iter().map(|e| e.size).sum::<u64>();
         }
         Ok(bytes)
+    }
+
+    /// Refuse a write of `new_bytes` that would take the tenant over its
+    /// quota. The estimate ([`Remote::usage`]) misses what other machines
+    /// stored since the collector's count, so within a tenth of the quota
+    /// the bytes are counted afresh before deciding.
+    fn admit(&self, new_bytes: u64) -> Result<()> {
+        let Some(quota) = self.settings.quota_bytes else {
+            return Ok(());
+        };
+        let (mut used, counted) = self.estimate_usage()?;
+        if !counted && used + new_bytes > quota - quota / 10 {
+            used = self.count_usage()?;
+        }
+        if used + new_bytes > quota {
+            return Err(Error::new(
+                Kind::Quota,
+                format!("this sync adds {new_bytes} bytes to {used}, over the quota of {quota}"),
+            ));
+        }
+        Ok(())
     }
 
     /// Run `jobs` on up to `concurrency` threads; the first error wins.
@@ -972,17 +1033,7 @@ impl Remote {
                         new_bytes += size;
                     }
                 }
-                if let Some(quota) = self.settings.quota_bytes {
-                    let used = self.usage()?;
-                    if used + new_bytes > quota {
-                        return Err(Error::new(
-                            Kind::Quota,
-                            format!(
-                                "this sync adds {new_bytes} bytes to {used}, over the quota of {quota}"
-                            ),
-                        ));
-                    }
-                }
+                self.admit(new_bytes)?;
                 if let Some(pack) = pack_upload {
                     let (name, _, bytes) = self.write_content("pack", pack_key, &pack, false)?;
                     let entry = PackEntry {

@@ -905,6 +905,61 @@ fn quotas_refuse_a_push_that_would_exceed_them() {
 }
 
 #[test]
+fn quotas_count_what_was_written_since_the_collectors_count() {
+    let w = world();
+    let store = w.file_store();
+    let a = w.machine("a");
+    // Three tasks of one incompressible file each, about the same size.
+    for (i, task) in ["t1", "t2", "t3"].iter().enumerate() {
+        let big: String = (0..100u32)
+            .map(|n| {
+                blake3::hash(&(n + 1000 * i as u32).to_le_bytes())
+                    .to_hex()
+                    .to_string()
+            })
+            .collect();
+        git(&a, &["branch", task, "main"]);
+        commit_on(&a, task, task, &[("big.txt", &big)]);
+    }
+    // One is stored, and the collector counts it: `gc/usage` is fresh for
+    // the next hour.
+    let unlimited = w.remote(store.clone(), "a");
+    let x = unlimited
+        .sync(&source(&a, "t1"), &mut TaskState::default())
+        .unwrap()
+        .pack
+        .unwrap()
+        .bytes;
+    assert_eq!(unlimited.gc(false).unwrap().usage.bytes, x);
+    // Room for one more and a half: each sync alone fits under the count,
+    // but the second must see the first.
+    let ra = w.remote_with(store.clone(), "a", Encryption::None, |o| {
+        o.settings.quota_bytes = Some(x * 5 / 2);
+    });
+    ra.sync(&source(&a, "t2"), &mut TaskState::default())
+        .unwrap();
+    assert!(
+        ra.usage().unwrap() >= 2 * x - x / 50,
+        "counted since the count"
+    );
+    let e = ra
+        .sync(&source(&a, "t3"), &mut TaskState::default())
+        .unwrap_err();
+    assert_eq!(e.kind, Kind::Quota, "{e}");
+    assert!(ra.manifest("t3").unwrap().is_none());
+    // Another machine knows nothing of those writes; near the quota it
+    // counts the bucket instead of trusting the collector's count.
+    let rb = w.remote_with(store.clone(), "b", Encryption::None, |o| {
+        o.settings.quota_bytes = Some(x * 21 / 10);
+    });
+    let e = rb
+        .sync(&source(&a, "t3"), &mut TaskState::default())
+        .unwrap_err();
+    assert_eq!(e.kind, Kind::Quota, "{e}");
+    assert!(rb.manifest("t3").unwrap().is_none());
+}
+
+#[test]
 fn uploads_are_bounded_in_concurrency_and_bandwidth() {
     let w = world();
     let slow = Arc::new(SlowStore::new(w.file_store(), "chunks/", 3));
