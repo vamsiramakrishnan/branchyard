@@ -138,6 +138,10 @@ pub struct SeatSpec {
     /// The hosts its harness may reach; unset, its parent's (the root's:
     /// open). Within its parent seat's.
     pub network: Option<branchyard::Network>,
+    /// The models its harness may call through the model gateway; unset,
+    /// its parent's (the root's: off the gateway). Within its parent
+    /// seat's.
+    pub models: Option<branchyard::models::ModelAccess>,
     pub telemetry: Option<Telemetry>,
     pub isolated: bool,
     pub budget: ChildBudget,
@@ -723,6 +727,11 @@ struct RawSeat {
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(schema_with = "schema::network"))]
     network: Option<branchyard::Network>,
+    /// Models the seat's harness may call through the model gateway
+    /// (docs/model-gateway.md), as globs ("claude-*"); its model calls then
+    /// go through the gateway. Unset: its parent seat's. Within its parent
+    /// seat's.
+    models: Option<Vec<String>>,
     /// `off`, or an http:// or https:// OTLP collector endpoint.
     telemetry: Option<String>,
     /// Run in a home private to the branch; inherited by the seats below.
@@ -1055,6 +1064,11 @@ impl RawSeat {
             seat.connectors.push(entry);
         }
         seat.network = self.network;
+        if let Some(models) = self.models {
+            let access = branchyard::models::ModelAccess { allow: models };
+            access.check().map_err(|e| fail("models", e))?;
+            seat.models = Some(access);
+        }
         if let Some(text) = self.telemetry {
             seat.telemetry = Some(Telemetry::parse(&text).map_err(|e| fail("telemetry", e))?);
         }
@@ -1661,6 +1675,16 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
             .map_err(|why| seat.error("network", why))?;
         networks.insert(&seat.name, effective);
     }
+    // And its models.
+    let mut models: BTreeMap<&str, Option<branchyard::models::ModelAccess>> = BTreeMap::new();
+    for seat in &order {
+        let above = parent
+            .get(seat.name.as_str())
+            .and_then(|up| models.get(up).cloned().flatten());
+        let effective = branchyard::models::narrow(seat.models.as_ref(), above.as_ref())
+            .map_err(|why| seat.error("models", why))?;
+        models.insert(&seat.name, effective);
+    }
 
     // Lower.
     let mut skipped = Vec::new();
@@ -1804,6 +1828,7 @@ fn provision(
         remote_mcp_servers: Vec::new(),
         connectors: seat.connectors.clone(),
         network: seat.network.clone(),
+        models: seat.models.clone(),
         instructions: Some(text),
         model: seat.model.clone(),
         effort: seat.effort,
@@ -2009,6 +2034,9 @@ fn provision_text(provision: &Provisioning) -> String {
                 .join(" ")
         ));
     }
+    if let Some(models) = &provision.models {
+        out.push_str(&format!("{pad}models {models}\n"));
+    }
     if let Some(network) = &provision.network {
         out.push_str(&format!("{pad}network {network}\n"));
     }
@@ -2116,6 +2144,44 @@ delegates_to = ["worker"]
             ),
         ] {
             let error = refused(&both(root, worker), "seats.worker.network", needle);
+            assert!(error.line.is_some(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn seat_models_lower_to_provisioning_and_stay_within_their_parents() {
+        let both = |root: &str, worker: &str| {
+            with("seats.lead", root).replacen(
+                "[seats.worker]\n",
+                &format!("[seats.worker]\n{worker}\n"),
+                1,
+            )
+        };
+        let planned = plan(
+            &parse(&both(
+                "models = [\"claude-*\"]",
+                "models = [\"claude-haiku-*\"]",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let root = planned.root.provision.models.as_ref().unwrap();
+        assert_eq!(root.allow, ["claude-*"]);
+        let worker = planned.seats.as_ref().unwrap().table["worker"]
+            .provision
+            .as_ref()
+            .unwrap();
+        assert_eq!(worker.models.as_ref().unwrap().allow, ["claude-haiku-*"]);
+        assert!(render(&planned).contains("models claude-*"));
+        for (root, worker, needle) in [
+            (
+                "models = [\"claude-*\"]",
+                "models = [\"gpt-*\"]",
+                "not within the parent",
+            ),
+            ("", "models = [\"a b\"]", "' '"),
+        ] {
+            let error = refused(&both(root, worker), "seats.worker.models", needle);
             assert!(error.line.is_some(), "{error:?}");
         }
     }

@@ -241,6 +241,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         submitted,
         session: last_session(yard, &row.branch),
         cost: turn_cost(yard, &row.branch),
+        metered: metered_turn(yard, &row.branch),
     };
     if let Err(error) = engine::conclude(yard, &prompt, &fence, &mut record, &mut recorder, driven)
     {
@@ -264,6 +265,28 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
 /// turn's outcome is known.
 fn turn_cost(yard: &Yard, name: &str) -> Option<f64> {
     cost_since_prompt(&record::read(&yard.store(), name).ok()?)
+}
+
+/// What the turn's calls through the model gateway cost, from the calls
+/// it recorded after its gateway started; `None` when it had none.
+fn metered_turn(yard: &Yard, name: &str) -> Option<f64> {
+    let events = record::read(&yard.store(), name).ok()?;
+    let start = events.iter().rposition(|event| {
+        matches!(&event.activity, Activity::Model(m)
+            if matches!(m.as_ref(), crate::models::ModelActivity::Gateway { .. }))
+    })?;
+    Some(
+        events[start + 1..]
+            .iter()
+            .filter_map(|event| match &event.activity {
+                Activity::Model(m) => match m.as_ref() {
+                    crate::models::ModelActivity::Call(call) => call.cost_usd,
+                    _ => None,
+                },
+                _ => None,
+            })
+            .sum(),
+    )
 }
 
 fn cost_since_prompt(events: &[RecordedEvent]) -> Option<f64> {

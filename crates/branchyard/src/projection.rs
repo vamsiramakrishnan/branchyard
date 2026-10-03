@@ -107,6 +107,10 @@ pub(crate) struct Hub {
     pub connectors: Mutex<Option<Arc<crate::connectors::Gateway>>>,
     /// Set by [`crate::Yard::use_knowledge`].
     pub knowledge: Mutex<Option<Arc<crate::KnowledgeSettings>>>,
+    /// Set by [`crate::Yard::use_models`].
+    pub models: Mutex<Option<Arc<crate::models::Gateway>>>,
+    /// Set by [`crate::Yard::use_ceilings`].
+    pub ceilings: Mutex<Arc<std::collections::BTreeMap<String, crate::Ceiling>>>,
 }
 
 impl Default for Hub {
@@ -125,6 +129,8 @@ impl Default for Hub {
             sandbox_provider: Default::default(),
             connectors: Default::default(),
             knowledge: Default::default(),
+            models: Default::default(),
+            ceilings: Default::default(),
         }
     }
 }

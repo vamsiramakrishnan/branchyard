@@ -36,6 +36,15 @@ pub struct Stats {
     /// From the event store: connector gateway calls by decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector_calls: Option<BTreeMap<String, u64>>,
+    /// From the event store: model gateway calls by decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_calls: Option<BTreeMap<String, u64>>,
+    /// From the event store: what the model gateway's calls cost, metered,
+    /// in USD, and their tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_cost_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_tokens: Option<u64>,
     /// With `--remote`: the server's unfinished operations of this
     /// repository visible to the caller.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +92,9 @@ impl Stats {
     pub fn add_events(&mut self, events: &[FeedEvent]) {
         let mut outcomes: BTreeMap<String, u64> = BTreeMap::new();
         let mut connectors: BTreeMap<String, u64> = BTreeMap::new();
+        let mut model_calls: BTreeMap<String, u64> = BTreeMap::new();
+        let mut model_cost = 0.0;
+        let mut model_tokens = 0;
         let mut tools = 0;
         let mut started: BTreeMap<&str, u64> = BTreeMap::new();
         let mut durations: Vec<f64> = Vec::new();
@@ -124,6 +136,13 @@ impl Stats {
                 Activity::ConnectorCall(call) => {
                     *connectors.entry(call.decision.clone()).or_default() += 1
                 }
+                Activity::Model(activity) => {
+                    if let branchyard::models::ModelActivity::Call(call) = activity.as_ref() {
+                        *model_calls.entry(call.decision.clone()).or_default() += 1;
+                        model_cost += call.cost_usd.unwrap_or(0.0);
+                        model_tokens += call.tokens.map_or(0, |t| t.total());
+                    }
+                }
                 _ => {}
             }
         }
@@ -140,6 +159,11 @@ impl Stats {
         self.outcomes = Some(outcomes);
         self.tool_calls = Some(tools);
         self.connector_calls = Some(connectors);
+        if !model_calls.is_empty() {
+            self.model_calls = Some(model_calls);
+            self.model_cost_usd = Some(model_cost);
+            self.model_tokens = Some(model_tokens);
+        }
     }
 
     /// Add the server's unfinished operations, as of `now_ms`.
@@ -198,6 +222,15 @@ impl Stats {
             out += &format!(
                 "connectors {n} calls{}\n",
                 listed(calls.iter().map(|(k, v)| format!("{k} {v}")))
+            );
+        }
+        if let Some(calls) = self.model_calls.as_ref().filter(|c| !c.is_empty()) {
+            let n: u64 = calls.values().sum();
+            out += &format!(
+                "models    {n} calls{}, {} tokens, ${:.4} metered\n",
+                listed(calls.iter().map(|(k, v)| format!("{k} {v}"))),
+                self.model_tokens.unwrap_or(0),
+                self.model_cost_usd.unwrap_or(0.0)
             );
         }
         let cost: f64 = self.cost_usd.values().sum();

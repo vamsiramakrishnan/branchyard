@@ -75,6 +75,7 @@ pub mod knowledge_routes;
 pub mod logging;
 pub mod map_routes;
 pub mod metrics;
+pub mod models;
 pub mod observe;
 pub mod ops;
 pub mod serve;

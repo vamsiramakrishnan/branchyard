@@ -72,6 +72,9 @@ pub const TURN_DURATION: &str = "branchyard_turn_duration_seconds";
 pub const TOOL_CALLS: &str = "branchyard_tool_calls_total";
 pub const COST: &str = "branchyard_cost_usd_total";
 pub const CONNECTOR_CALLS: &str = "branchyard_connector_calls_total";
+pub const MODEL_CALLS: &str = "branchyard_model_calls_total";
+pub const MODEL_TOKENS: &str = "branchyard_model_tokens_total";
+pub const MODEL_COST: &str = "branchyard_model_cost_usd_total";
 pub const WEBHOOKS: &str = "branchyard_webhook_deliveries_total";
 pub const WORKERS: &str = "branchyard_workers_live";
 pub const WORKER_SEEN: &str = "branchyard_worker_last_seen_seconds";
@@ -160,6 +163,21 @@ pub const FAMILIES: &[Family] = &[
         CONNECTOR_CALLS,
         Kind::Counter,
         "Connector gateway calls in operations this process ran, by connector and decision.",
+    ),
+    family(
+        MODEL_CALLS,
+        Kind::Counter,
+        "Model gateway calls in operations this process ran, by model and decision.",
+    ),
+    family(
+        MODEL_TOKENS,
+        Kind::Counter,
+        "Tokens of model gateway calls in operations this process ran, by model and kind (input, output, cache_read, cache_write).",
+    ),
+    family(
+        MODEL_COST,
+        Kind::Counter,
+        "Metered cost, in USD, of model gateway calls in operations this process ran, by model.",
     ),
     family(
         WEBHOOKS,

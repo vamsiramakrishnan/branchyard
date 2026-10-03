@@ -645,16 +645,20 @@ dependencies = [
  "branchyard-substrate",
  "branchyard-workspace",
  "glob",
+ "httparse",
  "postgres",
  "rcgen",
  "ring",
  "rusqlite",
  "rustix",
+ "rustls",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml_edit",
+ "webpki-roots",
 ]
 
 [[package]]

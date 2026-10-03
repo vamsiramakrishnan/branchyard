@@ -268,6 +268,16 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "goal": activity,
             "text": activity.describe(),
         }),
+        Activity::Model(activity) => json!({
+            "activity": "model",
+            "model": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Access(activity) => json!({
+            "activity": "access",
+            "access": activity,
+            "text": activity.describe(),
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value

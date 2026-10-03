@@ -299,6 +299,34 @@ const STEPS: &[(&str, &str)] = &[
         "by_knowledge_repo",
         "CREATE INDEX IF NOT EXISTS by_knowledge_repo ON by_knowledge (repo, id)",
     ),
+    (
+        "by_model_usage",
+        "CREATE TABLE IF NOT EXISTS by_model_usage (
+            repo TEXT NOT NULL,
+            id TEXT NOT NULL,
+            at_ms BIGINT NOT NULL,
+            branch TEXT NOT NULL,
+            turn BIGINT NOT NULL,
+            subject TEXT NOT NULL,
+            model TEXT NOT NULL,
+            api TEXT NOT NULL,
+            backend TEXT NOT NULL,
+            input BIGINT NOT NULL,
+            output BIGINT NOT NULL,
+            cache_read BIGINT NOT NULL,
+            cache_write BIGINT NOT NULL,
+            cache_write_1h BIGINT NOT NULL,
+            cost_usd DOUBLE PRECISION,
+            latency_ms BIGINT NOT NULL,
+            status BIGINT NOT NULL,
+            streamed BOOLEAN NOT NULL,
+            PRIMARY KEY (repo, id)
+        )",
+    ),
+    (
+        "by_model_usage_at",
+        "CREATE INDEX IF NOT EXISTS by_model_usage_at ON by_model_usage (repo, at_ms)",
+    ),
 ];
 
 fn steer_row(r: &Row) -> SteerRow {
@@ -2723,6 +2751,84 @@ impl crate::fleet::OutcomeBackend for Postgres {
             )
         })?;
         rows.iter().map(outcome_row).collect()
+    }
+}
+
+const USAGE_COLUMNS: &str = "id, at_ms, branch, turn, subject, model, api, backend, input, \
+     output, cache_read, cache_write, cache_write_1h, cost_usd, latency_ms, status, streamed";
+
+fn usage_row(r: &Row) -> crate::models::UsageRecord {
+    let api: String = r.get(6);
+    crate::models::UsageRecord {
+        id: r.get(0),
+        at_ms: uint(r.get(1)),
+        branch: r.get(2),
+        turn: u32::try_from(r.get::<_, i64>(3)).unwrap_or(0),
+        subject: r.get(4),
+        model: r.get(5),
+        api: serde_json::from_value(Value::String(api)).unwrap_or(crate::models::Api::Generic),
+        backend: r.get(7),
+        tokens: crate::models::Tokens {
+            input: uint(r.get(8)),
+            output: uint(r.get(9)),
+            cache_read: uint(r.get(10)),
+            cache_write: uint(r.get(11)),
+            cache_write_1h: uint(r.get(12)),
+        },
+        cost_usd: r.get(13),
+        latency_ms: uint(r.get(14)),
+        status: u16::try_from(r.get::<_, i64>(15)).unwrap_or(0),
+        streamed: r.get(16),
+    }
+}
+
+impl crate::models::UsageBackend for Postgres {
+    fn put_usage(&self, row: &crate::models::UsageRecord) -> Result<(), Error> {
+        // Accounting beside the branches, committed as event appends are.
+        self.tx(false, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO by_model_usage (repo, {USAGE_COLUMNS}) VALUES ($1, $2, $3, $4, \
+                     $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) \
+                     ON CONFLICT (repo, id) DO NOTHING"
+                ),
+                &[
+                    &self.repo,
+                    &row.id,
+                    &int(row.at_ms),
+                    &row.branch,
+                    &i64::from(row.turn),
+                    &row.subject,
+                    &row.model,
+                    &row.api.as_str(),
+                    &row.backend,
+                    &int(row.tokens.input),
+                    &int(row.tokens.output),
+                    &int(row.tokens.cache_read),
+                    &int(row.tokens.cache_write),
+                    &int(row.tokens.cache_write_1h),
+                    &row.cost_usd,
+                    &int(row.latency_ms),
+                    &i64::from(row.status),
+                    &row.streamed,
+                ],
+            )
+            .map_err(db("model usage"))?;
+            Ok(())
+        })
+    }
+
+    fn usage_since(&self, since_ms: u64) -> Result<Vec<crate::models::UsageRecord>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {USAGE_COLUMNS} FROM by_model_usage WHERE repo = $1 AND at_ms >= $2 \
+                     ORDER BY at_ms, id"
+                ),
+                &[&self.repo, &int(since_ms)],
+            )
+        })?;
+        Ok(rows.iter().map(usage_row).collect())
     }
 }
 

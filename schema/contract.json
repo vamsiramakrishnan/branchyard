@@ -906,6 +906,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -1166,6 +1177,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         },
         "Seats": {
           "type": "object",
@@ -2225,6 +2253,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -2485,6 +2524,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         },
         "Seats": {
           "type": "object",
@@ -3698,6 +3754,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -3958,6 +4025,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         }
       }
     },
@@ -4326,6 +4410,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -4586,6 +4681,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         }
       }
     },
@@ -5495,6 +5607,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -5755,6 +5878,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         }
       }
     },
@@ -6453,6 +6593,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -6713,6 +6864,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         }
       }
     },
@@ -7399,6 +7567,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -7659,6 +7838,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         }
       }
     },
@@ -11704,6 +11900,32 @@
               ],
               "additionalProperties": false,
               "description": "A goal and its judge's verdicts. See [`GoalActivity`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "$ref": "#/$defs/ModelActivity"
+                }
+              },
+              "required": [
+                "model"
+              ],
+              "additionalProperties": false,
+              "description": "The model gateway: how the turn's harness reaches its models, each\ncall it made through the gateway, and budget alerts. See\n[`models::ModelActivity`] and `docs/model-gateway.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "access": {
+                  "$ref": "#/$defs/AccessActivity"
+                }
+              },
+              "required": [
+                "access"
+              ],
+              "additionalProperties": false,
+              "description": "The person's ceiling narrowed what the turn may reach. See\n[`AccessActivity`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -14839,6 +15061,276 @@
             }
           ],
           "description": "Who decided a judgement."
+        },
+        "ModelActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "models": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The models the token allows."
+                },
+                "apis": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Api"
+                  },
+                  "description": "The APIs the gateway serves for it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "gateway"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "models",
+                "apis"
+              ],
+              "description": "The turn's harness calls its models through the gateway at `url`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Hosts added to the turn's egress policy for it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "direct"
+                }
+              },
+              "required": [
+                "kind",
+                "reason",
+                "hosts"
+              ],
+              "description": "The branch is on the gateway, but this turn's harness calls its\nprovider itself, and why."
+            },
+            {
+              "$ref": "#/$defs/ModelCall",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "call"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "One call: forwarded, or refused before it was."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "period": {
+                  "type": "string",
+                  "description": "`day` or `month` (UTC)."
+                },
+                "unit": {
+                  "type": "string",
+                  "description": "`usd` or `tokens`."
+                },
+                "used": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "limit": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "alert"
+                }
+              },
+              "required": [
+                "kind",
+                "period",
+                "unit",
+                "used",
+                "limit"
+              ],
+              "description": "The yard's spending in a period passed its alert threshold."
+            }
+          ],
+          "description": "What the gateway did, recorded on the branch."
+        },
+        "Api": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "anthropic",
+              "description": "Anthropic's Messages API (`/v1/messages`), with `x-api-key`."
+            },
+            {
+              "type": "string",
+              "const": "openai",
+              "description": "OpenAI's API (`/v1/chat/completions`, `/v1/responses` and the\nrest), with `Authorization: Bearer`."
+            },
+            {
+              "type": "string",
+              "const": "generic",
+              "description": "Anything else, passed through with the backend's key in its header."
+            }
+          ],
+          "description": "The API a backend speaks, and a request's path family at the gateway."
+        },
+        "Tokens": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input not read from a cache."
+            },
+            "output": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "cache_read": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "cache_write": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Written to a cache that lives five minutes (Anthropic's default),\nor the provider's only cache."
+            },
+            "cache_write_1h": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Written to Anthropic's one-hour cache.",
+              "default": 0
+            }
+          },
+          "required": [
+            "input",
+            "output",
+            "cache_read",
+            "cache_write"
+          ],
+          "description": "A call's tokens."
+        },
+        "ModelCall": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "The model asked for; empty for a request that names none."
+            },
+            "api": {
+              "$ref": "#/$defs/Api"
+            },
+            "decision": {
+              "type": "string",
+              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized` or `failed` (no backend answered)."
+            },
+            "backend": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The backend that answered."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it was refused, or what each backend that failed did."
+            },
+            "status": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The status the harness got."
+            },
+            "tokens": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Tokens"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "latency_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "streamed": {
+              "type": "boolean",
+              "default": false
+            },
+            "failed_over": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Backends tried before the one that answered, with what each did."
+            }
+          },
+          "required": [
+            "model",
+            "api",
+            "decision",
+            "status",
+            "latency_ms"
+          ],
+          "description": "One call through the gateway."
+        },
+        "AccessActivity": {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string",
+              "description": "Whose ceiling."
+            },
+            "narrowed": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "One line per scope it narrowed: what was asked, what remains."
+            }
+          },
+          "required": [
+            "subject",
+            "narrowed"
+          ],
+          "description": "What a person's ceiling did to a turn's access, recorded when it\nnarrowed something."
         }
       }
     },
@@ -15449,6 +15941,32 @@
               ],
               "additionalProperties": false,
               "description": "A goal and its judge's verdicts. See [`GoalActivity`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "$ref": "#/$defs/ModelActivity"
+                }
+              },
+              "required": [
+                "model"
+              ],
+              "additionalProperties": false,
+              "description": "The model gateway: how the turn's harness reaches its models, each\ncall it made through the gateway, and budget alerts. See\n[`models::ModelActivity`] and `docs/model-gateway.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "access": {
+                  "$ref": "#/$defs/AccessActivity"
+                }
+              },
+              "required": [
+                "access"
+              ],
+              "additionalProperties": false,
+              "description": "The person's ceiling narrowed what the turn may reach. See\n[`AccessActivity`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -18584,6 +19102,276 @@
             }
           ],
           "description": "Who decided a judgement."
+        },
+        "ModelActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "models": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The models the token allows."
+                },
+                "apis": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Api"
+                  },
+                  "description": "The APIs the gateway serves for it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "gateway"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "models",
+                "apis"
+              ],
+              "description": "The turn's harness calls its models through the gateway at `url`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Hosts added to the turn's egress policy for it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "direct"
+                }
+              },
+              "required": [
+                "kind",
+                "reason",
+                "hosts"
+              ],
+              "description": "The branch is on the gateway, but this turn's harness calls its\nprovider itself, and why."
+            },
+            {
+              "$ref": "#/$defs/ModelCall",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "call"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "One call: forwarded, or refused before it was."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "period": {
+                  "type": "string",
+                  "description": "`day` or `month` (UTC)."
+                },
+                "unit": {
+                  "type": "string",
+                  "description": "`usd` or `tokens`."
+                },
+                "used": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "limit": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "alert"
+                }
+              },
+              "required": [
+                "kind",
+                "period",
+                "unit",
+                "used",
+                "limit"
+              ],
+              "description": "The yard's spending in a period passed its alert threshold."
+            }
+          ],
+          "description": "What the gateway did, recorded on the branch."
+        },
+        "Api": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "anthropic",
+              "description": "Anthropic's Messages API (`/v1/messages`), with `x-api-key`."
+            },
+            {
+              "type": "string",
+              "const": "openai",
+              "description": "OpenAI's API (`/v1/chat/completions`, `/v1/responses` and the\nrest), with `Authorization: Bearer`."
+            },
+            {
+              "type": "string",
+              "const": "generic",
+              "description": "Anything else, passed through with the backend's key in its header."
+            }
+          ],
+          "description": "The API a backend speaks, and a request's path family at the gateway."
+        },
+        "Tokens": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input not read from a cache."
+            },
+            "output": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "cache_read": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "cache_write": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Written to a cache that lives five minutes (Anthropic's default),\nor the provider's only cache."
+            },
+            "cache_write_1h": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Written to Anthropic's one-hour cache.",
+              "default": 0
+            }
+          },
+          "required": [
+            "input",
+            "output",
+            "cache_read",
+            "cache_write"
+          ],
+          "description": "A call's tokens."
+        },
+        "ModelCall": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "The model asked for; empty for a request that names none."
+            },
+            "api": {
+              "$ref": "#/$defs/Api"
+            },
+            "decision": {
+              "type": "string",
+              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized` or `failed` (no backend answered)."
+            },
+            "backend": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The backend that answered."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it was refused, or what each backend that failed did."
+            },
+            "status": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The status the harness got."
+            },
+            "tokens": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Tokens"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "latency_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "streamed": {
+              "type": "boolean",
+              "default": false
+            },
+            "failed_over": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Backends tried before the one that answered, with what each did."
+            }
+          },
+          "required": [
+            "model",
+            "api",
+            "decision",
+            "status",
+            "latency_ms"
+          ],
+          "description": "One call through the gateway."
+        },
+        "AccessActivity": {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string",
+              "description": "Whose ceiling."
+            },
+            "narrowed": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "One line per scope it narrowed: what was asked, what remains."
+            }
+          },
+          "required": [
+            "subject",
+            "narrowed"
+          ],
+          "description": "What a person's ceiling did to a turn's access, recorded when it\nnarrowed something."
         }
       }
     },
@@ -21765,6 +22553,32 @@
               ],
               "additionalProperties": false,
               "description": "A goal and its judge's verdicts. See [`GoalActivity`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "$ref": "#/$defs/ModelActivity"
+                }
+              },
+              "required": [
+                "model"
+              ],
+              "additionalProperties": false,
+              "description": "The model gateway: how the turn's harness reaches its models, each\ncall it made through the gateway, and budget alerts. See\n[`models::ModelActivity`] and `docs/model-gateway.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "access": {
+                  "$ref": "#/$defs/AccessActivity"
+                }
+              },
+              "required": [
+                "access"
+              ],
+              "additionalProperties": false,
+              "description": "The person's ceiling narrowed what the turn may reach. See\n[`AccessActivity`]."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -24900,6 +25714,276 @@
             }
           ],
           "description": "Who decided a judgement."
+        },
+        "ModelActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "models": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The models the token allows."
+                },
+                "apis": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Api"
+                  },
+                  "description": "The APIs the gateway serves for it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "gateway"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "models",
+                "apis"
+              ],
+              "description": "The turn's harness calls its models through the gateway at `url`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Hosts added to the turn's egress policy for it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "direct"
+                }
+              },
+              "required": [
+                "kind",
+                "reason",
+                "hosts"
+              ],
+              "description": "The branch is on the gateway, but this turn's harness calls its\nprovider itself, and why."
+            },
+            {
+              "$ref": "#/$defs/ModelCall",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "call"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "One call: forwarded, or refused before it was."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "period": {
+                  "type": "string",
+                  "description": "`day` or `month` (UTC)."
+                },
+                "unit": {
+                  "type": "string",
+                  "description": "`usd` or `tokens`."
+                },
+                "used": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "limit": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "alert"
+                }
+              },
+              "required": [
+                "kind",
+                "period",
+                "unit",
+                "used",
+                "limit"
+              ],
+              "description": "The yard's spending in a period passed its alert threshold."
+            }
+          ],
+          "description": "What the gateway did, recorded on the branch."
+        },
+        "Api": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "anthropic",
+              "description": "Anthropic's Messages API (`/v1/messages`), with `x-api-key`."
+            },
+            {
+              "type": "string",
+              "const": "openai",
+              "description": "OpenAI's API (`/v1/chat/completions`, `/v1/responses` and the\nrest), with `Authorization: Bearer`."
+            },
+            {
+              "type": "string",
+              "const": "generic",
+              "description": "Anything else, passed through with the backend's key in its header."
+            }
+          ],
+          "description": "The API a backend speaks, and a request's path family at the gateway."
+        },
+        "Tokens": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input not read from a cache."
+            },
+            "output": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "cache_read": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "cache_write": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Written to a cache that lives five minutes (Anthropic's default),\nor the provider's only cache."
+            },
+            "cache_write_1h": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Written to Anthropic's one-hour cache.",
+              "default": 0
+            }
+          },
+          "required": [
+            "input",
+            "output",
+            "cache_read",
+            "cache_write"
+          ],
+          "description": "A call's tokens."
+        },
+        "ModelCall": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "The model asked for; empty for a request that names none."
+            },
+            "api": {
+              "$ref": "#/$defs/Api"
+            },
+            "decision": {
+              "type": "string",
+              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized` or `failed` (no backend answered)."
+            },
+            "backend": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The backend that answered."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why it was refused, or what each backend that failed did."
+            },
+            "status": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "The status the harness got."
+            },
+            "tokens": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Tokens"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "latency_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "streamed": {
+              "type": "boolean",
+              "default": false
+            },
+            "failed_over": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Backends tried before the one that answered, with what each did."
+            }
+          },
+          "required": [
+            "model",
+            "api",
+            "decision",
+            "status",
+            "latency_ms"
+          ],
+          "description": "One call through the gateway."
+        },
+        "AccessActivity": {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string",
+              "description": "Whose ceiling."
+            },
+            "narrowed": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "One line per scope it narrowed: what was asked, what remains."
+            }
+          },
+          "required": [
+            "subject",
+            "narrowed"
+          ],
+          "description": "What a person's ceiling did to a turn's access, recorded when it\nnarrowed something."
         }
       }
     },
@@ -26822,6 +27906,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -27082,6 +28177,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         },
         "Seats": {
           "type": "object",
@@ -28370,6 +29482,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -28630,6 +29753,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         },
         "Seats": {
           "type": "object",
@@ -29937,6 +31077,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -30197,6 +31348,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         },
         "Seats": {
           "type": "object",
@@ -31500,6 +32668,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -31760,6 +32939,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         },
         "Seats": {
           "type": "object",
@@ -33428,6 +34624,17 @@
                 }
               ],
               "description": "Which hosts the harness may reach (`--network`): `open` (unset),\n`none`, or an allowlist, enforced through Branchyard's egress\nproxy; see `docs/egress.md`. A connector grant adds the gateway's\nhost. A delegated child's is narrowed to its parent's."
+            },
+            "models": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -33688,6 +34895,23 @@
               "additionalProperties": false
             }
           ]
+        },
+        "ModelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Globs over model ids; `[\"*\"]` is every model. Empty allows none."
+            }
+          },
+          "required": [
+            "allow"
+          ],
+          "description": "What a branch may call through the model gateway."
         },
         "Seats": {
           "type": "object",

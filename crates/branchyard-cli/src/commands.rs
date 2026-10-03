@@ -134,6 +134,10 @@ fn open_yard() -> Result<Yard, branchyard::Error> {
     // `[connectors]`: the gateway its branches' turns are given.
     crate::gateway_cmd::configure(&yard)
         .map_err(|e| branchyard::Error::Unsupported(format!("[connectors]: {e}")))?;
+    // `[models]`: the model gateway its branches' turns may use
+    // (docs/model-gateway.md).
+    crate::models_cmd::configure(&yard)
+        .map_err(|e| branchyard::Error::Unsupported(format!("[models]: {e}")))?;
     // `[knowledge]`: what its branches are given and when they are
     // distilled (docs/knowledge.md).
     crate::knowledge_cmd::configure(&yard)
@@ -851,6 +855,10 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         if let Some((summary, _)) = egress_summary(&events) {
             value["egress"] = summary;
         }
+        // Its calls through the model gateway (docs/model-gateway.md).
+        if let Some((summary, _)) = crate::models_cmd::summary(&events) {
+            value["models"] = summary;
+        }
         return print(&json::text(&value));
     }
     let mut extra: Vec<(&str, String)> = line
@@ -859,6 +867,9 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         .collect();
     if let Some((_, text)) = egress_summary(&events) {
         extra.push(("egress", text));
+    }
+    if let Some((_, text)) = crate::models_cmd::summary(&events) {
+        extra.push(("models", text));
     }
     if let Some(listening) = listening.filter(|l| !l.is_empty()) {
         extra.push(("listening", crate::ports::lines(&listening).join("; ")));

@@ -531,6 +531,25 @@ A branch's harness reaches only the hosts its policy allows, through an allowlis
 | `RigPlan`'s `root.policy` | `default`, `deny`, `allow`, `delegation_commands` | adds `preset` when a seat names one; the rules include its expansion |
 | `[network]` and `[defaults] permissions` in `branchyard.toml`; `network` and `permission_policy` on a rig seat | none; `ask` or `yes` | in `schema/branchyard.config.json` and `schema/rig.json` |
 
+## Added with the model gateway
+
+A harness's model calls can go through a gateway of Branchyard's for each turn, on the turn's token, and one token carries every scope; see [model gateway](model-gateway.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `Provisioning::models` (`models::ModelAccess`, `models::narrow`) | none | `--model-gateway[=MODELS]` on `run`, `fan`, `send`, `fork`, `reincarnate`; `[models] allow` for new branches; a seat's `models` in a rig; `provision.models` over HTTP and `by --remote`; stored with the branch, kept by sends, narrowed for children, seats and sends (`denied` when wider) |
+| `[models]` in `branchyard.toml`; `models` and `ceilings` in a server's configuration file | none | backends (`api`, `url`, `key` by secret name, `header`), routes (`model`, `backends`, `weights`, `fallbacks`, `requests_per_minute`), `budget` (daily and monthly cost and tokens, `alert_at`), `prices`, `listen`, `sandbox_host`, `seed`; in `schema/branchyard.config.json` and `schema/server.config.json` |
+| `Yard::use_models`, `Yard::models`, `Yard::model_usage`, `Yard::use_ceilings`, `Yard::ceiling` | none | the yard's gateway settings, its stored usage records, and each person's `Ceiling` |
+| `branchyard::models` (`Gateway`, `Config`, `Signer`, `KeySource`, `Api`, `UsageRecord`, `Tokens`, `UsageTotals`, `summarize`, `period_starts`, `pricing`) | none | the gateway's settings and records; a turn's gateway is the engine's |
+| `Activity::Model` (`ModelActivity`: `gateway`, `direct`, `call`, `alert`; `ModelCall`) and `Activity::Access` (`AccessActivity`) | none | `model` and `access` in `by log --json` and event streams, lines in `by log`, the latest call in `by watch`, `models` in `by show` and `by show --json`; in `schema/contract.json` |
+| Token claims | `iss` … `by_grants`, `by_purpose` | adds optional `by_models`, `by_network`, `by_delegation` (`NetworkScope`, `DelegationScope`); without them a token is as before, and Anvil ignores them |
+| `by models [--period day\|month\|all] [--json]` | none | routes, backends (key source and whether set), budgets with today's and this month's spending, usage by model |
+| `by stats` | | adds `model_calls`, `model_tokens`, `model_cost_usd` |
+| `/metrics` | | adds `branchyard_model_calls_total`, `branchyard_model_tokens_total`, `branchyard_model_cost_usd_total` |
+| `BranchInfo::cost_usd` | the harness's own estimate | on the gateway, the metered cost of the branch's calls |
+| Store | | a `model_usage` table (SQLite) and `by_model_usage` (PostgreSQL, made on its own when missing) |
+| `--budget-usd` | the harness's estimate | also the gateway's metered cost, held before each call |
+
 ## Added with the wide map
 
 See [wide map](map.md), which has the full surface table for the server.

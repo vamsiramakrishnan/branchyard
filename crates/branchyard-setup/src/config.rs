@@ -116,6 +116,11 @@ pub struct ProjectConfig {
     /// distilled into proposals, and by which distiller.
     #[serde(default, skip_serializing_if = "KnowledgeConfig::is_empty")]
     pub knowledge: KnowledgeConfig,
+    /// The model gateway (docs/model-gateway.md): its backends, routes,
+    /// budgets and prices, and the models a new branch may call through it
+    /// when `--model-gateway` gives none.
+    #[serde(default, skip_serializing_if = "ModelsConfig::is_empty")]
+    pub models: ModelsConfig,
 }
 
 /// Orca's rule for a recipe's name: 1 to 64 lowercase letters, digits,
@@ -675,6 +680,189 @@ impl NetworkConfig {
         Network::from_rules(allow, enforce)
             .map(Some)
             .map_err(|e| ConfigError(format!("network.allow: {e}")))
+    }
+}
+
+/// `[models]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelsConfig {
+    /// Models a new branch may call through the gateway when
+    /// `--model-gateway` gives none, as globs (`"claude-*"`, `"*"`); set,
+    /// it puts new branches on the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    /// Backends by name: `[models.backends.anthropic] api = "anthropic"`,
+    /// `key = "ANTHROPIC_API_KEY"`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub backends: BTreeMap<String, ModelBackendConfig>,
+    /// Routes by requested model, first match wins: `[[models.routes]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<ModelRouteConfig>,
+    /// Daily and monthly limits (UTC) over every branch of the repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ModelBudgetConfig>,
+    /// Prices for models the catalog does not price, dollars per million
+    /// tokens, by model id or glob.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prices: BTreeMap<String, ModelPriceConfig>,
+    /// The address a turn's gateway listens on (default `127.0.0.1`);
+    /// `0.0.0.0` for sandboxes to reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    /// The host a sandboxed harness reaches the gateway at. Without it, a
+    /// sandboxed branch on the gateway fails its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_host: Option<String>,
+    /// Seeds the weighted choice of backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+}
+
+/// `[models.backends.NAME]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBackendConfig {
+    /// `anthropic`, `openai` or `generic`.
+    pub api: String,
+    /// Its base URL (default: the provider's public API; a generic
+    /// backend needs one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The secret holding its key, by name: an entry of `[secrets]`, else
+    /// a variable of that name. Never the key itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// A generic backend's key header (default `authorization`, as
+    /// `Bearer <key>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+}
+
+/// `[[models.routes]]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRouteConfig {
+    /// A glob over the requested model, such as `claude-*`.
+    pub model: String,
+    /// Backends chosen among by weight.
+    pub backends: Vec<String>,
+    /// One weight per backend (default: all 1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weights: Vec<u32>,
+    /// Tried in order after the weighted backends, on a refused
+    /// connection, a 5xx or a 429.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<String>,
+    /// At most this many requests a minute through this route, per
+    /// process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<u32>,
+}
+
+/// `[models.budget]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBudgetConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_tokens: Option<u64>,
+    /// The share of a limit at which an alert is recorded (default 0.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert_at: Option<f64>,
+}
+
+/// `[models.prices.MODEL]`, dollars per million tokens.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPriceConfig {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write: f64,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+impl ModelsConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &ModelsConfig::default()
+    }
+
+    /// The default model access, parsed.
+    pub fn access(&self) -> Result<Option<branchyard_provision::models::ModelAccess>, ConfigError> {
+        let Some(allow) = &self.allow else {
+            return Ok(None);
+        };
+        let access = branchyard_provision::models::ModelAccess {
+            allow: allow.clone(),
+        };
+        access
+            .check()
+            .map_err(|e| ConfigError(format!("models.allow: {e}")))?;
+        Ok(Some(access))
+    }
+
+    /// The checks beyond the file's shape. The gateway checks the rest
+    /// when `by` builds it.
+    pub fn check(&self) -> Result<(), ConfigError> {
+        let fail = |key: &str, why: String| Err(ConfigError(format!("models.{key}: {why}")));
+        self.access()?;
+        for (name, backend) in &self.backends {
+            if !matches!(backend.api.as_str(), "anthropic" | "openai" | "generic") {
+                return fail(
+                    &format!("backends.{name}.api"),
+                    format!("{:?} is not anthropic, openai or generic", backend.api),
+                );
+            }
+            if let Some(key) = &backend.key {
+                check_secret_reference(key)
+                    .or_else(|why| fail(&format!("backends.{name}.key"), why))?;
+                if key.starts_with('@') {
+                    return fail(
+                        &format!("backends.{name}.key"),
+                        "names a secret (an entry of [secrets] or a variable), not a file".into(),
+                    );
+                }
+            }
+            if let Some(url) = &backend.url {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return fail(
+                        &format!("backends.{name}.url"),
+                        format!("must be an http:// or https:// URL, not {url:?}"),
+                    );
+                }
+            }
+        }
+        for (i, route) in self.routes.iter().enumerate() {
+            branchyard_provision::models::check_pattern(&route.model)
+                .or_else(|why| fail(&format!("routes[{i}].model"), why))?;
+            if route.backends.is_empty() {
+                return fail(
+                    &format!("routes[{i}].backends"),
+                    "name at least one backend".into(),
+                );
+            }
+            for name in route.backends.iter().chain(&route.fallbacks) {
+                if !self.backends.contains_key(name) {
+                    return fail(&format!("routes[{i}]"), format!("no backend {name}"));
+                }
+            }
+        }
+        for model in self.prices.keys() {
+            branchyard_provision::models::check_pattern(model)
+                .or_else(|why| fail("prices", why))?;
+        }
+        Ok(())
     }
 }
 
@@ -1482,6 +1670,7 @@ impl ProjectConfig {
         }
         self.connectors.grant_entries()?;
         self.network.policy()?;
+        self.models.check()?;
         if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {
             return fail(
                 "connectors.grants",
@@ -2055,6 +2244,14 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
             out.push_str(&format!("enforce = {}\n", toml_string(name)));
         }
     }
+    if !config.models.is_empty() {
+        out.push_str(
+            "\n# The model gateway: backends, routes, budgets; see docs/model-gateway.md.\n",
+        );
+        let table: BTreeMap<&str, &ModelsConfig> =
+            [("models", &config.models)].into_iter().collect();
+        out.push_str(&toml::to_string(&table).unwrap_or_default());
+    }
     if let Some(workspace) = &config.workspace {
         out.push_str(
             "\n# What each new branch's worktree gets before its first turn, and what runs when\n\
@@ -2215,6 +2412,51 @@ grants = ["github:read", "linear@work:write:issues.*"]
             ("[network]\nenforce = \"always\"\n", "best_effort"),
             ("[network]\nports = [1]\n", "ports"),
             ("[defaults]\npermissions = \"yolo\"\n", "edit-worktree"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_model_gateway_is_checked_and_renders_back() {
+        let text = "version = 1\n\n[secrets]\nanthropic = \"ANTHROPIC_API_KEY\"\n\n[models]\n\
+                    allow = [\"claude-*\"]\nseed = 7\n\n\
+                    [models.backends.anthropic]\napi = \"anthropic\"\nkey = \"anthropic\"\n\n\
+                    [models.backends.spare]\napi = \"anthropic\"\nurl = \"https://spare.example\"\n\n\
+                    [[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"anthropic\"]\n\
+                    fallbacks = [\"spare\"]\nrequests_per_minute = 60\n\n\
+                    [models.budget]\ndaily_usd = 20.0\nalert_at = 0.5\n\n\
+                    [models.prices.\"local-*\"]\ninput = 0.5\noutput = 1.5\n";
+        let config = parse(text).unwrap();
+        assert_eq!(config.models.access().unwrap().unwrap().allow, ["claude-*"]);
+        assert_eq!(config.models.routes[0].fallbacks, ["spare"]);
+        assert_eq!(config.models.budget.as_ref().unwrap().daily_usd, Some(20.0));
+        assert_eq!(parse(&render(&config, "test")).unwrap(), config);
+        assert_eq!(
+            parse("version = 1\n").unwrap().models.access().unwrap(),
+            None
+        );
+        for (text, needle) in [
+            ("[models]\nallow = [\"a b\"]\n", "models.allow"),
+            (
+                "[models.backends.a]\napi = \"gemini\"\n",
+                "models.backends.a.api",
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\nkey = \"sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789\"\n",
+                "models.backends.a.key",
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\nkey = \"@/run/key\"\n",
+                "not a file",
+            ),
+            (
+                "[[models.routes]]\nmodel = \"*\"\nbackends = [\"x\"]\n",
+                "no backend x",
+            ),
+            ("[models]\nlisten = 1\n", "expected a string"),
+            ("[models]\nkeys = 1\n", "keys"),
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");

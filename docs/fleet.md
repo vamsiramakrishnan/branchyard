@@ -61,6 +61,8 @@ connectors = ["github"]     # recorded, not acted on yet
 | `plan` | Plan first: a new branch of this kind, routed or not, starts with a read-only planning turn and waits for approval ([plans and goals](plans-and-goals.md)) |
 | `goal_judge` | The judge harness of a `--goal` given to a branch of this kind when the command names none: `harness`, optional `model`, `effort`, `command`, `rubric` ([plans and goals](plans-and-goals.md#goals)) |
 
+A candidate's `model` is the harness's model. On the [model gateway](model-gateway.md) the branch's model access still applies: each call a routed candidate makes for a model the branch may not call is refused `403`, as any other. The router does not read `[models]`, so keep the candidates' models within it.
+
 The table is checked as strictly as `[workspace]`: unknown keys, an unknown harness, a bad effort, an empty candidate list, `attempts = 0`, an exploration outside 0 to 1 are errors naming the key (`by config validate` reports them). It may be in the project file or the user file; a project's `[fleet.<kind>]` replaces the user file's for the same kind. It is in `schema/branchyard.config.json`. A harness running on a branch (`BRANCHYARD_BRANCH` set) reads no configuration, so its `by` never routes.
 
 ## Routing

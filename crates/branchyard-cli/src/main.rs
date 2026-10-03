@@ -20,6 +20,7 @@ mod init;
 mod json;
 mod knowledge_cmd;
 mod map_cmd;
+mod models_cmd;
 mod notify;
 mod open;
 mod plan_cmd;
@@ -427,6 +428,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::inbox(target, as_branch, unread, json),
         Command::Rig { json, action } => commands::rig(env, target, &action.into_args(json)),
         Command::Gateway { json, action } => gateway_cmd::main(target, &action, json),
+        Command::Models { period, json } => models_cmd::main(env, target, &period, json),
         Command::Connect {
             connector,
             account,

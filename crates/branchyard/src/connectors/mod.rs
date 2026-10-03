@@ -152,6 +152,9 @@ impl Gateway {
             by_turn: String::new(),
             by_grants: Vec::new(),
             by_purpose: Some(keys::CONNECT_PURPOSE.to_owned()),
+            by_models: None,
+            by_network: None,
+            by_delegation: None,
         })
     }
 
@@ -176,6 +179,9 @@ impl Gateway {
             by_turn: String::new(),
             by_grants: grants,
             by_purpose: None,
+            by_models: None,
+            by_network: None,
+            by_delegation: None,
         };
         self.keys()?.sign(&claims)
     }
@@ -299,6 +305,9 @@ pub(crate) struct Prepared {
     pub connectors: Vec<String>,
     /// Written in the home, relative to it.
     pub files: Vec<String>,
+    /// The turn's token, which the model gateway takes too when the
+    /// branch is on it: one token carries every scope.
+    pub token: String,
     /// The token file on this host, removed when the turn ends (held for
     /// its drop).
     pub _token: TokenFile,
@@ -328,6 +337,7 @@ pub(crate) fn prepare(
     yard: &Yard,
     record: &Record,
     deadline_ms: Option<u64>,
+    scopes: &crate::access::TokenScopes,
 ) -> Result<Option<Prepared>, String> {
     let grant = match &record.provision {
         Some(spec) if !spec.connectors.is_empty() => spec.connectors.clone(),
@@ -418,19 +428,16 @@ pub(crate) fn prepare(
         subject: gateway.subject.clone(),
         tenant: gateway.tenant.clone(),
     });
-    let claims = Claims {
-        iss: gateway.issuer.clone(),
-        aud: gateway.url.clone(),
-        sub: actor.subject,
-        iat: now,
-        exp,
-        jti: keys::random_id().map_err(|e| e.to_string())?,
-        by_tenant: actor.tenant,
-        by_branch: gateway.by_branch(&record.info.name),
-        by_turn: (record.info.turns + 1).to_string(),
-        by_grants: grant,
-        by_purpose: None,
-    };
+    let claims = turn_claims(
+        &gateway.issuer,
+        &gateway.url,
+        actor,
+        gateway.by_branch(&record.info.name),
+        record.info.turns + 1,
+        (now, exp),
+        grant,
+        scopes,
+    )?;
     let token = gateway
         .keys()
         .and_then(|keys| keys.sign(&claims))
@@ -454,8 +461,40 @@ pub(crate) fn prepare(
         connectors: names,
         gateway_url: url,
         files: vec![format!("{HOME_DIR}/"), TOKEN_FILE.to_owned()],
+        token,
         _token: TokenFile(token_path),
     }))
+}
+
+/// A turn's claims: the contract's, and the turn's other scopes
+/// ([`crate::access::TokenScopes`]) as optional claims Anvil ignores.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn turn_claims(
+    issuer: &str,
+    audience: &str,
+    actor: Actor,
+    by_branch: String,
+    turn: u32,
+    (iat, exp): (u64, u64),
+    grants: Vec<GrantEntry>,
+    scopes: &crate::access::TokenScopes,
+) -> Result<Claims, String> {
+    Ok(Claims {
+        iss: issuer.to_owned(),
+        aud: audience.to_owned(),
+        sub: actor.subject,
+        iat,
+        exp,
+        jti: keys::random_id().map_err(|e| e.to_string())?,
+        by_tenant: actor.tenant,
+        by_branch,
+        by_turn: turn.to_string(),
+        by_grants: grants,
+        by_purpose: None,
+        by_models: scopes.models.clone(),
+        by_network: scopes.network.clone(),
+        by_delegation: scopes.delegation.clone(),
+    })
 }
 
 /// A bundle's package from the cache, packaged first if needed; keyed by

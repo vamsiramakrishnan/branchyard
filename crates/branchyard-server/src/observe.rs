@@ -192,6 +192,34 @@ pub fn record_events(
                     end_turn(open, branch, &harness, at, &tag(status, "state"));
                 }
             }
+            Activity::Model(activity) => {
+                if let branchyard::models::ModelActivity::Call(call) = activity.as_ref() {
+                    let model = call.model.as_str();
+                    metrics.inc(
+                        metrics::MODEL_CALLS,
+                        &[("model", model), ("decision", &call.decision)],
+                    );
+                    if let Some(tokens) = &call.tokens {
+                        for (kind, count) in [
+                            ("input", tokens.input),
+                            ("output", tokens.output),
+                            ("cache_read", tokens.cache_read),
+                            ("cache_write", tokens.cache_write + tokens.cache_write_1h),
+                        ] {
+                            if count > 0 {
+                                metrics.add(
+                                    metrics::MODEL_TOKENS,
+                                    &[("model", model), ("kind", kind)],
+                                    count as f64,
+                                );
+                            }
+                        }
+                    }
+                    if let Some(cost) = call.cost_usd.filter(|c| *c > 0.0) {
+                        metrics.add(metrics::MODEL_COST, &[("model", model)], cost);
+                    }
+                }
+            }
             Activity::ConnectorCall(call) => {
                 metrics.inc(
                     metrics::CONNECTOR_CALLS,
@@ -291,6 +319,62 @@ mod tests {
             Some(Value::Histogram { count, .. }) => *count as f64,
             None => 0.0,
         }
+    }
+
+    #[test]
+    fn model_gateway_calls_become_metrics() {
+        let observability = Observability {
+            metrics: Arc::new(Metrics::default()),
+            tracer: Tracer::new(Arc::new(MemoryExporter::default())),
+        };
+        let call = |decision: &str, tokens: Option<serde_json::Value>, cost: Option<f64>| {
+            let call: branchyard::models::ModelCall = serde_json::from_value(serde_json::json!({
+                "model": "claude-sonnet-4-6", "api": "anthropic", "decision": decision,
+                "status": 200, "latency_ms": 5, "tokens": tokens, "cost_usd": cost
+            }))
+            .unwrap();
+            Activity::Model(Box::new(branchyard::models::ModelActivity::Call(call)))
+        };
+        let tokens = serde_json::json!({"input": 10, "output": 5, "cache_read": 100,
+            "cache_write": 30, "cache_write_1h": 10});
+        let entries = vec![
+            entry(
+                1,
+                "a",
+                1_000,
+                call("allowed", Some(tokens.clone()), Some(0.25)),
+            ),
+            entry(2, "a", 1_100, call("allowed", Some(tokens), Some(0.5))),
+            entry(3, "a", 1_200, call("denied", None, None)),
+            entry(4, "other", 1_300, call("allowed", None, Some(9.0))),
+        ];
+        let branches: BTreeSet<String> = ["a".to_owned()].into();
+        record_events(
+            &observability,
+            &branches,
+            &|_| "claude-code".to_owned(),
+            &entries,
+            None,
+        );
+        let m = &observability.metrics;
+        let model = ("model", "claude-sonnet-4-6");
+        assert_eq!(
+            counter(m, metrics::MODEL_CALLS, &[model, ("decision", "allowed")]),
+            2.0
+        );
+        assert_eq!(
+            counter(m, metrics::MODEL_CALLS, &[model, ("decision", "denied")]),
+            1.0
+        );
+        assert_eq!(
+            counter(m, metrics::MODEL_TOKENS, &[model, ("kind", "cache_write")]),
+            80.0
+        );
+        assert_eq!(
+            counter(m, metrics::MODEL_TOKENS, &[model, ("kind", "output")]),
+            10.0
+        );
+        assert_eq!(counter(m, metrics::MODEL_COST, &[model]), 0.75);
     }
 
     #[test]

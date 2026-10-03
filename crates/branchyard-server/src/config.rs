@@ -411,6 +411,12 @@ pub struct Config {
     /// The connector gateway its branches' turns are given, and whether
     /// this server runs it; see `docs/connectors.md`. `None`: off.
     pub connectors: Option<ConnectorsConfig>,
+    /// The model gateway (docs/model-gateway.md), as `[models]` in
+    /// branchyard.toml says it. `None`: off.
+    pub models: Option<branchyard_setup::config::ModelsConfig>,
+    /// Each principal's ceiling: the most a branch acting for it may reach
+    /// (docs/model-gateway.md#one-scope).
+    pub ceilings: BTreeMap<String, branchyard::Ceiling>,
     /// Waiting this long queued raises an operation's effective priority
     /// by one; `None` turns aging off. See `docs/server.md#scheduling`.
     pub aging: Option<Duration>,
@@ -580,6 +586,8 @@ impl Config {
             webhooks: Vec::new(),
             webhook_insecure: false,
             connectors: None,
+            models: None,
+            ceilings: BTreeMap::new(),
             aging: Some(crate::store::DEFAULT_AGING),
             fair_share_window: crate::store::DEFAULT_FAIR_SHARE_WINDOW,
             metrics: None,
@@ -1008,6 +1016,15 @@ pub(crate) struct FileConfig {
     /// The connector gateway (docs/connectors.md): where it is, which
     /// bundles it serves, and whether this server runs it.
     connectors: Option<FileConnectors>,
+    /// The model gateway (docs/model-gateway.md): backends, routes,
+    /// budgets and prices, as `[models]` in branchyard.toml. A backend's
+    /// `key` names an entry of `secrets`, else a variable of this server.
+    models: Option<branchyard_setup::config::ModelsConfig>,
+    /// Each principal's ceiling, by its name: the connectors, models and
+    /// hosts any branch acting for it may have at most, whatever a request
+    /// asks for (docs/model-gateway.md#one-scope).
+    #[serde(default)]
+    ceilings: BTreeMap<String, FileCeiling>,
     /// Seconds an operation waits queued before its effective priority
     /// rises by one, so low-priority work cannot starve; 0 turns aging
     /// off. Default 60. See docs/server.md#scheduling.
@@ -1073,6 +1090,54 @@ pub(crate) struct FileMetrics {
     /// characters. Exactly one of `token` and `token_file`, or neither.
     token: Option<String>,
     token_file: Option<PathBuf>,
+}
+
+/// One principal's ceiling. Unset parts leave that scope as requested.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileCeiling {
+    /// The widest connector grant, in `--connector` form (`github:read`).
+    connectors: Option<Vec<String>>,
+    /// The models its branches may call through the model gateway, as
+    /// globs (`claude-*`).
+    models: Option<Vec<String>>,
+    /// The hosts its branches may reach, as `--network` rules; `[]` is
+    /// none.
+    network: Option<Vec<String>>,
+}
+
+impl FileCeiling {
+    fn ceiling(self, name: &str) -> Result<branchyard::Ceiling, String> {
+        let at = |e: String| format!("ceilings.{name}: {e}");
+        Ok(branchyard::Ceiling {
+            connectors: self
+                .connectors
+                .map(|grants| {
+                    grants
+                        .iter()
+                        .map(|g| branchyard::connectors::GrantEntry::parse(g))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()
+                .map_err(at)?,
+            models: match self.models {
+                Some(allow) => {
+                    let access = branchyard::models::ModelAccess { allow };
+                    access.check().map_err(at)?;
+                    Some(access)
+                }
+                None => None,
+            },
+            network: self
+                .network
+                .map(|rules| {
+                    branchyard::Network::from_rules(&rules, branchyard::NetworkEnforce::BestEffort)
+                })
+                .transpose()
+                .map_err(at)?,
+        })
+    }
 }
 
 /// `connectors`: the connector gateway; see `docs/connectors.md`.
@@ -1225,6 +1290,8 @@ pub struct Partial {
     pub webhooks: Vec<WebhookConfig>,
     pub webhook_insecure: bool,
     pub connectors: Option<ConnectorsConfig>,
+    pub models: Option<branchyard_setup::config::ModelsConfig>,
+    pub ceilings: BTreeMap<String, branchyard::Ceiling>,
     /// `aging_seconds`: `Some(None)` turns aging off.
     pub aging: Option<Option<Duration>>,
     pub fair_share_window: Option<Duration>,
@@ -1491,6 +1558,21 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             listen: c.listen,
             vault_key: c.vault_key.map(resolve),
         }),
+        models: match file.models {
+            Some(models) => {
+                models
+                    .check()
+                    .map_err(|e| format!("config {}: {e}", path.display()))?;
+                Some(models)
+            }
+            None => None,
+        },
+        ceilings: file
+            .ceilings
+            .into_iter()
+            .map(|(name, c)| c.ceiling(&name).map(|c| (name, c)))
+            .collect::<Result<_, String>>()
+            .map_err(|e| format!("config {}: {e}", path.display()))?,
         public_url: file.public_url,
         allow_trigger_prechecks: scripts(file.allow_trigger_prechecks),
         app: file.app.map(|app| match app {
@@ -1663,6 +1745,90 @@ mod tests {
         weak.secret = "short".into();
         c.webhooks.push(weak);
         assert!(c.validate().unwrap_err().contains("shorter than 16"));
+    }
+
+    #[test]
+    fn the_model_gateway_and_ceilings_load_and_are_checked() {
+        let temp = tempfile::Builder::new()
+            .prefix("branchyard-config-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("t.token"), "0123456789abcdef\n").unwrap();
+        let path = dir.join("server.json");
+        let write = |models: &str, ceilings: &str| {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"listen": "127.0.0.1:0", "data_dir": "data", "repos": {{"app": "repo"}},
+                    "tokens": [{{"name": "ci", "token_file": "t.token"}}],
+                    "secrets": {{"anthropic": "@anthropic.key"}},
+                    "models": {models}, "ceilings": {ceilings}}}"#
+                ),
+            )
+            .unwrap();
+        };
+        write(
+            r#"{"backends": {"anthropic": {"api": "anthropic", "key": "anthropic"}},
+                "routes": [{"model": "claude-*", "backends": ["anthropic"]}],
+                "budget": {"monthly_usd": 100}}"#,
+            r#"{"ci": {"models": ["claude-haiku-*"], "network": ["api.github.com:443"],
+                       "connectors": ["github:read"]}}"#,
+        );
+        let partial = load_file(&path).unwrap();
+        let models = partial.models.clone().unwrap();
+        assert_eq!(
+            models.backends["anthropic"].key.as_deref(),
+            Some("anthropic")
+        );
+        let ceiling = &partial.ceilings["ci"];
+        assert_eq!(ceiling.models.as_ref().unwrap().allow, ["claude-haiku-*"]);
+        assert_eq!(
+            ceiling.network.as_ref().unwrap().rules(),
+            ["api.github.com:443"]
+        );
+        assert_eq!(
+            ceiling.connectors.as_ref().unwrap()[0].to_string(),
+            "github:read"
+        );
+        // The repository's gateway: the key from the server's secrets,
+        // branches named under the repository.
+        let mut config = Config::new(dir.join("data"));
+        config.secrets = partial.secrets.clone();
+        config.models = partial.models.clone();
+        let gateway = crate::models::gateway_for(&config, "app").unwrap().unwrap();
+        assert_eq!(gateway.branch_scope.as_deref(), Some("app"));
+        assert_eq!(
+            gateway.backends[0].key,
+            Some(branchyard::models::KeySource::File(
+                dir.join("anthropic.key")
+            ))
+        );
+        assert_eq!(gateway.budget.monthly_usd, Some(100.0));
+        config.models = None;
+        assert!(crate::models::gateway_for(&config, "app")
+            .unwrap()
+            .is_none());
+        // Refused by name.
+        for (models, ceilings, needle) in [
+            (
+                r#"{"routes": [{"model": "*", "backends": ["x"]}]}"#,
+                "{}",
+                "no backend x",
+            ),
+            (
+                r#"{"backends": {"a": {"api": "x"}}}"#,
+                "{}",
+                "models.backends.a.api",
+            ),
+            ("{}", r#"{"ci": {"models": ["a b"]}}"#, "ceilings.ci"),
+            ("{}", r#"{"ci": {"network": ["https://x"]}}"#, "ceilings.ci"),
+            ("{}", r#"{"ci": {"budget": 1}}"#, "budget"),
+        ] {
+            write(models, ceilings);
+            let error = load_file(&path).unwrap_err();
+            assert!(error.contains(needle), "{models} {ceilings}: {error}");
+        }
     }
 
     #[test]

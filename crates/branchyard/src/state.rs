@@ -620,11 +620,16 @@ pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
 }
 
 /// [`PortBackend`], [`SandboxBackend`], the outcome store
-/// ([`crate::fleet::OutcomeBackend`]) and the knowledge store
-/// ([`crate::knowledge::KnowledgeBackend`]) together, so a [`Store`] holds
-/// one trait object for them.
+/// ([`crate::fleet::OutcomeBackend`]), the knowledge store
+/// ([`crate::knowledge::KnowledgeBackend`]) and the model usage store
+/// ([`crate::models::UsageBackend`]) together, so a [`Store`] holds one
+/// trait object for them.
 pub(crate) trait Extras:
-    PortBackend + SandboxBackend + crate::fleet::OutcomeBackend + crate::knowledge::KnowledgeBackend
+    PortBackend
+    + SandboxBackend
+    + crate::fleet::OutcomeBackend
+    + crate::knowledge::KnowledgeBackend
+    + crate::models::UsageBackend
 {
 }
 
@@ -632,7 +637,8 @@ impl<
         T: PortBackend
             + SandboxBackend
             + crate::fleet::OutcomeBackend
-            + crate::knowledge::KnowledgeBackend,
+            + crate::knowledge::KnowledgeBackend
+            + crate::models::UsageBackend,
     > Extras for T
 {
 }
@@ -787,6 +793,11 @@ impl Store {
 
     /// Repository knowledge; see [`crate::knowledge::KnowledgeBackend`].
     pub fn knowledge(&self) -> &dyn crate::knowledge::KnowledgeBackend {
+        self.extras.as_ref()
+    }
+
+    /// Calls through the model gateway; see [`crate::models::UsageBackend`].
+    pub fn usage(&self) -> &dyn crate::models::UsageBackend {
         self.extras.as_ref()
     }
 

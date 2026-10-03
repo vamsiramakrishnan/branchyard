@@ -85,6 +85,12 @@ impl Doing {
                     call.connector, call.operation, call.decision
                 ));
             }
+            // So is a call through the model gateway.
+            Activity::Model(activity) => {
+                if let branchyard::models::ModelActivity::Call(call) = activity.as_ref() {
+                    self.tool = Some(format!("model {} ({})", call.model, call.decision));
+                }
+            }
             // So is a request through the egress proxy.
             Activity::Egress(egress) => {
                 if let branchyard::EgressActivity::Decision {

@@ -43,6 +43,12 @@ The policy is stored with the branch, like the rest of its provisioning. A send 
 
 A turn with a [connector grant](connectors.md) gets the gateway's host and port added to its rules for that turn, from the URL the harness is given (`[connectors] gateway`, or `sandbox_gateway` in a sandbox). It is not stored: the branch's own policy stays what you set. So `--network none --connector github:read` reaches the gateway and nothing else.
 
+### The model gateway
+
+A turn on the [model gateway](model-gateway.md) gets its gateway's host and port (`127.0.0.1:PORT`) added the same way, for that turn only, so `--network none --model-gateway` reaches the gateway and nothing else, and the provider's hosts need not be allowed: the gateway, in the engine's process, calls them. A turn whose harness is logged in by subscription runs direct, and gets its provider's hosts added instead (`api.anthropic.com:443` and `console.anthropic.com:443` for Claude Code; `api.openai.com:443`, `chatgpt.com:443` and `auth.openai.com:443` for Codex).
+
+A person's ceiling (`ceilings` on a server, `Yard::use_ceilings`) caps the policy: each turn runs under its branch's policy within the ceiling, and an open policy takes the ceiling's rules ([one scope](model-gateway.md#one-scope)). The turn's token carries the effective policy and a digest of it (`by_network`).
+
 ### Delegated children
 
 A child is never wider than its parent:
@@ -130,11 +136,11 @@ Not enforced, or not by this:
 - **What an allowed host is used for.** The proxy never sees inside a tunnel: data can leave through an allowed host (a gist on `github.com`), and a client can name one host in `CONNECT` and another in its TLS server name (domain fronting through a CDN).
 - **DNS.** The proxy resolves on this host. A name an allowed rule matches may resolve to an address on your private network (DNS rebinding); only loopback and unspecified addresses are refused.
 - **Unix sockets.** A network namespace does not cover the filesystem. The harness can still connect to Unix sockets it can open on this host, such as a container runtime's socket or Branchyard's own delegation socket. Abstract sockets are per namespace and are not reachable.
-- **The harness's own API.** The harness talks to its model provider through the same proxy: a policy must allow it, such as `api.anthropic.com:443` for Claude Code. Branchyard does not add it.
+- **The harness's own API.** Off the model gateway, the harness talks to its model provider through the same proxy: a policy must allow it, such as `api.anthropic.com:443` for Claude Code. Branchyard adds it only for a branch on the [model gateway](model-gateway.md) whose harness runs direct; on the gateway, only the gateway is added.
 - **Proxy-unaware harnesses.** A harness or tool that does not honor `HTTPS_PROXY` cannot reach anything when confined.
 - **What runs outside the turn.** `[workspace]` setup and teardown scripts and the merge check run in the engine's network, not the harness's.
 - **Root.** Under a `by` running as root, the harness is root in its user namespace and may reconfigure its own network namespace; it still has no interface to the host's.
-- **A server's operator** cannot yet force a policy on requests; a request chooses its own.
+- **A server's operator** caps a request's policy with a principal's ceiling (`ceilings`), applied by intersection each turn; a request still chooses within it.
 
 ## Permission presets
 
@@ -182,4 +188,4 @@ The enforced tests need a host that allows unprivileged user and network namespa
 - macOS has no enforcement.
 - Microsandbox and Substrate do not apply a policy at all; routing a guest to the proxy, or using the runtime's own egress controls, is future work.
 - `by spawn` has no `--network` of its own: a child narrows through its seat or inherits its parent's.
-- A server's operator cannot set or cap a request's policy.
+- A server's operator can cap a request's policy per principal (`ceilings`), but not set a default for requests that name none.

@@ -230,6 +230,26 @@ CREATE TABLE IF NOT EXISTS outcomes (
     recorded_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS outcomes_kind ON outcomes (kind, recorded_ms);
+CREATE TABLE IF NOT EXISTS model_usage (
+    id TEXT PRIMARY KEY,
+    at_ms INTEGER NOT NULL,
+    branch TEXT NOT NULL,
+    turn INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    model TEXT NOT NULL,
+    api TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    cache_write_1h INTEGER NOT NULL,
+    cost_usd REAL,
+    latency_ms INTEGER NOT NULL,
+    status INTEGER NOT NULL,
+    streamed INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS model_usage_at ON model_usage (at_ms);
 CREATE TABLE IF NOT EXISTS knowledge (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scope_path TEXT,
@@ -2723,6 +2743,84 @@ impl crate::fleet::OutcomeBackend for Sqlite {
             rows.collect::<Result<Vec<_>, _>>().map_err(e)
         })?;
         rows.into_iter().map(outcome_record).collect()
+    }
+}
+
+const USAGE_COLUMNS: &str = "id, at_ms, branch, turn, subject, model, api, backend, input, \
+     output, cache_read, cache_write, cache_write_1h, cost_usd, latency_ms, status, streamed";
+
+fn usage_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::models::UsageRecord> {
+    let api: String = r.get(6)?;
+    Ok(crate::models::UsageRecord {
+        id: r.get(0)?,
+        at_ms: uint(r.get(1)?),
+        branch: r.get(2)?,
+        turn: u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
+        subject: r.get(4)?,
+        model: r.get(5)?,
+        api: serde_json::from_value(Value::String(api)).unwrap_or(crate::models::Api::Generic),
+        backend: r.get(7)?,
+        tokens: crate::models::Tokens {
+            input: uint(r.get(8)?),
+            output: uint(r.get(9)?),
+            cache_read: uint(r.get(10)?),
+            cache_write: uint(r.get(11)?),
+            cache_write_1h: uint(r.get(12)?),
+        },
+        cost_usd: r.get(13)?,
+        latency_ms: uint(r.get(14)?),
+        status: u16::try_from(r.get::<_, i64>(15)?).unwrap_or(0),
+        streamed: r.get(16)?,
+    })
+}
+
+impl crate::models::UsageBackend for Sqlite {
+    fn put_usage(&self, row: &crate::models::UsageRecord) -> Result<(), Error> {
+        // Accounting beside the branches, committed as event appends are.
+        self.tx(false, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO model_usage ({USAGE_COLUMNS}) VALUES \
+                     (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
+                ),
+                params![
+                    row.id,
+                    int(row.at_ms),
+                    row.branch,
+                    i64::from(row.turn),
+                    row.subject,
+                    row.model,
+                    row.api.as_str(),
+                    row.backend,
+                    int(row.tokens.input),
+                    int(row.tokens.output),
+                    int(row.tokens.cache_read),
+                    int(row.tokens.cache_write),
+                    int(row.tokens.cache_write_1h),
+                    row.cost_usd,
+                    int(row.latency_ms),
+                    i64::from(row.status),
+                    row.streamed
+                ],
+            )
+            .map_err(|e| db("model usage", e))?;
+            Ok(())
+        })
+    }
+
+    fn usage_since(&self, since_ms: u64) -> Result<Vec<crate::models::UsageRecord>, Error> {
+        self.query(|conn| {
+            let e = |error| db("model usage", error);
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {USAGE_COLUMNS} FROM model_usage WHERE at_ms >= ?1 ORDER BY at_ms, id"
+                ))
+                .map_err(e)?;
+            let rows = statement
+                .query_map(params![int(since_ms)], usage_row)
+                .map_err(e)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })
     }
 }
 

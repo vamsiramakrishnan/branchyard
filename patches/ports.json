@@ -136,6 +136,15 @@
       }
     },
     {
+      "path": "crates/branchyard/src/models/pricing.rs",
+      "from": {
+        "orca": {
+          "src/main/claude-usage/claude-model-pricing.ts": "6d8583cf27960587734940a95d816a559c988556",
+          "src/main/codex-usage/codex-model-pricing.ts": "3aac4771d066bd8b3113e485f09776aeeea30388"
+        }
+      }
+    },
+    {
       "path": "crates/branchyard-cli/src/adf.rs",
       "from": {
         "orca": {

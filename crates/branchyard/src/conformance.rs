@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::fleet::{BranchOutcome, OutcomeBackend, OutcomeRecord, TaskKind};
 use crate::graph::GraphBackend;
 use crate::knowledge::KnowledgeBackend;
+use crate::models::UsageBackend;
 use crate::state::{
     now_ms, Acquired, Backend, Begun, Fence, Owner, PortBackend, ProcessRow, Record,
     SandboxBackend, SandboxKind, SandboxRow,
@@ -45,6 +46,10 @@ pub(crate) struct Opened {
     pub knowledge: Arc<dyn KnowledgeBackend>,
     /// [`Opened::again`], as [`KnowledgeBackend`].
     pub again_knowledge: Box<dyn Fn() -> Arc<dyn KnowledgeBackend> + Send + Sync>,
+    /// The same backend, as [`UsageBackend`].
+    pub usage: Arc<dyn UsageBackend>,
+    /// [`Opened::again`], as [`UsageBackend`].
+    pub again_usage: Box<dyn Fn() -> Arc<dyn UsageBackend> + Send + Sync>,
     _cleanup: Box<dyn std::any::Any>,
 }
 
@@ -89,7 +94,13 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn KnowledgeBackend>
     };
+    let open_usage = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn UsageBackend>
+    };
     Opened {
+        usage: shared.clone(),
+        again_usage: Box::new(open_usage),
         backend: shared.clone(),
         storage: shared.clone(),
         graph: shared.clone(),
@@ -150,7 +161,14 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
             Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn KnowledgeBackend>
         }
     };
+    let open_usage = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn UsageBackend>
+    };
     Some(Opened {
+        usage: shared.clone(),
+        again_usage: Box::new(open_usage),
         backend: shared.clone(),
         storage: shared.clone(),
         graph: shared.clone(),
@@ -1574,6 +1592,54 @@ pub(crate) fn sandboxes(s: Opened) {
 
 /// Outcomes: rows survive a reopen, are replaced by id, list oldest first
 /// by kind or all, keep every field, and outlive their branch.
+/// Model gateway usage: rows kept as written, read from a time on, oldest
+/// first, by any handle; a row written twice is kept once.
+pub(crate) fn usage(s: Opened) {
+    use crate::models::{Api, Tokens, UsageRecord};
+    let row = |id: &str, at_ms: u64, cost: Option<f64>| UsageRecord {
+        id: id.into(),
+        at_ms,
+        branch: "app/b".into(),
+        turn: 2,
+        subject: "local:me".into(),
+        model: "claude-sonnet-4-6".into(),
+        api: Api::Anthropic,
+        backend: "anthropic".into(),
+        tokens: Tokens {
+            input: 10,
+            output: 5,
+            cache_read: 100,
+            cache_write: 30,
+            cache_write_1h: 10,
+        },
+        cost_usd: cost,
+        latency_ms: 812,
+        status: 200,
+        streamed: true,
+    };
+    let (a, b, c) = (
+        row("a", 2_000, Some(0.000_307_5)),
+        row("b", 1_000, None),
+        row("c", 3_000, Some(1.5)),
+    );
+    for r in [&a, &b, &c] {
+        s.usage.put_usage(r).unwrap();
+    }
+    s.usage.put_usage(&a).unwrap();
+    let again = (s.again_usage)();
+    assert_eq!(
+        again.usage_since(0).unwrap(),
+        [b.clone(), a.clone(), c.clone()]
+    );
+    assert_eq!(s.usage.usage_since(2_000).unwrap(), [a, c.clone()]);
+    assert_eq!(again.usage_since(3_001).unwrap(), []);
+    let mut other = row("d", 4_000, Some(0.25));
+    other.api = Api::Openai;
+    other.streamed = false;
+    again.put_usage(&other).unwrap();
+    assert_eq!(s.usage.usage_since(3_000).unwrap(), [c, other]);
+}
+
 pub(crate) fn outcomes(s: Opened) {
     let rows = &s.outcomes;
     let row = |id: &str, kind, outcome, at| OutcomeRecord {
@@ -1748,7 +1814,7 @@ macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
             concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes,
-            outcomes, knowledge);
+            outcomes, knowledge, usage);
     };
     ($open:expr; $($check:ident),*) => {
         $(
