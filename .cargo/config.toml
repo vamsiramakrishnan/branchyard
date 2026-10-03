@@ -1,0 +1,6 @@
+# Test threads get the stack `by`'s main thread has (8 MiB) rather than
+# Rust's 2 MiB default: clap's derived parser for `by`'s commands is one
+# function whose unoptimized stack frame outgrew 2 MiB when `by sync` was
+# added. A variable already set wins.
+[env]
+RUST_MIN_STACK = "8388608"
