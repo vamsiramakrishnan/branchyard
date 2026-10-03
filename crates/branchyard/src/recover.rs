@@ -71,6 +71,12 @@ pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
     // Warm pool slots a stopped process was making or claiming, and
     // directories in the pool with no record.
     crate::pool::reclaim(yard);
+    // Services whose owner stopped: what Branchyard started for them. A
+    // registry that cannot be read never keeps the repository from
+    // opening; `by services gc` says why.
+    if yard.has_services() {
+        let _ = yard.reclaim_services();
+    }
     match failed {
         Some(error) => Err(error),
         None => Ok(recovered),

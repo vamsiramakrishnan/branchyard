@@ -629,6 +629,50 @@ pub trait OperationStore: Send + Sync {
     /// lies between is the caller's: servers sharing the store claim each
     /// feed entry once.
     fn claim_webhook_cursor(&self, id: &str, expected: Option<u64>, next: u64) -> io::Result<bool>;
+
+    /// The fleet's service registry, in the same database
+    /// (`docs/registry.md`): servers, gateways and whatever registers over
+    /// the API. Workers are the workers table's, read as services by
+    /// [`worker_services`].
+    fn services(&self) -> &dyn branchyard::services::ServiceStore;
+}
+
+/// Live workers as service records of kind `worker`: what
+/// [`OperationStore::beat`] recorded, leased until `within` after their last
+/// beat. A worker is a service; its row is the one place it is kept.
+pub fn worker_services(
+    workers: &[LiveWorker],
+    within: Duration,
+    now_ms: u64,
+) -> Vec<branchyard::services::Service> {
+    use branchyard::services::{Service, ServiceOwner, KIND_WORKER};
+    workers
+        .iter()
+        .map(|w| {
+            let seen = now_ms.saturating_sub(w.seen_ms_ago);
+            let mut owner = ServiceOwner::remote(w.id.clone(), w.id.clone());
+            owner.host = w.host.clone();
+            owner.principal = None;
+            let mut service = Service::new(KIND_WORKER, owner)
+                .with_id(w.id.clone())
+                .with("host", w.host.clone())
+                .with("labels", w.labels.clone())
+                .with("repos", w.repos.clone());
+            if let Some(inventory) = &w.inventory {
+                let harnesses: Vec<String> = inventory
+                    .labels()
+                    .iter()
+                    .filter_map(|l| l.strip_prefix("harness:").map(str::to_owned))
+                    .collect();
+                service = service.with("harnesses", harnesses);
+            }
+            service.registered_ms = seen;
+            service.renewed_ms = seen;
+            service.changed_ms = seen;
+            service.lease_until_ms = seen + within.as_millis() as u64;
+            service
+        })
+        .collect()
 }
 
 fn ms(duration: Duration) -> i64 {
@@ -946,6 +990,8 @@ impl SqliteStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql)?;
         tx.execute_batch(SQLITE_SCHEMA).map_err(sql)?;
+        tx.execute_batch(branchyard::services::sqlite::SCHEMA)
+            .map_err(sql)?;
         sqlite_migrate(&tx).map_err(sql)?;
         tx.commit().map_err(sql)?;
         let store = SqliteStore {
@@ -966,6 +1012,8 @@ impl SqliteStore {
     pub fn memory() -> SqliteStore {
         let conn = rusqlite::Connection::open_in_memory().expect("an in-memory database");
         conn.execute_batch(SQLITE_SCHEMA)
+            .expect("the schema on an in-memory database");
+        conn.execute_batch(branchyard::services::sqlite::SCHEMA)
             .expect("the schema on an in-memory database");
         sqlite_migrate(&conn).expect("the schema on an in-memory database");
         SqliteStore {
@@ -1161,7 +1209,20 @@ fn sqlite_count_claim(
     Ok(())
 }
 
+impl branchyard::services::ServiceStore for SqliteStore {
+    fn transact(
+        &self,
+        f: &mut (dyn FnMut(&mut dyn branchyard::services::Rows) -> io::Result<()> + Send),
+    ) -> io::Result<()> {
+        branchyard::services::sqlite::transact(&mut self.conn(), f)
+    }
+}
+
 impl OperationStore for SqliteStore {
+    fn services(&self) -> &dyn branchyard::services::ServiceStore {
+        self
+    }
+
     fn load(&self) -> io::Result<Vec<StoredOperation>> {
         let conn = self.conn();
         let mut statement = conn
@@ -1810,6 +1871,10 @@ const PG_SCHEMA: &[(&str, &str)] = &[
         "by_workers.inventory",
         "ALTER TABLE by_workers ADD COLUMN IF NOT EXISTS inventory TEXT",
     ),
+    // The fleet's service registry (docs/registry.md).
+    branchyard::services::pg::SCHEMA[0],
+    branchyard::services::pg::SCHEMA[1],
+    branchyard::services::pg::SCHEMA[2],
 ];
 
 /// The claim: one statement, so it is atomic on its own.
@@ -2013,7 +2078,21 @@ fn pg_lease(lease: Duration) -> i64 {
 }
 
 #[cfg(feature = "postgres")]
+impl branchyard::services::ServiceStore for PostgresStore {
+    fn transact(
+        &self,
+        f: &mut (dyn FnMut(&mut dyn branchyard::services::Rows) -> io::Result<()> + Send),
+    ) -> io::Result<()> {
+        self.with(move |c| branchyard::services::pg::transact(c, f))?
+    }
+}
+
+#[cfg(feature = "postgres")]
 impl OperationStore for PostgresStore {
+    fn services(&self) -> &dyn branchyard::services::ServiceStore {
+        self
+    }
+
     fn load(&self) -> io::Result<Vec<StoredOperation>> {
         let rows =
             self.with(|c| c.query("SELECT id, body FROM by_operations ORDER BY seq", &[]))?;
@@ -3183,6 +3262,9 @@ macro_rules! forward {
 }
 
 impl OperationStore for MemoryStore {
+    fn services(&self) -> &dyn branchyard::services::ServiceStore {
+        &self.0
+    }
     forward! {
         load() -> io::Result<Vec<StoredOperation>>;
         get(id: &str) -> io::Result<Option<StoredOperation>>;

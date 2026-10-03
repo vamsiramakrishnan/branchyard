@@ -1287,3 +1287,21 @@ fn concurrent_scheduled_claims_on_separate_connections_never_double_claim() {
     assert!((used - 60.0).abs() < 0.5, "{used}");
     assert!(admitting.queue().unwrap().iter().all(|q| q.claimed));
 }
+
+/// The service registry conformance on PostgreSQL, through the operation
+/// store, and handles on separate connections (as separate servers would
+/// have) registering at once.
+#[test]
+fn services_conform_on_postgres() {
+    use std::sync::Arc;
+
+    use branchyard::services::{conformance, ServiceStore};
+    let Some(url) = database() else { return };
+    let store = PostgresStore::open(&url).unwrap();
+    conformance::check(store.services(), "pg");
+    let Some(other) = database() else { return };
+    let stores: Vec<Arc<dyn ServiceStore>> = (0..3)
+        .map(|_| Arc::new(PostgresStore::open(&other).unwrap()) as Arc<dyn ServiceStore>)
+        .collect();
+    conformance::check_concurrent(stores, 15, "pg connections");
+}

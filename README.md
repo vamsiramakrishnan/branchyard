@@ -436,6 +436,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Distribution](docs/distribution.md): prebuilt binaries, `install.sh` and a Homebrew formula; installing the skill for Claude Code and Codex, and reproducible plugin/SDK archives.
 - [Remote over ssh](docs/remote-ssh.md) and [environment recipes](docs/recipes.md).
 - [Harness lifecycle](docs/harness-lifecycle.md): which harnesses each machine has (version, login, quota), installing, updating and logging in to them under a policy, workers advertising them, and the router using it.
+- [Ambient registry](docs/registry.md): services Branchyard starts or uses (gateways, proxies, servers, workers, sandboxes, pool keepers) registered with capabilities and a lease, found by what they can do, reclaimed when their owner stops; `/.well-known/branchyard`, `by services`, and catalogs refreshed from the MCP registry and npm.
 - [Web companion](docs/companion.md): the page at `/app/`, pairing links, its security model and Web Push.
 - [Repository knowledge](docs/knowledge.md): entries proposed from branches, adopted after review, given to matching harnesses.
 - [Plans and goals](docs/plans-and-goals.md): read-only plans approved before execution, and goals a judge verifies.

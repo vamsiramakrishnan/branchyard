@@ -88,6 +88,8 @@ Every row names the process making or taking it, as a lease names its holder. Re
 - a `ready` row whose worktree is gone;
 - a directory in `.branchyard/pool/` with no row (an orphan), and git's record of it.
 
+A keeper (`PoolKeeper`, in `by serve` and `by worker`) registers itself in the repository's [service registry](registry.md) as a `pool_keeper` with the pool's slots to reclaim. When its process stops, the next reaper (any `Yard::open`, `by services gc`, a server's recovery interval) runs this same reclaim.
+
 Directories are listed before rows, and a filler writes its row before its directory, so a slot being made is never taken for an orphan. A claimed slot is never ready again, so no restart hands one slot to two branches. Prepared environments a slot links into (`share`) are never pruned while it does.
 
 ## Commands
