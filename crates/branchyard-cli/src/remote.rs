@@ -18,9 +18,9 @@ use branchyard::{
     Sent,
 };
 use branchyard_client::api::{
-    BudgetSpec, ErrorBody, ForkRequest, GraphRequest, MergeRequest, Operation, OperationResult,
-    OperationState, PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec, SendRequest,
-    SpawnRequest, TaskRequest,
+    BudgetSpec, ErrorBody, ForkRequest, GraphRequest, MapRequest, MergeRequest, Operation,
+    OperationResult, OperationState, PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec,
+    SendRequest, SpawnRequest, TaskRequest,
 };
 use branchyard_client::{new_key, Client, Repo};
 
@@ -46,11 +46,31 @@ impl Remote {
             .remote
             .as_deref()
             .ok_or_else(|| Failure::Message("no server URL".into()))?;
-        let token_file = globals.token_file.as_deref().ok_or_else(|| {
-            Failure::Message(
-                "remote mode needs a token: pass --token-file or set BRANCHYARD_TOKEN_FILE".into(),
-            )
-        })?;
+        // `ssh://`: a server this starts on the host, reached through a
+        // forwarded Unix socket, with the token it fetched (docs/remote-ssh.md).
+        let tunnel = match crate::ssh_remote::is_ssh(url) {
+            true => {
+                if globals.token_file.is_some() || globals.ca_file.is_some() {
+                    return Err(Failure::Message(
+                        "an ssh:// remote fetches its own token and needs no CA; drop                          --token-file and --ca-file (or BRANCHYARD_TOKEN_FILE and                          BRANCHYARD_CA_FILE)"
+                            .into(),
+                    ));
+                }
+                Some(crate::ssh_remote::connect(url)?)
+            }
+            false => None,
+        };
+        let tunnel_token = tunnel.as_ref().map(|t| t.token_file.display().to_string());
+        let url = tunnel.as_ref().map_or(url, |t| t.url.as_str());
+        let token_file = match &tunnel_token {
+            Some(file) => file.as_str(),
+            None => globals.token_file.as_deref().ok_or_else(|| {
+                Failure::Message(
+                    "remote mode needs a token: pass --token-file or set BRANCHYARD_TOKEN_FILE"
+                        .into(),
+                )
+            })?,
+        };
         let mut client = Client::from_token_file(url, token_file)?;
         if let Some(ca) = &globals.ca_file {
             client = client.with_ca_file(ca)?;
@@ -100,7 +120,14 @@ pub const REMOTE_DENY_NOTICE: &str = "remote mode cannot ask, so tool permission
 /// `--pass-env` names are the server's: a Substrate key is not made
 /// absolute here, since a relative path would name a file on this machine.
 fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
-    let mut provider = commands::provider(task);
+    if let Some(recipe) = &task.recipe {
+        return Err(Failure::Message(format!(
+            "--provider recipe:{} runs on the machine that has the repository: a server does not \
+             run environment recipes (docs/recipes.md). Run it without --remote",
+            recipe.name
+        )));
+    }
+    let mut provider = commands::provider(task)?;
     if let (Some(Provider::Substrate(options)), Some(args)) = (&mut provider, &task.substrate) {
         options.key = args.key.clone().into();
         if !options.key.is_absolute() {
@@ -124,6 +151,7 @@ fn permissions(task: &TaskArgs) -> Result<(PolicySpec, Option<&'static str>), Fa
              pass --yes, or leave requests denied"
                 .into(),
         )),
+        Permissions::Preset(preset) => Ok((PolicySpec::preset(preset), None)),
         Permissions::Unset => Ok((PolicySpec::default(), Some(REMOTE_DENY_NOTICE))),
     }
 }
@@ -155,6 +183,12 @@ fn announce(remote: &Remote, notice: Option<&str>, provider: Option<&Provider>) 
              (unqualified), reached from the server",
             remote.label(),
             options.template
+        ),
+        // Refused before anything is sent (see `provider`).
+        Some(Provider::Recipe(options)) => eprintln!(
+            "by: remote mode on {}: recipe {} is not run by a server",
+            remote.label(),
+            options.name
         ),
     }
     if let Some(notice) = notice {
@@ -244,6 +278,17 @@ fn result(op: Operation) -> Result<OperationResult, Failure> {
 /// Render the operation's activity as it streams, until the operation has
 /// finished and every entry up to its end cursor has been shown.
 fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operation, Failure> {
+    follow_prefixed(remote, op, console, None)
+}
+
+/// [`follow`], also showing every branch whose name starts with `prefix`:
+/// a map's, which its operation cannot name when it is accepted.
+fn follow_prefixed(
+    remote: &Remote,
+    op: &Operation,
+    console: &Console,
+    prefix: Option<&str>,
+) -> Result<Operation, Failure> {
     let mut branches: HashSet<String> = op.branches.iter().cloned().collect();
     let (tx, rx) = mpsc::channel();
     let stream = remote.repo.stream(Some(op.cursor));
@@ -259,6 +304,7 @@ fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operatio
     let mut streaming = true;
     let mut polled = Instant::now();
     let poll = Duration::from_millis(250);
+    let mut said_waiting = false;
     loop {
         if let Some(done) = &finished {
             let drained = done.end_cursor.is_none_or(|end| seen >= end);
@@ -283,7 +329,8 @@ fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operatio
                             branches.insert(branch.clone());
                         }
                     }
-                    if branches.contains(&entry.branch) {
+                    let prefixed = prefix.is_some_and(|p| entry.branch.starts_with(p));
+                    if prefixed || branches.contains(&entry.branch) {
                         console.event(&BranchEvent {
                             branch: entry.branch,
                             activity: entry.activity,
@@ -304,6 +351,10 @@ fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operatio
         if finished.is_none() && polled.elapsed() >= poll {
             polled = Instant::now();
             let op = remote.client.operation(&op.id)?;
+            if let (Some(waiting), false) = (&op.waiting, said_waiting) {
+                eprintln!("by: {} is still queued: {waiting}", op.id);
+                said_waiting = true;
+            }
             if op.state.is_terminal() {
                 finished = Some(op);
             }
@@ -350,10 +401,85 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         provider: provider.clone(),
         provision: provision(task)?,
         seats: None,
+        require_labels: task.require_labels.clone(),
+        priority: task.priority,
+        plan: task.plan,
+        goal: goal_request(task),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
     finish_one(env, remote, &op, task.delegate.is_some())
+}
+
+/// `--goal` and its options as the server takes them: the judge is one of
+/// the server's harnesses, with the server's command.
+fn goal_request(task: &TaskArgs) -> Option<branchyard_client::api::GoalRequest> {
+    task.goal
+        .as_ref()
+        .map(|text| branchyard_client::api::GoalRequest {
+            text: text.clone(),
+            rounds: task.goal_rounds,
+            judge: task.goal_judge.clone(),
+        })
+}
+
+/// `by plan approve` on a server: an operation running the branch's next
+/// turn with the plan, followed like a send.
+pub fn plan_approve(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    edited: Option<&str>,
+    task: &TaskArgs,
+    json: bool,
+) -> Outcome {
+    let (send, notice) = send_request(task, "plan approval")?;
+    let request = branchyard_client::knowledge_api::PlanApproveRequest {
+        edited: edited.map(str::to_owned),
+        send,
+    };
+    let op = remote.repo.approve_plan(branch, &request, &new_key())?;
+    announce(remote, notice, None);
+    plan_finish(env, remote, &op, json)
+}
+
+/// `by plan reject` on a server.
+pub fn plan_reject(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    reason: Option<&str>,
+    replan: bool,
+    task: &TaskArgs,
+    json: bool,
+) -> Outcome {
+    let (send, notice) = send_request(task, "plan rejection")?;
+    let request = branchyard_client::knowledge_api::PlanRejectRequest {
+        reason: reason.map(str::to_owned),
+        replan,
+        send,
+    };
+    let op = remote.repo.reject_plan(branch, &request, &new_key())?;
+    announce(remote, notice, None);
+    plan_finish(env, remote, &op, json)
+}
+
+fn plan_finish(env: &Env, remote: &Remote, op: &Operation, json: bool) -> Outcome {
+    if !json {
+        return finish_one(env, remote, op, false);
+    }
+    let sent = follow_result(env, remote, op).and_then(|result| {
+        result
+            .branches
+            .into_iter()
+            .next()
+            .map(|info| Sent {
+                name: info.name,
+                status: info.status,
+            })
+            .ok_or_else(|| branchyard::Error::State("the server returned no branch".into()))
+    });
+    commands::emit(true, sent, |_| String::new())
 }
 
 /// Follow an operation that runs one branch, then print its summary and
@@ -406,6 +532,10 @@ pub fn fan(
         provider: provider.clone(),
         provision: provision(task)?,
         seats: None,
+        require_labels: task.require_labels.clone(),
+        priority: task.priority,
+        plan: task.plan,
+        goal: goal_request(task),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -420,6 +550,131 @@ pub fn fan(
         .chain(result.descendants.iter())
         .collect();
     commands::fan_summary(env, &infos)
+}
+
+/// `by map --remote`: the items and schema are read here, the map runs as
+/// one operation on the server, and `--out` and `--reduce-out` are
+/// written here from its result.
+pub fn map(env: &Env, remote: &Remote, args: &crate::args::MapArgs, json: bool) -> Outcome {
+    let task: &TaskArgs = &args.task;
+    if crate::fleet_cmd::is_routed(task) || task.kind.is_some() {
+        return Err(crate::fleet_cmd::local_only());
+    }
+    let cwd = std::env::current_dir()?;
+    let items = crate::map_cmd::read_items(args, &cwd)?;
+    let schema = crate::map_cmd::read_schema(args)?;
+    let (policy, notice) = permissions(task)?;
+    let provider = provider(task)?;
+    let prompt = args.prompt.clone().unwrap_or_default();
+    let request = MapRequest {
+        name: task.name.clone(),
+        items,
+        schema,
+        concurrency: args.concurrency,
+        retries: args.retries,
+        total_usd: args.total_usd,
+        reduce: args.reduce.clone(),
+        remove_done: args.rm,
+        retry_failed: args.retry_failed,
+        task: TaskRequest {
+            prompt: prompt.clone(),
+            harness: task.harness.clone(),
+            harnesses: Vec::new(),
+            name: None,
+            base: task.base.clone(),
+            budget: budget(task),
+            policy,
+            check: task.check.clone(),
+            isolated: task.isolated,
+            command: task.command.clone(),
+            delegation: None,
+            allow_delegation: false,
+            unapproved_tools: task.unapproved_tools,
+            provider: provider.clone(),
+            provision: provision(task)?,
+            seats: None,
+            require_labels: task.require_labels.clone(),
+            priority: task.priority,
+            plan: false,
+            goal: None,
+        },
+    };
+    let name = request
+        .name
+        .clone()
+        .unwrap_or_else(|| branchyard::map_default_name(&prompt));
+    let op = remote.repo.submit_map(&request, &new_key())?;
+    announce(remote, notice, provider.as_ref());
+    eprintln!(
+        "by: map {name}: {} item(s), running on the server as {}",
+        request.items.len(),
+        op.id
+    );
+    map_finish(env, remote, &op, &name, args, json)
+}
+
+/// `by map resume --remote`: the server runs the map again with the
+/// request that started it.
+pub fn map_resume(
+    env: &Env,
+    remote: &Remote,
+    name: &str,
+    retry_failed: bool,
+    json: bool,
+) -> Outcome {
+    let op = remote.repo.resume_map(
+        name,
+        &branchyard_client::api::MapResumeRequest { retry_failed },
+        &new_key(),
+    )?;
+    eprintln!("by: map {name}: resumed on the server as {}", op.id);
+    let none = crate::args::MapArgs {
+        prompt: None,
+        items: None,
+        from_command: None,
+        input_format: None,
+        schema: None,
+        out: None,
+        concurrency: None,
+        retries: None,
+        total_usd: None,
+        reduce: None,
+        reduce_out: None,
+        rm: false,
+        retry_failed,
+        task: crate::args::Checked::new(TaskArgs::default()),
+    };
+    map_finish(env, remote, &op, name, &none, json)
+}
+
+fn map_finish(
+    env: &Env,
+    remote: &Remote,
+    op: &Operation,
+    name: &str,
+    args: &crate::args::MapArgs,
+    json: bool,
+) -> Outcome {
+    let console = live_console(env, true, json);
+    let done = follow_prefixed(remote, op, &console, Some(&format!("{name}-")));
+    console.finish();
+    let report = result(done?)?
+        .map
+        .ok_or_else(|| Failure::Message("the server returned no map".into()))?;
+    let out = args.out.as_ref().map(std::path::PathBuf::from);
+    if let Some(out) = &out {
+        crate::map_cmd::write_atomic(out, &crate::map_cmd::results_text(out, &report))?;
+    }
+    if let (Some(path), Some(text)) = (
+        &args.reduce_out,
+        report.reduce.as_ref().and_then(|r| r.text.as_ref()),
+    ) {
+        crate::map_cmd::write_atomic(
+            std::path::Path::new(path),
+            &format!("{}\n", text.trim_end()),
+        )?;
+    }
+    crate::map_cmd::finish(env, &report, out.as_deref(), json)
 }
 
 fn send_request(
@@ -438,6 +693,8 @@ fn send_request(
             allow_delegation: task.allow_delegation,
             unapproved_tools: task.unapproved_tools,
             provision: provision(task)?,
+            require_labels: task.require_labels.clone(),
+            priority: task.priority,
         },
         notice,
     ))
@@ -515,6 +772,8 @@ pub fn fork(
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
         provision: provision(task)?,
+        require_labels: task.require_labels.clone(),
+        priority: task.priority,
     };
     let op = remote.repo.fork(branch, &request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -537,6 +796,8 @@ pub fn reincarnate(env: &Env, remote: &Remote, branch: &str, task: &TaskArgs) ->
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
         provision: provision(task)?,
+        require_labels: task.require_labels.clone(),
+        priority: task.priority,
     };
     let op = remote.repo.reincarnate(branch, &request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -570,6 +831,9 @@ pub fn spawn(
         depends_on: args.depends_on.clone(),
         after: args.after,
         bindings: args.bindings.clone(),
+        require_labels: task.require_labels.clone(),
+        priority: task.priority,
+        connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
     };
     let op = remote
         .repo
@@ -708,7 +972,11 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
             max_seconds: root.budget.max_minutes.map(|m| m * 60.0),
             ..BudgetSpec::default()
         },
-        policy: PolicySpec { mode, rules },
+        policy: PolicySpec {
+            mode,
+            rules,
+            preset: None,
+        },
         check: root.check.clone(),
         isolated: root.isolated,
         command: args.command.clone(),
@@ -718,6 +986,10 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         provider: None,
         provision: Some(root.provision.clone()),
         seats: plan.seats.clone(),
+        require_labels: Vec::new(),
+        priority: None,
+        plan: false,
+        goal: None,
     };
     let op = match remote.repo.submit_task(&request, &new_key()) {
         Ok(op) => op,

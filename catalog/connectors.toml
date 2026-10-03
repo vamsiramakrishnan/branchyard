@@ -1,0 +1,634 @@
+# Generated from a pinned upstream source by branchyard-controls' catalog tests;
+# do not edit. Regenerate with
+#   BRANCHYARD_BLESS=1 cargo test -p branchyard-controls catalog
+# and review the diff. See crates/branchyard-controls/src/catalog.rs and
+# docs/connectors.md (the starting list Anvil adopts connectors from).
+#
+# Derived from generalaction/emdash at 873a3e2067f4abc136272ed2b61abea3a2c07bcf
+# (apps/emdash-desktop/src/core/primitives/mcp/api/catalog.ts), Copyright 2026
+# General Action, Inc., licensed under the Apache License, Version 2.0
+# (vendor/emdash/LICENSE.md).
+# Modified for Branchyard: each server's configuration was reduced to its kind,
+# URL or command, the package it runs, how it authenticates and the names of
+# its credentials (placeholder values dropped); entries are sorted by ID.
+
+[[connector]]
+id = "amplitude"
+name = "Amplitude"
+description = "Search, access, and get insights on your Amplitude data"
+kind = "remote-mcp"
+url = "https://mcp.amplitude.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://amplitude.com/docs/amplitude-ai/amplitude-mcp"
+source = "emdash:amplitude"
+
+[[connector]]
+id = "asana"
+name = "Asana"
+description = "Connect to Asana to coordinate tasks, projects, and goals"
+kind = "remote-mcp"
+url = "https://mcp.asana.com/v2/mcp"
+auth = "server"
+credentials = []
+homepage = "https://developers.asana.com/docs/mcp-server"
+source = "emdash:asana"
+
+[[connector]]
+id = "atlassian"
+name = "Atlassian"
+description = "Access Jira & Confluence from Claude"
+kind = "remote-mcp"
+url = "https://mcp.atlassian.com/v1/mcp/authv2"
+auth = "server"
+credentials = []
+homepage = "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/"
+source = "emdash:atlassian"
+
+[[connector]]
+id = "aws-marketplace"
+name = "AWS Marketplace"
+description = "Discover, evaluate, and buy solutions for the cloud"
+kind = "remote-mcp"
+url = "https://marketplace-mcp.us-east-1.api.aws/mcp"
+auth = "server"
+credentials = []
+homepage = "https://docs.aws.amazon.com/marketplace/latest/APIReference/marketplace-mcp-server.html"
+source = "emdash:aws_marketplace"
+
+[[connector]]
+id = "axiom"
+name = "Axiom"
+description = "Query logs, traces, metrics, and alerts in Axiom observability datasets"
+kind = "remote-mcp"
+url = "https://mcp.axiom.co/mcp"
+auth = "server"
+credentials = []
+homepage = "https://axiom.co/docs/console/intelligence/mcp-server"
+source = "emdash:axiom"
+
+[[connector]]
+id = "azure"
+name = "Azure MCP Server"
+description = "Manage Azure resources and run cloud operations through natural language"
+kind = "stdio-package"
+command = "npx"
+args = ["-y", "@azure/mcp@latest", "server", "start"]
+package = "@azure/mcp@latest"
+auth = "none"
+credentials = []
+homepage = "https://learn.microsoft.com/en-us/azure/developer/azure-mcp-server/"
+source = "emdash:azure"
+
+[[connector]]
+id = "bigquery"
+name = "Google Cloud BigQuery"
+description = "BigQuery: Advanced analytical insights for agents"
+kind = "remote-mcp"
+url = "https://bigquery.googleapis.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://cloud.google.com/bigquery/docs/use-bigquery-mcp"
+source = "emdash:bigquery"
+
+[[connector]]
+id = "canva"
+name = "Canva"
+description = "Search, create, autofill, and export Canva designs"
+kind = "remote-mcp"
+url = "https://mcp.canva.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://www.canva.dev/docs/mcp/"
+source = "emdash:canva"
+
+[[connector]]
+id = "chrome-devtools"
+name = "Chrome DevTools"
+description = "Browser automation, debugging and performance analysis with Chrome DevTools"
+kind = "stdio-package"
+command = "npx"
+args = ["-y", "chrome-devtools-mcp@latest"]
+package = "chrome-devtools-mcp@latest"
+auth = "none"
+credentials = []
+homepage = "https://github.com/ChromeDevTools/chrome-devtools-mcp"
+source = "emdash:chrome_devtools"
+
+[[connector]]
+id = "clerk"
+name = "Clerk"
+description = "Add authentication, organizations, and billing"
+kind = "remote-mcp"
+url = "https://mcp.clerk.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://clerk.com/docs/guides/ai/mcp/clerk-mcp-server"
+source = "emdash:clerk"
+
+[[connector]]
+id = "clickup"
+name = "ClickUp"
+description = "Project management & collaboration for teams & agents"
+kind = "remote-mcp"
+url = "https://mcp.clickup.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://help.clickup.com/hc/en-us/articles/33335772678423-What-is-ClickUp-MCP"
+source = "emdash:clickup"
+
+[[connector]]
+id = "cloudflare"
+name = "Cloudflare Developer Platform"
+description = "Build applications with compute, storage, and AI"
+kind = "remote-mcp"
+url = "https://mcp.cloudflare.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"
+source = "emdash:cloudflare"
+
+[[connector]]
+id = "cloudinary"
+name = "Cloudinary"
+description = "Manage, transform and deliver your images & videos"
+kind = "remote-mcp"
+url = "https://asset-management.mcp.cloudinary.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://cloudinary.com/documentation/cloudinary_llm_mcp"
+source = "emdash:cloudinary"
+
+[[connector]]
+id = "context7"
+name = "Context7"
+description = "Fetch up-to-date documentation and code examples"
+kind = "remote-mcp"
+url = "https://mcp.context7.com/mcp"
+auth = "header"
+credentials = [{ name = "CONTEXT7_API_KEY", required = false }]
+homepage = "https://github.com/upstash/context7"
+source = "emdash:context7"
+
+[[connector]]
+id = "dev-manager"
+name = "Dev Manager"
+description = "Launch and manage dev servers; requires the dev-manager daemon to be running separately"
+kind = "stdio-package"
+command = "npx"
+args = ["dev-manager-mcp", "stdio"]
+package = "dev-manager-mcp"
+auth = "none"
+credentials = []
+homepage = "https://github.com/BloopAI/dev-manager-mcp"
+source = "emdash:dev_manager"
+
+[[connector]]
+id = "devrev"
+name = "DevRev"
+description = "Search and update your company's knowledge graph"
+kind = "remote-mcp"
+url = "https://api.devrev.ai/mcp/v1"
+auth = "header"
+credentials = [{ name = "Authorization", required = false }]
+homepage = "https://support.devrev.ai/en-US/devrev/article/ZNqaZTsx-devrev-mcp-server-connect-your-ai-coding-assistant"
+source = "emdash:devrev"
+
+[[connector]]
+id = "exa"
+name = "Exa"
+description = "Web search and code context retrieval powered by Exa AI"
+kind = "remote-mcp"
+url = "https://mcp.exa.ai/mcp"
+auth = "header"
+credentials = [{ name = "x-api-key", required = false }]
+homepage = "https://exa.ai/docs/reference/exa-mcp"
+source = "emdash:exa"
+
+[[connector]]
+id = "executor"
+name = "Executor"
+description = "One MCP gateway for every tool: connect MCP, OpenAPI, and GraphQL integrations"
+kind = "stdio-command"
+command = "executor"
+args = ["mcp"]
+auth = "none"
+credentials = []
+homepage = "https://executor.sh/docs"
+source = "emdash:executor"
+
+[[connector]]
+id = "figma"
+name = "Figma"
+description = "Generate diagrams and better code from Figma context"
+kind = "remote-mcp"
+url = "https://mcp.figma.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://help.figma.com/hc/en-us/articles/32132100833559"
+source = "emdash:figma"
+
+[[connector]]
+id = "graphite"
+name = "Graphite"
+description = "Generate and manage stacked pull requests with the Graphite CLI"
+kind = "stdio-command"
+command = "gt"
+args = ["mcp"]
+auth = "none"
+credentials = []
+homepage = "https://graphite.com/docs/gt-mcp"
+source = "emdash:graphite"
+
+[[connector]]
+id = "graphos"
+name = "GraphOS MCP Tools"
+description = "Search Apollo docs, specs, and best practices"
+kind = "remote-mcp"
+url = "https://mcp.apollographql.com"
+auth = "server"
+credentials = []
+homepage = "https://www.apollographql.com/docs/graphos/platform/graphos-mcp-tools"
+source = "emdash:graphos"
+
+[[connector]]
+id = "honeycomb"
+name = "Honeycomb"
+description = "Query and explore observability data and SLOs"
+kind = "remote-mcp"
+url = "https://mcp.honeycomb.io/mcp"
+auth = "server"
+credentials = []
+homepage = "https://docs.honeycomb.io/integrations/mcp/configuration-guide"
+source = "emdash:honeycomb"
+
+[[connector]]
+id = "hugging-face"
+name = "Hugging Face"
+description = "Access the Hugging Face Hub and thousands of Gradio Apps"
+kind = "remote-mcp"
+url = "https://huggingface.co/mcp"
+auth = "server"
+credentials = []
+homepage = "https://huggingface.co/settings/mcp"
+source = "emdash:hugging_face"
+
+[[connector]]
+id = "intercom"
+name = "Intercom"
+description = "Access to Intercom data for better customer insights"
+kind = "remote-mcp"
+url = "https://mcp.intercom.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://developers.intercom.com/docs/guides/mcp"
+source = "emdash:intercom"
+
+[[connector]]
+id = "jam"
+name = "Jam"
+description = "Record screen and collect automatic context for issues"
+kind = "remote-mcp"
+url = "https://mcp.jam.dev/mcp"
+auth = "server"
+credentials = []
+homepage = "https://jam.dev/docs/jam-mcp"
+source = "emdash:jam"
+
+[[connector]]
+id = "linear"
+name = "Linear"
+description = "Manage issues, projects & team workflows in Linear"
+kind = "remote-mcp"
+url = "https://mcp.linear.app/mcp"
+auth = "server"
+credentials = []
+homepage = "https://linear.app/docs/mcp"
+source = "emdash:linear"
+
+[[connector]]
+id = "magic-patterns"
+name = "Magic Patterns"
+description = "Discuss and iterate on Magic Patterns designs"
+kind = "remote-mcp"
+url = "https://mcp.magicpatterns.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://www.magicpatterns.com/docs/documentation/features/mcp-server/overview"
+source = "emdash:magic_patterns"
+
+[[connector]]
+id = "make"
+name = "Make"
+description = "Run Make scenarios and manage your Make account"
+kind = "remote-mcp"
+url = "https://mcp.make.com"
+auth = "server"
+credentials = []
+homepage = "https://developers.make.com/mcp-server/"
+source = "emdash:make"
+
+[[connector]]
+id = "microsoft-learn"
+name = "Microsoft Learn"
+description = "Search trusted Microsoft docs to power your development"
+kind = "remote-mcp"
+url = "https://learn.microsoft.com/api/mcp"
+auth = "server"
+credentials = []
+homepage = "https://learn.microsoft.com/en-us/training/support/mcp"
+source = "emdash:microsoft_learn"
+
+[[connector]]
+id = "miro"
+name = "Miro"
+description = "Access and create new content on Miro boards"
+kind = "remote-mcp"
+url = "https://mcp.miro.com/"
+auth = "server"
+credentials = []
+homepage = "https://developers.miro.com/docs/miro-mcp"
+source = "emdash:miro"
+
+[[connector]]
+id = "monday"
+name = "monday.com"
+description = "Manage boards, items, and workflows in your monday.com workspace"
+kind = "remote-mcp"
+url = "https://mcp.monday.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://developer.monday.com/api-reference/docs/monday-mcp-overview"
+source = "emdash:monday"
+
+[[connector]]
+id = "mongodb"
+name = "MongoDB"
+description = "Query and manage MongoDB databases and Atlas clusters"
+kind = "stdio-package"
+command = "npx"
+args = ["-y", "mongodb-mcp-server@latest"]
+package = "mongodb-mcp-server@latest"
+auth = "env"
+credentials = [{ name = "MDB_MCP_CONNECTION_STRING", required = true }]
+homepage = "https://www.mongodb.com/docs/mcp-server/"
+source = "emdash:mongodb"
+
+[[connector]]
+id = "motherduck"
+name = "MotherDuck"
+description = "Analyze your data with natural language"
+kind = "remote-mcp"
+url = "https://api.motherduck.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://motherduck.com/docs/sql-reference/mcp/"
+source = "emdash:motherduck"
+
+[[connector]]
+id = "neon"
+name = "Neon"
+description = "Manage Neon Postgres databases, branches, migrations, and queries"
+kind = "remote-mcp"
+url = "https://mcp.neon.tech/mcp"
+auth = "server"
+credentials = []
+homepage = "https://neon.com/docs/ai/neon-mcp-server"
+source = "emdash:neon"
+
+[[connector]]
+id = "netlify"
+name = "Netlify"
+description = "Create, deploy, manage, and secure websites on Netlify"
+kind = "remote-mcp"
+url = "https://netlify-mcp.netlify.app/mcp"
+auth = "server"
+credentials = []
+homepage = "https://docs.netlify.com/build/build-with-ai/netlify-mcp-server/"
+source = "emdash:netlify"
+
+[[connector]]
+id = "notion"
+name = "Notion"
+description = "Connect your Notion workspace to search, update, and power workflows across tools"
+kind = "remote-mcp"
+url = "https://mcp.notion.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://developers.notion.com/docs/mcp"
+source = "emdash:notion"
+
+[[connector]]
+id = "notra"
+name = "Notra"
+description = "Create & manage posts, brand identities, integrations, and schedules"
+kind = "remote-mcp"
+url = "https://mcp.usenotra.com/mcp"
+auth = "header"
+credentials = [{ name = "Authorization", required = true }]
+homepage = "https://docs.usenotra.com/devtools/mcp"
+source = "emdash:notra"
+
+[[connector]]
+id = "openrouter"
+name = "OpenRouter"
+description = "Search live models, rankings, benchmarks, credits, and OpenRouter docs"
+kind = "remote-mcp"
+url = "https://mcp.openrouter.ai/mcp"
+auth = "server"
+credentials = []
+homepage = "https://openrouter.ai/docs/mcp-server"
+source = "emdash:openrouter"
+
+[[connector]]
+id = "parallel"
+name = "Parallel"
+description = "Free real-time web search and clean markdown extraction from any URL"
+kind = "remote-mcp"
+url = "https://search.parallel.ai/mcp"
+auth = "server"
+credentials = []
+homepage = "https://docs.parallel.ai/integrations/mcp/search-mcp"
+source = "emdash:parallel"
+
+[[connector]]
+id = "planetscale"
+name = "PlanetScale"
+description = "Authenticated access to your Postgres and MySQL DBs"
+kind = "remote-mcp"
+url = "https://mcp.pscale.dev/mcp/planetscale"
+auth = "server"
+credentials = []
+homepage = "https://planetscale.com/docs/connect/mcp"
+source = "emdash:planetscale"
+
+[[connector]]
+id = "playwright"
+name = "Playwright"
+description = "Browser automation with Playwright"
+kind = "stdio-package"
+command = "npx"
+args = ["@playwright/mcp@latest"]
+package = "@playwright/mcp@latest"
+auth = "none"
+credentials = []
+homepage = "https://github.com/microsoft/playwright-mcp"
+source = "emdash:playwright"
+
+[[connector]]
+id = "posthog"
+name = "PostHog"
+description = "Query, analyze, and manage your PostHog insights"
+kind = "remote-mcp"
+url = "https://mcp.posthog.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://posthog.com/docs/model-context-protocol"
+source = "emdash:posthog"
+
+[[connector]]
+id = "prisma"
+name = "Prisma"
+description = "Manage Prisma Postgres databases, migrations, and connection strings"
+kind = "remote-mcp"
+url = "https://mcp.prisma.io/mcp"
+auth = "server"
+credentials = []
+homepage = "https://docs.prisma.io/docs/ai/tools/mcp-server"
+source = "emdash:prisma"
+
+[[connector]]
+id = "railway"
+name = "Railway"
+description = "Create projects, deploy services, and manage Railway infrastructure"
+kind = "remote-mcp"
+url = "https://mcp.railway.com"
+auth = "server"
+credentials = []
+homepage = "https://docs.railway.com/ai/mcp-server"
+source = "emdash:railway"
+
+[[connector]]
+id = "resend"
+name = "Resend"
+description = "Send emails and manage contacts, broadcasts, and domains"
+kind = "stdio-package"
+command = "npx"
+args = ["-y", "resend-mcp"]
+package = "resend-mcp"
+auth = "env"
+credentials = [{ name = "RESEND_API_KEY", required = true }]
+homepage = "https://resend.com/docs/mcp-server"
+source = "emdash:resend"
+
+[[connector]]
+id = "sanity"
+name = "Sanity"
+description = "Create, query, and manage structured content in Sanity"
+kind = "remote-mcp"
+url = "https://mcp.sanity.io"
+auth = "server"
+credentials = []
+homepage = "https://www.sanity.io/docs/ai/mcp-server"
+source = "emdash:sanity"
+
+[[connector]]
+id = "sentry"
+name = "Sentry"
+description = "Search, query, and debug errors intelligently"
+kind = "remote-mcp"
+url = "https://mcp.sentry.dev/mcp"
+auth = "server"
+credentials = []
+homepage = "https://docs.sentry.io/product/sentry-mcp/"
+source = "emdash:sentry"
+
+[[connector]]
+id = "shopify"
+name = "Shopify Dev"
+description = "Search Shopify docs, explore GraphQL schemas, and validate app code"
+kind = "stdio-package"
+command = "npx"
+args = ["-y", "@shopify/dev-mcp@latest"]
+package = "@shopify/dev-mcp@latest"
+auth = "none"
+credentials = []
+homepage = "https://shopify.dev/docs/apps/build/ai-toolkit"
+source = "emdash:shopify"
+
+[[connector]]
+id = "slack"
+name = "Slack"
+description = "Send messages, create canvases, and fetch Slack data"
+kind = "remote-mcp"
+url = "https://mcp.slack.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://docs.slack.dev/ai/mcp-server"
+source = "emdash:slack"
+
+[[connector]]
+id = "stripe"
+name = "Stripe"
+description = "Payment processing and financial infrastructure tools"
+kind = "remote-mcp"
+url = "https://mcp.stripe.com"
+auth = "server"
+credentials = []
+homepage = "https://docs.stripe.com/mcp"
+source = "emdash:stripe"
+
+[[connector]]
+id = "supabase"
+name = "Supabase"
+description = "Manage databases, authentication, and storage"
+kind = "remote-mcp"
+url = "https://mcp.supabase.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://supabase.com/docs/guides/ai-tools/mcp"
+source = "emdash:supabase"
+
+[[connector]]
+id = "vercel"
+name = "Vercel"
+description = "Analyze, debug, and manage projects and deployments"
+kind = "remote-mcp"
+url = "https://mcp.vercel.com"
+auth = "server"
+credentials = []
+homepage = "https://vercel.com/docs/agent-resources/vercel-mcp"
+source = "emdash:vercel"
+
+[[connector]]
+id = "webflow"
+name = "Webflow"
+description = "Manage Webflow CMS, pages, assets and sites"
+kind = "remote-mcp"
+url = "https://mcp.webflow.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://developers.webflow.com/mcp/reference/overview"
+source = "emdash:webflow"
+
+[[connector]]
+id = "wix"
+name = "Wix"
+description = "Manage and build sites and apps on Wix"
+kind = "remote-mcp"
+url = "https://mcp.wix.com/mcp"
+auth = "server"
+credentials = []
+homepage = "https://dev.wix.com/docs/api-reference/articles/ai-tools/wix-mcp/about-the-wix-mcp"
+source = "emdash:wix"
+
+[[connector]]
+id = "wordpress"
+name = "WordPress"
+description = "Secure AI access to manage your WordPress.com sites"
+kind = "remote-mcp"
+url = "https://public-api.wordpress.com/wpcom/v2/mcp/v1"
+auth = "server"
+credentials = []
+homepage = "https://developer.wordpress.com/docs/mcp/"
+source = "emdash:wordpress"

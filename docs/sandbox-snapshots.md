@@ -102,9 +102,10 @@ A branch created from another's checkpoint records a seed: the source branch, th
 Each is tried in order, and the first that works is used:
 
 1. **Branch from the matching snapshot**: `branch_live` of the paused snapshot child (Microsandbox), or `branch` from the tag and `resume` (Substrate), with the child's own name and mounts. Recorded as `sandbox: branched from <branch>'s checkpoint N (microsandbox live branch)`.
-2. **Today's path**: a fresh sandbox, the worktree from git, and the `[workspace]` setup, with the reason: `sandbox: fresh (provider can't branch: …)`, `(<branch> has no provider snapshot at checkpoint N)`, `(could not branch from …: …)`.
+2. **Branch from the prepared environment** of the branch's key, when its `[workspace]` has `prepare = true` and its setup has not run ([prepared environments](environments.md#sandboxes)): `sandbox: branched from prepared environment <key> (microsandbox live branch)`, or from the last good one when its key's build failed.
+3. **Today's path**: a fresh sandbox, the worktree from git, and the `[workspace]` setup, with the reason: `sandbox: fresh (provider can't branch: …)`, `(<branch> has no provider snapshot at checkpoint N)`, `(could not branch from …: …)`.
 
-The event is `Activity::Sandbox(SandboxEvent::Started { provider, sandbox, origin })` with `origin` `fresh` (and its `reason`), `resumed`, `branched` (`branch`, `turn`, `method`) or `prepared`; `by` prints its line as the turn starts, and `by log --json` shows it as `{"activity": "sandbox", ...}`. It is the sandbox counterpart of the [session decision](checkpoints.md#sessions-native-where-it-ended-otherwise-a-summary), which is made independently: a branched sandbox does not continue the harness's session, and the harness is never cloned live (it is not running when a turn ends).
+The event is `Activity::Sandbox(SandboxEvent::Started { provider, sandbox, origin })` with `origin` `fresh` (and its `reason`), `resumed`, `branched` (`branch`, `turn`, `method`), `prepared`, or `environment` (`key`, `used`, `method`, `reason`); `by` prints its line as the turn starts, and `by log --json` shows it as `{"activity": "sandbox", ...}`. It is the sandbox counterpart of the [session decision](checkpoints.md#sessions-native-where-it-ended-otherwise-a-summary), which is made independently: a branched sandbox does not continue the harness's session, and the harness is never cloned live (it is not running when a turn ends).
 
 ## Setup inside the sandbox
 
@@ -114,9 +115,15 @@ What setup leaves in the worktree that git does not track (`node_modules/`, `.ve
 
 Without `keep = "pause"`, what setup installs *outside* the worktree and home goes with the sandbox at the end of the first turn, and setup does not run again: install into the worktree or home, or keep the sandbox.
 
+## Prepared environments
+
+With `[workspace] prepare = true`, setup's result outlives the branch: after setup succeeds in a sandbox, the running sandbox is live-branched into a paused child kept as the environment of the branch's key (setup, copy globs and lockfiles, on this provider), and later branches with that key branch their sandbox from it instead of running setup, falling back to the last good environment when a build fails. Only a provider that declares live branch keeps one. See [prepared environments](environments.md#sandboxes); the step is the journaled `environment`, and recovery destroys a planned snapshot it left.
+
 ## `by fan`: setup once
 
 When every branch of a fan runs on one provider whose placement mounts the worktree (Microsandbox), that provider declares live branch, and the workspace has setup commands:
+
+When the fan's key already has a prepared environment, none of this happens: every branch branches from the environment.
 
 1. A sandbox is prepared on the first branch's worktree and home (attached to this process, so an engine that stops mid-fan leaves nothing behind), and the first branch's setup runs in it once, as its journaled `setup` step.
 2. It is paused, and one `branch_live` makes a sandbox per branch, each rebound to its own worktree and home. Each branch's `sandbox` step is journaled first, so recovery can destroy it.
@@ -131,6 +138,7 @@ Each branch's turn records `sandbox: branched from the fan's prepared sandbox, s
 | `sandbox` | the sandbox a turn resumes, branches or creates, before it does | destroys it (Substrate: brings the work back first), unless the turn had parked it, and removes a kept row naming it |
 | `sandbox_park` | the sandbox being kept | a finished park is left alone: the next turn resumes it |
 | `sandbox_snapshot` | the snapshot child to be made | a pending one is destroyed |
+| `environment` | a prepared environment's key, staging directory and planned snapshot | the staging directory is removed and the planned snapshot destroyed ([environments](environments.md#durability)) |
 | `setup` | unchanged | unchanged; a sandboxed setup's processes go with the sandbox |
 
 ## Code and tests
@@ -149,6 +157,7 @@ Tested hermetically:
 - `branchyard-microsandbox`: the opt-in declarations, admission, children rebound and batched only with equal mounts, a child's image or limits refused, and, without KVM, the provider refusing pause and live branch when not opted in.
 - `branchyard-substrate` against its fake cluster: pause and resume, a paused actor's checkpoint suspending then tagging, a branch created stopped from the tag and resumed while the source stays suspended, live branch refused, a released tag deleted.
 - The engine against the fake provider (`crates/branchyard/tests/snapshots.rs`): a kept sandbox resumed across turns with a snapshot per checkpoint and everything released on removal; snapshots pruned to K; `fork --at N` branching from checkpoint N's snapshot with its own worktree mounted; a provider that cannot pause or branch falling back with the reason; a rewind restoring from its own snapshot; eviction beyond `max_paused`, least recently used first; a vanished kept sandbox replaced by a fresh one, recorded as such; setup exec'd inside the sandbox, seen by the harness, and inherited by a fork; a fan running setup once and one `branch_live` for every branch, a copied `.env` setup appended to reaching every member as setup left it, and running it per branch when the provider cannot live-branch; a delegated child starting from its parent's snapshot; the path following declared capabilities; a sandboxed teardown getting the branch's port.
+- Prepared environments against the fake provider: setup once in a sandbox kept as a paused snapshot, a later sandbox branched from it with no setup, a failed build falling back to the last good snapshot, pruning releasing it, and a provider without live branch keeping none.
 - The engine against the Substrate fake cluster: an actor kept paused, resumed with the worktree sent again, tagged at each checkpoint, a fork created from the tag while the source stays suspended, and actors and tags deleted on removal.
 - The store: the rows on SQLite and PostgreSQL (the shared conformance suite, including four engines racing to take one row), and on PostgreSQL a kept sandbox resumed and forked from by a second engine; recovery leaving a parked sandbox and destroying an unparked one.
 

@@ -69,6 +69,48 @@
         "$ref": "#/$defs/ProjectOverride"
       },
       "description": "Per-repository settings, keyed by the repository root's absolute\npath. User file only: `[projects.\"/src/app\".workspace]` replaces\nthat repository's own `[workspace]` for you."
+    },
+    "fleet": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/FleetConfig"
+      },
+      "description": "Who runs each kind of task: `[fleet.bugfix]`, ..., and\n`[fleet.default]`. With a fleet, `by run` without `--harness` routes\n(docs/fleet.md). A project's entry replaces the user file's for the\nsame kind."
+    },
+    "connectors": {
+      "$ref": "#/$defs/Connectors",
+      "description": "The connector gateway (docs/connectors.md): where it is, which\nbundles it serves, how `by gateway` runs it, and the grants a new\nbranch gets when `--connector` names none."
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkConfig",
+      "description": "The hosts a new branch's harness may reach (docs/egress.md), when\n`--network` gives none: an allowlist enforced through Branchyard's\negress proxy. Unset: open."
+    },
+    "usage": {
+      "$ref": "#/$defs/UsageConfig",
+      "description": "Quota meters per login (`by usage`, docs/usage.md): what `by run`\nand `by fan` do when a candidate's login is near its 5-hour or\nweekly limit, and named logins to meter."
+    },
+    "trackers": {
+      "$ref": "#/$defs/Trackers",
+      "description": "Issue trackers for `--issue` besides GitHub (docs/pull-requests.md):\neach one's API address and, instead of a token in the environment,\na connector gateway tool to fetch issues through."
+    },
+    "recipes": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RecipeConfig"
+      },
+      "description": "Environment recipes (docs/recipes.md): `[recipes.NAME]`, scripts\nthat create, suspend, resume and destroy a machine and print how to\nreach it. A repository's recipes run only once you trust them (`by\nrecipe trust NAME`); the user file's need no trust, and replace a\nrepository's recipe of the same name."
+    },
+    "knowledge": {
+      "$ref": "#/$defs/KnowledgeConfig",
+      "description": "Repository knowledge (docs/knowledge.md): whether adopted entries\nare given to harnesses and within what budget, when branches are\ndistilled into proposals, and by which distiller."
+    },
+    "models": {
+      "$ref": "#/$defs/ModelsConfig",
+      "description": "The model gateway (docs/model-gateway.md): its backends, routes,\nbudgets and prices, and the models a new branch may call through it\nwhen `--model-gateway` gives none."
+    },
+    "harnesses": {
+      "$ref": "#/$defs/HarnessesConfig",
+      "description": "Installing and updating harness CLIs (docs/harness-lifecycle.md):\nwhether `by harnesses install`, `update` and the router may run a\nharness's install command, and for which harnesses. A repository's\nfile may only say `install = \"never\"`; the rest belongs in your user\nfile, since it runs software on your machine."
     }
   },
   "title": "Branchyard configuration",
@@ -143,7 +185,7 @@
               "type": "null"
             }
           ],
-          "description": "How tool permission requests are answered: `ask` on the terminal,\nor `yes` to allow each one. Unset: decided by whether a terminal is\nattached."
+          "description": "How tool permission requests are answered: `ask` on the terminal,\n`yes` to allow each one, or a preset (`read-only`, `edit-worktree`,\n`full`; docs/egress.md#permission-presets). Unset: decided by\nwhether a terminal is attached."
         },
         "isolated": {
           "type": [
@@ -170,6 +212,13 @@
           ],
           "description": "Where the harness runs."
         },
+        "recipe": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "With `provider = \"recipe\"`: which `[recipes.NAME]` (docs/recipes.md)."
+        },
         "instructions": {
           "type": [
             "string",
@@ -191,6 +240,21 @@
           "type": "string",
           "const": "yes",
           "description": "Allow every request (`--yes`)."
+        },
+        {
+          "type": "string",
+          "const": "read-only",
+          "description": "The `read-only` preset: read and search; edits, commands and the\nweb denied (`--permissions read-only`)."
+        },
+        {
+          "type": "string",
+          "const": "edit-worktree",
+          "description": "The `edit-worktree` preset: read, search and edit files; commands\nand the web denied."
+        },
+        {
+          "type": "string",
+          "const": "full",
+          "description": "The `full` preset: every request allowed, as `yes`."
         }
       ]
     },
@@ -205,6 +269,11 @@
           "type": "string",
           "const": "microsandbox",
           "description": "A microVM per turn; needs `[microsandbox]` and a build with the\n`microsandbox` feature."
+        },
+        {
+          "type": "string",
+          "const": "recipe",
+          "description": "The machine an environment recipe makes (`--provider recipe:NAME`);\n`defaults.recipe` names it."
         }
       ]
     },
@@ -217,7 +286,7 @@
             "string",
             "null"
           ],
-          "description": "The server's URL, as `--remote`."
+          "description": "The server's URL, as `--remote`: `http(s)://host:port`,\n`unix:/path/to/socket`, or `ssh://[user@]host[:port]/path/to/repo`\nfor a server `by` starts there (docs/remote-ssh.md)."
         },
         "token_file": {
           "type": [
@@ -413,6 +482,35 @@
         "teardown": {
           "$ref": "#/$defs/Script",
           "description": "Run in the worktree when the branch is removed (`by rm`, `by merge\n--rm`), best-effort."
+        },
+        "prepare": {
+          "type": "boolean",
+          "description": "Prepared environments (docs/environments.md): run `setup` once per\nenvironment key (a hash of the setup commands, the copy globs and\nthe files `inputs` names) and keep what it produced under\n`.branchyard/environments/`; a new branch with the same key starts\nfrom it instead of running setup, cloned where the filesystem can."
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Globs, relative to the repository root, of the files setup reads\n(lockfiles, manifests): their content is part of the environment\nkey. Default: the common lockfiles and manifests present."
+        },
+        "share": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Directories setup produces that every branch with the same key\nshares, as a symbolic link to the prepared environment, instead of a\ncopy of its own (`node_modules`). Literal relative paths."
+        },
+        "pool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PoolConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A warm pool (docs/pools.md): worktrees made ready, with the prepared\nenvironment in place, before a branch asks for one."
         }
       },
       "description": "A branch's workspace lifecycle: `[workspace]`."
@@ -449,6 +547,54 @@
       ],
       "description": "A named command: `[workspace.run.NAME]`."
     },
+    "PoolConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "size": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Ready worktrees kept, 0 to 32. `by serve` and `by worker` refill it\nafter each claim; `by env pool fill` fills it once."
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Labels a `by serve` or `by worker` must all carry to keep this pool\nfilled; others leave it alone."
+        },
+        "max_age_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Minutes a ready worktree is kept before it is discarded. Default:\n1440 (a day)."
+        },
+        "max_behind": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "How many commits the base may have moved past a ready worktree for\na branch to still take it (it is brought forward). Default: 20. A\ncommit that changes an environment input always makes it stale."
+        },
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The revision worktrees are made at. Default: `HEAD` of the checkout."
+        }
+      },
+      "required": [
+        "size"
+      ],
+      "description": "A warm pool: `[workspace.pool]`."
+    },
     "ProjectOverride": {
       "type": "object",
       "additionalProperties": false,
@@ -466,6 +612,851 @@
         }
       },
       "description": "`[projects.\"<repository root>\"]` in the user file."
+    },
+    "FleetConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CandidateConfig"
+          },
+          "description": "Harnesses to route among, each with an optional model and effort."
+        },
+        "attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Branches `by fan --auto` starts (best of N); `by run` starts one. Default 1.",
+          "maximum": 16
+        },
+        "budget_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "Each attempt's cost limit, in dollars, which a failover chain shares;\na candidate whose recorded mean cost is over it is not picked.",
+          "minimum": 0.0
+        },
+        "max_turns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Each attempt's turn limit."
+        },
+        "max_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "Interrupt an attempt's turn after this many minutes.",
+          "minimum": 0.0
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A judge harness for `by judge` and `by fan --judge`; without one the\njudge is deterministic."
+        },
+        "failover": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Start the task again on the next candidate when a harness fails\n(not when the task does). `by run --auto` always does."
+        },
+        "exploration": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The chance, from 0 to 1, that the router picks at random instead of\nby sampled success. Default 0.1.",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "environment": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "An environment name, recorded on routed branches for tools that\nprepare environments; Branchyard does not act on it yet."
+        },
+        "connectors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Connector names, recorded on routed branches for tools that grant\nconnectors; Branchyard does not act on them yet."
+        },
+        "plan": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Plan first: a new branch of this kind starts with a read-only\nplanning turn and waits for `by plan approve` (docs/plans-and-goals.md)."
+        },
+        "goal_judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The judge of a `--goal` for this kind of task, when the command names\nnone: it runs read-only on a scratch branch and answers a JSON\nverdict (docs/plans-and-goals.md)."
+        }
+      },
+      "required": [
+        "candidates"
+      ],
+      "description": "`[fleet.<kind>]`: the candidates for a kind of task, in order of\npreference, and how they run."
+    },
+    "CandidateConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "Harness or profile ID, as `by harnesses` lists them."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A model name, or a size alias (`small`, `medium`, `large`, `extra-large`)."
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Reasoning effort: `low`, `medium`, `high`, `xhigh`, or 0-100."
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The executable and fixed arguments instead of the profile's, as\n`--command`; for development and testing."
+        }
+      },
+      "required": [
+        "harness"
+      ],
+      "description": "One candidate: `{ harness = \"codex\", model = \"large\", effort = \"high\" }`."
+    },
+    "JudgeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "The judge's harness or profile ID. It runs read-only on a scratch\nbranch and must answer a JSON verdict."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rubric": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Added to the judge's prompt, after the default rubric."
+        }
+      },
+      "required": [
+        "harness"
+      ],
+      "description": "`judge = { harness = \"claude-code\", rubric = \"...\" }`."
+    },
+    "Connectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gateway": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The gateway's canonical `/mcp` URL, such as\n`http://127.0.0.1:8931/mcp`: every token's audience, and what a\nharness on this machine is given. Without it, connectors are off."
+        },
+        "sandbox_gateway": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The same gateway as a sandboxed harness reaches it: a host address a\nMicrosandbox guest routes to, or Substrate's routed ingress. Without\nit, a sandboxed branch with a grant fails its turn."
+        },
+        "bundles": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The bundle root the gateway serves (`anvil serve mcp <root>\n--fleet`): every directory under it with an `air.yaml` or\n`air.json` is a connector."
+        },
+        "anvil": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Anvil's command line (default `anvil`), such as\n`\"node /opt/anvil/packages/cli/dist/bin-anvil.js\"`."
+        },
+        "listen": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The address `by gateway start` listens on (default: the gateway\nURL's loopback host); `0.0.0.0` for sandboxes to reach it."
+        },
+        "vault_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The gateway's vault key, a 0600 file of 32 bytes in 64 hex\ncharacters (default `.branchyard/gateway/vault.key`, made on first\nstart)."
+        },
+        "grants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Grants for a new branch (`by run`, `by fan`) when `--connector`\ngives none, in its form: `\"github:read\"`,\n`\"github@work:write:issues.*\"`. Applied only to isolated or\nsandboxed branches."
+        }
+      },
+      "description": "`[connectors]`."
+    },
+    "NetworkConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "HOST[:PORT] rules a new branch's harness may reach, such as\n`\"github.com\"` or `\"*.npmjs.org:443\"`; `[]` allows nothing. Unset:\nevery host (open). A connector grant adds the gateway."
+        },
+        "enforce": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkEnforceMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`best_effort` (the default): where the policy cannot be enforced,\nrun with the proxy's variables and say so. `required`: refuse to\nrun there."
+        }
+      },
+      "description": "`[network]`."
+    },
+    "NetworkEnforceMode": {
+      "type": "string",
+      "enum": [
+        "best_effort",
+        "required"
+      ]
+    },
+    "UsageConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "guard": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageGuard"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What `by run` and `by fan` do when a candidate's login is near its\nlimit: `warn` (the default), `refuse`, or `off`."
+        },
+        "near_percent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The percent of a 5-hour or weekly window at which a login counts as\nnear its limit. Default 90.",
+          "minimum": 0.0,
+          "maximum": 100.0
+        },
+        "skip_over": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The router (docs/fleet.md) skips a candidate whose login has used\nmore than this percent of a window. Unset: it never skips one.",
+          "minimum": 0.0,
+          "maximum": 100.0
+        },
+        "claude_five_hour_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Claude Code keeps no record of its limits on disk: the tokens a\n5-hour window allows you, so `by usage` can show a percent. Unset: it\nshows tokens and cost only."
+        },
+        "claude_weekly_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The same for Claude Code's weekly window."
+        },
+        "accounts": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/UsageAccount"
+          },
+          "description": "More logins to meter, by name: `[usage.accounts.work]` with the\nharness and the configuration directory it logs in from."
+        }
+      },
+      "description": "`[usage]`."
+    },
+    "UsageGuard": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "warn",
+          "description": "Say so on stderr, and start anyway."
+        },
+        {
+          "type": "string",
+          "const": "refuse",
+          "description": "Refuse to start, naming the login and its window."
+        },
+        {
+          "type": "string",
+          "const": "off",
+          "description": "Do not look."
+        }
+      ],
+      "description": "`guard` in `[usage]`."
+    },
+    "UsageAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "`claude-code` or `codex`."
+        },
+        "dir": {
+          "type": "string",
+          "description": "Its configuration directory: what `CLAUDE_CONFIG_DIR` or\n`CODEX_HOME` is set to when you use this login."
+        }
+      },
+      "required": [
+        "harness",
+        "dir"
+      ],
+      "description": "`[usage.accounts.NAME]`: a login other than the default one."
+    },
+    "Trackers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "linear": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "jira": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gitlab": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "`[trackers]`."
+    },
+    "TrackerConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The API's address: Linear's GraphQL endpoint, a Jira site\n(`https://acme.atlassian.net`) or a GitLab instance\n(`https://gitlab.example.com`)."
+        },
+        "gateway_tool": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Fetch issues through this connector gateway tool (such as\n`linear__get_issue`) when no token is in the environment; needs\n`[connectors] gateway`."
+        }
+      },
+      "description": "One tracker in `[trackers]`. Never a credential: tokens come from the\nenvironment (docs/pull-requests.md) or the connector gateway."
+    },
+    "RecipeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For people: what the machine is."
+        },
+        "create": {
+          "type": "string",
+          "description": "Creates a machine and prints its result (docs/recipes.md)."
+        },
+        "suspend": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Freezes the machine; with `resume`, the provider's pause."
+        },
+        "resume": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Continues a suspended machine and prints its result again."
+        },
+        "destroy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Releases the machine; `\"none\"` when it is cleaned up elsewhere."
+        },
+        "doctor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Checks this host can run the recipe (its CLI, credentials); exit 0\nis healthy. `by recipe check` runs it."
+        },
+        "timeout_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1,
+          "description": "How long one script may run, in seconds (default 900)."
+        }
+      },
+      "required": [
+        "create"
+      ],
+      "description": "One `[recipes.NAME]`, after Orca's `environmentRecipes` entries: shell\ncommands run in the repository root. `create` and `resume` print one\nJSON object saying how to reach the machine; `suspend`, `resume` and\n`destroy` get the machine's record on stdin."
+    },
+    "KnowledgeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provision": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Give matching adopted entries to each turn's harness, in its\ninstructions. Default true."
+        },
+        "budget_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "At most about this many tokens of entries per turn. Default 1500."
+        },
+        "distill_on": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "When a branch is distilled into proposed entries on its own: any of\n`merged`, `judged_best` and `ready`. Default `[\"merged\",\n\"judged_best\"]`; `[]` only on `by knowledge distill`."
+        },
+        "distiller": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistillerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A harness that distills, read-only on a scratch branch, answering a\nJSON list of proposals. Without one, the deterministic extractor\nproposes the corrections and review comments a branch was sent."
+        }
+      },
+      "description": "`[knowledge]`."
+    },
+    "DistillerConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "The distiller's harness or profile ID."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The executable and fixed arguments instead of the profile's; for\ndevelopment and testing."
+        }
+      },
+      "required": [
+        "harness"
+      ],
+      "description": "`distiller = { harness = \"claude-code\", model = \"small\" }`."
+    },
+    "ModelsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Models a new branch may call through the gateway when\n`--model-gateway` gives none, as globs (`\"claude-*\"`, `\"*\"`); set,\nit puts new branches on the gateway."
+        },
+        "backends": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelBackendConfig"
+          },
+          "description": "Backends by name: `[models.backends.anthropic] api = \"anthropic\"`,\n`key = \"ANTHROPIC_API_KEY\"`."
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelRouteConfig"
+          },
+          "description": "Routes by requested model, first match wins: `[[models.routes]]`."
+        },
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelBudgetConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Daily and monthly limits (UTC) over every branch of the repository."
+        },
+        "prices": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelPriceConfig"
+          },
+          "description": "Prices for models the catalog does not price, dollars per million\ntokens, by model id or glob."
+        },
+        "listen": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The address a turn's gateway listens on (default `127.0.0.1`);\n`0.0.0.0` for sandboxes to reach it."
+        },
+        "sandbox_host": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The host a sandboxed harness reaches the gateway at. Without it, a\nsandboxed branch on the gateway fails its turn."
+        },
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Seeds the weighted choice of backends."
+        }
+      },
+      "description": "`[models]`."
+    },
+    "ModelBackendConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "api": {
+          "type": "string",
+          "description": "`anthropic`, `openai` or `generic`."
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Its base URL (default: the provider's public API; a generic\nbackend needs one)."
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The secret holding its key, by name: an entry of `[secrets]`, else\na variable of that name. Never the key itself."
+        },
+        "header": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A generic backend's key header (default `authorization`, as\n`Bearer <key>`)."
+        }
+      },
+      "required": [
+        "api"
+      ],
+      "description": "`[models.backends.NAME]`."
+    },
+    "ModelRouteConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "A glob over the requested model, such as `claude-*`."
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Backends chosen among by weight."
+        },
+        "weights": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "description": "One weight per backend (default: all 1)."
+        },
+        "fallbacks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tried in order after the weighted backends, on a refused\nconnection, a 5xx or a 429."
+        },
+        "requests_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "At most this many requests a minute through this route, per\nprocess."
+        }
+      },
+      "required": [
+        "model",
+        "backends"
+      ],
+      "description": "`[[models.routes]]`."
+    },
+    "ModelBudgetConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "daily_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "monthly_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "daily_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "monthly_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "alert_at": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The share of a limit at which an alert is recorded (default 0.8)."
+        }
+      },
+      "description": "`[models.budget]`."
+    },
+    "ModelPriceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "type": "number",
+          "format": "double"
+        },
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_read": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_write": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "input",
+        "output"
+      ],
+      "description": "`[models.prices.MODEL]`, dollars per million tokens."
+    },
+    "HarnessesConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "install": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HarnessInstall"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`never`, `ask` (on a terminal, or with `--yes`) or `auto` (also\ninstalls on demand when the router needs a harness). Unset: `ask` on\na terminal and `never` elsewhere."
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "When not empty, only these harness IDs may be installed or updated."
+        }
+      },
+      "description": "`[harnesses]`."
+    },
+    "HarnessInstall": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "never",
+          "description": "Never install or update."
+        },
+        {
+          "type": "string",
+          "const": "ask",
+          "description": "Ask on a terminal first."
+        },
+        {
+          "type": "string",
+          "const": "auto",
+          "description": "Install without asking, also on demand for the router."
+        }
+      ],
+      "description": "`install` in `[harnesses]`."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

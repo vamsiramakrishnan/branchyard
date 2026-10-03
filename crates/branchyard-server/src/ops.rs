@@ -48,9 +48,13 @@ use serde_json::Value;
 
 use crate::config::Principal;
 use crate::error::ApiError;
+use crate::metrics;
+use crate::observe::Observability;
 use crate::store::{
-    Admission, AdmissionQuota, Claim, Idempotency, OperationStore, StoredOperation, Worker,
+    Admission, AdmissionQuota, Claim, Idempotency, OperationStore, Scheduling, StoredOperation,
+    Worker,
 };
+use crate::telemetry::SpanContext;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -88,6 +92,12 @@ pub struct NewOperation {
     pub creates: Vec<String>,
     /// The tenant's ceilings, checked in the admission's transaction.
     pub quota: AdmissionQuota,
+    /// Worker labels the operation needs (`require_labels`).
+    pub requires: Vec<String>,
+    /// Its priority, checked and capped (`docs/server.md#scheduling`).
+    pub priority: i32,
+    /// The request's `traceparent` header, which its trace continues.
+    pub trace: Option<String>,
 }
 
 /// How a registry dispatches.
@@ -105,6 +115,48 @@ pub struct Options {
     /// by its lock): every claim in it is a predecessor's, released at
     /// open.
     pub exclusive: bool,
+    /// The labels this process's worker carries: it claims only operations
+    /// whose required labels are all among them.
+    pub labels: Vec<String>,
+    /// How long an operation may wait queued before, when no live worker
+    /// carries the labels it requires, it reports why (`waiting`).
+    pub unclaimable_after: Duration,
+    /// How claims choose among queued operations: priority, aging and the
+    /// tenants' fair shares.
+    pub scheduling: Scheduling,
+    /// Where claims, renewals and finished operations are counted and
+    /// traced.
+    pub observability: Observability,
+    /// What this worker's machine has of each harness
+    /// (docs/harness-lifecycle.md), detected now and every
+    /// [`INVENTORY_EVERY`] on a thread of its own, advertised with each
+    /// beat; its `harness:<id>` labels are added to [`Options::labels`].
+    /// `None` advertises nothing.
+    pub inventory: Option<InventorySource>,
+}
+
+/// Detects this machine's harness inventory; `None` when it cannot.
+#[derive(Clone)]
+pub struct InventorySource(
+    pub Arc<dyn Fn() -> Option<branchyard::inventory::Inventory> + Send + Sync>,
+);
+
+impl std::fmt::Debug for InventorySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InventorySource")
+    }
+}
+
+impl InventorySource {
+    /// Detection on this machine with `/bin/sh` and the default options
+    /// (`BRANCHYARD_HARNESS_DIRS` read), without usage meters.
+    pub fn local() -> InventorySource {
+        InventorySource(Arc::new(|| {
+            branchyard::inventory::detect_local(&branchyard::inventory::DetectOptions::from_env())
+                .map_err(|e| tracing::warn!(error = %e, "could not detect the harnesses here"))
+                .ok()
+        }))
+    }
 }
 
 impl Options {
@@ -115,9 +167,41 @@ impl Options {
             poll: Duration::from_millis(250),
             repos,
             exclusive: true,
+            labels: Vec::new(),
+            unclaimable_after: DEFAULT_UNCLAIMABLE_AFTER,
+            scheduling: Scheduling::default(),
+            observability: Observability::default(),
+            inventory: None,
         }
     }
 }
+
+static INVENTORY_SOURCE: std::sync::OnceLock<InventorySource> = std::sync::OnceLock::new();
+
+/// Detect inventories with `source` in every registry this process opens
+/// from a configuration: how `by serve` and `by worker` add the usage
+/// meters `by usage` reads. Only the first call counts.
+pub fn set_inventory_source(source: InventorySource) {
+    let _ = INVENTORY_SOURCE.set(source);
+}
+
+/// The inventory source set with [`set_inventory_source`], else
+/// [`InventorySource::local`].
+pub fn inventory_source() -> InventorySource {
+    INVENTORY_SOURCE
+        .get()
+        .cloned()
+        .unwrap_or_else(InventorySource::local)
+}
+
+/// How often a worker detects its harnesses again.
+pub const INVENTORY_EVERY: Duration = Duration::from_secs(300);
+
+/// How long an operation waits before an unclaimable one says why.
+pub const DEFAULT_UNCLAIMABLE_AFTER: Duration = Duration::from_secs(60);
+/// How often a dispatcher records that its worker is alive, with its
+/// labels; a worker unseen for three beats is not counted as live.
+pub const BEAT: Duration = Duration::from_secs(5);
 
 /// How long a claim lasts without renewal, by default: as long as an
 /// engine's lease on a turn.
@@ -132,6 +216,8 @@ pub struct Registry {
     worker: Worker,
     state: Mutex<State>,
     changed: Condvar,
+    /// This worker's harness inventory, once detected.
+    inventory: Mutex<Option<branchyard::inventory::Inventory>>,
 }
 
 struct State {
@@ -189,6 +275,7 @@ impl Registry {
                 admitted: false,
             }),
             changed: Condvar::new(),
+            inventory: Mutex::new(None),
         }))
     }
 
@@ -201,10 +288,102 @@ impl Registry {
         &self.worker
     }
 
+    /// Where this registry counts and traces.
+    pub fn observability(&self) -> &Observability {
+        &self.options.observability
+    }
+
+    /// The shared queue as the store holds it, for metrics.
+    pub fn queue(&self) -> io::Result<Vec<crate::store::Queued>> {
+        self.store.queue()
+    }
+
+    /// Workers seen alive recently, for metrics.
+    pub fn live_workers(&self) -> io::Result<Vec<crate::store::LiveWorker>> {
+        self.store.workers(BEAT * 3)
+    }
+
+    /// This worker's harness inventory, once detected.
+    pub fn inventory(&self) -> Option<branchyard::inventory::Inventory> {
+        self.inventory
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// The labels this worker claims with: its configured ones and those
+    /// its inventory derives (`harness:<id>`).
+    pub fn labels(&self) -> Vec<String> {
+        let mut labels = self.options.labels.clone();
+        if let Some(inventory) = self.inventory() {
+            labels.extend(inventory.labels());
+        }
+        labels.sort();
+        labels.dedup();
+        labels
+    }
+
+    /// The labels an operation running `harnesses` by name on `repo` should
+    /// require, from the inventories live workers advertise; see
+    /// [`crate::store::harness_requirement`].
+    pub fn harness_requirement(&self, repo: &str, harnesses: &[String]) -> Vec<String> {
+        match self.store.workers(BEAT * 3) {
+            Ok(workers) => crate::store::harness_requirement(harnesses, repo, &workers),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the live workers");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Detect the inventory now and every [`INVENTORY_EVERY`] until the
+    /// registry stops accepting work.
+    fn detect_inventory(self: Arc<Self>, source: InventorySource) {
+        loop {
+            let found = (source.0)();
+            if found.is_some() {
+                *self.inventory.lock().unwrap_or_else(|p| p.into_inner()) = found;
+                // Beat with it now rather than at the next beat.
+                self.changed.notify_all();
+            }
+            let deadline = Instant::now() + INVENTORY_EVERY;
+            let mut state = self.lock();
+            loop {
+                if state.closed || !state.accepting {
+                    return;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                state = self
+                    .changed
+                    .wait_timeout(state, left)
+                    .unwrap_or_else(|p| p.into_inner())
+                    .0;
+            }
+        }
+    }
+
+    /// The priority a spawn from `branch` of `repo` inherits: that of the
+    /// latest operation that worked on it, else 0.
+    pub fn branch_priority(&self, repo: &str, branch: &str) -> Result<i32, ApiError> {
+        self.store
+            .branch_priority(repo, branch)
+            .map(|p| p.unwrap_or(0))
+            .map_err(|e| ApiError::internal(format!("could not read the operations: {e}")))
+    }
+
     /// Start dispatching: claim queued operations and run them with
     /// `executor`.
     pub fn start(self: &Arc<Self>, executor: Arc<dyn Executor>) -> io::Result<()> {
         self.lock().executor = Some(executor);
+        if let Some(source) = self.options.inventory.clone() {
+            let registry = self.clone();
+            std::thread::Builder::new()
+                .name("branchyard-inventory".into())
+                .spawn(move || registry.detect_inventory(source))?;
+        }
         let registry = self.clone();
         std::thread::Builder::new()
             .name("branchyard-dispatch".into())
@@ -215,8 +394,25 @@ impl Registry {
     pub fn get(&self, id: &str) -> Result<Option<Operation>, ApiError> {
         self.store
             .get(id)
-            .map(|found| found.map(|s| s.operation))
+            .map(|found| found.map(|s| self.describe(s.operation)))
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))
+    }
+
+    /// `operation`, saying why it waits when it has waited longer than
+    /// [`Options::unclaimable_after`] queued and no live worker serving its
+    /// repository carries every label it requires.
+    pub fn describe(&self, mut operation: Operation) -> Operation {
+        let waited = now_ms().saturating_sub(operation.created_at_ms);
+        if operation.state == OperationState::Queued
+            && !operation.requires.is_empty()
+            && waited >= self.options.unclaimable_after.as_millis() as u64
+        {
+            if let Ok(workers) = self.store.workers(BEAT * 3) {
+                operation.waiting =
+                    crate::store::unclaimable(&operation.requires, &operation.repo, &workers);
+            }
+        }
+        operation
     }
 
     /// `id`'s operation, only when it belongs to `tenant`: an operation of
@@ -230,7 +426,7 @@ impl Registry {
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))?;
         Ok(found
             .filter(|stored| stored.tenant() == tenant)
-            .map(|stored| stored.operation))
+            .map(|stored| self.describe(stored.operation)))
     }
 
     /// `tenant`'s queued and running operations, as the store holds them.
@@ -265,7 +461,7 @@ impl Registry {
             .map(|found| {
                 found
                     .filter(|stored| stored.tenant() == tenant)
-                    .map(|s| s.operation)
+                    .map(|s| self.describe(s.operation))
             })
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))
     }
@@ -283,6 +479,19 @@ impl Registry {
             return Err(ApiError::shutting_down());
         }
         let id = format!("op_{}", &branchyard_client::new_key()[..24]);
+        let observability = &self.options.observability;
+        let tracer = &observability.tracer;
+        let context = tracer.start_context(new.trace.as_deref());
+        let mut span = context.map(|(context, parent)| {
+            let mut span = tracer.start("admission", context, parent.as_ref());
+            span.kind(crate::telemetry::SpanKind::Server);
+            span.set("by.operation", id.clone());
+            span.set("by.repo", new.repo.clone());
+            span.set("by.kind", kind_name(new.kind));
+            span.set("by.tenant", new.principal.tenant.clone());
+            span.set("by.priority", i64::from(new.priority));
+            span
+        });
         let stored = StoredOperation {
             operation: Operation {
                 id: id.clone(),
@@ -296,19 +505,35 @@ impl Registry {
                 finished_at_ms: None,
                 result: None,
                 error: None,
+                requires: new.requires,
+                waiting: None,
+                priority: new.priority,
             },
             idempotency: new.idempotency,
             locks: new.locks,
             tenant: new.principal.tenant.clone(),
             principal: Some(new.principal),
             creates: new.creates,
+            trace: span.as_ref().map(|s| s.context().traceparent()),
         };
-        let admitted = self
-            .store
-            .admit(&stored, &work, &new.quota)
-            .map_err(|e| ApiError::internal(format!("could not record the operation: {e}")))?;
+        let admitted = self.store.admit(&stored, &work, &new.quota).map_err(|e| {
+            if let Some(span) = &mut span {
+                span.fail(e.to_string());
+            }
+            ApiError::internal(format!("could not record the operation: {e}"))
+        })?;
+        if let (Some(span), false) = (&mut span, admitted == Admission::Admitted) {
+            span.set("by.admitted", false);
+        }
         match admitted {
             Admission::Admitted => {
+                observability.metrics.inc(
+                    metrics::ADMITTED,
+                    &[
+                        ("kind", &kind_name(stored.operation.kind)),
+                        ("tenant", stored.tenant()),
+                    ],
+                );
                 let mut state = self.lock();
                 state.admitted = true;
                 self.changed.notify_all();
@@ -332,7 +557,23 @@ impl Registry {
     fn dispatch(self: Arc<Self>) {
         let mut renewed = Instant::now();
         let renew_every = self.options.lease / 3;
+        let mut beaten: Option<Instant> = None;
+        let mut advertised: Option<u64> = None;
         loop {
+            let inventory = self.inventory();
+            let detected = inventory.as_ref().map(|i| i.detected_at_ms);
+            if beaten.is_none_or(|at| at.elapsed() >= BEAT) || detected != advertised {
+                if let Err(e) = self.store.beat(
+                    &self.worker,
+                    &self.labels(),
+                    &self.options.repos,
+                    inventory.as_ref(),
+                ) {
+                    tracing::warn!(error = %e, "could not record this worker as alive");
+                }
+                beaten = Some(Instant::now());
+                advertised = detected;
+            }
             let (free, executor) = {
                 let mut state = self.lock();
                 if state.closed || !state.accepting {
@@ -350,11 +591,15 @@ impl Registry {
                 renewed = Instant::now();
             }
             if free {
-                match self
-                    .store
-                    .claim(&self.worker, &self.options.repos, self.options.lease)
-                {
+                match self.store.claim_next(
+                    &self.worker,
+                    &self.options.repos,
+                    &self.labels(),
+                    self.options.lease,
+                    &self.options.scheduling,
+                ) {
                     Ok(Some(claim)) => {
+                        self.claimed(&claim);
                         self.run(claim, executor);
                         continue;
                     }
@@ -373,6 +618,55 @@ impl Registry {
         }
     }
 
+    /// Count a claim, and trace it as a child of its admission.
+    fn claimed(&self, claim: &Claim) {
+        let observability = &self.options.observability;
+        let op = &claim.operation.operation;
+        let priority = op.priority.to_string();
+        let metrics = &observability.metrics;
+        metrics.inc(
+            metrics::CLAIMS,
+            &[
+                ("tenant", claim.operation.tenant()),
+                ("priority", &priority),
+            ],
+        );
+        let waited = now_ms().saturating_sub(op.created_at_ms);
+        metrics.observe(
+            metrics::CLAIM_WAIT,
+            &[("priority", &priority)],
+            waited as f64 / 1000.0,
+        );
+        if claim.took_over {
+            metrics.inc(metrics::EXPIRIES, &[]);
+        }
+        let tracer = &observability.tracer;
+        let admission = claim
+            .operation
+            .trace
+            .as_deref()
+            .and_then(SpanContext::parse);
+        if let (Some(admission), true) = (admission, tracer.enabled()) {
+            // The claim's span is the operation's wait in the queue: from
+            // its admission to this claim.
+            tracer.record(
+                crate::telemetry::SpanData::new(
+                    "claim",
+                    admission.child(),
+                    Some(&admission),
+                    op.created_at_ms,
+                    now_ms(),
+                )
+                .attr("by.operation", op.id.clone())
+                .attr("by.worker", self.worker.id.clone())
+                .attr("by.fence", claim.fence)
+                .attr("by.took_over", claim.took_over)
+                .attr("by.waited_ms", waited as i64)
+                .attr("by.priority", i64::from(op.priority)),
+            );
+        }
+    }
+
     /// Extend the lease of every operation running here.
     fn renew(&self) {
         let running: Vec<(String, i64)> = self
@@ -382,15 +676,18 @@ impl Registry {
             .map(|(id, fence)| (id.clone(), *fence))
             .collect();
         for (id, fence) in running {
+            let metrics = &self.options.observability.metrics;
             match self
                 .store
                 .renew(&self.worker, &id, fence, self.options.lease)
             {
-                Ok(true) => {}
+                Ok(true) => metrics.inc(metrics::RENEWALS, &[("result", "renewed")]),
                 Ok(false) => {
+                    metrics.inc(metrics::RENEWALS, &[("result", "lost")]);
                     tracing::warn!(%id, "lost the claim on an operation; another worker took it over")
                 }
                 Err(e) => {
+                    metrics.inc(metrics::RENEWALS, &[("result", "error")]);
                     tracing::error!(%id, error = %e, "could not renew the claim on an operation")
                 }
             }
@@ -426,6 +723,7 @@ impl Registry {
             operation: mut stored,
             work,
             fence,
+            ..
         } = claim;
         let id = stored.operation.id.clone();
         if stored.operation.state != OperationState::Queued {
@@ -456,12 +754,39 @@ impl Registry {
                 return;
             }
         }
-        let admitted = stored.clone();
+        // The operation's span, a child of its admission's: the executor
+        // gets its context as the operation's trace, for the turns it runs.
+        let tracer = &self.options.observability.tracer;
+        let mut span = stored
+            .trace
+            .as_deref()
+            .and_then(SpanContext::parse)
+            .map(|admission| {
+                let mut span = tracer.start(
+                    &format!("operation {}", kind_name(stored.operation.kind)),
+                    admission.child(),
+                    Some(&admission),
+                );
+                span.set("by.operation", id.clone());
+                span.set("by.repo", stored.operation.repo.clone());
+                span.set("by.kind", kind_name(stored.operation.kind));
+                span.set("by.tenant", stored.tenant().to_owned());
+                span.set("by.branches", stored.operation.branches.join(","));
+                span.set("by.fence", fence);
+                span
+            });
+        let mut admitted = stored.clone();
+        admitted.trace = span.as_ref().map(|s| s.context().traceparent());
         let finished = catch_unwind(AssertUnwindSafe(|| executor.execute(&admitted, &work)))
             .unwrap_or_else(|_| Finished {
                 result: Err(*ApiError::internal("the operation panicked; see the server log").body),
                 end_cursor: None,
             });
+        if let (Some(span), Err(error)) = (&mut span, &finished.result) {
+            span.set("by.error", error.code.clone());
+            span.fail(error.message.clone());
+        }
+        drop(span);
         let (outcome, result, error) = match finished.result {
             Ok(result) => (OperationState::Succeeded, Some(result), None),
             Err(error) => (OperationState::Failed, None, Some(error)),
@@ -481,7 +806,19 @@ impl Registry {
     fn record(&self, stored: &StoredOperation, fence: i64) -> bool {
         let id = &stored.operation.id;
         match self.store.finish(&self.worker, fence, stored) {
-            Ok(true) => true,
+            Ok(true) => {
+                self.options.observability.metrics.inc(
+                    metrics::FINISHED,
+                    &[
+                        ("kind", &kind_name(stored.operation.kind)),
+                        (
+                            "state",
+                            &format!("{:?}", stored.operation.state).to_lowercase(),
+                        ),
+                    ],
+                );
+                true
+            }
             Ok(false) => {
                 if !self.lock().closed {
                     tracing::warn!(
@@ -594,10 +931,19 @@ impl Registry {
                 count += 1;
             }
         }
+        let _ = self.store.leave(&self.worker);
         self.lock().closed = true;
         self.changed.notify_all();
         count
     }
+}
+
+/// An operation kind as the API names it: `task`, `send`, `merge`, ...
+pub fn kind_name(kind: OperationKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{kind:?}").to_lowercase())
 }
 
 /// The stored operation, if the key's original request was this one, by
@@ -727,6 +1073,9 @@ mod tests {
             principal: Principal::default_for("c"),
             creates: Vec::new(),
             quota: AdmissionQuota::default(),
+            requires: Vec::new(),
+            priority: 0,
+            trace: None,
         }
     }
 
@@ -973,8 +1322,8 @@ mod tests {
         // over again), short enough for the takeover below to come quickly.
         let lease = Duration::from_millis(750);
         let repos = ["r".to_owned()];
-        let first = store.claim(&ghost, &repos, lease).unwrap().unwrap();
-        let second = store.claim(&ghost, &repos, lease).unwrap().unwrap();
+        let first = store.claim(&ghost, &repos, &[], lease).unwrap().unwrap();
+        let second = store.claim(&ghost, &repos, &[], lease).unwrap().unwrap();
         assert_eq!(first.operation.operation.id, unstarted.id);
         assert_eq!(second.operation.operation.id, started_op.id);
         let mut running = second.operation.clone();

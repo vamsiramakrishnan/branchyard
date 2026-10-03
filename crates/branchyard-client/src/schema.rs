@@ -1,6 +1,6 @@
 //! Builds `schema/contract.json`: the JSON Schema for every request and
-//! response type of the server's HTTP API (`crate::api` and
-//! `crate::storage_api`), generated from their Rust definitions with
+//! response type of the server's HTTP API (`crate::api`,
+//! `crate::storage_api` and `crate::triggers`), generated from their Rust definitions with
 //! `schemars` rather than hand-maintained.
 //!
 //! Only behind the `schema` feature: this pulls `schemars::JsonSchema`
@@ -18,7 +18,10 @@ use schemars::{schema_for, Schema};
 use serde_json::{Map, Value};
 
 use crate::api;
+use crate::companion;
+use crate::knowledge_api;
 use crate::storage_api;
+use crate::triggers;
 
 /// One schema, generated with its own [`schemars::SchemaGenerator`], keyed
 /// by its root type's name. Each entry's `$defs` (nested types it
@@ -42,6 +45,22 @@ pub fn contract() -> Value {
     entry::<api::RuleSpec>("RuleSpec", &mut types);
     entry::<api::PolicySpec>("PolicySpec", &mut types);
     entry::<api::TaskRequest>("TaskRequest", &mut types);
+    entry::<api::GoalRequest>("GoalRequest", &mut types);
+    entry::<api::MapRequest>("MapRequest", &mut types);
+    entry::<api::MapResumeRequest>("MapResumeRequest", &mut types);
+    entry::<api::MapList>("MapList", &mut types);
+    entry::<branchyard::MapReport>("MapReport", &mut types);
+    entry::<knowledge_api::KnowledgeList>("KnowledgeList", &mut types);
+    entry::<knowledge_api::KnowledgeAddRequest>("KnowledgeAddRequest", &mut types);
+    entry::<knowledge_api::KnowledgeDecisionRequest>("KnowledgeDecisionRequest", &mut types);
+    entry::<knowledge_api::KnowledgeEditRequest>("KnowledgeEditRequest", &mut types);
+    entry::<knowledge_api::KnowledgeExport>("KnowledgeExport", &mut types);
+    entry::<knowledge_api::DistillRequest>("DistillRequest", &mut types);
+    entry::<knowledge_api::PlanApproveRequest>("PlanApproveRequest", &mut types);
+    entry::<knowledge_api::PlanRejectRequest>("PlanRejectRequest", &mut types);
+    entry::<branchyard::KnowledgeEntry>("KnowledgeEntry", &mut types);
+    entry::<branchyard::Distilled>("Distilled", &mut types);
+    entry::<branchyard::PlanInfo>("PlanInfo", &mut types);
     entry::<api::SendRequest>("SendRequest", &mut types);
     entry::<api::ForkRequest>("ForkRequest", &mut types);
     entry::<api::ReincarnateRequest>("ReincarnateRequest", &mut types);
@@ -66,12 +85,15 @@ pub fn contract() -> Value {
     entry::<api::FeedEntry>("FeedEntry", &mut types);
     entry::<api::BranchEvents>("BranchEvents", &mut types);
     entry::<api::BranchList>("BranchList", &mut types);
+    entry::<api::OperationList>("OperationList", &mut types);
     entry::<api::Diff>("Diff", &mut types);
     entry::<api::Removed>("Removed", &mut types);
     entry::<api::RepoEntry>("RepoEntry", &mut types);
     entry::<api::RepoList>("RepoList", &mut types);
     entry::<api::HarnessEntry>("HarnessEntry", &mut types);
     entry::<api::HarnessList>("HarnessList", &mut types);
+    entry::<api::WorkerInventory>("WorkerInventory", &mut types);
+    entry::<api::InventoryReport>("InventoryReport", &mut types);
     entry::<api::MergedInfo>("MergedInfo", &mut types);
     entry::<branchyard::BranchInfo>("BranchInfo", &mut types);
     entry::<branchyard::Inspection>("Inspection", &mut types);
@@ -91,6 +113,37 @@ pub fn contract() -> Value {
     entry::<storage_api::LockState>("LockState", &mut types);
     entry::<storage_api::Ack>("Ack", &mut types);
     entry::<storage_api::Empty>("Empty", &mut types);
+    entry::<triggers::When>("When", &mut types);
+    entry::<triggers::EventSource>("EventSource", &mut types);
+    entry::<triggers::Conditions>("Conditions", &mut types);
+    entry::<triggers::Precheck>("Precheck", &mut types);
+    entry::<triggers::RouteSpec>("RouteSpec", &mut types);
+    entry::<triggers::TriggerPolicy>("TriggerPolicy", &mut types);
+    entry::<triggers::TriggerSpec>("TriggerSpec", &mut types);
+    entry::<triggers::Trigger>("Trigger", &mut types);
+    entry::<triggers::TriggerCreated>("TriggerCreated", &mut types);
+    entry::<triggers::TriggerList>("TriggerList", &mut types);
+    entry::<triggers::SecretRequest>("SecretRequest", &mut types);
+    entry::<triggers::SecretSet>("SecretSet", &mut types);
+    entry::<triggers::TriggerTestRequest>("TriggerTestRequest", &mut types);
+    entry::<triggers::TriggerEvent>("TriggerEvent", &mut types);
+    entry::<triggers::PrecheckResult>("PrecheckResult", &mut types);
+    entry::<triggers::TriggerTest>("TriggerTest", &mut types);
+    entry::<triggers::RunState>("RunState", &mut types);
+    entry::<triggers::RunOutcome>("RunOutcome", &mut types);
+    entry::<triggers::TriggerRun>("TriggerRun", &mut types);
+    entry::<triggers::TriggerRuns>("TriggerRuns", &mut types);
+    entry::<triggers::FireAck>("FireAck", &mut types);
+    entry::<triggers::TriggerRemoved>("TriggerRemoved", &mut types);
+    entry::<triggers::TriggerToggle>("TriggerToggle", &mut types);
+    entry::<companion::PairRequest>("PairRequest", &mut types);
+    entry::<companion::Paired>("Paired", &mut types);
+    entry::<companion::Me>("Me", &mut types);
+    entry::<companion::PushInfo>("PushInfo", &mut types);
+    entry::<companion::PushSubscribe>("PushSubscribe", &mut types);
+    entry::<companion::PushUnsubscribe>("PushUnsubscribe", &mut types);
+    entry::<companion::PushResult>("PushResult", &mut types);
+    entry::<companion::PushTest>("PushTest", &mut types);
     Value::Object(Map::from_iter([
         (
             "schema".to_owned(),

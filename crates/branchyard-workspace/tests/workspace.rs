@@ -321,6 +321,60 @@ fn create_branch_snapshot_and_diff() {
     assert_eq!(found, ws);
 }
 
+/// A same-size rewrite made in the same second as the checkout, with the
+/// diff taken in a later second, still shows: git compares whole seconds
+/// (racy git), so a stat-identical file is trusted as clean unless the
+/// index it reads is no newer than the file. `diff` and `diffstat` work on a
+/// copy of the index, which must keep the index's own time for that check.
+#[test]
+fn a_same_size_rewrite_in_the_checkout_second_is_diffed() {
+    use std::os::unix::fs::MetadataExt;
+    let fixture = Fixture::new();
+    for attempt in 0.. {
+        // Start just after a second begins, so the checkout and the rewrite
+        // share it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        std::thread::sleep(Duration::from_nanos(
+            1_000_000_000 - u64::from(now.subsec_nanos()),
+        ));
+        let ws = fixture.workspace(&format!("racy{attempt}"));
+        let file = ws.path.join("a.txt");
+        fs::write(&file, "one\nTWO\nthree\n").unwrap();
+        let index = git(
+            &ws.path,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        );
+        let index = fs::metadata(index.trim()).unwrap();
+        let written = fs::metadata(&file).unwrap();
+        if (written.mtime(), written.ctime()) != (index.mtime(), index.mtime()) {
+            // Too slow to share the second; try again.
+            assert!(attempt < 10, "never wrote within the checkout's second");
+            continue;
+        }
+        // The diff runs in a later second than the checkout and the write.
+        let next = Duration::from_secs(written.mtime() as u64 + 1);
+        while std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            < next
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let diff = ws.diff().unwrap();
+        assert!(diff.contains("-two\n+TWO"), "{diff:?}");
+        let stat = ws.diffstat().unwrap();
+        assert_eq!(
+            (stat.files_changed, stat.insertions, stat.deletions),
+            (1, 1, 1)
+        );
+        let candidate = ws.snapshot("racy").unwrap().expect("a candidate");
+        assert_eq!(candidate.stat, stat);
+        return;
+    }
+}
+
 #[test]
 fn snapshot_without_changes_is_none() {
     let fixture = Fixture::new();
@@ -816,4 +870,134 @@ fn push_sends_exactly_the_commit_to_a_remote_branch() {
             Err(GitError::InvalidRef(_))
         ));
     }
+}
+
+#[test]
+fn worktreeinclude_names_only_ignored_literal_paths_that_exist() {
+    use branchyard_workspace::include;
+    let f = Fixture::new();
+    let root = f.root();
+    fs::write(
+        root.join(".gitignore"),
+        "*.log\n.env\nnode_modules/\n.vscode/\n",
+    )
+    .unwrap();
+    git(&root, &["add", ".gitignore"]);
+    git(&root, &["commit", "-q", "-m", "ignore"]);
+    fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    fs::write(root.join(".vscode/settings.json"), "{}").unwrap();
+    fs::create_dir_all(root.join("node_modules")).unwrap();
+    fs::write(root.join("notes.txt"), "untracked, not ignored").unwrap();
+    fs::write(
+        root.join(include::WORKTREE_INCLUDE_FILE),
+        "# carried\n.env\n.vscode/\nnode_modules\na.txt\nnotes.txt\n*.log\n../escape\nmissing\n",
+    )
+    .unwrap();
+    let included = include::resolve(&root);
+    assert_eq!(included.paths, [".env", ".vscode", "node_modules"]);
+    let skipped = included.skipped.join("\n");
+    for named in ["a.txt", "notes.txt", "*.log", "../escape"] {
+        assert!(skipped.contains(named), "{named} not in {skipped}");
+    }
+    assert!(!skipped.contains("missing"), "{skipped}");
+    // No file, nothing.
+    fs::remove_file(root.join(include::WORKTREE_INCLUDE_FILE)).unwrap();
+    assert_eq!(include::resolve(&root), include::Included::default());
+}
+
+/// A detached worktree at `rev`, as a warm pool's slot is.
+fn detached(f: &Fixture, name: &str, rev: &str) -> PathBuf {
+    let slot = f.dir.join(name);
+    git(
+        &f.root(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            slot.to_str().unwrap(),
+            rev,
+        ],
+    );
+    slot
+}
+
+#[test]
+fn a_detached_worktree_is_adopted_as_a_branch() {
+    let f = Fixture::new();
+    let base = f.head("main");
+    // What setup produced (ignored) and a link beside the checkout.
+    let slot = detached(&f, "slot", "main");
+    fs::write(slot.join("build.log"), "built").unwrap();
+    std::os::unix::fs::symlink(f.dir.join("scratch"), slot.join("shared")).unwrap();
+    let name: BranchName = "warm".parse().unwrap();
+    let ws = f
+        .repo
+        .adopt_worktree(&name, &base, &slot, &f.dir.join("warm"))
+        .unwrap();
+    assert!(!slot.exists());
+    assert_eq!(ws.path, f.dir.join("warm"));
+    assert_eq!(
+        fs::read_to_string(ws.path.join("build.log")).unwrap(),
+        "built"
+    );
+    assert!(fs::symlink_metadata(ws.path.join("shared"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        branchyard_workspace::git::current_branch(&ws.path).unwrap(),
+        Some("by/warm".into())
+    );
+    // Listed like a created branch, with its base recorded.
+    let listed = f.repo.workspace(&name).unwrap().unwrap();
+    assert_eq!(listed.base, base);
+    assert_eq!(listed.path, ws.path);
+
+    // A slot behind the base is moved forward by the checkout.
+    let older = f.head("main");
+    let newer = f.commit_on_main("b.txt", "b\n");
+    let slot = detached(&f, "slot2", older.as_str());
+    let ws = f
+        .repo
+        .adopt_worktree(
+            &"ahead".parse().unwrap(),
+            &newer,
+            &slot,
+            &f.dir.join("ahead"),
+        )
+        .unwrap();
+    assert_eq!(ws.base, newer);
+    assert_eq!(fs::read_to_string(ws.path.join("b.txt")).unwrap(), "b\n");
+
+    // An existing branch is refused before the slot is touched.
+    let slot = detached(&f, "slot3", "main");
+    let refused = f
+        .repo
+        .adopt_worktree(&name, &newer, &slot, &f.dir.join("again"));
+    assert!(
+        matches!(refused, Err(GitError::BranchExists(_))),
+        "{refused:?}"
+    );
+    assert!(slot.is_dir() && !f.dir.join("again").exists());
+
+    // A checkout that cannot happen (an untracked file in the way) removes
+    // the moved worktree and leaves no branch.
+    let slot = detached(&f, "slot4", older.as_str());
+    fs::write(slot.join("b.txt"), "in the way").unwrap();
+    let failed = f.repo.adopt_worktree(
+        &"blocked".parse().unwrap(),
+        &newer,
+        &slot,
+        &f.dir.join("blocked"),
+    );
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(!slot.exists() && !f.dir.join("blocked").exists());
+    assert!(f
+        .repo
+        .workspace(&"blocked".parse().unwrap())
+        .unwrap()
+        .is_none());
+    assert!(!git(&f.root(), &["branch", "--list", "by/blocked"]).contains("blocked"));
 }

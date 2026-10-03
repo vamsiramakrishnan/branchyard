@@ -21,9 +21,9 @@ use branchyard::{
 };
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, Diff, FeedEntry, ForkRequest,
-    GraphRequest, HarnessList, IntegrateRequest, MergeRequest, Operation, OperationKind,
-    PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
-    SteerRequest, TaskRequest,
+    GraphRequest, HarnessList, IntegrateRequest, InventoryReport, MergeRequest, Operation,
+    OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest,
+    SpawnRequest, SteerRequest, TaskRequest, WorkerInventory,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -56,6 +56,12 @@ pub struct App {
     /// areas): quick, synchronous calls, unlike the operation registry's
     /// durable one for long operations. See `storage_routes`.
     pub storage_idem: crate::storage_routes::StorageIdem,
+    /// Triggers and schedules: their store, settings and the dispatcher's
+    /// wake-up; see `crate::triggers`.
+    pub triggers: Arc<crate::triggers::dispatch::Hub>,
+    /// The web companion, when the operator turned it on; see
+    /// `crate::companion`.
+    pub companion: Option<Arc<crate::companion::Companion>>,
 }
 
 #[derive(Clone)]
@@ -288,7 +294,7 @@ impl App {
     /// admitted, and spend accrues while turns run; being read from
     /// durable branch and artifact state, it needs no recovery of its own
     /// after a restart. See `docs/server.md#quotas`.
-    async fn check_admission_quotas(
+    pub(crate) async fn check_admission_quotas(
         self: &Arc<Self>,
         caller: &Caller,
         policy: &TenantPolicy,
@@ -429,6 +435,23 @@ impl App {
             Provider::Local => return Ok(Some(provider)),
             Provider::Microsandbox(_) => "microsandbox",
             Provider::Substrate(_) => "substrate",
+            // A recipe is the repository's own scripts, run as the person
+            // who trusted them on the machine that has the repository; a
+            // request carries its commands, which this server would run
+            // as itself. Refused whatever allow_providers says.
+            Provider::Recipe(options) => {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "provider_not_allowed",
+                    format!(
+                        "a server does not run environment recipes (recipe {}): a recipe runs \
+                         where the repository is, as the person who trusted it; run it with by \
+                         run --provider recipe:{} there, without --remote",
+                        options.name, options.name
+                    ),
+                )
+                .detail(serde_json::json!({ "provider": "recipe" })))
+            }
         };
         if !self.config.allow_providers.contains(kind) {
             return Err(ApiError::new(
@@ -486,6 +509,14 @@ impl App {
                     .detail(serde_json::json!({ "secret": secret.name })))
                 }
             }
+        }
+        if !spec.connectors.is_empty() && self.config.connectors.is_none() {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "connectors_not_configured",
+                "this server has no connector gateway; its operator can configure one under \
+                 connectors (docs/connectors.md)",
+            ));
         }
         if !spec.mcp_servers.is_empty() && !self.config.allow_client_commands {
             return Err(ApiError::new(
@@ -631,6 +662,16 @@ impl App {
             setup: w.setup.commands(),
             teardown: w.teardown.commands(),
             digest: Some(w.digest()),
+            prepare: w.prepare,
+            inputs: w.inputs.clone(),
+            share: w.share.clone(),
+            pool: w.pool.as_ref().map(|p| branchyard::PoolSpec {
+                size: p.size,
+                labels: p.labels.clone(),
+                max_age_secs: p.max_age_secs(),
+                max_behind: p.max_behind,
+                base: p.base.clone(),
+            }),
         }))
     }
 }
@@ -643,10 +684,12 @@ pub fn router(app: Shared) -> Router {
     let v1 = Router::new()
         .route("/v1/repos", get(repos))
         .route("/v1/harnesses", get(harnesses))
+        .route("/v1/inventory", get(inventory))
         .route("/v1/operations", get(operation_by_key))
         .route("/v1/operations/{id}", get(operation))
         .route("/v1/repos/{repo}/tasks", axum::routing::post(post_task))
         .route("/v1/repos/{repo}/branches", get(branches))
+        .route("/v1/repos/{repo}/operations", get(repo_operations))
         .route(
             "/v1/repos/{repo}/branches/{branch}",
             get(branch).delete(delete_branch),
@@ -719,10 +762,20 @@ pub fn router(app: Shared) -> Router {
         // Artifacts and scratch areas: see `storage_routes`, kept separate
         // so this feature's routes are easy to merge alongside unrelated
         // work on this router (inbox messages, branch lifecycle).
-        .merge(crate::storage_routes::router());
+        .merge(crate::storage_routes::router())
+        // Triggers, and their signed webhook endpoint: `crate::triggers`.
+        .merge(crate::triggers::routes::router())
+        // The web companion's page, pairing and push: `crate::companion`.
+        .merge(crate::companion::router())
+        // Repository knowledge and plan approval: `knowledge_routes`.
+        .merge(crate::knowledge_routes::router())
+        // Wide maps: `map_routes`.
+        .merge(crate::map_routes::router());
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        .route("/.well-known/jwks.json", get(jwks))
+        .route("/metrics", get(metrics_route))
         .merge(v1)
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
         .method_not_allowed_fallback(|| async {
@@ -778,6 +831,112 @@ pub fn router(app: Shared) -> Router {
         .with_state(app)
 }
 
+/// `GET /.well-known/jwks.json`: the public keys the connector gateway
+/// verifies this server's tokens against; `404` without connectors.
+async fn jwks(State(app): State<Shared>) -> Response {
+    if app.config.connectors.is_none() {
+        return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route").into_response();
+    }
+    let app = app.clone();
+    match tokio::task::spawn_blocking(move || crate::connectors::jwks(&app.config)).await {
+        Ok(Ok(set)) => axum::Json(set).into_response(),
+        Ok(Err(e)) => ApiError::internal(e).into_response(),
+        Err(e) => ApiError::internal(e.to_string()).into_response(),
+    }
+}
+
+/// `GET /metrics`: Prometheus metrics, for a principal with the `admin`
+/// scope or the metrics token; `404` unless metrics are configured. See
+/// `docs/observability.md`.
+async fn metrics_route(State(app): State<Shared>, headers: HeaderMap) -> Response {
+    let Some(metrics) = &app.config.metrics else {
+        return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route").into_response();
+    };
+    let header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let operator = app
+        .credentials
+        .verify(header)
+        .is_some_and(|principal| principal.allows("admin"));
+    if !operator && !metrics_token_matches(metrics, header) {
+        return match app.credentials.verify(header) {
+            Some(_) => scope_required("admin").into_response(),
+            None => ApiError::unauthorized().into_response(),
+        };
+    }
+    render_metrics(app.clone()).await
+}
+
+/// Whether `header` presents the metrics token.
+pub(crate) fn metrics_token_matches(
+    metrics: &crate::config::MetricsConfig,
+    header: Option<&str>,
+) -> bool {
+    let (Some(expected), Some(presented)) = (
+        &metrics.token_sha256,
+        header
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map(str::trim),
+    ) else {
+        return false;
+    };
+    let digest = crate::config::sha256_hex(presented.as_bytes());
+    crate::auth::constant_time_eq(digest.as_bytes(), expected.as_bytes())
+}
+
+/// The registry's counters, and the shared queue's and workers' gauges and
+/// each repository's warm pool read now, in the Prometheus text format.
+pub(crate) async fn render_metrics(app: Shared) -> Response {
+    let rendered = tokio::task::spawn_blocking(move || {
+        let registry = &app.registry;
+        let mut snapshot = registry.observability().metrics.snapshot();
+        let queue = registry.queue()?;
+        let workers = registry.live_workers()?;
+        crate::metrics::queue_gauges(&mut snapshot, &queue, &workers, crate::ops::now_ms() as i64);
+        for repo in app.repos.values() {
+            // Only a repository whose workspace has a pool.
+            if let Ok(Some(spec)) = app.workspace(repo) {
+                if spec.pool.is_some() {
+                    let slots = repo.yard.pool_slots().map_err(std::io::Error::other)?;
+                    crate::metrics::pool_gauges(&mut snapshot, &repo.name, &slots);
+                }
+            }
+        }
+        Ok::<_, std::io::Error>(crate::metrics::encode(&snapshot))
+    })
+    .await;
+    match rendered {
+        Ok(Ok(text)) => {
+            ([(header::CONTENT_TYPE, crate::metrics::CONTENT_TYPE)], text).into_response()
+        }
+        Ok(Err(e)) => ApiError::internal(format!("could not read the queue: {e}")).into_response(),
+        Err(e) => ApiError::internal(e.to_string()).into_response(),
+    }
+}
+
+/// The router of `--metrics-addr`'s listener: `/metrics` only, with the
+/// metrics token when one is configured.
+pub fn metrics_router(app: Shared) -> Router {
+    async fn serve(State(app): State<Shared>, headers: HeaderMap) -> Response {
+        let Some(metrics) = &app.config.metrics else {
+            return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route")
+                .into_response();
+        };
+        let header = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        if metrics.token_sha256.is_some() && !metrics_token_matches(metrics, header) {
+            return ApiError::unauthorized().into_response();
+        }
+        render_metrics(app.clone()).await
+    }
+    Router::new()
+        .route("/metrics", get(serve))
+        .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
+        .with_state(app)
+}
+
 /// The request ID assigned by [`request_id`], read back by the
 /// [`TraceLayer`] span above and echoed on the response.
 #[derive(Clone)]
@@ -812,22 +971,44 @@ async fn request_id(mut request: Request, next: Next) -> Response {
 /// routes cannot be probed anonymously. Every read (`GET`, `HEAD`) needs
 /// the `read` scope, checked here once so no handler can forget it.
 async fn authenticate(State(app): State<Shared>, mut request: Request, next: Next) -> Response {
-    if request.uri().path() == "/healthz" {
+    // The connector gateway's verification keys are public; `/metrics`
+    // checks its own credentials (a principal's `admin` scope, or the
+    // metrics token).
+    if matches!(
+        request.uri().path(),
+        "/healthz" | "/.well-known/jwks.json" | "/metrics"
+    ) {
+        return next.run(request).await;
+    }
+    // A trigger's webhook is authenticated by its own signature, which
+    // its handler checks against the trigger's secret.
+    if request.method() == Method::POST && crate::triggers::routes::is_fire(request.uri().path()) {
+        return next.run(request).await;
+    }
+    // The companion's page and its pairing-code redemption, when it is on.
+    if crate::companion::is_public(&app, request.method(), request.uri().path()) {
         return next.run(request).await;
     }
     let header = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    match app.credentials.verify(header) {
-        Some(principal) => {
+    // A configured credential, else (with the companion on) a paired token.
+    let verified = match app.credentials.verify(header) {
+        Some(principal) => Some((principal.clone(), crate::companion::configured(header))),
+        None => crate::companion::verify_paired(&app, header).await,
+    };
+    match verified {
+        Some((principal, verified)) => {
             let read = matches!(*request.method(), Method::GET | Method::HEAD);
             if read && !principal.allows("read") {
                 return scope_required("read").into_response();
             }
-            let caller = Caller(principal.clone());
+            let caller = Caller(principal);
             request.extensions_mut().insert(caller);
-            next.run(request).await
+            request.extensions_mut().insert(verified.clone());
+            let response = next.run(request).await;
+            crate::companion::bound(&app, &verified, response)
         }
         None => ApiError::unauthorized().into_response(),
     }
@@ -885,7 +1066,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 }
 
 /// FNV-1a, 64-bit: a stable fingerprint, not a security boundary.
-fn fingerprint(text: &str) -> String {
+pub(crate) fn fingerprint(text: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.bytes() {
         hash ^= u64::from(byte);
@@ -911,7 +1092,7 @@ async fn replay_or(
     }
 }
 
-fn idempotency(
+pub(crate) fn idempotency(
     headers: &HeaderMap,
     caller: &Caller,
     route: &str,
@@ -966,7 +1147,7 @@ fn cursor_param(query: Option<&str>) -> Result<Option<u64>, ApiError> {
     Ok(None)
 }
 
-async fn sync_feed(feed: &Arc<Feed>) -> Result<u64, ApiError> {
+pub(crate) async fn sync_feed(feed: &Arc<Feed>) -> Result<u64, ApiError> {
     let feed = feed.clone();
     blocking(move || feed.sync())
         .await?
@@ -1008,6 +1189,44 @@ async fn harnesses(
         .ok_or_else(|| ApiError::internal("no repositories"))?;
     let list = blocking(move || yard.harnesses()).await?;
     Ok(Json(HarnessList { harnesses: list }))
+}
+
+/// `GET /v1/inventory`: live workers serving the caller's repositories,
+/// this one first, with the harness inventory each advertises.
+async fn inventory(
+    State(app): State<Shared>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Json<InventoryReport>, ApiError> {
+    if !caller.0.allows("read") {
+        return Err(scope_required("read"));
+    }
+    let visible: Vec<String> = app.visible_repos(&caller).map(|r| r.name.clone()).collect();
+    let registry = app.registry.clone();
+    let workers = blocking(move || registry.live_workers())
+        .await?
+        .map_err(|e| ApiError::internal(format!("could not read the live workers: {e}")))?;
+    let this = app.registry.worker().id.clone();
+    let mut workers: Vec<WorkerInventory> = workers
+        .into_iter()
+        .filter_map(|w| {
+            let repos: Vec<String> = w
+                .repos
+                .into_iter()
+                .filter(|r| visible.contains(r))
+                .collect();
+            (!repos.is_empty()).then(|| WorkerInventory {
+                this: w.id == this,
+                id: w.id,
+                host: w.host,
+                labels: w.labels,
+                repos,
+                seen_ms_ago: w.seen_ms_ago,
+                inventory: w.inventory,
+            })
+        })
+        .collect();
+    workers.sort_by_key(|w| !w.this);
+    Ok(Json(InventoryReport { workers }))
 }
 
 fn unknown_operation(what: String) -> ApiError {
@@ -1089,15 +1308,66 @@ fn percent_decode(value: &str) -> String {
 }
 
 /// Admit `work` as an operation: durably enqueued before this returns.
-async fn admit(app: &Shared, new: NewOperation, work: Work) -> Result<Response, ApiError> {
+pub(crate) async fn admit(
+    app: &Shared,
+    new: NewOperation,
+    work: Work,
+) -> Result<Response, ApiError> {
     let value = work.to_value()?;
     let registry = app.registry.clone();
     let (op, replayed) = blocking(move || registry.submit(new, value)).await??;
     Ok(operation_response(op, replayed))
 }
 
+/// The priority an operation is admitted at: the request's, checked
+/// against -10..=10, or `inherited` when it names none, capped at the
+/// tenant's `max_priority`. See `docs/server.md#scheduling`.
+pub(crate) fn admitted_priority(
+    policy: &TenantPolicy,
+    asked: Option<i32>,
+    inherited: i32,
+) -> Result<i32, ApiError> {
+    use crate::store::{MAX_PRIORITY, MIN_PRIORITY};
+    let priority = match asked {
+        Some(p) if !(MIN_PRIORITY..=MAX_PRIORITY).contains(&p) => {
+            return Err(ApiError::bad_request(format!(
+                "priority {p} is outside {MIN_PRIORITY} to {MAX_PRIORITY}"
+            )))
+        }
+        Some(p) => p,
+        None => inherited,
+    };
+    Ok(priority
+        .min(policy.max_priority.unwrap_or(MAX_PRIORITY))
+        .max(MIN_PRIORITY))
+}
+
+/// The request's W3C `traceparent` header, which its operation's trace
+/// continues; see `docs/observability.md`.
+pub(crate) fn incoming_trace(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| crate::telemetry::SpanContext::parse(v).is_some())
+        .map(str::to_owned)
+}
+
+/// The worker labels a request requires, checked, sorted and once each.
+pub(crate) fn required_labels(labels: &[String]) -> Result<Vec<String>, ApiError> {
+    if let Some(bad) = labels.iter().find(|l| !crate::store::valid_label(l)) {
+        return Err(ApiError::bad_request(format!(
+            "require_labels: {bad:?} is not a label (1 to 63 of a-z, 0-9, '.', '_', '-' and ':', \
+             starting with a letter or digit)"
+        )));
+    }
+    let mut labels = labels.to_vec();
+    labels.sort();
+    labels.dedup();
+    Ok(labels)
+}
+
 /// The operation a request's idempotency key already names, if any.
-async fn replayed(
+pub(crate) async fn replayed(
     app: &Shared,
     caller: &Caller,
     idem: Option<&Idempotency>,
@@ -1121,12 +1391,58 @@ async fn post_task(
     let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
     let route = format!("POST /v1/repos/{}/tasks", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(response) = replayed(&app, &caller, idem.as_ref()).await? {
-        return Ok(response);
+    let (op, replayed) = admit_task(
+        &app,
+        &repo,
+        &caller,
+        idem,
+        request,
+        incoming_trace(&headers),
+    )
+    .await?;
+    Ok(operation_response(op, replayed))
+}
+
+/// Admit a task on `repo` for `caller`, or return the operation `idem`
+/// already names (`true`): what `POST .../tasks` does, and what a firing
+/// trigger does as the principal that created it.
+pub(crate) async fn admit_task(
+    app: &Shared,
+    repo: &RepoState,
+    caller: &Caller,
+    idem: Option<Idempotency>,
+    request: TaskRequest,
+    trace: Option<String>,
+) -> Result<(Operation, bool), ApiError> {
+    if let Some(op) = replayed_operation(app, caller, idem.as_ref()).await? {
+        return Ok((op, true));
     }
-    let policy = app.tenant_policy(&caller);
-    app.check_admission_quotas(&caller, &policy).await?;
-    let options = work::task_options(&app, &repo, &request)?;
+    let policy = app.tenant_policy(caller);
+    app.check_admission_quotas(caller, &policy).await?;
+    let options = work::task_options(app, repo, &request)?;
+    let mut requires = required_labels(&request.require_labels)?;
+    // Steer a task that runs its harnesses by name, here, toward a worker
+    // whose inventory says they can run (docs/harness-lifecycle.md).
+    let by_name = options.command.is_none()
+        && matches!(options.provider, None | Some(branchyard::Provider::Local));
+    if by_name {
+        let named: Vec<String> = match request.harnesses.is_empty() {
+            true => request.harness.iter().cloned().collect(),
+            false => request.harnesses.clone(),
+        };
+        let ids: Vec<String> = named
+            .iter()
+            .filter_map(|h| branchyard::inventory::harness_of(h))
+            .map(str::to_owned)
+            .collect();
+        if !ids.is_empty() && ids.len() == named.len() {
+            let (registry, name) = (app.registry.clone(), repo.name.clone());
+            let derived = blocking(move || registry.harness_requirement(&name, &ids)).await?;
+            requires.extend(derived);
+            requires.sort();
+            requires.dedup();
+        }
+    }
     let planned = {
         let (yard, prompt, harnesses) = (
             repo.yard.clone(),
@@ -1140,7 +1456,12 @@ async fn post_task(
         .await?
         {
             Ok(planned) => planned,
-            Err(e) => return replay_or(&app, &caller, idem.as_ref(), error::sdk(&e)).await,
+            Err(e) => {
+                return match replayed_operation(app, caller, idem.as_ref()).await? {
+                    Some(op) => Ok((op, true)),
+                    None => Err(error::sdk(&e)),
+                }
+            }
         }
     };
     let cursor = sync_feed(&repo.feed).await?;
@@ -1153,13 +1474,32 @@ async fn post_task(
         cursor,
         idempotency: idem,
         principal: caller.0.clone(),
-        quota: app.admission_quota(&caller, &policy),
+        quota: app.admission_quota(caller, &policy),
+        requires,
+        priority: admitted_priority(&policy, request.priority, 0)?,
+        trace,
     };
-    admit(&app, new, Work::Task { request }).await
+    let value = Work::Task { request }.to_value()?;
+    let registry = app.registry.clone();
+    blocking(move || registry.submit(new, value)).await?
+}
+
+/// The operation a request's idempotency key already names, if any.
+async fn replayed_operation(
+    app: &Shared,
+    caller: &Caller,
+    idem: Option<&Idempotency>,
+) -> Result<Option<Operation>, ApiError> {
+    let Some(idem) = idem.cloned() else {
+        return Ok(None);
+    };
+    let registry = app.registry.clone();
+    let tenant = caller.tenant().to_owned();
+    blocking(move || registry.replay(&idem, &tenant)).await?
 }
 
 /// The branch's record, or `unknown_branch`.
-async fn existing(yard: &Yard, name: &str) -> Result<branchyard::Branch, ApiError> {
+pub(crate) async fn existing(yard: &Yard, name: &str) -> Result<branchyard::Branch, ApiError> {
     let (yard, name) = (yard.clone(), name.to_owned());
     blocking(move || yard.branch(&name))
         .await?
@@ -1197,6 +1537,9 @@ async fn post_send(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, 0)?,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Send { branch, request }).await
 }
@@ -1236,6 +1579,9 @@ async fn post_fork(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, 0)?,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Fork { branch, request }).await
 }
@@ -1275,6 +1621,9 @@ async fn post_reincarnate(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, 0)?,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Reincarnate { branch, request }).await
 }
@@ -1328,6 +1677,9 @@ async fn post_merge(
         principal: caller.0.clone(),
         creates: Vec::new(),
         quota: AdmissionQuota::default(),
+        requires: Vec::new(),
+        priority: 0,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Merge { branch, target }).await
 }
@@ -1430,6 +1782,15 @@ async fn post_spawn(
     // a send or removal of it must not run meanwhile.
     let mut locks = planned.clone();
     locks.push(parent.clone());
+    // A child the request gives no priority inherits its parent's.
+    let inherited = match request.priority {
+        Some(_) => 0,
+        None => {
+            let (registry, repo_name, parent) =
+                (app.registry.clone(), repo.name.clone(), parent.clone());
+            blocking(move || registry.branch_priority(&repo_name, &parent)).await??
+        }
+    };
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Spawn,
@@ -1440,6 +1801,9 @@ async fn post_spawn(
         idempotency: idem,
         principal: caller.0.clone(),
         quota: app.admission_quota(&caller, &policy),
+        requires: required_labels(&request.require_labels)?,
+        priority: admitted_priority(&policy, request.priority, inherited)?,
+        trace: incoming_trace(&headers),
     };
     admit(
         &app,
@@ -1486,6 +1850,9 @@ async fn post_integrate(
         principal: caller.0.clone(),
         creates: Vec::new(),
         quota: AdmissionQuota::default(),
+        requires: Vec::new(),
+        priority: 0,
+        trace: incoming_trace(&headers),
     };
     admit(&app, new, Work::Integrate { branch, parent }).await
 }
@@ -1719,6 +2086,34 @@ async fn branches(
         .await?
         .map_err(|e| error::sdk(&e))?;
     Ok(Json(BranchList { branches }))
+}
+
+/// `GET /v1/repos/{repo}/operations[?branch=NAME]`: the caller's tenant's
+/// unfinished operations of the repository, each saying why it waits when
+/// no live worker can claim it.
+async fn repo_operations(
+    State(app): State<Shared>,
+    Path(repo): Path<String>,
+    Extension(caller): Extension<Caller>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<branchyard_client::api::OperationList>, ApiError> {
+    let name = app.authorized_repo(&caller, &repo, "read")?.name.clone();
+    let branch = query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("branch="))
+        .map(percent_decode);
+    let registry = app.registry.clone();
+    let tenant = caller.tenant().to_owned();
+    let unfinished = blocking(move || registry.unfinished(&tenant)).await??;
+    let operations = unfinished
+        .into_iter()
+        .map(|stored| app.registry.describe(stored.operation))
+        .filter(|op| op.repo == name)
+        .filter(|op| branch.as_ref().is_none_or(|b| op.branches.contains(b)))
+        .collect();
+    Ok(Json(branchyard_client::api::OperationList { operations }))
 }
 
 async fn branch(

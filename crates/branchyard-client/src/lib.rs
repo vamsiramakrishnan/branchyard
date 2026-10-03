@@ -44,11 +44,14 @@
 //!   CA file.
 
 pub mod api;
+pub mod companion;
 pub mod http;
+pub mod knowledge_api;
 #[cfg(feature = "schema")]
 pub mod schema;
 pub mod sse;
 pub mod storage_api;
+pub mod triggers;
 
 use std::fmt;
 use std::io::BufReader;
@@ -60,7 +63,7 @@ use backon::{BackoffBuilder, BlockingRetryable, ExponentialBackoff, ExponentialB
 
 use branchyard::{
     ArtifactRef, Asked, BranchInfo, Children, EventPage, Graph, GraphApplied, HarnessInfo, Inbox,
-    Inspection, Message, ScratchArea, ScratchLock, Steer,
+    Inspection, MapReport, MapSummary, Message, ScratchArea, ScratchLock, Steer,
 };
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
@@ -69,8 +72,9 @@ use serde::Serialize;
 use api::{
     AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, Diff,
     ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest,
-    MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest,
-    SpawnRequest, SteerRequest, TaskRequest, TextRequest,
+    InventoryReport, MapList, MapRequest, MapResumeRequest, MergeRequest, Operation,
+    ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest,
+    TaskRequest, TextRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -173,7 +177,8 @@ impl fmt::Debug for Client {
 }
 
 impl Client {
-    /// A client for `url` (`http://` or `https://`) presenting `token`.
+    /// A client for `url` (`http://`, `https://` or `unix:/path/to/socket`)
+    /// presenting `token`.
     pub fn new(url: &str, token: impl Into<String>) -> Result<Client, Error> {
         let endpoint = Endpoint::parse(url).map_err(Error::Config)?;
         let token = token.into();
@@ -239,6 +244,12 @@ impl Client {
     pub fn harnesses(&self) -> Result<Vec<HarnessInfo>, Error> {
         let list: HarnessList = self.get("/v1/harnesses")?;
         Ok(list.harnesses)
+    }
+
+    /// The live workers serving this caller's repositories and the
+    /// harnesses each one's machine has: `GET /v1/inventory`.
+    pub fn inventory(&self) -> Result<InventoryReport, Error> {
+        self.get("/v1/inventory")
     }
 
     pub fn operation(&self, id: &str) -> Result<Operation, Error> {
@@ -459,6 +470,43 @@ impl Repo {
         self.client.post(&self.path("/tasks"), request, key)
     }
 
+    /// Start a wide map. Returns once the server has durably accepted it.
+    pub fn submit_map(&self, request: &MapRequest, key: &str) -> Result<Operation, Error> {
+        self.client.post(&self.path("/maps"), request, key)
+    }
+
+    /// Run a recorded map again with the request that started it.
+    pub fn resume_map(
+        &self,
+        name: &str,
+        request: &MapResumeRequest,
+        key: &str,
+    ) -> Result<Operation, Error> {
+        self.client.post(
+            &self.path(&format!("/maps/{}/resume", encode(name))),
+            request,
+            key,
+        )
+    }
+
+    /// The repository's recorded maps.
+    pub fn maps(&self) -> Result<Vec<MapSummary>, Error> {
+        Ok(self.client.get::<MapList>(&self.path("/maps"))?.maps)
+    }
+
+    /// A recorded map's rows and progress.
+    pub fn map(&self, name: &str) -> Result<MapReport, Error> {
+        self.client
+            .get(&self.path(&format!("/maps/{}", encode(name))))
+    }
+
+    /// Forget a map's record; its branches stay.
+    pub fn remove_map(&self, name: &str) -> Result<(), Error> {
+        self.client
+            .delete::<Removed>(&self.path(&format!("/maps/{}", encode(name))))
+            .map(|_| ())
+    }
+
     pub fn send(&self, branch: &str, request: &SendRequest, key: &str) -> Result<Operation, Error> {
         self.client
             .post(&self.branch_path(branch, "/send"), request, key)
@@ -653,6 +701,17 @@ impl Repo {
 
     pub fn branch(&self, name: &str) -> Result<BranchInfo, Error> {
         self.client.get(&self.branch_path(name, ""))
+    }
+
+    /// The caller's queued and running operations of this repository, or
+    /// only those working on `branch`; each says why it waits when no live
+    /// worker can claim it (`Operation::waiting`).
+    pub fn operations(&self, branch: Option<&str>) -> Result<Vec<Operation>, Error> {
+        let path = match branch {
+            Some(branch) => self.path(&format!("/operations?branch={}", encode(branch))),
+            None => self.path("/operations"),
+        };
+        Ok(self.client.get::<api::OperationList>(&path)?.operations)
     }
 
     pub fn diff(&self, name: &str) -> Result<String, Error> {

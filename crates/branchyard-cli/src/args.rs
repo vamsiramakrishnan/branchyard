@@ -62,6 +62,8 @@ pub enum Permissions {
     Yes,
     /// `--ask`: prompt on the terminal.
     Ask,
+    /// `--permissions PRESET`: a named preset's rules.
+    Preset(branchyard::PolicyPreset),
     /// Neither flag: decided by whether a terminal is attached.
     #[default]
     Unset,
@@ -91,6 +93,10 @@ pub struct TaskArgs {
     pub sandbox: Option<SandboxArgs>,
     /// `--provider substrate` and its options.
     pub substrate: Option<SubstrateArgs>,
+    /// `--provider recipe:NAME` and its options; the recipe is resolved
+    /// and its trust checked when the command runs
+    /// (`crate::recipe_cmd::provider`).
+    pub recipe: Option<RecipeArgs>,
     /// `--provider local`.
     pub local: bool,
     /// From `--delegate[=DEPTH]`: levels of children the harness may create.
@@ -106,9 +112,212 @@ pub struct TaskArgs {
     pub provision: Option<branchyard::Provisioning>,
     /// `--instructions FILE`, read when the command runs.
     pub instructions: Option<String>,
-    /// `--issue URL|#N|N`: the GitHub issue that is the task; see
-    /// `crate::pr::issue_task`.
+    /// `--issue URL|#N|N|linear:KEY|jira:KEY|gitlab:PATH#N`: the issue
+    /// that is the task; see `crate::pr::issue_task`.
     pub issue: Option<String>,
+    /// `--pr N`: start from GitHub pull request N's head; see
+    /// `crate::pr::issue_task`.
+    pub pr: Option<u64>,
+    /// `--require-label`: worker labels the server's operation needs.
+    pub require_labels: Vec<String>,
+    /// `--priority`: the server's operation's priority, -10 to 10.
+    pub priority: Option<i32>,
+    /// `--auto`: route through the fleet table, failing over when a harness
+    /// fails. See docs/fleet.md.
+    pub auto: bool,
+    /// Route because the configuration has a `[fleet]` and the command
+    /// names no harness (filled by `crate::defaults`); failover is then the
+    /// entry's.
+    pub implied_auto: bool,
+    /// `--kind`: the task's kind instead of the classifier's.
+    pub kind: Option<branchyard::TaskKind>,
+    /// `--seed`: a reproducible route.
+    pub seed: Option<u64>,
+    /// The configuration's `[fleet]`, when it has one (`crate::defaults`).
+    pub fleet: Option<branchyard::Fleet>,
+    /// `--plan`: plan first, read-only, and wait for `by plan approve`.
+    pub plan: bool,
+    /// `--goal`: a goal a judge verifies when the branch would be ready.
+    pub goal: Option<String>,
+    /// `--goal-rounds`: follow-up turns at most for an unmet goal.
+    pub goal_rounds: Option<u32>,
+    /// `--goal-judge`: the goal's judge harness.
+    pub goal_judge: Option<String>,
+    /// `--goal-judge-command`: launch the goal judge with this.
+    pub goal_judge_command: Option<Vec<String>>,
+}
+
+const PLAN_EXAMPLES: &str = "\
+Examples:
+  by run \"migrate the config loader\" --plan
+  by plan show migrate-the-config-loader
+  by plan approve migrate-the-config-loader --edit
+  by plan reject migrate-the-config-loader --reason \"keep the old flag\" --replan
+
+See docs/plans-and-goals.md.";
+
+const KNOWLEDGE_EXAMPLES: &str = "\
+Examples:
+  by knowledge review
+  by knowledge add \"Run cargo fmt before finishing\" --path \"crates/**\"
+  by knowledge distill fix-parser
+  by knowledge export --out AGENTS.md
+
+See docs/knowledge.md.";
+
+/// `by plan`'s actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum PlanAction {
+    /// Show a branch's plan, its task list and its phase
+    Show { branch: String },
+    /// Approve the plan and run it as the branch's next turn, with normal permissions
+    Approve {
+        branch: String,
+        /// Edit the plan in your editor first; what you save is what is approved
+        #[arg(long, conflicts_with = "file")]
+        edit: bool,
+        /// Approve this file's text instead of the proposed plan
+        #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+        file: Option<String>,
+        /// The editor for --edit: a known name or a command line that waits until the file is
+        /// closed (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR", requires = "edit")]
+        editor: Option<String>,
+        #[command(flatten)]
+        task: Checked<SendFlags>,
+    },
+    /// Reject the plan: the branch ends, or with --replan it plans again with your reason
+    Reject {
+        branch: String,
+        /// Why; with --replan, the branch's next planning turn gets it
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        reason: Option<String>,
+        /// Plan again (read-only) instead of ending the branch
+        #[arg(long)]
+        replan: bool,
+        #[command(flatten)]
+        task: Checked<SendFlags>,
+    },
+}
+
+/// `by knowledge`'s actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum KnowledgeAction {
+    /// The repository's entries (default: proposed and adopted)
+    List {
+        /// Only entries with this status: proposed, adopted or rejected
+        #[arg(long, value_name = "STATUS", value_parser = knowledge_status, conflicts_with = "all")]
+        status: Option<branchyard::KnowledgeStatus>,
+        /// Every entry, rejected ones too
+        #[arg(long)]
+        all: bool,
+    },
+    /// One entry
+    Show { id: u64 },
+    /// Walk the proposed entries one at a time: adopt, reject, edit or skip each
+    Review {
+        /// The editor for edits (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR")]
+        editor: Option<String>,
+    },
+    /// Adopt entries: from now on, matching branches are given them
+    Adopt {
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<u64>,
+    },
+    /// Reject entries: they are not used, and the same text is not proposed again
+    Reject {
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<u64>,
+        /// Why
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+    },
+    /// Change an entry's text (in your editor without --text) or scope
+    Edit {
+        id: u64,
+        /// The new text
+        #[arg(long, value_name = "TEXT", value_parser = non_blank)]
+        text: Option<String>,
+        /// The path glob it applies to; \"\" for the whole repository
+        #[arg(long, value_name = "GLOB")]
+        path: Option<String>,
+        /// The kind of task it applies to; \"\" for every kind
+        #[arg(long, value_name = "KIND")]
+        kind: Option<String>,
+        /// The editor (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR", conflicts_with = "text")]
+        editor: Option<String>,
+    },
+    /// Add an entry you wrote, adopted (or only proposed, with --propose)
+    Add {
+        #[arg(value_parser = non_blank)]
+        text: String,
+        /// Only for tasks touching files matching this glob, such as crates/parser/**
+        #[arg(long, value_name = "GLOB")]
+        path: Option<String>,
+        /// Only for tasks of this kind
+        #[arg(long, value_name = "KIND", value_parser = task_kind)]
+        kind: Option<branchyard::TaskKind>,
+        /// Add it as proposed, for review, instead of adopted
+        #[arg(long)]
+        propose: bool,
+    },
+    /// Remove an entry
+    Rm { id: u64 },
+    /// Propose entries from a branch now: the corrections sent into it and the review comments
+    /// it addressed, or a distiller harness's proposals
+    Distill {
+        branch: String,
+        /// Ask this harness to distill, read-only on a scratch branch (default: [knowledge]
+        /// distiller, else the deterministic extractor)
+        #[arg(long, value_name = "ID", conflicts_with = "deterministic")]
+        harness: Option<String>,
+        /// Launch the distiller with this instead of its executable, for development and testing
+        #[arg(long, value_name = "CMD", value_parser = command_argv, requires = "harness")]
+        command: Option<Argv>,
+        /// Use only the deterministic extractor, even when [knowledge] names a distiller
+        #[arg(long)]
+        deterministic: bool,
+    },
+    /// Adopted entries as an AGENTS.md-style Markdown file
+    Export {
+        /// Write it here instead of stdout
+        #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+        out: Option<String>,
+    },
+}
+
+fn knowledge_status(text: &str) -> Result<branchyard::KnowledgeStatus, String> {
+    text.parse().map_err(|e: branchyard::Error| match e {
+        branchyard::Error::Unsupported(why) => why,
+        other => other.to_string(),
+    })
+}
+
+/// `by fleet`'s actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum FleetAction {
+    /// Recorded outcomes per kind and candidate: runs, merged, judged best, failed, cost, time
+    Stats {
+        /// Only this kind
+        #[arg(long, value_name = "KIND", value_parser = task_kind)]
+        kind: Option<branchyard::TaskKind>,
+    },
+    /// What the router would pick for a prompt, without running anything
+    Route {
+        /// The task
+        prompt: String,
+        /// The task's kind instead of the classifier's
+        #[arg(long, value_name = "KIND", value_parser = task_kind)]
+        kind: Option<branchyard::TaskKind>,
+        /// Attempts, as for `by fan --auto`
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=16))]
+        attempts: Option<u32>,
+        /// Seed the router for a reproducible pick
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+    },
 }
 
 /// Options for `--provider microsandbox`.
@@ -162,6 +371,20 @@ pub struct SubstrateArgs {
     pub lifecycle: LifecycleArgs,
 }
 
+/// Options for `--provider recipe:NAME`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RecipeArgs {
+    /// The recipe's name, `[recipes.NAME]`.
+    pub name: String,
+    /// `--recipe-workdir`: where the worktree goes on the machine.
+    pub workdir: Option<String>,
+    /// `--recipe-home`: the harness's `HOME` on the machine.
+    pub home: Option<String>,
+    pub pass_env: Vec<String>,
+    /// `--keep-sandbox` and `--max-paused`.
+    pub lifecycle: LifecycleArgs,
+}
+
 /// Options of `by spawn`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpawnArgs {
@@ -180,6 +403,11 @@ pub struct SpawnArgs {
     pub after: branchyard::After,
     /// `--bind NAME:ACCESS`, repeatable.
     pub bindings: Vec<branchyard::Binding>,
+    /// `--connector`, repeatable: the child's grant, narrowed to its
+    /// parent's. Empty: its seat's or its parent's.
+    pub connectors: Vec<branchyard::connectors::GrantEntry>,
+    /// `--plan`: the child plans first, read-only.
+    pub plan: bool,
     pub json: bool,
 }
 
@@ -363,6 +591,7 @@ harnesses run as the server's user, with no other isolation.";
 const RUN_EXAMPLES: &str = "\
 Examples:
   by run \"fix the flaky test\" --check \"cargo test -p core\" --yes
+  by run \"fix the flaky test\" --auto --kind bugfix     # routed by [fleet]
   by run \"add a --verbose flag\" -n verbose --harness codex --budget-usd 2
   by run \"port the build\" --provider microsandbox --image ghcr.io/me/claude:1 \\
       --pass-env ANTHROPIC_API_KEY
@@ -371,12 +600,66 @@ Examples:
 const FAN_EXAMPLES: &str = "\
 Examples:
   by fan \"speed up the parser\" --harness claude-code,codex,gemini-cli --check \"cargo test\"
-  by ls";
+  by fan \"fix the parser crash\" --auto --attempts 3 --judge
+  by ls
+
+--auto picks the harnesses from the [fleet] table in branchyard.toml (the
+default when there is a [fleet] and no --harness); --judge then scores the
+attempts and proposes one. See docs/fleet.md.";
+
+const MAP_EXAMPLES: &str = "\
+Examples:
+  by map \"Find the license and stars of {{item.repo}}\" --items repos.csv \\
+      --schema answer.schema.json --out results.csv --concurrency 8 --yes
+  git ls-files '*.md' | by map \"Fix spelling in {{item}}\" --rm --yes
+  by map \"Summarize issue {{item.number}}\" --from-command \"gh issue list --json number\" \\
+      --input-format json --reduce \"Group these by theme\" --yes
+  by map resume find-the-license-and-stars-of-item-repo
+  by map show find-the-license-and-stars-of-item-repo
+
+Each item runs on its own branch, <map>-<item id>. With --schema, each branch
+must end its reply with JSON matching the schema; an invalid answer gets one
+follow-up turn. Running the same command again (or by map resume) skips the
+items done. See docs/map.md.";
+
+const JUDGE_EXAMPLES: &str = "\
+Examples:
+  by judge speed-up-the-parser                  # a fan's branches
+  by judge a b c --harness claude-code --json
+  by judge speed-up-the-parser --pick --discard-others --yes
+
+Runs each attempt's check on its exact candidate, scores it without a model
+(check, diff size, cost, time), and, with a judge harness (--harness, or the
+[fleet] entry's judge), asks it for a JSON verdict on a read-only scratch
+branch. An answer that is not a strict verdict falls back to the
+deterministic score. Local mode only. See docs/fleet.md.";
+
+const FLEET_EXAMPLES: &str = "\
+Examples:
+  by fleet stats
+  by fleet stats --kind bugfix --json
+  by fleet route \"fix the flaky parser test\" --seed 7
+
+The table lives in branchyard.toml as [fleet.<kind>] and [fleet.default];
+see docs/fleet.md.";
 
 const SEND_EXAMPLES: &str = "\
 Examples:
   by send fix-the-flaky-test \"now add a regression test\"
   by send fix-the-flaky-test \"also cover Windows\" --steer";
+
+const REVIEW_EXAMPLES: &str = "\
+Opens the branch's diff in your editor. Write a comment on its own line
+starting with >> under the line it is about (under a file's header: the whole
+file; under an @@ line: the hunk). On save, every comment goes to the branch
+as one prompt, formatted File / Line / User comment, as by send would send it.
+With no comments nothing is sent; an unsent review is kept and reopened.
+
+Examples:
+  by review fix-the-flaky-test
+  by review fix-the-flaky-test --editor \"code --wait\"
+  by review fix-the-flaky-test --print
+  by review fix-the-flaky-test --file review.diff --yes";
 
 const FORK_EXAMPLES: &str = "\
 Examples:
@@ -435,6 +718,20 @@ Examples:
 runs setup before its first turn and teardown when it is removed. Its scripts
 never run until you trust them; see docs/workspace.md.";
 
+const ENV_EXAMPLES: &str = "\
+Examples:
+  by env list
+  by env show
+  by env rebuild
+  by env prune --keep 2 --older-than 7
+  by env pool fill
+
+With prepare = true in [workspace], setup runs once per environment key (the
+setup commands, copy globs and lockfiles) and new branches start from what it
+produced. A failed build never replaces the last good one. See
+docs/environments.md. With [workspace.pool], ready worktrees wait for new
+branches; by serve and by worker refill them. See docs/pools.md.";
+
 const PR_EXAMPLES: &str = "\
 Examples:
   by pr fix-the-flaky-test                       # push, then open or update the PR
@@ -445,6 +742,46 @@ Examples:
 Needs the GitHub CLI, gh, logged in (gh auth login). The branch must be
 ready and its check must pass on its candidate; --allow-not-ready and
 --allow-failing-check override that. Local mode only. See docs/pull-requests.md.";
+
+const HARNESSES_EXAMPLES: &str = "\
+Examples:
+  by harnesses                                  # installed here: version, login, quota
+  by harnesses --on ssh://me@build.example      # on another machine
+  by harnesses --remote https://by.internal     # on a server's live workers
+  by harnesses install codex                    # the catalog's command, under [harnesses] install
+  by harnesses update codex --version 0.200.0 --yes
+  by harnesses login codex                      # its own login flow, once
+  printf %s \"$KEY\" | by harnesses login claude-code --api-key
+  by harnesses --profiles                       # the profiles Branchyard drives
+  by harnesses --all --json | jq '.[] | select(.id == \"codex\") | .install'
+
+Detection never reads a secret: a login is verified only by the harness's own
+status command, otherwise it is likely from credential files and key variables
+by name. Installs run only as [harnesses] install allows (ask on a terminal,
+never elsewhere, unless your user file says otherwise) and are logged. --all
+reads catalog/harnesses.toml, generated from emdash's and Orca's agent
+registries. See docs/harness-lifecycle.md.";
+
+const USAGE_EXAMPLES: &str = "\
+Examples:
+  by usage
+  by usage --json | jq '.logins[] | {harness, five_hour: .five_hour.used_percent}'
+
+Read from each login's own session files, never a credential: Codex records
+its rate limits there; Claude Code records tokens only, so its percent needs
+[usage] claude_five_hour_tokens. [usage] guard = \"refuse\" stops by run and
+by fan near a limit; skip_over makes the router pass a candidate over. See
+docs/usage.md.";
+
+const ADOPT_EXAMPLES: &str = "\
+Examples:
+  by adopt                         # this repository's Claude Code and Codex sessions
+  by adopt 3f2a9c --name parser    # make one a branch
+  by send parser \"now add a test\"  # resumes the adopted session
+
+The branch's worktree starts at the commit the session recorded (Codex), else
+the HEAD of the directory it ran in, with that directory's uncommitted changes
+to tracked files applied (--no-diff leaves them out). See docs/usage.md.";
 
 const OPEN_EXAMPLES: &str = "\
 Examples:
@@ -487,6 +824,42 @@ Examples:
   by config validate ~/.config/branchyard/config.toml
   by config schema > branchyard.config.json";
 
+const MODELS_EXAMPLES: &str = "\
+Examples:
+  by models                        # routes, backends, budgets, and this month's usage
+  by models --period day --json
+  by run --model-gateway 'fix the bug'              # this branch's model calls go through the gateway
+  by run --model-gateway='claude-sonnet-*' 'fix it' # and only to these models
+
+[models] in branchyard.toml names the backends (their API, URL and the secret
+holding each key), the routes by model, and daily and monthly budgets. A
+branch on the gateway gets its own gateway each turn, on the turn's token; the
+key never reaches the harness. See docs/model-gateway.md.";
+
+const GATEWAY_EXAMPLES: &str = "\
+Examples:
+  by gateway start                 # in the background; its log in .branchyard/gateway/
+  by gateway status --json
+  by gateway start --foreground    # in this terminal, until interrupted
+  by gateway rotate-key            # a new signing key; the previous one stays valid
+  by gateway stop
+
+[connectors] in branchyard.toml says where the gateway is (gateway), which
+bundles it serves (bundles) and how to run Anvil (anvil). The gateway reads
+this yard's public keys from .branchyard/gateway/jwks.json and writes its audit
+log to .branchyard/gateway/audit.jsonl, which by log shows. See
+docs/connectors.md.";
+
+const CONNECT_EXAMPLES: &str = "\
+Examples:
+  by connect github
+  by connect github --account work --open
+  by connect github --api-key-stdin < ~/.config/github-token
+
+Runs `anvil connect` against the gateway as you: it opens (or prints) the
+connector's authorization URL, and the gateway keeps the upstream token. A
+harness never sees it. See docs/connectors.md.";
+
 const COMPLETIONS_EXAMPLES: &str = "\
 Examples:
   by completions bash > ~/.local/share/bash-completion/completions/by
@@ -501,7 +874,7 @@ pub enum Command {
     Run {
         /// The task for the harness; quote it (with --issue, added to the issue's text)
         #[arg(
-            required_unless_present = "issue",
+            required_unless_present_any = ["issue", "pr"],
             default_value = "",
             hide_default_value = true
         )]
@@ -514,21 +887,38 @@ pub enum Command {
     Fan {
         /// The task for every harness; quote it (with --issue, added to the issue's text)
         #[arg(
-            required_unless_present = "issue",
+            required_unless_present_any = ["issue", "pr"],
             default_value = "",
             hide_default_value = true
         )]
         prompt: String,
-        /// Harnesses to run on, one branch each
-        #[arg(
-            long = "harness",
-            value_name = "ID,ID,...",
-            required = true,
-            value_parser = harness_list
-        )]
-        harnesses: List,
+        /// Harnesses to run on, one branch each (default with a [fleet]: routed, as --auto)
+        #[arg(long = "harness", value_name = "ID,ID,...", value_parser = harness_list)]
+        harnesses: Option<List>,
+        /// Branches to start when routed (default: the [fleet] entry's attempts)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=16))]
+        attempts: Option<u32>,
+        /// Then judge the attempts and propose one, as `by judge` does
+        #[arg(long)]
+        judge: bool,
         #[command(flatten)]
         task: Checked<FanFlags>,
+    },
+    /// Run one prompt over every item of a list, each on its own branch, and collect the answers
+    #[command(
+        display_order = 101,
+        after_help = MAP_EXAMPLES,
+        args_conflicts_with_subcommands = true,
+        subcommand_negates_reqs = true
+    )]
+    Map {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<MapAction>,
+        #[command(flatten)]
+        map: MapArgs,
     },
     /// Continue a branch's session with another prompt
     #[command(display_order = 102, after_help = SEND_EXAMPLES)]
@@ -546,6 +936,26 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        task: Checked<SendFlags>,
+    },
+    /// Comment on a branch's diff in your editor, then send every comment as one prompt
+    #[command(display_order = 111, after_help = REVIEW_EXAMPLES)]
+    Review {
+        branch: String,
+        /// Print the prompt the comments make instead of sending it
+        #[arg(long)]
+        print: bool,
+        /// The editor: a known name or a command line that waits until the file is closed, such
+        /// as "code --wait" (default: $VISUAL, then $EDITOR)
+        #[arg(long, value_name = "EDITOR", conflicts_with = "file")]
+        editor: Option<String>,
+        /// Read the comments from this edited review file instead of opening an editor
+        #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+        file: Option<String>,
+        /// Send in the background (by send, detached, its output in a log file) and return
+        #[arg(long, conflicts_with = "print")]
+        detach: bool,
         #[command(flatten)]
         task: Checked<SendFlags>,
     },
@@ -591,6 +1001,29 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: WorkspaceAction,
+    },
+    /// Prepared environments: list, show, rebuild or prune them; the warm pool
+    #[command(display_order = 111, subcommand_required = true, after_help = ENV_EXAMPLES)]
+    Env {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: EnvAction,
+    },
+    /// Environment recipes: repository scripts that create a VM; list, check, trust them
+    /// (see docs/recipes.md)
+    #[command(
+        display_order = 112,
+        subcommand_required = true,
+        after_help = crate::recipe_cmd::RECIPE_EXAMPLES
+    )]
+    Recipe {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: crate::recipe_cmd::RecipeAction,
     },
     /// Remove a branch's worktree and record
     #[command(display_order = 106)]
@@ -664,6 +1097,69 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Score attempts at one task, optionally with a judge harness, and propose or merge one
+    #[command(display_order = 109, after_help = JUDGE_EXAMPLES)]
+    Judge {
+        /// A `by fan`'s name, or the branches to judge
+        #[arg(required = true, value_name = "FAN|BRANCH")]
+        targets: Vec<String>,
+        /// Ask this harness for a verdict (default: the [fleet] entry's judge, if any)
+        #[arg(long, value_name = "ID", conflicts_with = "deterministic")]
+        harness: Option<String>,
+        /// Score without a judge harness, even when the [fleet] names one
+        #[arg(long)]
+        deterministic: bool,
+        /// Launch the judge harness with this instead of its executable, for development and
+        /// testing
+        #[arg(long, value_name = "CMD", value_parser = command_argv, requires = "harness")]
+        command: Option<Argv>,
+        /// More rubric for the judge harness, after the default
+        #[arg(long, value_name = "TEXT")]
+        rubric: Option<String>,
+        /// Merge the proposed pick, as `by compare --pick` does
+        #[arg(long)]
+        pick: bool,
+        /// Local branch to merge the pick into (default: the current branch)
+        #[arg(long, value_name = "TARGET", requires = "pick")]
+        into: Option<String>,
+        /// After the pick merges, remove the other attempts
+        #[arg(long, requires = "pick")]
+        discard_others: bool,
+        /// Do not ask before removing the others
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// A branch's plan: show it, approve it (as proposed or edited) or reject it
+    #[command(display_order = 112, subcommand_required = true, after_help = PLAN_EXAMPLES)]
+    Plan {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: PlanAction,
+    },
+    /// Repository knowledge: review, adopt, reject, edit, add, remove or export what agents are
+    /// told
+    #[command(display_order = 113, subcommand_required = true, after_help = KNOWLEDGE_EXAMPLES)]
+    Knowledge {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: KnowledgeAction,
+    },
+    /// The fleet table's routing: outcome statistics, or what a prompt would be routed to
+    #[command(display_order = 207, subcommand_required = true, after_help = FLEET_EXAMPLES)]
+    Fleet {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: FleetAction,
+    },
     /// Push a ready branch and open or update its GitHub pull request; --watch feeds CI and
     /// reviews back
     #[command(display_order = 110, after_help = PR_EXAMPLES)]
@@ -675,6 +1171,13 @@ pub enum Command {
     /// List branches
     #[command(display_order = 200)]
     Ls {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Summarize branches, turns and cost (and, with --remote, the server's queue)
+    #[command(display_order = 209)]
+    Stats {
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -716,12 +1219,67 @@ pub enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// List harness profiles and whether they are installed
-    #[command(display_order = 205)]
+    /// Which harnesses are installed here or elsewhere, with version, login and quota; install,
+    /// update or log in to one
+    #[command(display_order = 205, after_help = HARNESSES_EXAMPLES)]
     Harnesses {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        /// Every harness CLI in catalog/harnesses.toml, with install and login commands, API-key
+        /// variables and models where known, marking the ones Branchyard can drive
+        #[arg(long, conflicts_with_all = ["profiles", "on"])]
+        all: bool,
+        /// The harness profiles Branchyard drives, and whether each is on PATH
+        #[arg(long, conflicts_with = "on")]
+        profiles: bool,
+        /// Detect again rather than use what was detected in the last minute
+        #[arg(long)]
+        refresh: bool,
+        /// Another machine: ssh://[user@]host[:port], or recipe:NAME (a fresh machine from the
+        /// repository's recipe)
+        #[arg(long, value_name = "TARGET", global = true)]
+        on: Option<String>,
+        #[command(subcommand)]
+        action: Option<HarnessesAction>,
+    },
+    /// Each local Claude Code and Codex login's 5-hour and weekly usage, and when it resets
+    #[command(display_order = 208, after_help = USAGE_EXAMPLES)]
+    Usage {
         /// Print JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Make a Claude Code or Codex session already on this machine a branch; --list shows them
+    #[command(display_order = 112, after_help = ADOPT_EXAMPLES)]
+    Adopt {
+        /// The session's ID, or a unique start of it (default: list them)
+        session: Option<String>,
+        /// List this repository's sessions (the default without SESSION)
+        #[arg(long)]
+        list: bool,
+        /// The branch's name (default: a slug of the session's first prompt)
+        #[arg(short, long, conflicts_with = "list")]
+        name: Option<String>,
+        /// Do not carry the session directory's uncommitted changes into the branch
+        #[arg(long, conflicts_with = "list")]
+        no_diff: bool,
+        /// The profile its turns run with, one of the session's harness's (default: the
+        /// harness's default profile), such as claude-code-acp
+        #[arg(long, value_name = "ID", conflicts_with = "list")]
+        harness: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// The catalog of connectors Anvil can adopt (see docs/connectors.md)
+    #[command(display_order = 207, subcommand_required = true)]
+    Connectors {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: ConnectorsAction,
     },
     /// Open a branch's worktree in your editor
     #[command(display_order = 206, after_help = OPEN_EXAMPLES)]
@@ -934,6 +1492,34 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         branch: String,
     },
+    /// Tasks on a schedule or from webhooks: add, list, show, test, enable, disable, rm, runs
+    /// (see docs/triggers.md)
+    #[command(
+        display_order = 503,
+        subcommand_required = true,
+        after_help = crate::trigger_cmd::TRIGGER_EXAMPLES
+    )]
+    Trigger {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: crate::trigger_cmd::TriggerAction,
+    },
+    /// Servers by --remote ssh:// started on other hosts: their status, or stop one
+    /// (see docs/remote-ssh.md)
+    #[command(
+        display_order = 504,
+        subcommand_required = true,
+        after_help = crate::ssh_remote::REMOTE_EXAMPLES
+    )]
+    Remote {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: crate::ssh_remote::RemoteAction,
+    },
     /// Print a shell completion script for by
     #[command(display_order = 600, after_help = COMPLETIONS_EXAMPLES)]
     Completions {
@@ -958,6 +1544,105 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
+    #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
+    Gateway {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: GatewayAction,
+    },
+    /// The model gateway: its routes, backends and budgets, and what its calls cost
+    #[command(display_order = 405, after_help = MODELS_EXAMPLES)]
+    Models {
+        /// Usage over this period (UTC): day, month, or all
+        #[arg(long, value_name = "PERIOD", default_value = "month", value_parser = ["day", "month", "all"])]
+        period: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect your account for a connector through the gateway (anvil connect)
+    #[command(display_order = 404, after_help = CONNECT_EXAMPLES)]
+    Connect {
+        /// The connector, as the gateway serves it, such as github
+        connector: String,
+        /// Which of your accounts to connect (default: your default account)
+        #[arg(long, value_name = "NAME")]
+        account: Option<String>,
+        /// For a key-based connector: read the API key or personal token from stdin
+        #[arg(long)]
+        api_key_stdin: bool,
+        /// Also open the authorization URL in your browser
+        #[arg(long)]
+        open: bool,
+    },
+}
+
+/// `by gateway ...`; see docs/connectors.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum GatewayAction {
+    /// Start the gateway, supervised, in the background (or in this terminal)
+    Start {
+        /// Run in this terminal until interrupted, restarting the gateway if it exits
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop the gateway started in the background
+    Stop,
+    /// Whether the gateway runs and listens, what it serves, and the signing keys
+    Status,
+    /// Put a new signing key first; tokens the previous one signed stay valid until they expire
+    RotateKey {
+        /// Older keys to keep publishing
+        #[arg(long, value_name = "N", default_value = "1")]
+        keep: usize,
+    },
+    /// Print the public keys the gateway verifies tokens against (JWKS)
+    Jwks,
+}
+
+/// `by harnesses ACTION`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum HarnessesAction {
+    /// Install a harness with the catalog's command, when [harnesses] install allows, then
+    /// check it is there
+    Install(HarnessChange),
+    /// Install a harness again at a newer or pinned version, then check it
+    Update(HarnessChange),
+    /// Log in to a harness once, through its own flow, or store its API key
+    Login {
+        /// The harness's ID, as `by harnesses --all` lists it
+        id: String,
+        /// Store an API key, read from standard input, for the harness's key variable instead
+        /// (in a 0600 file beside your user configuration, named in its [secrets])
+        #[arg(long)]
+        api_key: bool,
+    },
+    /// Every install, update and login recorded on this machine
+    Log,
+}
+
+/// What `by harnesses install|update` takes.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct HarnessChange {
+    /// The harness's ID, as `by harnesses --all` lists it
+    pub id: String,
+    /// The version to install (default: the version its profile was checked against, where
+    /// the install command can take one)
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+    /// Answer yes to installing ([harnesses] install = "ask")
+    #[arg(long)]
+    pub yes: bool,
+}
+
+/// `by connectors ...`.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum ConnectorsAction {
+    /// Every connector in catalog/connectors.toml: kind, authentication, credential names
+    Catalog,
 }
 
 /// `by workspace ...`; see docs/workspace.md.
@@ -972,16 +1657,85 @@ pub enum WorkspaceAction {
     Trust,
     /// Forget the trust decision for this repository
     Untrust,
-    /// Run a named [workspace.run] script in a branch's worktree
+    /// Run a named [workspace.run] script in a branch's worktree; with --detach, several at once
     Run {
         /// The branch (default: $BRANCHYARD_BRANCH inside a harness), then the
-        /// script's name (default: the one marked default, or the only one)
-        #[arg(value_name = "BRANCH [NAME]", num_args = 0..=2)]
+        /// script's name (default: the one marked default, or the only one); with --detach,
+        /// several names start each its own script, each with its own port
+        #[arg(value_name = "BRANCH [NAME...]")]
         args: Vec<String>,
         /// Start it in the background, output to a log file, and return
         #[arg(long)]
         detach: bool,
     },
+    /// The TCP ports a branch's processes listen on (default: every branch's)
+    Ports {
+        /// One branch (default: every branch with a worktree here)
+        branch: Option<String>,
+    },
+    /// Open a port a branch listens on in a browser ($BROWSER, xdg-open or open)
+    Browse {
+        /// The branch (default: $BRANCHYARD_BRANCH inside a harness)
+        branch: Option<String>,
+        /// The port (default: the branch's only one, or its reserved BRANCHYARD_PORT)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the URL instead of opening it
+        #[arg(long)]
+        print: bool,
+    },
+    /// Stop the processes listening on a branch's ports (SIGTERM)
+    Kill {
+        /// The branch (default: $BRANCHYARD_BRANCH inside a harness)
+        branch: Option<String>,
+        /// Only the process listening on this port
+        #[arg(long)]
+        port: Option<u16>,
+        /// Do not ask first
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// `by env ...`; see docs/environments.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum EnvAction {
+    /// Every prepared environment and recorded failure, newest first
+    List,
+    /// One environment: its inputs, setup, what it holds (default: the current key)
+    Show {
+        /// A key, or the start of one
+        key: Option<String>,
+    },
+    /// Build the current key's environment now from HEAD; a failure keeps the last good one
+    Rebuild,
+    /// Remove old environments; the newest of each recipe and linked ones stay
+    Prune {
+        /// Only these keys (or starts of keys), even the newest
+        #[arg(value_name = "KEY")]
+        keys: Vec<String>,
+        /// Good environments kept per recipe (default 3)
+        #[arg(long, value_name = "N")]
+        keep: Option<usize>,
+        /// Remove those unused for this many days (default 14)
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u64>,
+    },
+    /// The warm pool of ready worktrees (`[workspace.pool]`); see docs/pools.md
+    #[command(subcommand)]
+    Pool(PoolAction),
+}
+
+/// `by env pool ...`; see docs/pools.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum PoolAction {
+    /// The pool's slots: ready, being made, being claimed
+    Status,
+    /// Discard stale slots and make new ones until the pool is full (runs setup when
+    /// the environment is not built)
+    Fill,
+    /// Remove every ready slot on this host
+    Drain,
 }
 
 /// `by config ...`.
@@ -1392,6 +2146,25 @@ impl ScratchAction {
     }
 }
 
+impl Command {
+    /// The recipe `--provider recipe:NAME` names, for commands that take
+    /// it: a server never runs one, so remote mode refuses it before
+    /// connecting.
+    pub fn recipe(&self) -> Option<&str> {
+        let task: &TaskArgs = match self {
+            Command::Run { task, .. } => task,
+            Command::Fan { task, .. } => task,
+            Command::Fork { task, .. } => task,
+            Command::Reincarnate { task, .. } => task,
+            Command::Send { task, .. } => task,
+            Command::Review { task, .. } => task,
+            Command::Spawn { spawn, .. } => &spawn.task,
+            _ => return None,
+        };
+        task.recipe.as_ref().map(|r| r.name.as_str())
+    }
+}
+
 /// Flags whose combination is checked after clap parses them, producing
 /// [`Flags::Output`]; flattened into a command as [`Checked<Self>`].
 pub trait Flags: Args + FromArgMatches {
@@ -1539,7 +2312,7 @@ impl From<AfterArg> for branchyard::After {
 }
 
 /// `--provider`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderArg {
     /// A process on this host (the default for a new branch)
     Local,
@@ -1547,6 +2320,30 @@ pub enum ProviderArg {
     Microsandbox,
     /// An Agent Substrate actor; needs the --substrate-* endpoints and key
     Substrate,
+    /// The machine an environment recipe makes (`recipe:NAME`)
+    Recipe(String),
+}
+
+/// `local`, `microsandbox`, `substrate` or `recipe:NAME`.
+fn provider_arg(value: &str) -> Result<ProviderArg, String> {
+    match value {
+        "local" => Ok(ProviderArg::Local),
+        "microsandbox" => Ok(ProviderArg::Microsandbox),
+        "substrate" => Ok(ProviderArg::Substrate),
+        other => match other.strip_prefix("recipe:") {
+            Some(name) if branchyard_setup::config::valid_recipe_name(name) => {
+                Ok(ProviderArg::Recipe(name.to_owned()))
+            }
+            Some(name) => Err(format!(
+                "{name:?} is not a recipe name (1 to 64 of a-z, 0-9, '.', '_' and '-', \
+                 starting with a letter or digit)"
+            )),
+            None => Err(format!(
+                "{other:?} is not a provider [possible values: local, microsandbox, substrate, \
+                 recipe:NAME]"
+            )),
+        },
+    }
 }
 
 /// `--check`, the budget, turn and time limits, and stall detection.
@@ -1556,7 +2353,8 @@ pub struct Limits {
     /// Check to pass before merging, such as "cargo test"; split like a shell, run without one
     #[arg(long, value_name = "CMD", value_parser = check_argv)]
     check: Option<Argv>,
-    /// Stop once the harness's own cost estimate exceeds X dollars
+    /// Stop once the harness's own cost estimate, or on the model gateway its metered cost,
+    /// exceeds X dollars
     #[arg(long, value_name = "X", value_parser = usd, allow_negative_numbers = true)]
     budget_usd: Option<f64>,
     /// Stop after N turns
@@ -1594,6 +2392,15 @@ pub struct Perms {
     /// Ask on the terminal for each tool permission request
     #[arg(long)]
     ask: bool,
+    /// Answer tool permission requests by a named preset: read-only, edit-worktree, or full
+    /// (as --yes); see docs/egress.md#permission-presets
+    #[arg(
+        long,
+        value_name = "PRESET",
+        value_parser = branchyard::PolicyPreset::parse,
+        conflicts_with_all = ["yes", "ask"]
+    )]
+    permissions: Option<branchyard::PolicyPreset>,
     /// Run a profile that does not route tool permission requests to Branchyard (Antigravity,
     /// Pi, Amp); its tools run under the harness's own configuration
     #[arg(long)]
@@ -1602,10 +2409,11 @@ pub struct Perms {
 
 impl Perms {
     fn apply(self, task: &mut TaskArgs) {
-        task.permissions = match (self.yes, self.ask) {
-            (true, _) => Permissions::Yes,
-            (false, true) => Permissions::Ask,
-            (false, false) => Permissions::Unset,
+        task.permissions = match (self.yes, self.ask, self.permissions) {
+            (true, _, _) => Permissions::Yes,
+            (false, true, _) => Permissions::Ask,
+            (false, false, Some(preset)) => Permissions::Preset(preset),
+            (false, false, None) => Permissions::Unset,
         };
         task.unapproved_tools = self.allow_unapproved_tools;
     }
@@ -1621,8 +2429,9 @@ pub struct Launch {
     /// Launch this instead of the profile's executable, for development and testing
     #[arg(long, value_name = "CMD", value_parser = command_argv)]
     command: Option<Argv>,
-    /// Where the harness runs (default: local, or the branch's own)
-    #[arg(long, value_name = "PROVIDER")]
+    /// Where the harness runs: local, microsandbox, substrate or recipe:NAME (default: local,
+    /// or the branch's own)
+    #[arg(long, value_name = "PROVIDER", value_parser = provider_arg)]
     provider: Option<ProviderArg>,
     /// Variables to copy into the sandbox, such as API keys; nothing else is
     #[arg(long, value_name = "NAME,NAME,...", value_parser = variable_names)]
@@ -1632,11 +2441,39 @@ pub struct Launch {
     #[command(flatten)]
     substrate: SubstrateFlags,
     #[command(flatten)]
+    recipe: RecipeFlags,
+    #[command(flatten)]
     lifecycle: LifecycleFlags,
+    /// With --remote: only a worker carrying this label runs it (repeatable)
+    #[arg(long = "require-label", value_name = "LABEL")]
+    require_label: Vec<String>,
+    /// With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's
+    /// parent's); higher runs first
+    #[arg(
+        long,
+        value_name = "N",
+        allow_negative_numbers = true,
+        value_parser = clap::value_parser!(i32).range(-10..=10)
+    )]
+    priority: Option<i32>,
 }
 
 #[derive(Args, Clone, Debug, Default, PartialEq)]
-#[command(next_help_heading = "Sandbox lifecycle (--provider microsandbox or substrate)")]
+#[command(next_help_heading = "Recipe provider (--provider recipe:NAME)")]
+pub struct RecipeFlags {
+    /// Where the worktree is copied on the machine (default:
+    /// /tmp/branchyard/<branch>-<hash>/workspace)
+    #[arg(long, value_name = "PATH")]
+    recipe_workdir: Option<String>,
+    /// The harness's HOME on the machine (default: beside the workdir)
+    #[arg(long, value_name = "PATH")]
+    recipe_home: Option<String>,
+}
+
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(
+    next_help_heading = "Sandbox lifecycle (--provider microsandbox, substrate or recipe:NAME)"
+)]
 pub struct LifecycleFlags {
     /// Between turns: destroy the sandbox (default) or pause it for the next turn
     #[arg(long, value_name = "WHAT", value_parser = keep_sandbox)]
@@ -1764,9 +2601,29 @@ impl SubstrateFlags {
 impl Launch {
     fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
         task.isolated = self.isolated;
+        task.require_labels = self.require_label.clone();
+        task.priority = self.priority;
         task.command = self.command.map(|argv| argv.0);
         let chosen = self.provider;
         let micro = &self.microsandbox;
+        let recipe = matches!(chosen, Some(ProviderArg::Recipe(_)));
+        if !recipe {
+            let given = [
+                ("recipe-workdir", self.recipe.recipe_workdir.is_some()),
+                ("recipe-home", self.recipe.recipe_home.is_some()),
+            ]
+            .into_iter()
+            .find_map(|(flag, given)| given.then_some(flag));
+            if let Some(flag) = given {
+                return Err(format!("--{flag} needs --provider recipe:NAME"));
+            }
+        } else if self.lifecycle.sandbox_snapshots.is_some() {
+            return Err(
+                "--sandbox-snapshots does not apply to a recipe's machine, which has no \
+                 snapshots"
+                    .into(),
+            );
+        }
         if chosen != Some(ProviderArg::Microsandbox) {
             let given = [
                 ("image", micro.image.is_some()),
@@ -1786,12 +2643,14 @@ impl Launch {
             }
         }
         if matches!(chosen, None | Some(ProviderArg::Local)) && self.pass_env.is_some() {
-            return Err("--pass-env needs --provider microsandbox or substrate".into());
+            return Err(
+                "--pass-env needs --provider microsandbox, substrate or recipe:NAME".into(),
+            );
         }
         if matches!(chosen, None | Some(ProviderArg::Local)) {
             if let Some(flag) = self.lifecycle.first_given() {
                 return Err(format!(
-                    "--{flag} needs --provider microsandbox or substrate"
+                    "--{flag} needs --provider microsandbox, substrate or recipe:NAME"
                 ));
             }
         }
@@ -1800,6 +2659,22 @@ impl Launch {
         match chosen {
             None => {}
             Some(ProviderArg::Local) => task.local = true,
+            Some(ProviderArg::Recipe(name)) => {
+                let path = |value: Option<String>, flag: &str| match value {
+                    Some(path) if !path.starts_with('/') => Err(format!(
+                        "--{flag} is a path on the recipe's machine and must be absolute, not \
+                         {path:?}"
+                    )),
+                    other => Ok(other),
+                };
+                task.recipe = Some(RecipeArgs {
+                    name,
+                    workdir: path(self.recipe.recipe_workdir, "recipe-workdir")?,
+                    home: path(self.recipe.recipe_home, "recipe-home")?,
+                    pass_env,
+                    lifecycle,
+                });
+            }
             Some(ProviderArg::Microsandbox) => {
                 let image = self
                     .microsandbox
@@ -1901,6 +2776,31 @@ pub struct Provision {
     /// Send the harness's OpenTelemetry to this OTLP/gRPC collector, or turn it off
     #[arg(long, value_name = "URL|off", value_parser = branchyard::Telemetry::parse)]
     telemetry: Option<branchyard::Telemetry>,
+    /// A connector the harness may call through the gateway (docs/connectors.md):
+    /// CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]], such as github:read or
+    /// 'github:write:issues.*'; only into its private home (--isolated or a sandbox). Repeatable
+    #[arg(long = "connector", value_name = "GRANT", value_parser = branchyard::connectors::GrantEntry::parse)]
+    connectors: Vec<branchyard::connectors::GrantEntry>,
+    /// The hosts the harness may reach (docs/egress.md): open, none, or HOST[:PORT] rules
+    /// separated by commas, such as 'github.com,*.npmjs.org:443'
+    #[arg(long, value_name = "open|none|HOSTS", value_parser = branchyard::Network::parse_flag)]
+    network: Option<branchyard::Network>,
+    /// Refuse to run where the network policy cannot be enforced (required), or run with the
+    /// proxy's variables only and say so (best-effort, the default)
+    #[arg(long, value_name = "MODE", value_parser = branchyard::NetworkEnforce::parse, requires = "network")]
+    network_enforce: Option<branchyard::NetworkEnforce>,
+    /// Call the harness's models through Branchyard's model gateway (docs/model-gateway.md),
+    /// which holds the provider's key, meters every call and holds the budgets; =MODELS limits
+    /// it to these models, globs separated by commas, such as 'claude-sonnet-*'
+    #[arg(
+        long,
+        value_name = "MODELS",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "*",
+        value_parser = branchyard::models::ModelAccess::parse_flag
+    )]
+    model_gateway: Option<branchyard::models::ModelAccess>,
 }
 
 impl Provision {
@@ -1912,6 +2812,11 @@ impl Provision {
             model: self.model,
             effort: self.effort,
             telemetry: self.telemetry,
+            connectors: self.connectors,
+            network: self
+                .network
+                .map(|n| n.with_enforce(self.network_enforce.unwrap_or_default())),
+            models: self.model_gateway,
             ..branchyard::Provisioning::default()
         };
         task.provision = (!spec.is_empty() || self.instructions.is_some()).then_some(spec);
@@ -1922,12 +2827,18 @@ impl Provision {
 /// `by run`'s options.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 pub struct RunFlags {
-    /// Harness or profile ID (default: claude-code)
+    /// Harness or profile ID (default: claude-code, or routed when there is a [fleet])
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
-    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
-    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    #[command(flatten)]
+    route: RouteFlags,
+    /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,
+    /// gitlab:GROUP/PROJECT#N, or a Linear, Jira or GitLab URL; a prompt, if given, is added
+    #[arg(long, value_name = "REF", value_parser = non_blank)]
     issue: Option<String>,
+    /// Start from GitHub pull request N's head (fetched with gh and git); by pr then updates it
+    #[arg(long, value_name = "N", conflicts_with_all = ["issue", "base"])]
+    pr: Option<u64>,
     /// Branch name (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
@@ -1944,16 +2855,25 @@ pub struct RunFlags {
     delegation: Delegation,
     #[command(flatten)]
     provision: Provision,
+    #[command(flatten)]
+    plan_goal: PlanGoal,
 }
 
 impl Flags for RunFlags {
     type Output = TaskArgs;
     fn check(self) -> Result<TaskArgs, String> {
+        if self.route.auto && self.harness.is_some() {
+            return Err("--auto routes through the [fleet] table; it takes no --harness".into());
+        }
         let mut task = TaskArgs {
             harness: self.harness,
             name: self.name,
             base: self.base,
             issue: self.issue,
+            pr: self.pr,
+            auto: self.route.auto,
+            kind: self.route.kind,
+            seed: self.route.seed,
             ..TaskArgs::default()
         };
         self.limits.apply(&mut task);
@@ -1961,8 +2881,67 @@ impl Flags for RunFlags {
         self.launch.apply(&mut task)?;
         self.delegation.apply(&mut task);
         self.provision.apply(&mut task);
+        self.plan_goal.apply(&mut task);
         Ok(task)
     }
+}
+
+/// Plan approval and goals, for `run` and `fan`; see docs/plans-and-goals.md.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Plan and goal")]
+pub struct PlanGoal {
+    /// Plan first: the first turn runs read-only and proposes a plan, and the branch waits for
+    /// `by plan approve` (or reject) before anything changes
+    #[arg(long)]
+    plan: bool,
+    /// A goal a judge must find evidence of before the branch is done; unmet, it gets follow-up
+    /// turns with what is missing
+    #[arg(long, value_name = "TEXT", value_parser = non_blank)]
+    goal: Option<String>,
+    /// Follow-up turns at most for an unmet goal (default 2), within the budget
+    #[arg(long, value_name = "N", requires = "goal", value_parser = clap::value_parser!(u32).range(0..=20))]
+    goal_rounds: Option<u32>,
+    /// The goal's judge harness, read-only on a scratch branch (default: the [fleet] entry's
+    /// goal_judge; without one, the branch's check and a non-empty diff decide)
+    #[arg(long, value_name = "ID", requires = "goal")]
+    goal_judge: Option<String>,
+    /// Launch the goal judge with this instead of its executable, for development and testing
+    #[arg(long, value_name = "CMD", value_parser = command_argv, requires = "goal_judge")]
+    goal_judge_command: Option<Argv>,
+}
+
+impl PlanGoal {
+    fn apply(self, task: &mut TaskArgs) {
+        task.plan = self.plan;
+        task.goal = self.goal;
+        task.goal_rounds = self.goal_rounds;
+        task.goal_judge = self.goal_judge;
+        task.goal_judge_command = self.goal_judge_command.map(|a| a.0);
+    }
+}
+
+/// Routing through the fleet table, for `run` and `fan`; see docs/fleet.md.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+#[command(next_help_heading = "Routing")]
+pub struct RouteFlags {
+    /// Pick the harness from the [fleet] table in branchyard.toml, learning from outcomes, and
+    /// fail over to the next candidate when a harness fails
+    #[arg(long)]
+    auto: bool,
+    /// The task's kind (default: inferred from the prompt): bugfix, feature, refactor, review,
+    /// research, docs, migration, tests, other
+    #[arg(long, value_name = "KIND", value_parser = task_kind)]
+    kind: Option<branchyard::TaskKind>,
+    /// Seed the router, for a reproducible pick
+    #[arg(long, value_name = "N")]
+    seed: Option<u64>,
+}
+
+fn task_kind(text: &str) -> Result<branchyard::TaskKind, String> {
+    text.parse().map_err(|e: branchyard::Error| match e {
+        branchyard::Error::Unsupported(why) => why,
+        other => other.to_string(),
+    })
 }
 
 /// `by fan`'s options: `run`'s, with `--harness` a list, taken by the
@@ -1972,9 +2951,15 @@ pub struct FanFlags {
     /// Branch name prefix (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
-    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
-    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    #[command(flatten)]
+    route: RouteFlags,
+    /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,
+    /// gitlab:GROUP/PROJECT#N, or a Linear, Jira or GitLab URL; a prompt, if given, is added
+    #[arg(long, value_name = "REF", value_parser = non_blank)]
     issue: Option<String>,
+    /// Start from GitHub pull request N's head (fetched with gh and git); by pr then updates it
+    #[arg(long, value_name = "N", conflicts_with_all = ["issue", "base"])]
+    pr: Option<u64>,
     /// Base revision (default: HEAD)
     #[arg(short, long, value_name = "REV")]
     base: Option<String>,
@@ -1988,6 +2973,8 @@ pub struct FanFlags {
     delegation: Delegation,
     #[command(flatten)]
     provision: Provision,
+    #[command(flatten)]
+    plan_goal: PlanGoal,
 }
 
 impl Flags for FanFlags {
@@ -1995,7 +2982,9 @@ impl Flags for FanFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: None,
+            route: self.route,
             issue: self.issue,
+            pr: self.pr,
             name: self.name,
             base: self.base,
             limits: self.limits,
@@ -2003,6 +2992,130 @@ impl Flags for FanFlags {
             launch: self.launch,
             delegation: self.delegation,
             provision: self.provision,
+            plan_goal: self.plan_goal,
+        }
+        .check()
+    }
+}
+
+/// `by map`'s actions besides running one.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum MapAction {
+    /// Run a recorded map again with its command line and items, skipping the items done
+    Resume {
+        name: String,
+        /// Run the items that failed again too
+        #[arg(long)]
+        retry_failed: bool,
+    },
+    /// The recorded maps and their progress
+    Ls,
+    /// A map's progress, its items' results and its reduce
+    Show { name: String },
+    /// Forget a map's record (its branches stay; remove them with by rm)
+    Rm { name: String },
+}
+
+/// `by map`'s run: the prompt template, where the items come from, the
+/// answer's schema, the results, and the branches' options.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct MapArgs {
+    /// The prompt template: {{item}}, {{item.FIELD}} (a path such as {{item.a.0.b}}), {{id}},
+    /// {{index}} and {{map}} are replaced for each item
+    #[arg(required = true)]
+    pub prompt: Option<String>,
+    /// Read the items from this file (- for standard input): JSON lines, a JSON array, CSV with a
+    /// header, or one item per line, by its extension (default: standard input)
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub items: Option<String>,
+    /// Read the items from this shell command's output, run in the repository as you
+    #[arg(long, value_name = "CMD", conflicts_with = "items", value_parser = non_blank)]
+    pub from_command: Option<String>,
+    /// How the items are written: jsonl, json, csv or lines (default: the file's extension, else
+    /// guessed from the first character: [ for json, { for jsonl, else lines)
+    #[arg(long, value_name = "FORMAT", value_parser = item_format)]
+    pub input_format: Option<branchyard::ItemFormat>,
+    /// Each branch must answer with JSON matching this JSON Schema (a subset; see docs/map.md);
+    /// without one, an item's result is its last reply's text
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub schema: Option<String>,
+    /// Write the results here as each item ends: CSV for a .csv file, else JSON lines
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub out: Option<String>,
+    /// Branches running at once (default 4)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64))]
+    pub concurrency: Option<u32>,
+    /// New branches an item gets after its first fails (default 1)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(0..=10))]
+    pub retries: Option<u32>,
+    /// Stop starting items once the map has cost X dollars, across runs (per branch, use
+    /// --budget-usd)
+    #[arg(long, value_name = "X", value_parser = usd)]
+    pub total_usd: Option<f64>,
+    /// Then one more branch, given every result, answers this prompt: the map's summary
+    #[arg(long, value_name = "PROMPT", value_parser = non_blank)]
+    pub reduce: Option<String>,
+    /// Write the reduce's answer to this file too
+    #[arg(long, value_name = "FILE", requires = "reduce", value_hint = ValueHint::FilePath)]
+    pub reduce_out: Option<String>,
+    /// Remove an item's branches once its answer is recorded (failed items' branches are kept)
+    #[arg(long)]
+    pub rm: bool,
+    /// Run the items that failed in an earlier run again
+    #[arg(long)]
+    pub retry_failed: bool,
+    #[command(flatten)]
+    pub task: Checked<MapFlags>,
+}
+
+fn item_format(text: &str) -> Result<branchyard::ItemFormat, String> {
+    text.parse().map_err(|e: branchyard::Error| match e {
+        branchyard::Error::Unsupported(why) => why,
+        other => other.to_string(),
+    })
+}
+
+/// `by map`'s branch options: `run`'s, without an issue, a pull request,
+/// delegation, a plan or a goal.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct MapFlags {
+    /// Harness or profile ID (default: claude-code, or routed when there is a [fleet])
+    #[arg(long, value_name = "ID")]
+    harness: Option<String>,
+    /// The map's name, which its branches' names start with (default: a slug of the prompt)
+    #[arg(short, long)]
+    name: Option<String>,
+    /// Base revision of every branch (default: HEAD)
+    #[arg(short, long, value_name = "REV")]
+    base: Option<String>,
+    #[command(flatten)]
+    route: RouteFlags,
+    #[command(flatten)]
+    limits: Limits,
+    #[command(flatten)]
+    perms: Perms,
+    #[command(flatten)]
+    launch: Launch,
+    #[command(flatten)]
+    provision: Provision,
+}
+
+impl Flags for MapFlags {
+    type Output = TaskArgs;
+    fn check(self) -> Result<TaskArgs, String> {
+        RunFlags {
+            harness: self.harness,
+            route: self.route,
+            issue: None,
+            pr: None,
+            name: self.name,
+            base: self.base,
+            limits: self.limits,
+            perms: self.perms,
+            launch: self.launch,
+            delegation: Delegation::default(),
+            provision: self.provision,
+            plan_goal: PlanGoal::default(),
         }
         .check()
     }
@@ -2023,6 +3136,18 @@ pub struct SendFlags {
     delegation: Delegation,
     #[command(flatten)]
     provision: Provision,
+    /// With --remote: only a worker carrying this label runs it (repeatable)
+    #[arg(long = "require-label", value_name = "LABEL", help_heading = "Launch")]
+    require_label: Vec<String>,
+    /// With --remote: the operation's priority, -10 to 10 (default 0); higher runs first
+    #[arg(
+        long,
+        value_name = "N",
+        allow_negative_numbers = true,
+        value_parser = clap::value_parser!(i32).range(-10..=10),
+        help_heading = "Launch"
+    )]
+    priority: Option<i32>,
 }
 
 impl Flags for SendFlags {
@@ -2030,6 +3155,8 @@ impl Flags for SendFlags {
     fn check(self) -> Result<TaskArgs, String> {
         let mut task = TaskArgs {
             command: self.command.map(|argv| argv.0),
+            require_labels: self.require_label,
+            priority: self.priority,
             ..TaskArgs::default()
         };
         self.limits.apply(&mut task);
@@ -2063,7 +3190,9 @@ impl Flags for ForkFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: None,
+            route: RouteFlags::default(),
             issue: None,
+            pr: None,
             name: self.name,
             base: None,
             limits: self.limits,
@@ -2071,6 +3200,7 @@ impl Flags for ForkFlags {
             launch: self.launch,
             delegation: self.delegation,
             provision: self.provision,
+            plan_goal: PlanGoal::default(),
         }
         .check()
     }
@@ -2102,7 +3232,9 @@ impl Flags for ReincarnateFlags {
     fn check(self) -> Result<TaskArgs, String> {
         RunFlags {
             harness: self.harness,
+            route: RouteFlags::default(),
             issue: None,
+            pr: None,
             name: self.name,
             base: None,
             limits: self.limits,
@@ -2110,6 +3242,7 @@ impl Flags for ReincarnateFlags {
             launch: self.launch,
             delegation: self.delegation,
             provision: self.provision,
+            plan_goal: PlanGoal::default(),
         }
         .check()
     }
@@ -2128,8 +3261,9 @@ pub struct SpawnFlags {
     /// Harness or profile ID (default: claude-code)
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
-    /// Take the task from this GitHub issue (fetched with gh); a prompt, if given, is added to it
-    #[arg(long, value_name = "URL|#N|N", value_parser = non_blank)]
+    /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,
+    /// gitlab:GROUP/PROJECT#N, or a Linear, Jira or GitLab URL; a prompt, if given, is added
+    #[arg(long, value_name = "REF", value_parser = non_blank)]
     issue: Option<String>,
     /// Branch name (default: a slug of the prompt)
     #[arg(short, long)]
@@ -2171,6 +3305,14 @@ pub struct SpawnGraph {
     /// writer lock for each turn); repeatable
     #[arg(long = "bind", value_name = "SCRATCH:ACCESS", value_parser = branchyard::Binding::parse)]
     bindings: Vec<branchyard::Binding>,
+    /// A connector the child may use, within its parent's grant (default: its seat's or its
+    /// parent's): CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]]. Repeatable
+    #[arg(long = "connector", value_name = "GRANT", value_parser = branchyard::connectors::GrantEntry::parse)]
+    connectors: Vec<branchyard::connectors::GrantEntry>,
+    /// Plan first: the child's first turn is read-only and its plan is escalated to the
+    /// parent's inbox; it changes nothing until `by plan approve`
+    #[arg(long)]
+    plan: bool,
 }
 
 impl Flags for SpawnFlags {
@@ -2195,6 +3337,8 @@ impl Flags for SpawnFlags {
             depends_on: self.graph.depends_on.map(|list| list.0).unwrap_or_default(),
             after: self.graph.after.map(Into::into).unwrap_or_default(),
             bindings: self.graph.bindings,
+            connectors: self.graph.connectors,
+            plan: self.graph.plan,
             json: self.json,
         })
     }
@@ -2221,6 +3365,9 @@ pub struct PrArgs {
     pub interval: Duration,
     /// `--max-rounds`: stop after delivering feedback this many times.
     pub max_rounds: Option<u32>,
+    /// `--no-resolve`: leave review threads the watch fed back unresolved
+    /// after a push addresses them.
+    pub no_resolve: bool,
     /// Limits and permissions for the turns `--watch` starts.
     pub task: TaskArgs,
     pub json: bool,
@@ -2283,6 +3430,10 @@ pub struct PrFlags {
         help_heading = "Watching"
     )]
     max_rounds: Option<u32>,
+    /// With --watch: do not reply "Addressed in <commit>" to, and resolve, the review threads it
+    /// fed back once a pushed commit changes their files
+    #[arg(long, requires = "watch", help_heading = "Watching")]
+    no_resolve: bool,
     /// Print JSON
     #[arg(long, conflicts_with = "watch")]
     json: bool,
@@ -2321,6 +3472,7 @@ impl Flags for PrFlags {
             watch: self.watch,
             interval: self.interval,
             max_rounds: self.max_rounds,
+            no_resolve: self.no_resolve,
             task,
             json: self.json,
         })
@@ -2727,6 +3879,7 @@ mod tests {
             Command::Fork { task, .. } => task.into_inner(),
             Command::Reincarnate { task, .. } => task.into_inner(),
             Command::Send { task, .. } => task.into_inner(),
+            Command::Review { task, .. } => task.into_inner(),
             other => panic!("{other:?} has no task"),
         }
     }
@@ -2734,6 +3887,57 @@ mod tests {
     #[test]
     fn the_command_tree_is_consistent() {
         command().debug_assert();
+    }
+
+    #[test]
+    fn map_runs_a_prompt_or_takes_an_action() {
+        let Command::Map {
+            action: None,
+            map,
+            json: false,
+        } = parse_str(
+            "map 'look at {{item.repo}}' --items r.csv --schema s.json --out o.csv \
+             --concurrency 8 --retries 2 --total-usd 5 --reduce 'sum up' --rm -n look \
+             --harness codex --budget-usd 1 --yes",
+        )
+        .unwrap()
+        else {
+            panic!("not a map run");
+        };
+        assert_eq!(map.prompt.as_deref(), Some("look at {{item.repo}}"));
+        assert_eq!(map.items.as_deref(), Some("r.csv"));
+        assert_eq!(map.concurrency, Some(8));
+        assert_eq!(map.retries, Some(2));
+        assert_eq!(map.total_usd, Some(5.0));
+        assert!(map.rm);
+        let task = map.task.clone().into_inner();
+        assert_eq!(task.name.as_deref(), Some("look"));
+        assert_eq!(task.harness.as_deref(), Some("codex"));
+        assert_eq!(task.budget_usd, Some(1.0));
+        assert_eq!(task.permissions, Permissions::Yes);
+        assert!(matches!(
+            parse_str("map resume look --retry-failed --json").unwrap(),
+            Command::Map {
+                action: Some(MapAction::Resume {
+                    retry_failed: true,
+                    ..
+                }),
+                json: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_str("map ls").unwrap(),
+            Command::Map {
+                action: Some(MapAction::Ls),
+                ..
+            }
+        ));
+        assert_eq!(kind("map"), ErrorKind::MissingRequiredArgument);
+        assert_eq!(kind("map x --concurrency 0"), ErrorKind::ValueValidation);
+        assert!(err("map x --items a --from-command b").contains("cannot be used with"));
+        assert!(err("map x --reduce-out f").contains("--reduce"));
+        assert!(err("map x --input-format xml").contains("not an item format"));
     }
 
     #[test]
@@ -2769,6 +3973,7 @@ mod tests {
                 command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
                 sandbox: None,
                 substrate: None,
+                recipe: None,
                 local: false,
                 delegate: None,
                 allow_delegation: false,
@@ -2776,6 +3981,19 @@ mod tests {
                 provision: None,
                 instructions: None,
                 issue: None,
+                pr: None,
+                require_labels: Vec::new(),
+                priority: None,
+                auto: false,
+                implied_auto: false,
+                kind: None,
+                seed: None,
+                fleet: None,
+                plan: false,
+                goal: None,
+                goal_rounds: None,
+                goal_judge: None,
+                goal_judge_command: None,
             }
         );
     }
@@ -2835,6 +4053,140 @@ mod tests {
             ErrorKind::ArgumentConflict
         );
         assert!(err("run go --model a --model b").contains("cannot be used multiple times"));
+    }
+
+    #[test]
+    fn the_model_gateway_flag_parses() {
+        for line in [
+            "run go --model-gateway",
+            "fan go --harness a,b --model-gateway",
+            "fork b go --model-gateway",
+            "send b go --model-gateway",
+        ] {
+            let spec = task(line).provision.unwrap();
+            assert_eq!(
+                spec.models,
+                Some(branchyard::models::ModelAccess::all()),
+                "{line}"
+            );
+        }
+        let spec = task("run go --model-gateway='claude-*,gpt-5'")
+            .provision
+            .unwrap();
+        assert_eq!(spec.models.unwrap().allow, ["claude-*", "gpt-5"]);
+        assert_eq!(task("run go").provision, None);
+        assert!(err("run go --model-gateway='a b'").contains("' '"));
+        assert_eq!(
+            parse_str("models --period day --json").unwrap(),
+            Command::Models {
+                period: "day".into(),
+                json: true
+            }
+        );
+        assert!(err("models --period week").contains("week"));
+    }
+
+    #[test]
+    fn network_and_permission_preset_flags_parse() {
+        for line in [
+            "run go --network 'github.com,*.npmjs.org:443' --network-enforce required",
+            "fan go --harness a,b --network 'github.com,*.npmjs.org:443' --network-enforce required",
+            "fork b go --network 'github.com,*.npmjs.org:443' --network-enforce required",
+            "send b go --network 'github.com,*.npmjs.org:443' --network-enforce required",
+        ] {
+            let spec = task(line).provision.unwrap_or_else(|| panic!("{line}"));
+            assert_eq!(
+                spec.network.unwrap().to_string(),
+                "github.com, *.npmjs.org:443 (required)",
+                "{line}"
+            );
+        }
+        let none = task("run go --network none").provision.unwrap();
+        assert_eq!(none.network, Some(branchyard::Network::none()));
+        for (line, error) in [
+            ("run go --network https://x.com", "not a URL"),
+            ("run go --network '*'", "\"open\""),
+            ("run go --network-enforce required", "--network"),
+            (
+                "run go --network none --network-enforce always",
+                "best_effort",
+            ),
+            (
+                "run go --permissions yolo",
+                "read-only, edit-worktree, full",
+            ),
+            ("run go --permissions full --yes", "cannot be used with"),
+        ] {
+            assert!(err(line).contains(error), "{line}: {}", err(line));
+        }
+        for (line, preset) in [
+            (
+                "run go --permissions read-only",
+                branchyard::PolicyPreset::ReadOnly,
+            ),
+            (
+                "send b go --permissions edit-worktree",
+                branchyard::PolicyPreset::EditWorktree,
+            ),
+            (
+                "fan go --harness a,b --permissions full",
+                branchyard::PolicyPreset::Full,
+            ),
+        ] {
+            assert_eq!(
+                task(line).permissions,
+                Permissions::Preset(preset),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn connector_flags_repeat_and_parse() {
+        for line in [
+            "run go --isolated --connector github --connector 'github:write+confirm:issues.create'",
+            "fan go --harness a,b --isolated --connector github --connector 'github:write+confirm:issues.create'",
+            "fork b go --connector github --connector 'github:write+confirm:issues.create'",
+            "send b go --connector github --connector 'github:write+confirm:issues.create'",
+        ] {
+            let spec = task(line).provision.unwrap_or_else(|| panic!("{line}"));
+            let grants: Vec<String> = spec.connectors.iter().map(|g| g.to_string()).collect();
+            assert_eq!(
+                grants,
+                ["github:read", "github:write+confirm:issues.create"],
+                "{line}"
+            );
+        }
+        for (line, error) in [
+            ("run go --connector github:admin", "mode"),
+            ("run go --connector 'a b'", "connector id"),
+            ("run go --connector github:read:", "operation"),
+        ] {
+            assert!(err(line).contains(error), "{line}: {}", err(line));
+        }
+        assert!(matches!(
+            parse_str("gateway status --json").unwrap(),
+            Command::Gateway {
+                json: true,
+                action: GatewayAction::Status
+            }
+        ));
+        assert!(matches!(
+            parse_str("gateway rotate-key --keep 2").unwrap(),
+            Command::Gateway {
+                action: GatewayAction::RotateKey { keep: 2 },
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_str("connect github --account work --api-key-stdin").unwrap(),
+            Command::Connect {
+                connector: "github".into(),
+                account: Some("work".into()),
+                api_key_stdin: true,
+                open: false,
+            }
+        );
     }
 
     #[test]
@@ -2905,7 +4257,7 @@ mod tests {
             })
         );
         assert!(err("run go --keep-sandbox pause")
-            .contains("--keep-sandbox needs --provider microsandbox or substrate"));
+            .contains("--keep-sandbox needs --provider microsandbox, substrate or recipe:NAME"));
         assert!(
             err("run go --provider microsandbox --image a --keep-sandbox forever")
                 .contains("not pause or destroy")
@@ -2924,10 +4276,10 @@ mod tests {
         assert!(err("run go --provider local --cpus 2")
             .contains("--cpus needs --provider microsandbox"));
         assert!(err("run go --provider local --pass-env A")
-            .contains("--pass-env needs --provider microsandbox or substrate"));
+            .contains("--pass-env needs --provider microsandbox, substrate or recipe:NAME"));
         let docker = err("run go --provider docker");
         assert!(
-            docker.contains("[possible values: local, microsandbox, substrate]"),
+            docker.contains("[possible values: local, microsandbox, substrate, recipe:NAME]"),
             "{docker}"
         );
         assert!(err("run go --provider microsandbox --image a --cpus 0").contains("--cpus"));
@@ -2937,6 +4289,42 @@ mod tests {
             kind("send b go --provider local"),
             ErrorKind::UnknownArgument
         );
+    }
+
+    #[test]
+    fn provider_recipe_names_a_recipe_and_its_paths() {
+        let task = self::task(
+            "run go --provider recipe:devbox --recipe-workdir /srv/work --pass-env TOKEN \
+             --keep-sandbox pause --max-paused 2",
+        );
+        assert_eq!(
+            task.recipe,
+            Some(RecipeArgs {
+                name: "devbox".into(),
+                workdir: Some("/srv/work".into()),
+                home: None,
+                pass_env: vec!["TOKEN".into()],
+                lifecycle: LifecycleArgs {
+                    keep: Some(branchyard::SandboxKeep::Pause),
+                    snapshots: None,
+                    max_paused: Some(2),
+                },
+            })
+        );
+        assert!(task.sandbox.is_none() && task.substrate.is_none() && !task.local);
+        let fan = self::task("fan go --harness codex,claude --provider recipe:lab.box");
+        assert_eq!(fan.recipe.map(|r| r.name), Some("lab.box".into()));
+        assert!(err("run go --provider recipe:").contains("not a recipe name"));
+        assert!(err("run go --provider recipe:Dev").contains("not a recipe name"));
+        assert!(err("run go --recipe-workdir /w").contains("needs --provider recipe:NAME"));
+        assert!(
+            err("run go --provider recipe:devbox --recipe-home home").contains("must be absolute")
+        );
+        assert!(
+            err("run go --provider recipe:devbox --sandbox-snapshots 2").contains("no snapshots")
+        );
+        assert!(err("run go --provider recipe:devbox --image a")
+            .contains("--image needs --provider microsandbox"));
     }
 
     #[test]
@@ -2984,6 +4372,15 @@ mod tests {
         assert_eq!(spawn.depends_on, ["a", "b"]);
         assert_eq!(spawn.after, branchyard::After::Integrated);
         assert_eq!(spawn.bindings.len(), 2);
+        assert!(spawn.connectors.is_empty());
+        let Command::Spawn { spawn: granted, .. } =
+            parse_str("spawn go --connector github:read --connector 'linear@work:write:issues.*'")
+                .unwrap()
+        else {
+            panic!("not spawn")
+        };
+        let grants: Vec<String> = granted.connectors.iter().map(|g| g.to_string()).collect();
+        assert_eq!(grants, ["github:read", "linear@work:write:issues.*"]);
         assert_eq!(spawn.seat.as_deref(), Some("worker"));
         assert!(err("spawn go --after soon").contains("[possible values: settled, integrated]"));
         assert!(err("spawn go --bind cache").contains("--bind"));
@@ -3039,6 +4436,15 @@ mod tests {
         assert!(help("inspect").contains("Usage: by inspect [OPTIONS] [BRANCH]"));
         assert!(task("run go --delegate --allow-delegation").allow_delegation);
         assert!(task("send b go --allow-unapproved-tools").unapproved_tools);
+        for line in [
+            "run go --require-label gpu --require-label linux",
+            "fan go --harness a,b --require-label gpu --require-label linux",
+            "send b go --require-label gpu --require-label linux",
+            "fork b go --require-label gpu --require-label linux",
+            "reincarnate b --require-label gpu --require-label linux",
+        ] {
+            assert_eq!(task(line).require_labels, ["gpu", "linux"], "{line}");
+        }
     }
 
     #[test]
@@ -3115,18 +4521,35 @@ mod tests {
     }
 
     #[test]
-    fn fan_requires_a_harness_list() {
+    fn fan_takes_a_harness_list_or_routes() {
         let Command::Fan {
             harnesses, task, ..
         } = parse_str("fan go --harness 'claude-code, codex' --max-turns 2").unwrap()
         else {
             panic!("not fan")
         };
-        assert_eq!(*harnesses, ["claude-code", "codex"]);
+        assert_eq!(*harnesses.unwrap(), ["claude-code", "codex"]);
         assert_eq!(task.harness, None);
         assert_eq!(task.max_turns, Some(2));
-        assert_eq!(kind("fan go"), ErrorKind::MissingRequiredArgument);
-        assert!(err("fan go").contains("--harness <ID,ID,...>"));
+        // Without --harness it routes through [fleet]; the command says so
+        // when there is none.
+        let Command::Fan {
+            harnesses,
+            task,
+            attempts,
+            judge,
+            ..
+        } = parse_str("fan go --auto --kind bugfix --attempts 3 --judge --seed 9").unwrap()
+        else {
+            panic!("not fan")
+        };
+        assert_eq!(harnesses, None);
+        assert!(task.auto && judge);
+        assert_eq!(
+            (task.kind, task.seed, attempts),
+            (Some(branchyard::TaskKind::Bugfix), Some(9), Some(3))
+        );
+        assert!(err("fan go --attempts 0").contains("0"));
         assert!(err("fan go --harness codex,codex").contains("lists codex twice"));
         assert!(err("fan go --harness codex,").contains("empty entry"));
     }
@@ -3285,9 +4708,65 @@ mod tests {
                 follow: true
             }
         );
+        let harnesses = |json, all| Command::Harnesses {
+            json,
+            all,
+            profiles: false,
+            refresh: false,
+            on: None,
+            action: None,
+        };
         assert_eq!(
             parse_str("harnesses --json").unwrap(),
-            Command::Harnesses { json: true }
+            harnesses(true, false)
+        );
+        assert_eq!(
+            parse_str("harnesses --all").unwrap(),
+            harnesses(false, true)
+        );
+        assert_eq!(
+            parse_str("harnesses install codex --on ssh://h --version 1.2 --yes --json").unwrap(),
+            Command::Harnesses {
+                json: true,
+                all: false,
+                profiles: false,
+                refresh: false,
+                on: Some("ssh://h".into()),
+                action: Some(HarnessesAction::Install(HarnessChange {
+                    id: "codex".into(),
+                    version: Some("1.2".into()),
+                    yes: true,
+                })),
+            }
+        );
+        assert_eq!(
+            parse_str("harnesses login codex --api-key").unwrap(),
+            Command::Harnesses {
+                json: false,
+                all: false,
+                profiles: false,
+                refresh: false,
+                on: None,
+                action: Some(HarnessesAction::Login {
+                    id: "codex".into(),
+                    api_key: true,
+                }),
+            }
+        );
+        assert!(parse_str("harnesses --all --on ssh://h").is_err());
+        assert_eq!(
+            parse_str("connectors --json catalog").unwrap(),
+            Command::Connectors {
+                json: true,
+                action: ConnectorsAction::Catalog
+            }
+        );
+        assert_eq!(
+            parse_str("connectors catalog --json").unwrap(),
+            Command::Connectors {
+                json: true,
+                action: ConnectorsAction::Catalog
+            }
         );
         assert!(err("diff b --json").contains("unexpected argument '--json'"));
     }
@@ -3375,8 +4854,65 @@ mod tests {
                 }
             )
         );
-        assert!(err("workspace run a b c").contains("no more were expected"));
+        assert_eq!(
+            parse_str("workspace run a b c --detach").unwrap(),
+            Command::Workspace {
+                json: false,
+                action: WorkspaceAction::Run {
+                    args: vec!["a".into(), "b".into(), "c".into()],
+                    detach: true,
+                },
+            }
+        );
+        assert_eq!(
+            parse_str("workspace kill b --port 5173 --yes --json").unwrap(),
+            Command::Workspace {
+                json: true,
+                action: WorkspaceAction::Kill {
+                    branch: Some("b".into()),
+                    port: Some(5173),
+                    yes: true,
+                },
+            }
+        );
+        assert!(err("workspace browse b --port 0x1").contains("invalid value"));
         assert!(err("workspace").contains("Usage"));
+    }
+
+    #[test]
+    fn env_actions_parse() {
+        let env = |line: &str| match parse_str(line).unwrap() {
+            Command::Env { json, action } => (json, action),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(env("env list --json"), (true, EnvAction::List));
+        assert_eq!(env("env show"), (false, EnvAction::Show { key: None }));
+        assert_eq!(env("env rebuild"), (false, EnvAction::Rebuild));
+        assert_eq!(
+            env("env prune abc def --keep 1 --older-than 7"),
+            (
+                false,
+                EnvAction::Prune {
+                    keys: vec!["abc".into(), "def".into()],
+                    keep: Some(1),
+                    older_than: Some(7),
+                }
+            )
+        );
+        assert_eq!(
+            env("env pool fill --json"),
+            (true, EnvAction::Pool(PoolAction::Fill))
+        );
+        assert_eq!(
+            env("env pool status"),
+            (false, EnvAction::Pool(PoolAction::Status))
+        );
+        assert_eq!(
+            env("env pool drain"),
+            (false, EnvAction::Pool(PoolAction::Drain))
+        );
+        assert!(err("env pool").contains("Usage"));
+        assert!(err("env").contains("Usage"));
     }
 
     #[test]
@@ -3415,10 +4951,11 @@ mod tests {
         let error = parse_str("mrege b").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
         assert_eq!(error.exit_code(), 2);
+        // `review`, `recipe` and `remote` are close to `mrege` too, so clap lists them.
         assert!(
             error
                 .to_string()
-                .contains("a similar subcommand exists: 'merge'"),
+                .contains("similar subcommands exist: 'review', 'recipe', 'remote', 'merge'"),
             "{error}"
         );
         assert!(err("run go --budget 2").contains("a similar argument exists: '--budget-usd'"));

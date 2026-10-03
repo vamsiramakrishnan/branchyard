@@ -13,10 +13,10 @@
 //! detected by the server's own parser (`value_source`), which knows
 //! `-c FILE` and `--config=FILE` alike.
 //!
-//! - New branches (`run`, `fan`) take every default: harness, model,
+//! - New branches (`run`, `fan`, `map`) take every default: harness, model,
 //!   effort, auth, limits, check, permissions, isolation, provider,
-//!   instructions, MCP servers, and secrets when the branch has a private
-//!   home (isolated or sandboxed).
+//!   instructions, MCP servers, the `[network]` policy, and secrets when
+//!   the branch has a private home (isolated or sandboxed).
 //! - `send`, `fork`, `reincarnate` and `spawn` take only `permissions`: the
 //!   rest would override what the branch or its seat already has.
 //! - `serve` and `worker` take `serve.config` as `--config` ([`apply_serve`]).
@@ -67,10 +67,25 @@ pub fn apply(
             return Ok((globals, command));
         }
         Command::Run { task, .. } => apply_task(&config, task, Scope::NewBranch)?,
-        Command::Fan { task, .. } => {
+        // A map's branches are new branches; its other actions take nothing.
+        Command::Map {
+            action: None, map, ..
+        } => apply_task(&config, &mut map.task, Scope::NewBranch)?,
+        Command::Fan {
+            task, harnesses, ..
+        } => {
+            let explicit = task.auto;
             apply_task(&config, task, Scope::NewBranch)?;
-            // fan's harnesses are its --harness list.
+            // fan's harnesses are its --harness list, which routing replaces.
             task.harness = None;
+            if harnesses.is_some() {
+                if explicit {
+                    return Err(
+                        "--auto routes through the [fleet] table; it takes no --harness".into(),
+                    );
+                }
+                task.implied_auto = false;
+            }
         }
         Command::Send { task, .. } => apply_task(&config, task, Scope::Continue)?,
         Command::Fork { task, .. } => apply_task(&config, task, Scope::Continue)?,
@@ -111,6 +126,16 @@ fn load(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Proje
     Ok(Some(config))
 }
 
+/// The merged configuration files under `cwd`, for commands that read a
+/// section of their own (`[usage]`, `[trackers]`): `None` without files, or
+/// inside a harness's branch.
+pub fn config_at(
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<ProjectConfig>, String> {
+    load(cwd, env)
+}
+
 /// `[notify]`, and `[remote]` for what `--remote`, `--token-file`,
 /// `--ca-file`, `--repo` and their variables left unset. The rest of `[remote]` applies only
 /// when its `url` is the server in use.
@@ -149,6 +174,13 @@ pub fn serve_args(config: &ProjectConfig, args: Vec<String>) -> Vec<String> {
     if branchyard_server::cli::names_config(&args) {
         return args;
     }
+    // `token list`, `token revoke`, `token new --link`: the subcommand's
+    // own `--config`, after it.
+    if args.first().is_some_and(|a| a == "token") {
+        let mut with = args;
+        with.extend(["--config".to_owned(), path.clone()]);
+        return with;
+    }
     let mut with = vec!["--config".to_owned(), path.clone()];
     with.extend(args);
     with
@@ -161,13 +193,27 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         task.permissions = match d.permissions {
             Some(PermissionsMode::Ask) => Permissions::Ask,
             Some(PermissionsMode::Yes) => Permissions::Yes,
+            Some(PermissionsMode::ReadOnly) => {
+                Permissions::Preset(branchyard::PolicyPreset::ReadOnly)
+            }
+            Some(PermissionsMode::EditWorktree) => {
+                Permissions::Preset(branchyard::PolicyPreset::EditWorktree)
+            }
+            Some(PermissionsMode::Full) => Permissions::Preset(branchyard::PolicyPreset::Full),
             None => Permissions::Unset,
         };
     }
     if scope == Scope::Continue {
         return Ok(());
     }
-    if task.harness.is_none() {
+    if !config.fleet.is_empty() {
+        task.fleet = Some(fleet(config)?);
+        // A [fleet] routes a task that names no harness (docs/fleet.md).
+        if task.harness.is_none() && !task.auto {
+            task.implied_auto = true;
+        }
+    }
+    if task.harness.is_none() && !task.auto && !task.implied_auto {
         task.harness = d.harness.clone();
     }
     if task.check.is_none() {
@@ -188,7 +234,15 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
     if d.isolated == Some(true) {
         task.isolated = true;
     }
-    let chose_provider = task.sandbox.is_some() || task.substrate.is_some() || task.local;
+    let chose_provider =
+        task.sandbox.is_some() || task.substrate.is_some() || task.recipe.is_some() || task.local;
+    if let (false, Some(ProviderKind::Recipe), Some(name)) = (chose_provider, d.provider, &d.recipe)
+    {
+        task.recipe = Some(crate::args::RecipeArgs {
+            name: name.clone(),
+            ..crate::args::RecipeArgs::default()
+        });
+    }
     if !chose_provider && d.provider == Some(ProviderKind::Microsandbox) {
         if let Some(sandbox) = &config.microsandbox {
             task.sandbox = Some(SandboxArgs {
@@ -213,10 +267,35 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
     }
     // Provisioning: fill each unset part; add servers and secrets the
     // flags did not name.
-    let private_home = task.isolated || task.sandbox.is_some() || task.substrate.is_some();
+    let private_home = task.isolated
+        || task.sandbox.is_some()
+        || task.substrate.is_some()
+        || task.recipe.is_some();
+    // The model gateway's default access, when `--model-gateway` gave
+    // none.
+    let models = config.models.access().map_err(|e| e.to_string())?;
+    let flag_models = task.provision.as_ref().is_some_and(|p| p.models.is_some());
+    let on_gateway = flag_models || models.is_some();
     let secrets = match private_home {
         true => config.secret_sources().map_err(|e| e.to_string())?,
         false => Vec::new(),
+    };
+    // A branch on the model gateway is never given a provider's key: the
+    // gateway holds the backends' keys, and a harness with one could reach
+    // the provider around it.
+    let secrets: Vec<branchyard::SecretSource> = match on_gateway {
+        false => secrets,
+        true => secrets
+            .into_iter()
+            .filter(|s| {
+                !branchyard::models::PROVIDER_KEYS.contains(&s.name.as_str())
+                    && !config
+                        .models
+                        .backends
+                        .values()
+                        .any(|b| b.key.as_deref() == Some(s.name.as_str()))
+            })
+            .collect(),
     };
     let mcp: Vec<branchyard::McpServerSpec> = config
         .mcp
@@ -230,11 +309,30 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         }
         None => None,
     };
+    // Default grants, only where they can be placed and only when the
+    // flags gave none.
+    let grants = match private_home {
+        true => config
+            .connectors
+            .grant_entries()
+            .map_err(|e| e.to_string())?,
+        false => Vec::new(),
+    };
+    let flag_grants = task
+        .provision
+        .as_ref()
+        .is_some_and(|p| !p.connectors.is_empty());
+    // The network policy, when `--network` gave none.
+    let network = config.network.policy().map_err(|e| e.to_string())?;
+    let flag_network = task.provision.as_ref().is_some_and(|p| p.network.is_some());
     let wanted = d.model.is_some()
+        || (network.is_some() && !flag_network)
         || effort.is_some()
         || d.auth.is_some()
         || !secrets.is_empty()
-        || !mcp.is_empty();
+        || !mcp.is_empty()
+        || (!grants.is_empty() && !flag_grants)
+        || (models.is_some() && !flag_models);
     if wanted {
         let spec = task.provision.get_or_insert_with(Default::default);
         if spec.model.is_none() {
@@ -256,8 +354,102 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
                 spec.mcp_servers.push(server);
             }
         }
+        if spec.connectors.is_empty() {
+            spec.connectors = grants;
+        }
+        if spec.network.is_none() {
+            spec.network = network;
+        }
+        if spec.models.is_none() {
+            spec.models = models;
+        }
     }
     Ok(())
+}
+
+/// The configuration's `[fleet]` as the SDK takes it.
+pub fn fleet(config: &ProjectConfig) -> Result<branchyard::Fleet, String> {
+    let words = |key: &str, line: &Option<String>| -> Result<Option<Vec<String>>, String> {
+        line.as_deref()
+            .map(branchyard_setup::config::split_words)
+            .transpose()
+            .map_err(|e| format!("{key}: {e}"))
+    };
+    let effort = |key: &str, text: &Option<String>| -> Result<Option<branchyard::Effort>, String> {
+        text.as_deref()
+            .map(branchyard::Effort::parse)
+            .transpose()
+            .map_err(|e| format!("{key}: {e}"))
+    };
+    let mut entries = std::collections::BTreeMap::new();
+    for (kind, entry) in &config.fleet {
+        let key = format!("fleet.{kind}");
+        let mut candidates = Vec::new();
+        for (index, c) in entry.candidates.iter().enumerate() {
+            let at = format!("{key}.candidates[{index}]");
+            candidates.push(branchyard::FleetCandidate {
+                harness: c.harness.clone(),
+                model: c.model.clone(),
+                effort: effort(&at, &c.effort)?,
+                command: words(&at, &c.command)?,
+            });
+        }
+        let judge = match &entry.judge {
+            Some(j) => Some(branchyard::JudgeSpec {
+                harness: j.harness.clone(),
+                model: j.model.clone(),
+                effort: effort(&format!("{key}.judge"), &j.effort)?,
+                command: words(&format!("{key}.judge"), &j.command)?,
+                rubric: j.rubric.clone(),
+            }),
+            None => None,
+        };
+        entries.insert(
+            kind.clone(),
+            branchyard::FleetEntry {
+                candidates,
+                attempts: entry.attempts.unwrap_or(1),
+                budget: branchyard::Budget {
+                    max_usd: entry.budget_usd,
+                    max_turns: entry.max_turns,
+                    max_duration: entry
+                        .max_minutes
+                        .and_then(|m| Duration::try_from_secs_f64(m * 60.0).ok()),
+                    ..branchyard::Budget::default()
+                },
+                judge,
+                failover: entry.failover.unwrap_or(false),
+                exploration: entry.exploration.unwrap_or(branchyard::DEFAULT_EXPLORATION),
+                environment: entry.environment.clone(),
+                connectors: entry.connectors.clone(),
+                plan: entry.plan.unwrap_or(false),
+                goal_judge: match &entry.goal_judge {
+                    Some(j) => Some(branchyard::JudgeSpec {
+                        harness: j.harness.clone(),
+                        model: j.model.clone(),
+                        effort: effort(&format!("{key}.goal_judge"), &j.effort)?,
+                        command: words(&format!("{key}.goal_judge"), &j.command)?,
+                        rubric: j.rubric.clone(),
+                    }),
+                    None => None,
+                },
+            },
+        );
+    }
+    Ok(branchyard::Fleet { entries })
+}
+
+/// The `[fleet]` of the files under `cwd`, for commands that take no task
+/// options (`by judge`, `by fleet`); `None` without one, or inside a
+/// harness.
+pub fn fleet_at(
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<branchyard::Fleet>, String> {
+    match load(cwd, env)? {
+        Some(config) if !config.fleet.is_empty() => fleet(&config).map(Some),
+        _ => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -316,6 +508,143 @@ config = "/srv/server.json"
     }
 
     #[test]
+    fn a_fleet_routes_new_branches_that_name_no_harness() {
+        let config = config(
+            r#"
+[defaults]
+harness = "codex"
+[fleet.default]
+candidates = [{ harness = "codex", model = "large", effort = "high", command = "/x/codex --y" }]
+attempts = 3
+budget_usd = 2
+max_minutes = 1
+failover = true
+judge = { harness = "claude-code", rubric = "short" }
+environment = "rust"
+connectors = ["github"]
+"#,
+        );
+        let mut task = TaskArgs::default();
+        apply_task(&config, &mut task, Scope::NewBranch).unwrap();
+        assert!(task.implied_auto && !task.auto);
+        assert_eq!(task.harness, None, "the router picks, not [defaults]");
+        let fleet = task.fleet.unwrap();
+        let entry = &fleet.entries["default"];
+        assert_eq!(entry.attempts, 3);
+        assert_eq!(entry.budget.max_usd, Some(2.0));
+        assert_eq!(entry.budget.max_duration, Some(Duration::from_secs(60)));
+        assert!(entry.failover);
+        assert_eq!(entry.exploration, branchyard::DEFAULT_EXPLORATION);
+        assert_eq!(entry.candidates[0].effort, Some(branchyard::Effort::High));
+        assert_eq!(
+            entry.candidates[0].command.as_deref(),
+            Some(&["/x/codex".to_owned(), "--y".into()][..])
+        );
+        assert_eq!(
+            entry.judge.as_ref().unwrap().rubric.as_deref(),
+            Some("short")
+        );
+        assert_eq!(entry.connectors, ["github"]);
+        // A named harness is not routed.
+        let mut named = TaskArgs {
+            harness: Some("gemini-cli".into()),
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut named, Scope::NewBranch).unwrap();
+        assert!(!named.implied_auto);
+        // The table's keys are the SDK's kinds and `default`.
+        let kinds: Vec<&str> = branchyard::TaskKind::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .chain(["default"])
+            .collect();
+        assert_eq!(branchyard_setup::config::FLEET_KEYS, kinds.as_slice());
+    }
+
+    #[test]
+    fn default_grants_go_only_to_a_new_private_branch_without_its_own() {
+        let config = config(
+            "[connectors]\ngateway = \"http://127.0.0.1:8931/mcp\"\ngrants = [\"github:read\"]\n",
+        );
+        let grants = |task: &TaskArgs| -> Vec<String> {
+            task.provision
+                .as_ref()
+                .map(|p| p.connectors.iter().map(|g| g.to_string()).collect())
+                .unwrap_or_default()
+        };
+        let mut isolated = TaskArgs {
+            isolated: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut isolated, Scope::NewBranch).unwrap();
+        assert_eq!(grants(&isolated), ["github:read"]);
+        // Not isolated: nowhere to place them.
+        let mut shared = TaskArgs::default();
+        apply_task(&config, &mut shared, Scope::NewBranch).unwrap();
+        assert!(grants(&shared).is_empty());
+        // The flags win, whole.
+        let mut own = TaskArgs {
+            isolated: true,
+            provision: Some(branchyard::Provisioning {
+                connectors: vec![branchyard::connectors::GrantEntry::parse("linear").unwrap()],
+                ..Default::default()
+            }),
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut own, Scope::NewBranch).unwrap();
+        assert_eq!(grants(&own), ["linear:read"]);
+        // A send keeps the branch's.
+        let mut send = TaskArgs {
+            isolated: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut send, Scope::Continue).unwrap();
+        assert!(grants(&send).is_empty());
+    }
+
+    #[test]
+    fn the_model_gateway_default_keeps_provider_keys_from_the_harness() {
+        let on = config(
+            "[secrets]\nOPENAI_API_KEY = \"MY_OPENAI\"\nanthropic = \"MY_ANTHROPIC\"\n\
+             GH_TOKEN = \"GH_TOKEN\"\n\n[models]\nallow = [\"claude-*\"]\n\n\
+             [models.backends.a]\napi = \"anthropic\"\nkey = \"anthropic\"\n",
+        );
+        let mut task = TaskArgs {
+            isolated: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&on, &mut task, Scope::NewBranch).unwrap();
+        let spec = task.provision.unwrap();
+        assert_eq!(spec.models.unwrap().allow, ["claude-*"]);
+        // Neither a provider's key nor a backend's secret reaches it.
+        let names: Vec<&str> = spec.secrets.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["GH_TOKEN"]);
+        // The flag wins.
+        let mut flagged = TaskArgs {
+            provision: Some(branchyard::Provisioning {
+                models: Some(branchyard::models::ModelAccess {
+                    allow: vec!["gpt-5".into()],
+                }),
+                ..Default::default()
+            }),
+            ..TaskArgs::default()
+        };
+        apply_task(&on, &mut flagged, Scope::NewBranch).unwrap();
+        assert_eq!(flagged.provision.unwrap().models.unwrap().allow, ["gpt-5"]);
+        // Without [models] allow, a branch stays off the gateway, keys and
+        // all.
+        let off = config("[secrets]\nOPENAI_API_KEY = \"MY_OPENAI\"\n");
+        let mut task = TaskArgs {
+            isolated: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&off, &mut task, Scope::NewBranch).unwrap();
+        let spec = task.provision.unwrap();
+        assert_eq!(spec.models, None);
+        assert_eq!(spec.secrets[0].name, "OPENAI_API_KEY");
+    }
+
+    #[test]
     fn continuing_takes_only_permissions() {
         let config = config(FILE);
         let mut task = TaskArgs::default();
@@ -369,6 +698,21 @@ config = "/srv/server.json"
         assert_eq!(
             serve_args(&config, vec!["token".into(), "new".into()]),
             ["token", "new"]
+        );
+        // The token commands that read the server's store take the file
+        // after them, unless they name their own place.
+        let words = |w: &[&str]| -> Vec<String> { w.iter().map(|a| a.to_string()).collect() };
+        assert_eq!(
+            serve_args(&config, words(&["token", "new", "--link"])),
+            ["token", "new", "--link", "--config", "/srv/server.json"]
+        );
+        assert_eq!(
+            serve_args(&config, words(&["token", "revoke", "phone"])),
+            ["token", "revoke", "phone", "--config", "/srv/server.json"]
+        );
+        assert_eq!(
+            serve_args(&config, words(&["token", "list", "--data-dir", "d"])),
+            ["token", "list", "--data-dir", "d"]
         );
         assert_eq!(
             serve_args(&config, vec!["--worker".into()]),

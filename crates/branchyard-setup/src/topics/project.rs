@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use super::{flag, harness_question, list, secret_choices, secret_ref_question, text};
-use crate::config::{self, PermissionsMode, ProjectConfig, ProviderKind};
+use crate::config::{self, ProjectConfig, ProviderKind};
 use crate::interview::{number, Answers, Choice, Condition, Kind, Question, Rule};
 use crate::plan::{ArtifactKind, Plan, PlannedFile};
 use crate::probe::{Facts, Probe};
@@ -101,12 +101,22 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
         )
         .optional()
         .default(match d.permissions {
-            Some(PermissionsMode::Yes) => json!("yes"),
-            Some(PermissionsMode::Ask) | None => json!("ask"),
+            Some(mode) => json!(mode.as_str()),
+            None => json!("ask"),
         })
         .choices(vec![
             Choice::new("ask", "Ask me", "prompt on the terminal for each request (--ask)"),
             Choice::new("yes", "Allow all", "allow every request (--yes); only for trusted tasks"),
+            Choice::new(
+                "read-only",
+                "Read only",
+                "read and search; edits, commands and the web denied (a preset)",
+            ),
+            Choice::new(
+                "edit-worktree",
+                "Edit files",
+                "read, search and edit files; commands and the web denied (a preset)",
+            ),
             Choice::new(Value::Null, "Decide per run", "ask when a terminal is attached, else deny"),
         ]),
         Question::new(
@@ -206,7 +216,11 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             Choice::new(true, "Yes", "private HOME; give the harness a secret next"),
         ]),
     ];
-    if facts.platform.kvm || d.provider == Some(ProviderKind::Microsandbox) {
+    // A recipe chosen by hand is kept: this question offers only local and
+    // Microsandbox.
+    if (facts.platform.kvm || d.provider == Some(ProviderKind::Microsandbox))
+        && d.provider != Some(ProviderKind::Recipe)
+    {
         qs.push(
             Question::new(
                 "provider",
@@ -766,6 +780,55 @@ mod tests {
             serde_json::from_value(json!({"scope": "user"})).unwrap();
         let state = resolve(&|a| questions(&facts, a), &user, true);
         assert!(!state.answers.contains_key("workspace") || state.answers["workspace"].is_null());
+    }
+
+    #[test]
+    fn a_workspace_is_imported_from_another_tools_configuration() {
+        let mut probe = FakeProbe::typical();
+        for file in ["package.json", "pnpm-lock.yaml", ".env"] {
+            probe.files.insert(file.into(), String::new());
+        }
+        probe.files.insert(
+            ".emdash.json".into(),
+            r#"{"preservePatterns": [".env.local"], "shellSetup": "nvm use",
+                "scripts": {"setup": "pnpm install && pnpm build", "run": "PORT=$EMDASH_PORT pnpm dev"}}"#
+                .into(),
+        );
+        // Superset gives teardown, which emdash's file does not; its setup
+        // loses to emdash's, which comes first.
+        probe.files.insert(
+            ".superset/config.json".into(),
+            r#"{"setup": ["bun install"], "teardown": ["docker compose down"]}"#.into(),
+        );
+        probe
+            .files
+            .insert(".conductor/settings.toml".into(), "[scripts\n".into());
+        let facts = Facts::gather(&probe);
+        let w = &facts.workspace;
+        assert_eq!(w.setup, ["pnpm install && pnpm build"]);
+        assert_eq!(w.run.as_deref(), Some("PORT=$BRANCHYARD_PORT pnpm dev"));
+        assert_eq!(w.teardown, ["docker compose down"]);
+        assert_eq!(w.copy, [".env", ".env.local"]);
+        assert!(w
+            .found
+            .ends_with(&[".emdash.json".into(), ".superset/config.json".into()]));
+        assert_eq!(w.notes.len(), 2, "{:?}", w.notes);
+        assert!(w.notes[0].starts_with(".emdash.json: shellSetup is not imported"));
+        assert!(w.notes[1].starts_with(".conductor/settings.toml was not imported:"));
+        let lines = facts.lines();
+        assert!(lines.iter().any(|l| l.label == "Not imported"), "{lines:?}");
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        let plan = plan(&facts, &state.answers, &probe);
+        let parsed = config::parse(&plan_body(&facts, &state.answers, &probe)).unwrap();
+        let workspace = parsed.workspace.unwrap();
+        assert_eq!(workspace.setup.commands(), ["pnpm install && pnpm build"]);
+        assert_eq!(workspace.copy, [".env", ".env.local"]);
+        assert_eq!(
+            workspace.run_script(None).unwrap().1,
+            ["PORT=$BRANCHYARD_PORT pnpm dev"]
+        );
+        assert_eq!(workspace.teardown.commands(), ["docker compose down"]);
+        assert!(plan.valid);
     }
 
     fn plan_body(facts: &Facts, answers: &Answers, probe: &FakeProbe) -> String {

@@ -60,6 +60,10 @@ pub fn report(status: &BranchStatus, pending: Option<&str>) -> Report {
             Some("waiting for its prerequisites".to_owned()),
         ),
         BranchStatus::Blocked { reason } => (HerdrState::Idle, Some(format!("blocked: {reason}"))),
+        BranchStatus::AwaitingPlanApproval => (
+            HerdrState::Blocked,
+            Some("its plan awaits approval".to_owned()),
+        ),
     };
     Report {
         state,

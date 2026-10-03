@@ -245,6 +245,62 @@ fn a_task_runs_through_merge_over_http() {
     assert!(harnesses.iter().any(|h| h.harness == "gemini-cli"));
 }
 
+/// A request's permission preset decides the harness's tool requests, and
+/// its network policy reaches the engine, which applies it and records how.
+#[test]
+fn presets_and_network_policies_reach_the_engine() {
+    let f = Fixture::new();
+    let server = Server::start(f.config());
+    let client = Client::new(&server.url(), TOKEN).unwrap();
+    let repo = client.repo("app");
+    for (name, preset, answer) in [
+        ("ro", branchyard::PolicyPreset::ReadOnly, "denied"),
+        ("full", branchyard::PolicyPreset::Full, "allowed"),
+    ] {
+        let done = run(
+            &client,
+            &branchyard_client::api::TaskRequest {
+                policy: PolicySpec::preset(preset),
+                ..task("PERMISSION", name)
+            },
+        );
+        assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+        assert!(common_text(&repo, name).contains(answer), "{name}");
+    }
+    let done = run(
+        &client,
+        &branchyard_client::api::TaskRequest {
+            provision: Some(branchyard::Provisioning {
+                network: Some(branchyard::Network::none()),
+                ..branchyard::Provisioning::default()
+            }),
+            ..task("hi", "offline")
+        },
+    );
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    let applied: Vec<_> = repo
+        .events("offline", 0)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            branchyard::Activity::Egress(egress) => Some(*egress),
+            _ => None,
+        })
+        .collect();
+    match applied.as_slice() {
+        [branchyard::EgressActivity::Applied {
+            policy,
+            enforcement,
+            ..
+        }] => {
+            assert_eq!(policy, "none");
+            assert_ne!(*enforcement, branchyard::EgressEnforcement::NotApplied);
+        }
+        other => panic!("expected one applied event, got {other:?}"),
+    }
+}
+
 fn common_text(repo: &branchyard_client::Repo, branch: &str) -> String {
     repo.events(branch, 0)
         .unwrap()

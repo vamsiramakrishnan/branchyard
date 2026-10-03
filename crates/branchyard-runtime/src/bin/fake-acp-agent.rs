@@ -38,6 +38,14 @@
 //! - `SH <command>`, one per line: runs the command with `sh -c` in its
 //!   working directory and environment, and replies `sh: <exit status>`
 //!   followed by the command's output, for each line.
+//! - `REPLY_FILE <path>`, on a line of its own, checked before every other
+//!   keyword: replies the file's contents verbatim (or `reply file <path>:
+//!   <error>`) and does nothing else; a judge's canned verdict.
+//! - `REPLY_SEQUENCE <dir>`, on a line of its own, checked right after
+//!   `REPLY_FILE`: replies the contents of the first file in `dir` by name
+//!   and removes it, so a run of prompts gets a run of canned answers (a
+//!   judge that finds a goal unmet, then met); `reply sequence <dir>:
+//!   empty` when none is left.
 //! - `INSTRUCTED`: replies `instructed=<bool>`, whether a prompt this
 //!   process received began with Branchyard's instructions preamble. The
 //!   preamble is removed before any keyword is looked for.
@@ -145,6 +153,8 @@ fn main() {
         return;
     }
     let mut instructed = false;
+    // The last instructions preamble, for SHOW_INSTRUCTIONS.
+    let mut preamble = String::new();
     let mut servers = Value::Null;
     let mut session = "fake-session-1".to_owned();
     let mut resumed = false;
@@ -215,10 +225,35 @@ fn main() {
             (Some("session/prompt"), Some(id)) => {
                 let mut text = params["prompt"][0]["text"].as_str().unwrap_or_default();
                 if let Some(rest) = text.strip_prefix(PREAMBLE_OPEN) {
-                    if let Some((_, prompt)) = rest.split_once(PREAMBLE_CLOSE) {
+                    if let Some((given, prompt)) = rest.split_once(PREAMBLE_CLOSE) {
                         instructed = true;
+                        preamble = given.to_owned();
                         text = prompt.trim_start();
                     }
+                }
+                if let Some(path) = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("REPLY_FILE "))
+                {
+                    let path = path.trim();
+                    let reply_text = std::fs::read_to_string(path)
+                        .unwrap_or_else(|e| format!("reply file {path}: {e}"));
+                    chunk(&session, &reply_text);
+                    reply(&id, json!({"stopReason": "end_turn"}));
+                    continue;
+                }
+                if let Some(dir) = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("REPLY_SEQUENCE "))
+                {
+                    chunk(&session, &next_in_sequence(dir.trim()));
+                    reply(&id, json!({"stopReason": "end_turn"}));
+                    continue;
+                }
+                if text.contains("SHOW_INSTRUCTIONS") {
+                    chunk(&session, &format!("instructions: {preamble}"));
+                    reply(&id, json!({"stopReason": "end_turn"}));
+                    continue;
                 }
                 if text.contains("INSTRUCTED") {
                     chunk(&session, &format!("instructed={instructed}"));
@@ -294,6 +329,22 @@ fn main() {
     if stubborn {
         std::thread::sleep(Duration::from_secs(60));
     }
+}
+
+/// For `REPLY_SEQUENCE`: the first file in `dir` by name, removed.
+fn next_in_sequence(dir: &str) -> String {
+    let mut files: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+        Err(error) => return format!("reply sequence {dir}: {error}"),
+    };
+    files.sort();
+    let Some(first) = files.into_iter().find(|p| p.is_file()) else {
+        return format!("reply sequence {dir}: empty");
+    };
+    let text = std::fs::read_to_string(&first)
+        .unwrap_or_else(|e| format!("reply sequence {}: {e}", first.display()));
+    let _ = std::fs::remove_file(&first);
+    text
 }
 
 /// For `ORPHAN`: note the prompt in `orphan.log`, start a child in this

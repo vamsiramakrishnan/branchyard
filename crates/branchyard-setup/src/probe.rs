@@ -78,6 +78,11 @@ pub struct WorkspaceFacts {
     pub run: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teardown: Vec<String>,
+    /// What another tool's committed configuration (`.emdash.json`,
+    /// `orca.yaml`, `.superset/config.json`, `.conductor/settings.toml`)
+    /// could not carry over, and why; see [`crate::import`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl WorkspaceFacts {
@@ -139,7 +144,55 @@ impl WorkspaceFacts {
         facts.setup = setup;
         facts.run = run;
         facts.teardown = teardown;
+        facts.import(probe);
         facts
+    }
+
+    /// Prefer what another worktree tool's committed configuration says
+    /// over what the lockfiles suggest: the first file (in
+    /// [`crate::import::IMPORTERS`] order) that gives setup, a run script
+    /// or teardown decides it, and every file's copy globs are added.
+    fn import(&mut self, probe: &dyn Probe) {
+        let (imported, notes) = crate::import::detect(probe);
+        self.notes = notes;
+        let mut setup = None;
+        let mut run = None;
+        let mut teardown = None;
+        for found in &imported {
+            if found.is_empty() {
+                continue;
+            }
+            self.found.push(found.file.to_owned());
+            for glob in &found.copy {
+                let valid = crate::config::check_copy_glob(glob).is_ok();
+                if !valid {
+                    self.notes.push(format!(
+                        "{}: copy {glob:?} is not a [workspace] copy glob",
+                        found.file
+                    ));
+                } else if !self.copy.contains(glob) {
+                    self.copy.push(glob.clone());
+                }
+            }
+            if setup.is_none() && !found.setup.is_empty() {
+                setup = Some(found.setup.clone());
+            }
+            if run.is_none() {
+                run = found.run.clone();
+            }
+            if teardown.is_none() && !found.teardown.is_empty() {
+                teardown = Some(found.teardown.clone());
+            }
+        }
+        if let Some(setup) = setup {
+            self.setup = setup;
+        }
+        if let Some(run) = run {
+            self.run = Some(run);
+        }
+        if let Some(teardown) = teardown {
+            self.teardown = teardown;
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -427,6 +480,9 @@ impl Facts {
                 "Suggested workspace",
                 format!("{} (from {})", parts.join("; "), w.found.join(", ")),
             );
+        }
+        if !w.notes.is_empty() {
+            push("workspace_notes", "Not imported", w.notes.join("; "));
         }
         push(
             "config",

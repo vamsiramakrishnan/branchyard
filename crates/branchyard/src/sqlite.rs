@@ -24,8 +24,9 @@ use serde_json::Value;
 
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PortBackend,
-    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SteerRow, StepRow,
+    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend,
+    PortBackend, ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow,
+    SlotRow, SlotState, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
@@ -213,6 +214,71 @@ CREATE TABLE IF NOT EXISTS sandboxes (
     PRIMARY KEY (branch, kind, name)
 );
 CREATE INDEX IF NOT EXISTS sandboxes_provider ON sandboxes (kind, provider, used_ms);
+CREATE TABLE IF NOT EXISTS outcomes (
+    id TEXT PRIMARY KEY,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    model TEXT,
+    effort TEXT,
+    outcome TEXT NOT NULL,
+    score REAL,
+    cost_usd REAL,
+    duration_ms INTEGER,
+    turns INTEGER NOT NULL,
+    routed INTEGER NOT NULL,
+    recorded_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS outcomes_kind ON outcomes (kind, recorded_ms);
+CREATE TABLE IF NOT EXISTS model_usage (
+    id TEXT PRIMARY KEY,
+    at_ms INTEGER NOT NULL,
+    branch TEXT NOT NULL,
+    turn INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    model TEXT NOT NULL,
+    api TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    cache_write_1h INTEGER NOT NULL,
+    cost_usd REAL,
+    latency_ms INTEGER NOT NULL,
+    status INTEGER NOT NULL,
+    streamed INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS model_usage_at ON model_usage (at_ms);
+CREATE TABLE IF NOT EXISTS knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_path TEXT,
+    scope_kind TEXT,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    adopted_by TEXT,
+    decided_ms INTEGER,
+    note TEXT
+);
+CREATE TABLE IF NOT EXISTS pool_slots (
+    id TEXT PRIMARY KEY,
+    place TEXT NOT NULL,
+    recipe TEXT NOT NULL,
+    state TEXT NOT NULL,
+    base TEXT NOT NULL,
+    path TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    host TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    pid_start TEXT NOT NULL,
+    branch TEXT,
+    created_ms INTEGER NOT NULL,
+    changed_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pool_slots_place ON pool_slots (place, created_ms);
 ";
 
 #[derive(Debug)]
@@ -2567,6 +2633,502 @@ impl StorageBackend for Sqlite {
                     acquired_at: uint(acquired_ms) / 1000,
                 })
             })
+        })
+    }
+}
+
+const OUTCOME_COLUMNS: &str = "id, repository, branch, kind, harness, model, effort, outcome, \
+     score, cost_usd, duration_ms, turns, routed, recorded_ms";
+
+type OutcomeColumns = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+    i64,
+    bool,
+    i64,
+);
+
+fn outcome_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutcomeColumns> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
+        r.get(11)?,
+        r.get(12)?,
+        r.get(13)?,
+    ))
+}
+
+fn outcome_record(c: OutcomeColumns) -> Result<crate::fleet::OutcomeRecord, Error> {
+    Ok(crate::fleet::OutcomeRecord {
+        id: c.0,
+        repo: c.1,
+        branch: c.2,
+        kind: c
+            .3
+            .parse()
+            .map_err(|e| Error::State(format!("outcome kind: {e}")))?,
+        harness: c.4,
+        model: c.5,
+        effort: c.6,
+        outcome: crate::fleet::BranchOutcome::parse(&c.7)?,
+        score: c.8,
+        cost_usd: c.9,
+        duration_ms: c.10.map(uint),
+        turns: u32::try_from(c.11).unwrap_or(0),
+        routed: c.12,
+        recorded_ms: uint(c.13),
+    })
+}
+
+impl crate::fleet::OutcomeBackend for Sqlite {
+    fn put_outcome(&self, row: &crate::fleet::OutcomeRecord) -> Result<(), Error> {
+        // Statistics derived from branches, not a branch's state: committed
+        // as event appends are, without a sync of its own.
+        self.tx(false, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO outcomes ({OUTCOME_COLUMNS}) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+                ),
+                params![
+                    row.id,
+                    row.repo,
+                    row.branch,
+                    row.kind.as_str(),
+                    row.harness,
+                    row.model,
+                    row.effort,
+                    row.outcome.as_str(),
+                    row.score,
+                    row.cost_usd,
+                    row.duration_ms.map(int),
+                    i64::from(row.turns),
+                    row.routed,
+                    int(row.recorded_ms)
+                ],
+            )
+            .map_err(|e| db("outcome", e))?;
+            Ok(())
+        })
+    }
+
+    fn outcome(&self, id: &str) -> Result<Option<crate::fleet::OutcomeRecord>, Error> {
+        let found = self.query(|conn| {
+            conn.query_row(
+                &format!("SELECT {OUTCOME_COLUMNS} FROM outcomes WHERE id = ?1"),
+                params![id],
+                outcome_row,
+            )
+            .optional()
+            .map_err(|e| db("outcome", e))
+        })?;
+        found.map(outcome_record).transpose()
+    }
+
+    fn outcomes(
+        &self,
+        kind: Option<crate::fleet::TaskKind>,
+    ) -> Result<Vec<crate::fleet::OutcomeRecord>, Error> {
+        let rows = self.query(|conn| {
+            let e = |error| db("outcomes", error);
+            let kind = kind.map(|k| k.as_str().to_owned());
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {OUTCOME_COLUMNS} FROM outcomes WHERE ?1 IS NULL OR kind = ?1 \
+                     ORDER BY recorded_ms, id"
+                ))
+                .map_err(e)?;
+            let rows = statement.query_map(params![kind], outcome_row).map_err(e)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })?;
+        rows.into_iter().map(outcome_record).collect()
+    }
+}
+
+const USAGE_COLUMNS: &str = "id, at_ms, branch, turn, subject, model, api, backend, input, \
+     output, cache_read, cache_write, cache_write_1h, cost_usd, latency_ms, status, streamed";
+
+fn usage_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::models::UsageRecord> {
+    let api: String = r.get(6)?;
+    Ok(crate::models::UsageRecord {
+        id: r.get(0)?,
+        at_ms: uint(r.get(1)?),
+        branch: r.get(2)?,
+        turn: u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
+        subject: r.get(4)?,
+        model: r.get(5)?,
+        api: serde_json::from_value(Value::String(api)).unwrap_or(crate::models::Api::Generic),
+        backend: r.get(7)?,
+        tokens: crate::models::Tokens {
+            input: uint(r.get(8)?),
+            output: uint(r.get(9)?),
+            cache_read: uint(r.get(10)?),
+            cache_write: uint(r.get(11)?),
+            cache_write_1h: uint(r.get(12)?),
+        },
+        cost_usd: r.get(13)?,
+        latency_ms: uint(r.get(14)?),
+        status: u16::try_from(r.get::<_, i64>(15)?).unwrap_or(0),
+        streamed: r.get(16)?,
+    })
+}
+
+impl crate::models::UsageBackend for Sqlite {
+    fn put_usage(&self, row: &crate::models::UsageRecord) -> Result<(), Error> {
+        // Accounting beside the branches, committed as event appends are.
+        self.tx(false, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO model_usage ({USAGE_COLUMNS}) VALUES \
+                     (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
+                ),
+                params![
+                    row.id,
+                    int(row.at_ms),
+                    row.branch,
+                    i64::from(row.turn),
+                    row.subject,
+                    row.model,
+                    row.api.as_str(),
+                    row.backend,
+                    int(row.tokens.input),
+                    int(row.tokens.output),
+                    int(row.tokens.cache_read),
+                    int(row.tokens.cache_write),
+                    int(row.tokens.cache_write_1h),
+                    row.cost_usd,
+                    int(row.latency_ms),
+                    i64::from(row.status),
+                    row.streamed
+                ],
+            )
+            .map_err(|e| db("model usage", e))?;
+            Ok(())
+        })
+    }
+
+    fn usage_since(&self, since_ms: u64) -> Result<Vec<crate::models::UsageRecord>, Error> {
+        self.query(|conn| {
+            let e = |error| db("model usage", error);
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {USAGE_COLUMNS} FROM model_usage WHERE at_ms >= ?1 ORDER BY at_ms, id"
+                ))
+                .map_err(e)?;
+            let rows = statement
+                .query_map(params![int(since_ms)], usage_row)
+                .map_err(e)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })
+    }
+}
+
+const KNOWLEDGE_COLUMNS: &str = "id, scope_path, scope_kind, text, source, status, created_ms, \
+     adopted_by, decided_ms, note";
+
+type KnowledgeColumns = (
+    i64,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+);
+
+fn knowledge_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeColumns> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+    ))
+}
+
+fn knowledge_entry(c: KnowledgeColumns) -> Result<crate::KnowledgeEntry, Error> {
+    Ok(crate::KnowledgeEntry {
+        id: uint(c.0),
+        scope: crate::KnowledgeScope {
+            path: c.1,
+            kind: c
+                .2
+                .map(|k| k.parse())
+                .transpose()
+                .map_err(|e| Error::State(format!("knowledge kind: {e}")))?,
+        },
+        text: c.3,
+        source: decode("knowledge source", &c.4)?,
+        status: c
+            .5
+            .parse()
+            .map_err(|e| Error::State(format!("knowledge status: {e}")))?,
+        created_ms: uint(c.6),
+        adopted_by: c.7,
+        decided_ms: c.8.map(uint),
+        note: c.9,
+    })
+}
+
+impl crate::knowledge::KnowledgeBackend for Sqlite {
+    fn add_knowledge(&self, entry: &crate::KnowledgeEntry) -> Result<crate::KnowledgeEntry, Error> {
+        let source = encode("knowledge source", &entry.source)?;
+        let created = match entry.created_ms {
+            0 => now_ms(),
+            at => at,
+        };
+        let id = self.tx(true, |tx| {
+            tx.execute(
+                "INSERT INTO knowledge (scope_path, scope_kind, text, source, status, created_ms, \
+                 adopted_by, decided_ms, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    entry.scope.path,
+                    entry.scope.kind.map(|k| k.as_str()),
+                    entry.text,
+                    source,
+                    entry.status.as_str(),
+                    int(created),
+                    entry.adopted_by,
+                    entry.decided_ms.map(int),
+                    entry.note
+                ],
+            )
+            .map_err(|e| db("knowledge", e))?;
+            Ok(tx.last_insert_rowid())
+        })?;
+        Ok(crate::KnowledgeEntry {
+            id: uint(id),
+            created_ms: created,
+            ..entry.clone()
+        })
+    }
+
+    fn knowledge(&self, id: u64) -> Result<Option<crate::KnowledgeEntry>, Error> {
+        let found = self.query(|conn| {
+            conn.query_row(
+                &format!("SELECT {KNOWLEDGE_COLUMNS} FROM knowledge WHERE id = ?1"),
+                params![int(id)],
+                knowledge_row,
+            )
+            .optional()
+            .map_err(|e| db("knowledge", e))
+        })?;
+        found.map(knowledge_entry).transpose()
+    }
+
+    fn knowledge_entries(&self) -> Result<Vec<crate::KnowledgeEntry>, Error> {
+        let rows = self.query(|conn| {
+            let e = |error| db("knowledge", error);
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {KNOWLEDGE_COLUMNS} FROM knowledge ORDER BY id"
+                ))
+                .map_err(e)?;
+            let rows = statement.query_map([], knowledge_row).map_err(e)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })?;
+        rows.into_iter().map(knowledge_entry).collect()
+    }
+
+    fn put_knowledge(
+        &self,
+        entry: &crate::KnowledgeEntry,
+        expected: crate::KnowledgeStatus,
+    ) -> Result<bool, Error> {
+        let source = encode("knowledge source", &entry.source)?;
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE knowledge SET scope_path = ?2, scope_kind = ?3, text = ?4, \
+                     source = ?5, status = ?6, adopted_by = ?7, decided_ms = ?8, note = ?9 \
+                     WHERE id = ?1 AND status = ?10",
+                    params![
+                        int(entry.id),
+                        entry.scope.path,
+                        entry.scope.kind.map(|k| k.as_str()),
+                        entry.text,
+                        source,
+                        entry.status.as_str(),
+                        entry.adopted_by,
+                        entry.decided_ms.map(int),
+                        entry.note,
+                        expected.as_str()
+                    ],
+                )
+                .map_err(|e| db("knowledge", e))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn remove_knowledge(&self, id: u64) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute("DELETE FROM knowledge WHERE id = ?1", params![int(id)])
+                .map_err(|e| db("knowledge", e))?;
+            Ok(changed == 1)
+        })
+    }
+}
+
+const SLOT_COLUMNS: &str = "id, place, recipe, state, base, path, detail, host, pid, pid_start, \
+     branch, created_ms, changed_ms";
+
+type SlotColumns = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+    i64,
+    i64,
+);
+
+fn slot_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<SlotColumns> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
+        r.get(11)?,
+        r.get(12)?,
+    ))
+}
+
+fn slot_row(c: SlotColumns) -> Result<SlotRow, Error> {
+    Ok(SlotRow {
+        id: c.0,
+        place: c.1,
+        recipe: c.2,
+        state: SlotState::parse(&c.3)?,
+        base: c.4,
+        path: c.5,
+        detail: c.6,
+        host: c.7,
+        pid: u32::try_from(c.8).unwrap_or(0),
+        start: c.9,
+        branch: c.10,
+        created_ms: uint(c.11),
+        changed_ms: uint(c.12),
+    })
+}
+
+impl PoolBackend for Sqlite {
+    fn insert_slot(&self, row: &SlotRow) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO pool_slots ({SLOT_COLUMNS}) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                ),
+                params![
+                    row.id,
+                    row.place,
+                    row.recipe,
+                    row.state.as_str(),
+                    row.base,
+                    row.path,
+                    row.detail,
+                    row.host,
+                    i64::from(row.pid),
+                    row.start,
+                    row.branch,
+                    int(row.created_ms),
+                    int(row.changed_ms)
+                ],
+            )
+            .map_err(|e| db("pool slot", e))?;
+            Ok(())
+        })
+    }
+
+    fn slots(&self, place: Option<&str>) -> Result<Vec<SlotRow>, Error> {
+        let rows = self.query(|conn| {
+            let e = |error| db("pool slots", error);
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {SLOT_COLUMNS} FROM pool_slots \
+                     WHERE ?1 IS NULL OR place = ?1 ORDER BY created_ms, id"
+                ))
+                .map_err(e)?;
+            let rows = statement
+                .query_map(params![place], slot_columns)
+                .map_err(e)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })?;
+        rows.into_iter().map(slot_row).collect()
+    }
+
+    fn update_slot(&self, row: &SlotRow, expected: SlotState) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE pool_slots SET state = ?2, base = ?3, path = ?4, detail = ?5, \
+                     host = ?6, pid = ?7, pid_start = ?8, branch = ?9, changed_ms = ?10 \
+                     WHERE id = ?1 AND state = ?11",
+                    params![
+                        row.id,
+                        row.state.as_str(),
+                        row.base,
+                        row.path,
+                        row.detail,
+                        row.host,
+                        i64::from(row.pid),
+                        row.start,
+                        row.branch,
+                        int(row.changed_ms),
+                        expected.as_str()
+                    ],
+                )
+                .map_err(|e| db("pool slot", e))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn delete_slot(&self, id: &str) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute("DELETE FROM pool_slots WHERE id = ?1", params![id])
+                .map_err(|e| db("pool slot", e))?;
+            Ok(changed == 1)
         })
     }
 }

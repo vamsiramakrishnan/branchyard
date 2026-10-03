@@ -49,7 +49,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
 /// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 24] = [
+pub const TOOLS: [&str; 26] = [
     "spawn",
     "inspect",
     "events",
@@ -74,6 +74,8 @@ pub const TOOLS: [&str; 24] = [
     "escalate",
     "answer",
     "inbox",
+    "approve_plan",
+    "reject_plan",
 ];
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
@@ -88,7 +90,7 @@ shows. You act only as your own branch and only \
 on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
-descendant's message; and read your own inbox.";
+descendant's message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {
@@ -188,6 +190,7 @@ pub fn tools() -> Vec<Tool> {
                 "additionalProperties": false,
             },
         },
+        "plan": {"type": "boolean", "description": "Plan first: the child's first turn is read-only and proposes a plan, escalated to your inbox; it changes nothing until you approve_plan"},
     });
     let mut spawn_edit = spawn_properties.clone();
     spawn_edit["kind"] = json!({"const": "spawn"});
@@ -474,6 +477,33 @@ pub fn tools() -> Vec<Tool> {
             inbox.annotations = Some(read_only("Read your inbox"));
             inbox
         },
+        Tool::new(
+            "approve_plan",
+            "Approve a descendant's plan that awaits approval, as proposed or with edited in its              place, and start the turn that carries it out; returns once it has started.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "branch": branch_property("A descendant whose plan awaits approval"),
+                    "edited": {"type": "string", "description": "The plan to approve instead of the proposed one"},
+                },
+                "required": ["branch"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "reject_plan",
+            "Reject a descendant's plan: it ends, or with replan it plans again (read-only)              with your reason.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "branch": branch_property("A descendant whose plan awaits approval"),
+                    "reason": {"type": "string"},
+                    "replan": {"type": "boolean"},
+                },
+                "required": ["branch"],
+                "additionalProperties": false,
+            })),
+        ),
     ]
 }
 

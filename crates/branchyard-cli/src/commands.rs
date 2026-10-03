@@ -56,7 +56,7 @@ impl Env {
         }
     }
 
-    fn style(&self) -> Style {
+    pub(crate) fn style(&self) -> Style {
         Style { color: self.color }
     }
 
@@ -127,10 +127,22 @@ pub fn open() -> Result<Yard, Failure> {
 }
 
 fn open_yard() -> Result<Yard, branchyard::Error> {
-    match std::env::var_os(branchyard::ENV_ROOT).filter(|v| !v.is_empty()) {
+    let yard = match std::env::var_os(branchyard::ENV_ROOT).filter(|v| !v.is_empty()) {
         Some(root) => Yard::open(root),
         None => Yard::open("."),
-    }
+    }?;
+    // `[connectors]`: the gateway its branches' turns are given.
+    crate::gateway_cmd::configure(&yard)
+        .map_err(|e| branchyard::Error::Unsupported(format!("[connectors]: {e}")))?;
+    // `[models]`: the model gateway its branches' turns may use
+    // (docs/model-gateway.md).
+    crate::models_cmd::configure(&yard)
+        .map_err(|e| branchyard::Error::Unsupported(format!("[models]: {e}")))?;
+    // `[knowledge]`: what its branches are given and when they are
+    // distilled (docs/knowledge.md).
+    crate::knowledge_cmd::configure(&yard)
+        .map_err(|e| branchyard::Error::Unsupported(format!("[knowledge]: {e}")))?;
+    Ok(yard)
 }
 
 fn now() -> u64 {
@@ -141,20 +153,25 @@ fn now() -> u64 {
 }
 
 /// Console and policy for commands that run a harness.
-struct Live {
-    console: Arc<Console>,
+pub(crate) struct Live {
+    pub(crate) console: Arc<Console>,
     policy: Policy,
 }
 
 impl Live {
     /// `branch` is the provider a send or fork inherits when the flags name
     /// none.
-    fn start(env: &Env, task: &TaskArgs, prefixed: bool, branch: Option<Provider>) -> Live {
+    pub(crate) fn start(
+        env: &Env,
+        task: &TaskArgs,
+        prefixed: bool,
+        branch: Option<Provider>,
+    ) -> Live {
         Live::start_to(env, task, prefixed, false, branch)
     }
 
     /// With `json`, activity goes to stderr so stdout holds only the result.
-    fn start_to(
+    pub(crate) fn start_to(
         env: &Env,
         task: &TaskArgs,
         prefixed: bool,
@@ -174,7 +191,8 @@ impl Live {
             .with_notifier(env.notifier()),
         );
         let choice = console::choose(task.permissions, env.stdin_tty, env.stderr_tty);
-        match provider(task).or(branch) {
+        // A recipe that cannot be used is refused by `options`, below.
+        match provider(task).ok().flatten().or(branch) {
             None | Some(Provider::Local) => {
                 eprintln!("by: local mode: harnesses run as your user, with no isolation beyond it")
             }
@@ -189,6 +207,11 @@ impl Live {
                 options.template,
                 options.workdir()
             ),
+            Some(Provider::Recipe(options)) => eprintln!(
+                "by: harnesses run on machines recipe {} makes; the worktree is copied there and \
+                 back",
+                options.name
+            ),
         }
         if choice == (Choice::DenyAll { notice: true }) {
             eprintln!("by: {}", console::DENY_NOTICE);
@@ -197,7 +220,17 @@ impl Live {
         Live { console, policy }
     }
 
-    fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
+    pub(crate) fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
+        if !task.require_labels.is_empty() {
+            return Err(Failure::Message(
+                "--require-label chooses among a server's workers: use it with --remote".into(),
+            ));
+        }
+        if task.priority.is_some() {
+            return Err(Failure::Message(
+                "--priority orders a server's queue: use it with --remote".into(),
+            ));
+        }
         let console = self.console.clone();
         let exe = std::env::current_exe().ok();
         let policy = match (&exe, task.allow_delegation) {
@@ -220,7 +253,7 @@ impl Live {
             observer: Some(Arc::new(move |event| console.event(event))),
             isolated: task.isolated,
             command: task.command.clone(),
-            provider: provider(task),
+            provider: provider(task)?,
             delegation: task.delegate.map(Envelope::depth),
             delegation_cli: exe,
             delegation_server: None,
@@ -228,12 +261,18 @@ impl Live {
             provision: provision(task)?,
             seats: None,
             workspace: None,
+            actor: None,
+            // A local harness inherits this process's environment,
+            // `TRACEPARENT` included.
+            trace_parent: None,
+            plan: task.plan,
+            goal: crate::plan_cmd::goal(task),
         })
     }
 
     /// Print the closing summary for one branch, once every branch it
     /// delegated to on this process has finished.
-    fn finish(self, env: &Env, result: Result<Branch, branchyard::Error>) -> Outcome {
+    pub(crate) fn finish(self, env: &Env, result: Result<Branch, branchyard::Error>) -> Outcome {
         let branch = match result {
             Ok(branch) => branch,
             Err(error) => {
@@ -260,7 +299,9 @@ impl Live {
 
 /// Wait for every branch these delegated to, in this process or another,
 /// saying which, and return them; `None` if there were none.
-fn wait_for_descendants(branches: &[&Branch]) -> Result<Option<Vec<BranchInfo>>, Failure> {
+pub(crate) fn wait_for_descendants(
+    branches: &[&Branch],
+) -> Result<Option<Vec<BranchInfo>>, Failure> {
     let mut all = Vec::new();
     for branch in branches {
         let running: Vec<String> = branch
@@ -293,17 +334,28 @@ pub fn branch_outcome(info: &BranchInfo) -> Outcome {
 
 /// The repository's `[workspace]` for a command that creates branches,
 /// once its scripts are trusted (docs/workspace.md).
-fn workspace(env: &Env, yard: &Yard) -> Result<Option<branchyard::WorkspaceSpec>, Failure> {
+pub(crate) fn workspace(
+    env: &Env,
+    yard: &Yard,
+) -> Result<Option<branchyard::WorkspaceSpec>, Failure> {
     crate::workspace_cmd::for_new_branch(env, yard.root())
 }
 
 pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome {
     if let Target::Remote(remote) = target {
+        if crate::fleet_cmd::is_routed(task) || task.kind.is_some() {
+            return Err(crate::fleet_cmd::local_only());
+        }
         // The issue's link lives in the prompt's header on a server.
         let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
         return remote::run(env, remote, &prompt, &task);
     }
     let yard = open()?;
+    if !crate::fleet_cmd::is_routed(task) {
+        // A login near its 5-hour or weekly limit (docs/usage.md).
+        let harness = task.harness.clone().unwrap_or_else(|| "claude-code".into());
+        crate::usage::guard(&[harness])?;
+    }
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let task = &task;
     let workspace = workspace(env, &yard)?;
@@ -312,25 +364,74 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome
         workspace,
         ..live.options(task)?
     };
-    let result = yard.task(prompt).options(options).run();
+    // `[fleet.<kind>] plan` and `goal_judge` (docs/plans-and-goals.md).
+    let options = crate::plan_cmd::with_fleet(options, task, &prompt);
+    // Routed (docs/fleet.md): the router picks the harness and fails over;
+    // the branch that ends the chain is the one summarized.
+    let result = match (crate::fleet_cmd::is_routed(task), task.kind) {
+        (true, _) => match crate::fleet_cmd::routed(&yard, &prompt, &options, task, false, None) {
+            Ok(mut routed) => Ok(routed.branches.remove(0)),
+            Err(Failure::Sdk(error)) => Err(error),
+            Err(other) => {
+                live.console.finish();
+                return Err(other);
+            }
+        },
+        (false, Some(kind)) => yard.run_with_kind(&prompt, &options, kind),
+        (false, None) => yard.task(prompt).options(options).run(),
+    };
     if let (Ok(branch), Some(issue)) = (&result, &issue) {
         crate::pr::link_issue(branch, issue)?;
     }
     live.finish(env, result)
 }
 
+/// `by fan`'s routing and judging; see docs/fleet.md.
+#[derive(Clone, Debug, Default)]
+pub struct FanRoute {
+    /// Branches to start when routed, instead of the entry's attempts.
+    pub attempts: Option<u32>,
+    /// Judge the attempts afterwards.
+    pub judge: bool,
+}
+
 pub fn fan(
     env: &Env,
     target: &Target,
     prompt: &str,
-    harnesses: &[String],
+    harnesses: Option<&[String]>,
     task: &TaskArgs,
+    route: &FanRoute,
 ) -> Outcome {
+    let routed = crate::fleet_cmd::is_routed(task);
+    if harnesses.is_some() && task.auto {
+        return Err(Failure::Message(
+            "--auto routes through the [fleet] table; it takes no --harness".into(),
+        ));
+    }
+    let harnesses = match (harnesses, routed) {
+        (Some(harnesses), _) => harnesses,
+        (None, true) => &[],
+        (None, false) => {
+            return Err(Failure::Message(
+                "fan needs --harness ID,ID,... or a [fleet] table to route by (--auto); see \
+                 docs/fleet.md"
+                    .into(),
+            ))
+        }
+    };
     if let Target::Remote(remote) = target {
+        if routed || task.kind.is_some() || route.judge {
+            return Err(crate::fleet_cmd::local_only());
+        }
         let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
         return remote::fan(env, remote, &prompt, harnesses, &task);
     }
     let yard = open()?;
+    if !routed {
+        // Logins near their 5-hour or weekly limits (docs/usage.md).
+        crate::usage::guard(harnesses)?;
+    }
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let (prompt, task) = (prompt.as_str(), &task);
     let workspace = workspace(env, &yard)?;
@@ -340,12 +441,28 @@ pub fn fan(
         workspace,
         ..live.options(task)?
     };
-    let builder = yard.task(prompt).options(options);
-    // Knowing the names up front lines the prefixes up from the first line.
-    if let Ok(names) = builder.planned_names(&ids) {
-        live.console.reserve(&names);
-    }
-    let result = builder.run_on(&ids);
+    let options = crate::plan_cmd::with_fleet(options, task, prompt);
+    let result = match routed {
+        true => {
+            match crate::fleet_cmd::routed(&yard, prompt, &options, task, true, route.attempts) {
+                Ok(routed) => Ok(routed.branches),
+                Err(Failure::Sdk(error)) => Err(error),
+                Err(other) => {
+                    live.console.finish();
+                    return Err(other);
+                }
+            }
+        }
+        false => {
+            let builder = yard.task(prompt).options(options);
+            // Knowing the names up front lines the prefixes up from the
+            // first line.
+            if let Ok(names) = builder.planned_names(&ids) {
+                live.console.reserve(&names);
+            }
+            builder.run_on(&ids)
+        }
+    };
     let branches = match result {
         Ok(branches) => branches,
         Err(error) => {
@@ -366,7 +483,24 @@ pub fn fan(
         .map(Branch::info)
         .chain(descendants.iter())
         .collect();
-    fan_summary(env, &infos)
+    let summary = fan_summary(env, &infos);
+    if route.judge {
+        let names: Vec<String> = branches.iter().map(|b| b.info().name.clone()).collect();
+        let judgement =
+            crate::fleet_cmd::judge_names(&yard, &names, None, None, task.fleet.as_ref())?;
+        print(&format!(
+            "\n{}",
+            crate::fleet_cmd::judgement_table(&judgement, env.style())
+        ))?;
+        if judgement.pick.is_some() {
+            print(&format!(
+                "\n{}\n  by judge {} --pick\n",
+                env.style().paint(Tone::Dim, "next"),
+                names.join(" ")
+            ))?;
+        }
+    }
+    summary
 }
 
 /// The comparison closing `by fan`, and its exit status: failure only when
@@ -437,7 +571,8 @@ pub fn send(
     let branch = open()?.branch(branch)?;
     if json {
         let live = Live::start_to(env, task, true, true, branch.provider()?);
-        let result = branch.send(prompt, live.options(task)?);
+        let options = live.options(task)?;
+        let result = failed_over(branch.send(prompt, options.clone()), &options);
         live.console.finish();
         let branch = match result {
             Ok(branch) => branch,
@@ -453,8 +588,29 @@ pub fn send(
     }
     let delegating = task.delegate.is_some() || !branch.info().children.is_empty();
     let live = Live::start(env, task, delegating, branch.provider()?);
-    let result = branch.send(prompt, live.options(task)?);
+    let options = live.options(task)?;
+    let result = failed_over(branch.send(prompt, options.clone()), &options);
     live.finish(env, result)
+}
+
+/// A routed branch whose turn failed for its harness goes on, on the next
+/// candidate, when its route asked for failover (docs/fleet.md).
+fn failed_over(
+    result: Result<Branch, branchyard::Error>,
+    options: &TaskOptions,
+) -> Result<Branch, branchyard::Error> {
+    let sent = result?;
+    match sent.yard().failover(&sent.info().name, options)? {
+        Some(next) => {
+            eprintln!(
+                "by: {}'s harness failed; the task went on as {}",
+                sent.info().name,
+                next.info().name
+            );
+            Ok(next)
+        }
+        None => Ok(sent),
+    }
 }
 
 /// How long `by send --steer` waits for the engine running the turn to
@@ -594,22 +750,67 @@ pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
         let list = infos.iter().map(json::branch).collect();
         return print(&json::text(&serde_json::Value::Array(list)));
     }
+    // Recorded maps and their progress follow the branches (docs/map.md).
+    let maps = crate::map_cmd::ls_section(target, env.style()).unwrap_or_default();
     if infos.is_empty() {
-        return print("no branches; start one with: by run \"<prompt>\"\n");
+        return print(&format!(
+            "no branches; start one with: by run \"<prompt>\"\n{maps}"
+        ));
     }
-    print(&render::branch_table(&infos, now(), env.style()))
+    print(&format!(
+        "{}{maps}",
+        render::branch_table(&infos, now(), env.style())
+    ))
 }
 
 /// `by show`, with the merge-readiness line `by pr` and `by pr --watch`
 /// recorded; `refresh` asks GitHub first (local mode).
+/// `by show` of a branch a queued operation will create.
+fn show_queued(branch: &str, op: &branchyard_client::api::Operation, as_json: bool) -> Outcome {
+    if as_json {
+        let value = serde_json::json!({ "branch": branch, "operation": op });
+        return print(&json::text(&value));
+    }
+    let word = |value: serde_json::Value| value.as_str().unwrap_or_default().to_owned();
+    let mut text = format!(
+        "branch    {branch} (not created yet)\noperation {} ({}, {})\n",
+        op.id,
+        word(serde_json::to_value(op.kind).unwrap_or_default()),
+        word(serde_json::to_value(op.state).unwrap_or_default()),
+    );
+    if !op.requires.is_empty() {
+        text.push_str(&format!("requires  {}\n", op.requires.join(", ")));
+    }
+    if let Some(waiting) = &op.waiting {
+        text.push_str(&format!("waiting   {waiting}\n"));
+    }
+    print(&text)
+}
+
 pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bool) -> Outcome {
+    let mut listening = None;
     let (info, events) = match target {
         Target::Local => {
             let yard = open()?;
             if refresh {
                 crate::pr::refresh(&yard, branch)?;
             }
-            let branch = yard.branch(branch)?;
+            let branch = match yard.branch(branch) {
+                Ok(branch) => branch,
+                // A map's name shows the map (docs/map.md).
+                Err(error @ branchyard::Error::UnknownBranch(_)) => {
+                    return match crate::map_cmd::show_if_map(env, target, branch, as_json) {
+                        Some(shown) => shown,
+                        None => Err(error.into()),
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            };
+            listening = Some(
+                crate::ports::of_yard(&yard)
+                    .remove(&branch.info().name)
+                    .unwrap_or_default(),
+            );
             (branch.info().clone(), branch.events()?)
         }
         Target::Remote(_) if refresh => {
@@ -619,10 +820,23 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
                     .into(),
             )))
         }
-        Target::Remote(remote) => (
-            remote.repo.branch(branch)?,
-            remote.repo.events(branch, 0)?.events,
-        ),
+        Target::Remote(remote) => match remote.repo.branch(branch) {
+            Ok(info) => (info, remote.repo.events(branch, 0)?.events),
+            // Not created yet: an operation that will create it may be
+            // queued, and say why no worker has claimed it.
+            Err(error) if error.code() == Some("unknown_branch") => {
+                match remote.repo.operations(Some(branch))?.into_iter().next() {
+                    Some(op) => return show_queued(branch, &op, as_json),
+                    None => {
+                        return match crate::map_cmd::show_if_map(env, target, branch, as_json) {
+                            Some(shown) => shown,
+                            None => Err(error.into()),
+                        }
+                    }
+                }
+            }
+            Err(error) => return Err(error.into()),
+        },
     };
     let checkpoints = crate::attempts::checkpoints(target, &info)?;
     let (readiness, line) = crate::pr::show_readiness(&info, &events, env.style());
@@ -630,18 +844,95 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         let mut value = json::branch(&info);
         value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
         value["merge_readiness"] = readiness;
+        // Only when something listens, so local and remote `show --json`
+        // agree for a branch with no servers.
+        if let Some(listening) = listening.as_ref().filter(|l| !l.is_empty()) {
+            value["listening"] = serde_json::to_value(listening).unwrap_or_default();
+        }
+        // Its plan and goal, when it has them (docs/plans-and-goals.md).
+        crate::plan_cmd::show_json(&info.name, &events, &mut value);
+        // How its last turn's network policy was applied (docs/egress.md).
+        if let Some((summary, _)) = egress_summary(&events) {
+            value["egress"] = summary;
+        }
+        // Its calls through the model gateway (docs/model-gateway.md).
+        if let Some((summary, _)) = crate::models_cmd::summary(&events) {
+            value["models"] = summary;
+        }
         return print(&json::text(&value));
     }
-    let extra = line
+    let mut extra: Vec<(&str, String)> = line
         .map(|line| ("merge readiness", line))
         .into_iter()
         .collect();
+    if let Some((_, text)) = egress_summary(&events) {
+        extra.push(("egress", text));
+    }
+    if let Some((_, text)) = crate::models_cmd::summary(&events) {
+        extra.push(("models", text));
+    }
+    if let Some(listening) = listening.filter(|l| !l.is_empty()) {
+        extra.push(("listening", crate::ports::lines(&listening).join("; ")));
+    }
+    extra.extend(crate::plan_cmd::show_lines(&info.name, &events));
     let mut text = render::details(&info, now(), env.style(), extra);
     text.push_str(&crate::attempts::checkpoint_lines(
         &checkpoints,
         env.style(),
     ));
     print(&text)
+}
+
+/// How the branch's last turn with a network policy applied it, and what
+/// its proxy decided in that turn: as JSON and as one line. `None` when no
+/// turn had one.
+pub(crate) fn egress_summary(
+    events: &[branchyard::RecordedEvent],
+) -> Option<(serde_json::Value, String)> {
+    use branchyard::EgressActivity;
+    let at = events.iter().rposition(|e| {
+        matches!(&e.activity, Activity::Egress(egress)
+            if matches!(egress.as_ref(), EgressActivity::Applied { .. }))
+    })?;
+    let Activity::Egress(applied) = &events[at].activity else {
+        return None;
+    };
+    let EgressActivity::Applied {
+        policy,
+        allow,
+        enforcement,
+        reason,
+    } = applied.as_ref()
+    else {
+        return None;
+    };
+    let (mut allowed, mut denied) = (0, 0);
+    for event in &events[at + 1..] {
+        if let Activity::Egress(egress) = &event.activity {
+            if let EgressActivity::Decision { allowed: yes, .. } = egress.as_ref() {
+                match yes {
+                    true => allowed += 1,
+                    false => denied += 1,
+                }
+            }
+        }
+    }
+    let mut text = format!(
+        "{} ({policy}); {allowed} allowed, {denied} denied",
+        enforcement.as_str()
+    );
+    if let Some(reason) = reason {
+        text.push_str(&format!("; not enforced: {reason}"));
+    }
+    let value = serde_json::json!({
+        "policy": policy,
+        "allow": allow,
+        "enforcement": enforcement,
+        "reason": reason,
+        "allowed": allowed,
+        "denied": denied,
+    });
+    Some((value, text))
 }
 
 pub fn diff(env: &Env, target: &Target, branch: &str) -> Outcome {
@@ -718,7 +1009,12 @@ pub fn log(env: &Env, target: &Target, branch: &str, as_json: bool, follow: bool
         return log_follow(env, target, branch, as_json);
     }
     let events = match target {
-        Target::Local => open()?.branch(branch)?.events()?,
+        Target::Local => {
+            let yard = open()?;
+            // The gateway's newest calls, if it has written any.
+            let _ = yard.ingest_connector_audit();
+            yard.branch(branch)?.events()?
+        }
         Target::Remote(remote) => remote.repo.events(branch, 0)?.events,
     };
     if as_json {
@@ -737,9 +1033,13 @@ const FOLLOW_POLL: Duration = Duration::from_millis(500);
 /// Message text still streaming is held back until the stream pauses, so
 /// a reply is not cut into many stamped pieces.
 fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcome {
-    let local = match target {
-        Target::Local => Some(open()?.branch(branch)?),
+    let yard = match target {
+        Target::Local => Some(open()?),
         Target::Remote(_) => None,
+    };
+    let local = match &yard {
+        Some(yard) => Some(yard.branch(branch)?),
+        None => None,
     };
     let mut cursor = 0u64;
     let mut held: Vec<RecordedEvent> = Vec::new();
@@ -747,6 +1047,10 @@ fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcom
     loop {
         let (events, next) = match (&local, target) {
             (Some(branch), _) => {
+                // The gateway's newest calls, as connector_call events.
+                if let Some(yard) = &yard {
+                    let _ = yard.ingest_connector_audit();
+                }
                 let page = branch.wait_for_events(cursor, 500, FOLLOW_POLL)?;
                 (page.events, page.next_cursor)
             }
@@ -799,6 +1103,24 @@ fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcom
             std::thread::sleep(FOLLOW_POLL);
         }
     }
+}
+
+/// [`merge`] without removing, and locally without printing, for a command
+/// whose stdout is JSON (`by compare --pick --json`, `by judge --pick
+/// --json`). Remotely the server's merge line is still printed.
+pub fn merge_quietly(target: &Target, branch: &str, into: Option<&str>) -> Outcome {
+    if let Target::Remote(remote) = target {
+        return remote::merge(remote, branch, into);
+    }
+    let yard = open()?;
+    let target = match into {
+        Some(target) => target.to_owned(),
+        None => yard
+            .current_branch()?
+            .ok_or_else(|| Failure::Message("HEAD is detached; pass --into <branch>".into()))?,
+    };
+    yard.merge(branch, &target)?;
+    Ok(())
 }
 
 pub fn merge(target: &Target, branch: &str, into: Option<&str>, remove: bool) -> Outcome {
@@ -868,7 +1190,7 @@ pub fn mcp(root: &str, branch: &str) -> Outcome {
 
 /// The delegate for this harness's branch when `by` runs inside a
 /// delegating harness; `None` outside one.
-fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
+pub(crate) fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
     let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
     if set(ENV_TOKEN) {
         return match Delegate::from_env() {
@@ -886,13 +1208,13 @@ fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
     Ok(None)
 }
 
-fn to_json<T: Serialize>(value: &T) -> String {
+pub(crate) fn to_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).expect("results serialize")
 }
 
 /// Report `error`: `{"error": {"kind", "message"}}` on stdout with
 /// `--json`, else on stderr; exit 1 either way.
-fn fail(json: bool, error: &branchyard::Error) -> Outcome {
+pub(crate) fn fail(json: bool, error: &branchyard::Error) -> Outcome {
     if json {
         let value =
             serde_json::json!({"error": {"kind": error.kind(), "message": error.to_string()}});
@@ -904,7 +1226,7 @@ fn fail(json: bool, error: &branchyard::Error) -> Outcome {
 }
 
 /// Print a result as JSON or as text.
-fn emit<T: Serialize>(
+pub(crate) fn emit<T: Serialize>(
     json: bool,
     result: Result<T, branchyard::Error>,
     text: impl Fn(&T) -> String,
@@ -956,6 +1278,8 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         depends_on: args.depends_on.clone(),
         after: args.after,
         bindings: args.bindings.clone(),
+        connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
+        plan: args.plan,
         ..Spawn::default()
     };
     if let Some(delegate) = harness_delegate(json)? {
@@ -1805,9 +2129,14 @@ pub(crate) fn provision(task: &TaskArgs) -> Result<Option<branchyard::Provisioni
     Ok(spec)
 }
 
-pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
+/// The provider the flags name, if any. `--provider recipe:NAME` resolves
+/// the recipe here and is refused unless it may run.
+pub(crate) fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
+    if let Some(recipe) = &task.recipe {
+        return crate::recipe_cmd::provider(recipe).map(|o| Some(Provider::Recipe(o)));
+    }
     if let Some(substrate) = &task.substrate {
-        return Some(Provider::Substrate(SubstrateOptions {
+        return Ok(Some(Provider::Substrate(SubstrateOptions {
             endpoint: substrate.endpoint.clone(),
             router: substrate.router.clone(),
             atespace: substrate.atespace.clone().unwrap_or_default(),
@@ -1824,9 +2153,9 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
             keep: substrate.lifecycle.keep.unwrap_or_default(),
             snapshots: substrate.lifecycle.snapshots,
             max_paused: substrate.lifecycle.max_paused,
-        }));
+        })));
     }
-    match (&task.sandbox, task.local) {
+    Ok(match (&task.sandbox, task.local) {
         (Some(sandbox), _) => Some(Provider::Microsandbox(SandboxOptions {
             image: sandbox.image.clone(),
             cpus: sandbox.cpus,
@@ -1839,7 +2168,7 @@ pub(crate) fn provider(task: &TaskArgs) -> Option<Provider> {
         })),
         (None, true) => Some(Provider::Local),
         (None, false) => None,
-    }
+    })
 }
 
 /// `by rig check FILE` prints the plan; `by rig run FILE PROMPT` runs the

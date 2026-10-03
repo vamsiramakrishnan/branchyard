@@ -78,6 +78,831 @@ pub struct ProjectConfig {
     /// that repository's own `[workspace]` for you.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub projects: BTreeMap<String, ProjectOverride>,
+    /// Who runs each kind of task: `[fleet.bugfix]`, ..., and
+    /// `[fleet.default]`. With a fleet, `by run` without `--harness` routes
+    /// (docs/fleet.md). A project's entry replaces the user file's for the
+    /// same kind.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fleet: BTreeMap<String, FleetConfig>,
+    /// The connector gateway (docs/connectors.md): where it is, which
+    /// bundles it serves, how `by gateway` runs it, and the grants a new
+    /// branch gets when `--connector` names none.
+    #[serde(default, skip_serializing_if = "Connectors::is_empty")]
+    pub connectors: Connectors,
+    /// The hosts a new branch's harness may reach (docs/egress.md), when
+    /// `--network` gives none: an allowlist enforced through Branchyard's
+    /// egress proxy. Unset: open.
+    #[serde(default, skip_serializing_if = "NetworkConfig::is_empty")]
+    pub network: NetworkConfig,
+    /// Quota meters per login (`by usage`, docs/usage.md): what `by run`
+    /// and `by fan` do when a candidate's login is near its 5-hour or
+    /// weekly limit, and named logins to meter.
+    #[serde(default, skip_serializing_if = "UsageConfig::is_empty")]
+    pub usage: UsageConfig,
+    /// Issue trackers for `--issue` besides GitHub (docs/pull-requests.md):
+    /// each one's API address and, instead of a token in the environment,
+    /// a connector gateway tool to fetch issues through.
+    #[serde(default, skip_serializing_if = "Trackers::is_empty")]
+    pub trackers: Trackers,
+    /// Environment recipes (docs/recipes.md): `[recipes.NAME]`, scripts
+    /// that create, suspend, resume and destroy a machine and print how to
+    /// reach it. A repository's recipes run only once you trust them (`by
+    /// recipe trust NAME`); the user file's need no trust, and replace a
+    /// repository's recipe of the same name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub recipes: BTreeMap<String, RecipeConfig>,
+    /// Repository knowledge (docs/knowledge.md): whether adopted entries
+    /// are given to harnesses and within what budget, when branches are
+    /// distilled into proposals, and by which distiller.
+    #[serde(default, skip_serializing_if = "KnowledgeConfig::is_empty")]
+    pub knowledge: KnowledgeConfig,
+    /// The model gateway (docs/model-gateway.md): its backends, routes,
+    /// budgets and prices, and the models a new branch may call through it
+    /// when `--model-gateway` gives none.
+    #[serde(default, skip_serializing_if = "ModelsConfig::is_empty")]
+    pub models: ModelsConfig,
+    /// Installing and updating harness CLIs (docs/harness-lifecycle.md):
+    /// whether `by harnesses install`, `update` and the router may run a
+    /// harness's install command, and for which harnesses. A repository's
+    /// file may only say `install = "never"`; the rest belongs in your user
+    /// file, since it runs software on your machine.
+    #[serde(default, skip_serializing_if = "HarnessesConfig::is_empty")]
+    pub harnesses: HarnessesConfig,
+}
+
+/// `[harnesses]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessesConfig {
+    /// `never`, `ask` (on a terminal, or with `--yes`) or `auto` (also
+    /// installs on demand when the router needs a harness). Unset: `ask` on
+    /// a terminal and `never` elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<HarnessInstall>,
+    /// When not empty, only these harness IDs may be installed or updated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+}
+
+impl HarnessesConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &HarnessesConfig::default()
+    }
+}
+
+/// `install` in `[harnesses]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessInstall {
+    /// Never install or update.
+    Never,
+    /// Ask on a terminal first.
+    Ask,
+    /// Install without asking, also on demand for the router.
+    Auto,
+}
+
+/// Orca's rule for a recipe's name: 1 to 64 lowercase letters, digits,
+/// dots, underscores or hyphens, starting with a letter or digit.
+pub fn valid_recipe_name(name: &str) -> bool {
+    name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
+/// One `[recipes.NAME]`, after Orca's `environmentRecipes` entries: shell
+/// commands run in the repository root. `create` and `resume` print one
+/// JSON object saying how to reach the machine; `suspend`, `resume` and
+/// `destroy` get the machine's record on stdin.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeConfig {
+    /// For people: what the machine is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Creates a machine and prints its result (docs/recipes.md).
+    pub create: String,
+    /// Freezes the machine; with `resume`, the provider's pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend: Option<String>,
+    /// Continues a suspended machine and prints its result again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+    /// Releases the machine; `"none"` when it is cleaned up elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destroy: Option<String>,
+    /// Checks this host can run the recipe (its CLI, credentials); exit 0
+    /// is healthy. `by recipe check` runs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doctor: Option<String>,
+    /// How long one script may run, in seconds (default 900).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout_seconds: Option<u64>,
+}
+
+impl RecipeConfig {
+    /// What the trust decision is about: SHA-256, in hex, of every command
+    /// (and the timeout) in canonical form. Any change changes it.
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical = serde_json::json!({
+            "create": self.create,
+            "suspend": self.suspend,
+            "resume": self.resume,
+            "destroy": self.destroy,
+            "doctor": self.doctor,
+            "timeout_seconds": self.timeout_seconds,
+        });
+        hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
+    }
+
+    /// Orca's rules for a recipe: a name of 1 to 64 lowercase letters,
+    /// digits, dots, underscores or hyphens, starting with a letter or
+    /// digit, and a `create` command.
+    pub fn check(&self, name: &str) -> Result<(), ConfigError> {
+        let key = format!("recipes.{name}");
+        if !valid_recipe_name(name) {
+            return Err(ConfigError(format!(
+                "{key}: use 1-64 lowercase letters, numbers, dots, underscores or hyphens, \
+                 starting with a letter or number"
+            )));
+        }
+        if self.create.trim().is_empty() {
+            return Err(ConfigError(format!("{key}.create: needs a command")));
+        }
+        for (field, value) in [
+            ("suspend", &self.suspend),
+            ("resume", &self.resume),
+            ("destroy", &self.destroy),
+            ("doctor", &self.doctor),
+        ] {
+            if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+                return Err(ConfigError(format!("{key}.{field}: must not be empty")));
+            }
+        }
+        if self.timeout_seconds == Some(0) {
+            return Err(ConfigError(format!(
+                "{key}.timeout_seconds: must be at least 1"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `[knowledge]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeConfig {
+    /// Give matching adopted entries to each turn's harness, in its
+    /// instructions. Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<bool>,
+    /// At most about this many tokens of entries per turn. Default 1500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub budget_tokens: Option<u32>,
+    /// When a branch is distilled into proposed entries on its own: any of
+    /// `merged`, `judged_best` and `ready`. Default `["merged",
+    /// "judged_best"]`; `[]` only on `by knowledge distill`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distill_on: Option<Vec<String>>,
+    /// A harness that distills, read-only on a scratch branch, answering a
+    /// JSON list of proposals. Without one, the deterministic extractor
+    /// proposes the corrections and review comments a branch was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distiller: Option<DistillerConfig>,
+}
+
+impl KnowledgeConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == KnowledgeConfig::default()
+    }
+}
+
+/// `distiller = { harness = "claude-code", model = "small" }`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DistillerConfig {
+    /// The distiller's harness or profile ID.
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The executable and fixed arguments instead of the profile's; for
+    /// development and testing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// The values `[knowledge] distill_on` takes.
+pub const DISTILL_TRIGGERS: &[&str] = &["merged", "judged_best", "ready"];
+
+/// `[usage]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    /// What `by run` and `by fan` do when a candidate's login is near its
+    /// limit: `warn` (the default), `refuse`, or `off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<UsageGuard>,
+    /// The percent of a 5-hour or weekly window at which a login counts as
+    /// near its limit. Default 90.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub near_percent: Option<f64>,
+    /// The router (docs/fleet.md) skips a candidate whose login has used
+    /// more than this percent of a window. Unset: it never skips one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub skip_over: Option<f64>,
+    /// Claude Code keeps no record of its limits on disk: the tokens a
+    /// 5-hour window allows you, so `by usage` can show a percent. Unset: it
+    /// shows tokens and cost only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_five_hour_tokens: Option<u64>,
+    /// The same for Claude Code's weekly window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_weekly_tokens: Option<u64>,
+    /// More logins to meter, by name: `[usage.accounts.work]` with the
+    /// harness and the configuration directory it logs in from.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accounts: BTreeMap<String, UsageAccount>,
+}
+
+impl UsageConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &UsageConfig::default()
+    }
+}
+
+/// `guard` in `[usage]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum UsageGuard {
+    /// Say so on stderr, and start anyway.
+    Warn,
+    /// Refuse to start, naming the login and its window.
+    Refuse,
+    /// Do not look.
+    Off,
+}
+
+/// `[usage.accounts.NAME]`: a login other than the default one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageAccount {
+    /// `claude-code` or `codex`.
+    pub harness: String,
+    /// Its configuration directory: what `CLAUDE_CONFIG_DIR` or
+    /// `CODEX_HOME` is set to when you use this login.
+    pub dir: String,
+}
+
+/// `[trackers]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Trackers {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<TrackerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jira: Option<TrackerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gitlab: Option<TrackerConfig>,
+}
+
+impl Trackers {
+    pub fn is_empty(&self) -> bool {
+        self == &Trackers::default()
+    }
+}
+
+/// One tracker in `[trackers]`. Never a credential: tokens come from the
+/// environment (docs/pull-requests.md) or the connector gateway.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TrackerConfig {
+    /// The API's address: Linear's GraphQL endpoint, a Jira site
+    /// (`https://acme.atlassian.net`) or a GitLab instance
+    /// (`https://gitlab.example.com`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Fetch issues through this connector gateway tool (such as
+    /// `linear__get_issue`) when no token is in the environment; needs
+    /// `[connectors] gateway`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_tool: Option<String>,
+}
+
+/// The keys `[fleet]` takes: the task kinds, then `default`.
+pub const FLEET_KEYS: &[&str] = &[
+    "bugfix",
+    "feature",
+    "refactor",
+    "review",
+    "research",
+    "docs",
+    "migration",
+    "tests",
+    "other",
+    "default",
+];
+
+/// The most attempts a fleet entry may ask for.
+pub const MAX_ATTEMPTS: u32 = 16;
+
+/// `[fleet.<kind>]`: the candidates for a kind of task, in order of
+/// preference, and how they run.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FleetConfig {
+    /// Harnesses to route among, each with an optional model and effort.
+    pub candidates: Vec<CandidateConfig>,
+    /// Branches `by fan --auto` starts (best of N); `by run` starts one. Default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 16))]
+    pub attempts: Option<u32>,
+    /// Each attempt's cost limit, in dollars, which a failover chain shares;
+    /// a candidate whose recorded mean cost is over it is not picked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0))]
+    pub budget_usd: Option<f64>,
+    /// Each attempt's turn limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_turns: Option<u32>,
+    /// Interrupt an attempt's turn after this many minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0))]
+    pub max_minutes: Option<f64>,
+    /// A judge harness for `by judge` and `by fan --judge`; without one the
+    /// judge is deterministic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeConfig>,
+    /// Start the task again on the next candidate when a harness fails
+    /// (not when the task does). `by run --auto` always does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover: Option<bool>,
+    /// The chance, from 0 to 1, that the router picks at random instead of
+    /// by sampled success. Default 0.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub exploration: Option<f64>,
+    /// An environment name, recorded on routed branches for tools that
+    /// prepare environments; Branchyard does not act on it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// Connector names, recorded on routed branches for tools that grant
+    /// connectors; Branchyard does not act on them yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connectors: Vec<String>,
+    /// Plan first: a new branch of this kind starts with a read-only
+    /// planning turn and waits for `by plan approve` (docs/plans-and-goals.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
+    /// The judge of a `--goal` for this kind of task, when the command names
+    /// none: it runs read-only on a scratch branch and answers a JSON
+    /// verdict (docs/plans-and-goals.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_judge: Option<JudgeConfig>,
+}
+
+/// One candidate: `{ harness = "codex", model = "large", effort = "high" }`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateConfig {
+    /// Harness or profile ID, as `by harnesses` lists them.
+    pub harness: String,
+    /// A model name, or a size alias (`small`, `medium`, `large`, `extra-large`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Reasoning effort: `low`, `medium`, `high`, `xhigh`, or 0-100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The executable and fixed arguments instead of the profile's, as
+    /// `--command`; for development and testing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// `judge = { harness = "claude-code", rubric = "..." }`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeConfig {
+    /// The judge's harness or profile ID. It runs read-only on a scratch
+    /// branch and must answer a JSON verdict.
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Added to the judge's prompt, after the default rubric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubric: Option<String>,
+}
+
+impl FleetConfig {
+    /// The checks beyond the shape: `key` (`fleet.bugfix`) prefixes each
+    /// message.
+    pub fn check(&self, key: &str) -> Result<(), ConfigError> {
+        let fail = |what: &str, why: String| Err(ConfigError(format!("{key}.{what}: {why}")));
+        if self.candidates.is_empty() {
+            return fail("candidates", "needs at least one candidate".into());
+        }
+        for (index, candidate) in self.candidates.iter().enumerate() {
+            let at = format!("candidates[{index}]");
+            check_harness(&candidate.harness).or_else(|why| fail(&format!("{at}.harness"), why))?;
+            check_model_effort(candidate.model.as_deref(), candidate.effort.as_deref())
+                .or_else(|(what, why)| fail(&format!("{at}.{what}"), why))?;
+            check_command(candidate.command.as_deref())
+                .or_else(|why| fail(&format!("{at}.command"), why))?;
+            if self.candidates[..index].contains(candidate) {
+                return fail(&at, "is listed twice".into());
+            }
+        }
+        match self.attempts {
+            Some(0) => return fail("attempts", "must be at least 1".into()),
+            Some(n) if n > MAX_ATTEMPTS => {
+                return fail(
+                    "attempts",
+                    format!("must be at most {MAX_ATTEMPTS}, not {n}"),
+                )
+            }
+            _ => {}
+        }
+        for (what, value) in [
+            ("budget_usd", self.budget_usd),
+            ("max_minutes", self.max_minutes),
+        ] {
+            if let Some(value) = value {
+                if !(value.is_finite() && value > 0.0) {
+                    return fail(what, format!("must be a positive number, not {value}"));
+                }
+            }
+        }
+        if self.max_turns == Some(0) {
+            return fail("max_turns", "must be at least 1".into());
+        }
+        if let Some(exploration) = self.exploration {
+            if !(0.0..=1.0).contains(&exploration) {
+                return fail(
+                    "exploration",
+                    format!("must be from 0 to 1, not {exploration}"),
+                );
+            }
+        }
+        for (name, judge) in [("judge", &self.judge), ("goal_judge", &self.goal_judge)] {
+            let Some(judge) = judge else { continue };
+            check_harness(&judge.harness).or_else(|why| fail(&format!("{name}.harness"), why))?;
+            check_model_effort(judge.model.as_deref(), judge.effort.as_deref())
+                .or_else(|(what, why)| fail(&format!("{name}.{what}"), why))?;
+            check_command(judge.command.as_deref())
+                .or_else(|why| fail(&format!("{name}.command"), why))?;
+            if judge.rubric.as_deref().is_some_and(|r| r.trim().is_empty()) {
+                return fail(&format!("{name}.rubric"), "must not be empty".into());
+            }
+        }
+        if self
+            .environment
+            .as_deref()
+            .is_some_and(|e| e.trim().is_empty())
+        {
+            return fail("environment", "must not be empty".into());
+        }
+        if let Some(bad) = self.connectors.iter().find(|c| c.trim().is_empty()) {
+            return fail("connectors", format!("{bad:?} is not a connector name"));
+        }
+        Ok(())
+    }
+}
+
+fn check_harness(harness: &str) -> Result<(), String> {
+    match branchyard_harness::profiles::default_for(harness)
+        .or_else(|| branchyard_harness::profiles::by_id(harness))
+    {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "{harness:?} is not a harness or profile; see `by harnesses`"
+        )),
+    }
+}
+
+fn check_model_effort(
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(), (&'static str, String)> {
+    if model.is_some_and(|m| m.trim().is_empty()) {
+        return Err(("model", "must not be empty".into()));
+    }
+    if let Some(effort) = effort {
+        branchyard_provision::Effort::parse(effort).map_err(|e| ("effort", e))?;
+    }
+    Ok(())
+}
+
+fn check_command(command: Option<&str>) -> Result<(), String> {
+    match command {
+        Some(command) if split_words(command)?.is_empty() => Err("needs a command".into()),
+        _ => Ok(()),
+    }
+}
+
+/// `[connectors]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Connectors {
+    /// The gateway's canonical `/mcp` URL, such as
+    /// `http://127.0.0.1:8931/mcp`: every token's audience, and what a
+    /// harness on this machine is given. Without it, connectors are off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    /// The same gateway as a sandboxed harness reaches it: a host address a
+    /// Microsandbox guest routes to, or Substrate's routed ingress. Without
+    /// it, a sandboxed branch with a grant fails its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_gateway: Option<String>,
+    /// The bundle root the gateway serves (`anvil serve mcp <root>
+    /// --fleet`): every directory under it with an `air.yaml` or
+    /// `air.json` is a connector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundles: Option<String>,
+    /// Anvil's command line (default `anvil`), such as
+    /// `"node /opt/anvil/packages/cli/dist/bin-anvil.js"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anvil: Option<String>,
+    /// The address `by gateway start` listens on (default: the gateway
+    /// URL's loopback host); `0.0.0.0` for sandboxes to reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    /// The gateway's vault key, a 0600 file of 32 bytes in 64 hex
+    /// characters (default `.branchyard/gateway/vault.key`, made on first
+    /// start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_key: Option<String>,
+    /// Grants for a new branch (`by run`, `by fan`) when `--connector`
+    /// gives none, in its form: `"github:read"`,
+    /// `"github@work:write:issues.*"`. Applied only to isolated or
+    /// sandboxed branches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<String>,
+}
+
+impl Connectors {
+    pub fn is_empty(&self) -> bool {
+        self == &Connectors::default()
+    }
+
+    /// The default grants, parsed.
+    pub fn grant_entries(
+        &self,
+    ) -> Result<Vec<branchyard_provision::connectors::GrantEntry>, ConfigError> {
+        self.grants
+            .iter()
+            .map(|g| {
+                branchyard_provision::connectors::GrantEntry::parse(g)
+                    .map_err(|e| ConfigError(format!("connectors.grants: {e}")))
+            })
+            .collect()
+    }
+}
+
+/// `[network]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkConfig {
+    /// HOST[:PORT] rules a new branch's harness may reach, such as
+    /// `"github.com"` or `"*.npmjs.org:443"`; `[]` allows nothing. Unset:
+    /// every host (open). A connector grant adds the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    /// `best_effort` (the default): where the policy cannot be enforced,
+    /// run with the proxy's variables and say so. `required`: refuse to
+    /// run there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce: Option<NetworkEnforceMode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkEnforceMode {
+    BestEffort,
+    Required,
+}
+
+impl NetworkConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &NetworkConfig::default()
+    }
+
+    /// The policy it describes, checked with the flag's parser; `None`
+    /// when it describes none.
+    pub fn policy(&self) -> Result<Option<branchyard_provision::network::Network>, ConfigError> {
+        use branchyard_provision::network::{Enforce, Network};
+        let enforce = match self.enforce {
+            None | Some(NetworkEnforceMode::BestEffort) => Enforce::BestEffort,
+            Some(NetworkEnforceMode::Required) => Enforce::Required,
+        };
+        let Some(allow) = &self.allow else {
+            return match self.enforce {
+                Some(NetworkEnforceMode::Required) => Err(ConfigError(
+                    "network.enforce: an open network has nothing to enforce; give network.allow"
+                        .into(),
+                )),
+                _ => Ok(None),
+            };
+        };
+        Network::from_rules(allow, enforce)
+            .map(Some)
+            .map_err(|e| ConfigError(format!("network.allow: {e}")))
+    }
+}
+
+/// `[models]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelsConfig {
+    /// Models a new branch may call through the gateway when
+    /// `--model-gateway` gives none, as globs (`"claude-*"`, `"*"`); set,
+    /// it puts new branches on the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    /// Backends by name: `[models.backends.anthropic] api = "anthropic"`,
+    /// `key = "ANTHROPIC_API_KEY"`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub backends: BTreeMap<String, ModelBackendConfig>,
+    /// Routes by requested model, first match wins: `[[models.routes]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<ModelRouteConfig>,
+    /// Daily and monthly limits (UTC) over every branch of the repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ModelBudgetConfig>,
+    /// Prices for models the catalog does not price, dollars per million
+    /// tokens, by model id or glob.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prices: BTreeMap<String, ModelPriceConfig>,
+    /// The address a turn's gateway listens on (default `127.0.0.1`);
+    /// `0.0.0.0` for sandboxes to reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    /// The host a sandboxed harness reaches the gateway at. Without it, a
+    /// sandboxed branch on the gateway fails its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_host: Option<String>,
+    /// Seeds the weighted choice of backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+}
+
+/// `[models.backends.NAME]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBackendConfig {
+    /// `anthropic`, `openai` or `generic`.
+    pub api: String,
+    /// Its base URL (default: the provider's public API; a generic
+    /// backend needs one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The secret holding its key, by name: an entry of `[secrets]`, else
+    /// a variable of that name. Never the key itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// A generic backend's key header (default `authorization`, as
+    /// `Bearer <key>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+}
+
+/// `[[models.routes]]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRouteConfig {
+    /// A glob over the requested model, such as `claude-*`.
+    pub model: String,
+    /// Backends chosen among by weight.
+    pub backends: Vec<String>,
+    /// One weight per backend (default: all 1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weights: Vec<u32>,
+    /// Tried in order after the weighted backends, on a refused
+    /// connection, a 5xx or a 429.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<String>,
+    /// At most this many requests a minute through this route, per
+    /// process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<u32>,
+}
+
+/// `[models.budget]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBudgetConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_tokens: Option<u64>,
+    /// The share of a limit at which an alert is recorded (default 0.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert_at: Option<f64>,
+}
+
+/// `[models.prices.MODEL]`, dollars per million tokens.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPriceConfig {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write: f64,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+impl ModelsConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &ModelsConfig::default()
+    }
+
+    /// The default model access, parsed.
+    pub fn access(&self) -> Result<Option<branchyard_provision::models::ModelAccess>, ConfigError> {
+        let Some(allow) = &self.allow else {
+            return Ok(None);
+        };
+        let access = branchyard_provision::models::ModelAccess {
+            allow: allow.clone(),
+        };
+        access
+            .check()
+            .map_err(|e| ConfigError(format!("models.allow: {e}")))?;
+        Ok(Some(access))
+    }
+
+    /// The checks beyond the file's shape. The gateway checks the rest
+    /// when `by` builds it.
+    pub fn check(&self) -> Result<(), ConfigError> {
+        let fail = |key: &str, why: String| Err(ConfigError(format!("models.{key}: {why}")));
+        self.access()?;
+        for (name, backend) in &self.backends {
+            if !matches!(backend.api.as_str(), "anthropic" | "openai" | "generic") {
+                return fail(
+                    &format!("backends.{name}.api"),
+                    format!("{:?} is not anthropic, openai or generic", backend.api),
+                );
+            }
+            if let Some(key) = &backend.key {
+                check_secret_reference(key)
+                    .or_else(|why| fail(&format!("backends.{name}.key"), why))?;
+                if key.starts_with('@') {
+                    return fail(
+                        &format!("backends.{name}.key"),
+                        "names a secret (an entry of [secrets] or a variable), not a file".into(),
+                    );
+                }
+            }
+            if let Some(url) = &backend.url {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return fail(
+                        &format!("backends.{name}.url"),
+                        format!("must be an http:// or https:// URL, not {url:?}"),
+                    );
+                }
+            }
+        }
+        for (i, route) in self.routes.iter().enumerate() {
+            branchyard_provision::models::check_pattern(&route.model)
+                .or_else(|why| fail(&format!("routes[{i}].model"), why))?;
+            if route.backends.is_empty() {
+                return fail(
+                    &format!("routes[{i}].backends"),
+                    "name at least one backend".into(),
+                );
+            }
+            for name in route.backends.iter().chain(&route.fallbacks) {
+                if !self.backends.contains_key(name) {
+                    return fail(&format!("routes[{i}]"), format!("no backend {name}"));
+                }
+            }
+        }
+        for model in self.prices.keys() {
+            branchyard_provision::models::check_pattern(model)
+                .or_else(|why| fail("prices", why))?;
+        }
+        Ok(())
+    }
 }
 
 /// A branch's workspace lifecycle: `[workspace]`.
@@ -101,6 +926,96 @@ pub struct WorkspaceConfig {
     /// --rm`), best-effort.
     #[serde(default, skip_serializing_if = "Script::is_empty")]
     pub teardown: Script,
+    /// Prepared environments (docs/environments.md): run `setup` once per
+    /// environment key (a hash of the setup commands, the copy globs and
+    /// the files `inputs` names) and keep what it produced under
+    /// `.branchyard/environments/`; a new branch with the same key starts
+    /// from it instead of running setup, cloned where the filesystem can.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepare: bool,
+    /// Globs, relative to the repository root, of the files setup reads
+    /// (lockfiles, manifests): their content is part of the environment
+    /// key. Default: the common lockfiles and manifests present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+    /// Directories setup produces that every branch with the same key
+    /// shares, as a symbolic link to the prepared environment, instead of a
+    /// copy of its own (`node_modules`). Literal relative paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub share: Vec<String>,
+    /// A warm pool (docs/pools.md): worktrees made ready, with the prepared
+    /// environment in place, before a branch asks for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<PoolConfig>,
+}
+
+/// A warm pool: `[workspace.pool]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PoolConfig {
+    /// Ready worktrees kept, 0 to 32. `by serve` and `by worker` refill it
+    /// after each claim; `by env pool fill` fills it once.
+    pub size: u32,
+    /// Labels a `by serve` or `by worker` must all carry to keep this pool
+    /// filled; others leave it alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Minutes a ready worktree is kept before it is discarded. Default:
+    /// 1440 (a day).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_minutes: Option<u64>,
+    /// How many commits the base may have moved past a ready worktree for
+    /// a branch to still take it (it is brought forward). Default: 20. A
+    /// commit that changes an environment input always makes it stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_behind: Option<u32>,
+    /// The revision worktrees are made at. Default: `HEAD` of the checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// The largest `[workspace.pool] size`.
+pub const POOL_MAX_SIZE: u32 = 32;
+
+impl PoolConfig {
+    /// The checks beyond the shape: `key` prefixes each message.
+    pub fn check(&self, key: &str) -> Result<(), ConfigError> {
+        let fail = |what: &str, why: String| Err(ConfigError(format!("{key}.{what}: {why}")));
+        if self.size > POOL_MAX_SIZE {
+            return fail("size", format!("is at most {POOL_MAX_SIZE}"));
+        }
+        for label in &self.labels {
+            let valid = (1..=63).contains(&label.len())
+                && label.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && label.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                });
+            if !valid {
+                return fail(
+                    "labels",
+                    format!(
+                        "{label:?} is not a label (1 to 63 of a-z, 0-9, '.', '_' and '-', \
+                         starting with a letter or digit)"
+                    ),
+                );
+            }
+        }
+        if self.max_age_minutes == Some(0) {
+            return fail("max_age_minutes", "must be at least 1".into());
+        }
+        if let Some(base) = &self.base {
+            if base.trim().is_empty() || base.starts_with('-') || base.contains(char::is_whitespace)
+            {
+                return fail("base", format!("{base:?} is not a revision"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `max_age_minutes` in seconds.
+    pub fn max_age_secs(&self) -> Option<u64> {
+        self.max_age_minutes.map(|m| m.saturating_mul(60))
+    }
 }
 
 /// One command, or a list run in order.
@@ -198,6 +1113,30 @@ impl WorkspaceConfig {
         for (what, script) in [("setup", &self.setup), ("teardown", &self.teardown)] {
             check_script(script).or_else(|why| fail(what.into(), &why))?;
         }
+        if self.prepare && self.setup.is_empty() {
+            return fail(
+                "prepare".into(),
+                "prepares the environment setup builds, so it needs setup",
+            );
+        }
+        for (what, set) in [("inputs", &self.inputs), ("share", &self.share)] {
+            if !set.is_empty() && !self.prepare {
+                return fail(what.into(), "is only used with prepare = true");
+            }
+        }
+        for pattern in &self.inputs {
+            if let Err(why) = check_copy_glob(pattern) {
+                return fail("inputs".into(), &format!("{pattern:?} {why}"));
+            }
+        }
+        for path in &self.share {
+            if let Err(why) = check_share_path(path) {
+                return fail("share".into(), &format!("{path:?} {why}"));
+            }
+        }
+        if let Some(pool) = &self.pool {
+            pool.check(&format!("{key}.pool"))?;
+        }
         let mut defaults = Vec::new();
         for (name, run) in &self.run {
             let valid = !name.is_empty()
@@ -282,12 +1221,20 @@ impl WorkspaceConfig {
                 )
             })
             .collect();
-        let canonical = serde_json::json!({
+        let mut canonical = serde_json::json!({
             "copy": self.copy,
             "setup": self.setup.commands(),
             "run": run,
             "teardown": self.teardown.commands(),
         });
+        // Only when used, so a section without them keeps the digest it
+        // was trusted with.
+        if self.prepare {
+            canonical["prepare"] = serde_json::json!({
+                "inputs": self.inputs,
+                "share": self.share,
+            });
+        }
         hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
     }
 }
@@ -312,6 +1259,35 @@ pub fn check_copy_glob(pattern: &str) -> Result<(), String> {
         return Err("must not reach into .git or .branchyard".into());
     }
     glob::Pattern::new(pattern).map_err(|e| format!("is not a glob: {e}"))?;
+    Ok(())
+}
+
+/// Why a `share` path is refused, if it is: a literal relative path (no
+/// glob) inside the repository, not into `.git` or `.branchyard`.
+pub fn check_share_path(path: &str) -> Result<(), String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.trim().is_empty() {
+        return Err("is empty".into());
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with('~') || trimmed.starts_with('\\') {
+        return Err("must be relative to the repository root".into());
+    }
+    if trimmed.contains(['*', '?', '[', '!']) {
+        return Err("must be a literal path, not a glob".into());
+    }
+    if trimmed
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("must be a plain path inside the repository".into());
+    }
+    if trimmed
+        .split('/')
+        .next()
+        .is_some_and(|first| first == ".git" || first == ".branchyard")
+    {
+        return Err("must not reach into .git or .branchyard".into());
+    }
     Ok(())
 }
 
@@ -391,8 +1367,9 @@ pub struct Defaults {
     #[schemars(range(min = 0.0))]
     pub max_minutes: Option<f64>,
     /// How tool permission requests are answered: `ask` on the terminal,
-    /// or `yes` to allow each one. Unset: decided by whether a terminal is
-    /// attached.
+    /// `yes` to allow each one, or a preset (`read-only`, `edit-worktree`,
+    /// `full`; docs/egress.md#permission-presets). Unset: decided by
+    /// whether a terminal is attached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionsMode>,
     /// A scrubbed environment and a private HOME for the harness.
@@ -404,6 +1381,9 @@ pub struct Defaults {
     /// Where the harness runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderKind>,
+    /// With `provider = "recipe"`: which `[recipes.NAME]` (docs/recipes.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
     /// A file of standing instructions for the harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -416,12 +1396,32 @@ impl Defaults {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum PermissionsMode {
     /// Ask on the terminal for each request (`--ask`).
     Ask,
     /// Allow every request (`--yes`).
     Yes,
+    /// The `read-only` preset: read and search; edits, commands and the
+    /// web denied (`--permissions read-only`).
+    ReadOnly,
+    /// The `edit-worktree` preset: read, search and edit files; commands
+    /// and the web denied.
+    EditWorktree,
+    /// The `full` preset: every request allowed, as `yes`.
+    Full,
+}
+
+impl PermissionsMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PermissionsMode::Ask => "ask",
+            PermissionsMode::Yes => "yes",
+            PermissionsMode::ReadOnly => "read-only",
+            PermissionsMode::EditWorktree => "edit-worktree",
+            PermissionsMode::Full => "full",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -432,13 +1432,18 @@ pub enum ProviderKind {
     /// A microVM per turn; needs `[microsandbox]` and a build with the
     /// `microsandbox` feature.
     Microsandbox,
+    /// The machine an environment recipe makes (`--provider recipe:NAME`);
+    /// `defaults.recipe` names it.
+    Recipe,
 }
 
 /// A Branchyard server to run commands against.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Remote {
-    /// The server's URL, as `--remote`.
+    /// The server's URL, as `--remote`: `http(s)://host:port`,
+    /// `unix:/path/to/socket`, or `ssh://[user@]host[:port]/path/to/repo`
+    /// for a server `by` starts there (docs/remote-ssh.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// A file holding the bearer token, as `--token-file`.
@@ -644,6 +1649,25 @@ impl ProjectConfig {
                 return fail("defaults.check", "needs a command".into());
             }
         }
+        match (d.provider, &d.recipe) {
+            (Some(ProviderKind::Recipe), None) => {
+                return fail(
+                    "defaults.recipe",
+                    "provider = \"recipe\" needs recipe = \"NAME\", naming a [recipes.NAME]".into(),
+                )
+            }
+            (Some(ProviderKind::Recipe), Some(name)) if !valid_recipe_name(name) => {
+                return fail("defaults.recipe", format!("{name:?} is not a recipe name"))
+            }
+            (Some(ProviderKind::Recipe), Some(_)) => {}
+            (_, Some(_)) => {
+                return fail(
+                    "defaults.recipe",
+                    "names the recipe for provider = \"recipe\"; set that too".into(),
+                )
+            }
+            _ => {}
+        }
         if d.provider == Some(ProviderKind::Microsandbox) && self.microsandbox.is_none() {
             return fail(
                 "defaults.provider",
@@ -658,10 +1682,13 @@ impl ProjectConfig {
                 .map_err(|e| ConfigError(format!("mcp.{name}: {e}")))?;
         }
         if let Some(url) = &self.remote.url {
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
+            if !["http://", "https://", "ssh://", "unix:/"]
+                .iter()
+                .any(|scheme| url.starts_with(scheme))
+            {
                 return fail(
                     "remote.url",
-                    format!("must be an http:// or https:// URL, not {url:?}"),
+                    format!("must be an http://, https://, ssh:// or unix:/ URL, not {url:?}"),
                 );
             }
         }
@@ -685,6 +1712,9 @@ impl ProjectConfig {
         if let Some(workspace) = &self.workspace {
             workspace.check("workspace")?;
         }
+        for (name, recipe) in &self.recipes {
+            recipe.check(name)?;
+        }
         for (root, project) in &self.projects {
             if !(root.starts_with('/') || root.starts_with("~/")) {
                 return fail(
@@ -695,6 +1725,134 @@ impl ProjectConfig {
             if let Some(workspace) = &project.workspace {
                 workspace.check(&format!("projects.{root:?}.workspace"))?;
             }
+        }
+        if self.knowledge.budget_tokens == Some(0) {
+            return fail("knowledge.budget_tokens", "must be at least 1".into());
+        }
+        for trigger in self.knowledge.distill_on.iter().flatten() {
+            if !DISTILL_TRIGGERS.contains(&trigger.as_str()) {
+                return fail(
+                    "knowledge.distill_on",
+                    format!("{trigger:?} is not one of {}", DISTILL_TRIGGERS.join(", ")),
+                );
+            }
+        }
+        if let Some(distiller) = &self.knowledge.distiller {
+            check_harness(&distiller.harness)
+                .or_else(|why| fail("knowledge.distiller.harness", why))?;
+            check_model_effort(distiller.model.as_deref(), distiller.effort.as_deref())
+                .or_else(|(what, why)| fail(&format!("knowledge.distiller.{what}"), why))?;
+            check_command(distiller.command.as_deref())
+                .or_else(|why| fail("knowledge.distiller.command", why))?;
+        }
+        for (kind, entry) in &self.fleet {
+            if !FLEET_KEYS.contains(&kind.as_str()) {
+                return fail(
+                    &format!("fleet.{kind}"),
+                    format!("is not a task kind; use one of {}", FLEET_KEYS.join(", ")),
+                );
+            }
+            entry.check(&format!("fleet.{kind}"))?;
+        }
+        for (key, url) in [
+            ("connectors.gateway", &self.connectors.gateway),
+            (
+                "connectors.sandbox_gateway",
+                &self.connectors.sandbox_gateway,
+            ),
+        ] {
+            if let Some(url) = url {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return fail(
+                        key,
+                        format!("must be an http:// or https:// URL, not {url:?}"),
+                    );
+                }
+            }
+        }
+        for (key, value) in [
+            ("connectors.bundles", &self.connectors.bundles),
+            ("connectors.anvil", &self.connectors.anvil),
+            ("connectors.listen", &self.connectors.listen),
+            ("connectors.vault_key", &self.connectors.vault_key),
+        ] {
+            if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+                return fail(key, "must not be empty".into());
+            }
+        }
+        if let Some(anvil) = &self.connectors.anvil {
+            split_words(anvil).map_err(|e| ConfigError(format!("connectors.anvil: {e}")))?;
+        }
+        self.connectors.grant_entries()?;
+        self.network.policy()?;
+        self.models.check()?;
+        if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {
+            return fail(
+                "connectors.grants",
+                "grants need a gateway; set connectors.gateway".into(),
+            );
+        }
+        for (key, value) in [
+            ("usage.near_percent", self.usage.near_percent),
+            ("usage.skip_over", self.usage.skip_over),
+        ] {
+            if value.is_some_and(|v| !(0.0..=100.0).contains(&v)) {
+                return fail(key, "must be a percent, from 0 to 100".into());
+            }
+        }
+        for (name, account) in &self.usage.accounts {
+            if !matches!(account.harness.as_str(), "claude-code" | "codex") {
+                return fail(
+                    &format!("usage.accounts.{name}.harness"),
+                    format!("must be claude-code or codex, not {:?}", account.harness),
+                );
+            }
+            if account.dir.trim().is_empty() {
+                return fail(
+                    &format!("usage.accounts.{name}.dir"),
+                    "must not be empty".into(),
+                );
+            }
+        }
+        for (name, tracker) in [
+            ("linear", &self.trackers.linear),
+            ("jira", &self.trackers.jira),
+            ("gitlab", &self.trackers.gitlab),
+        ] {
+            let Some(tracker) = tracker else { continue };
+            if let Some(url) = &tracker.url {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return fail(
+                        &format!("trackers.{name}.url"),
+                        format!("must be an http:// or https:// URL, not {url:?}"),
+                    );
+                }
+            }
+            if let Some(tool) = &tracker.gateway_tool {
+                if tool.trim().is_empty() {
+                    return fail(
+                        &format!("trackers.{name}.gateway_tool"),
+                        "must not be empty".into(),
+                    );
+                }
+                if self.connectors.gateway.is_none() {
+                    return fail(
+                        &format!("trackers.{name}.gateway_tool"),
+                        "needs a gateway; set connectors.gateway".into(),
+                    );
+                }
+            }
+        }
+        if let Some(bad) = self.harnesses.allow.iter().find(|id| {
+            id.is_empty()
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        }) {
+            return fail(
+                "harnesses.allow",
+                format!("{bad:?} is not a harness ID; see `by harnesses --all`"),
+            );
         }
         if let Some(sandbox) = &self.microsandbox {
             if sandbox.image.trim().is_empty() {
@@ -735,6 +1893,22 @@ impl ProjectConfig {
                  (~/.config/branchyard/config.toml), not in a repository"
                     .into(),
             )),
+            // A repository's file is code you have not read: it may forbid
+            // installing harnesses, never allow it.
+            Layer::Project
+                if !self.harnesses.allow.is_empty()
+                    || matches!(
+                        self.harnesses.install,
+                        Some(HarnessInstall::Ask | HarnessInstall::Auto)
+                    ) =>
+            {
+                Err(ConfigError(
+                    "harnesses: a repository's branchyard.toml may only set [harnesses] install \
+                     = \"never\"; allowing installs (install = \"ask\" or \"auto\", allow) belongs \
+                     in your user configuration (~/.config/branchyard/config.toml)"
+                        .into(),
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -751,6 +1925,8 @@ impl ProjectConfig {
         resolve(&mut self.remote.ca_file);
         resolve(&mut self.serve.config);
         resolve(&mut self.defaults.instructions);
+        resolve(&mut self.connectors.bundles);
+        resolve(&mut self.connectors.vault_key);
         for source in self.secrets.values_mut() {
             if let Some(path) = source.strip_prefix('@') {
                 *source = format!("@{}", resolve_path(path, dir, home).display());
@@ -1074,12 +2250,7 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
         line("max_minutes", d.max_minutes.map(toml_number));
         line(
             "permissions",
-            d.permissions.map(|p| {
-                toml_string(match p {
-                    PermissionsMode::Ask => "ask",
-                    PermissionsMode::Yes => "yes",
-                })
-            }),
+            d.permissions.map(|p| toml_string(p.as_str())),
         );
         line("isolated", d.isolated.map(|b| b.to_string()));
         line("check", d.check.as_deref().map(toml_string));
@@ -1089,9 +2260,11 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
                 toml_string(match p {
                     ProviderKind::Local => "local",
                     ProviderKind::Microsandbox => "microsandbox",
+                    ProviderKind::Recipe => "recipe",
                 })
             }),
         );
+        line("recipe", d.recipe.as_deref().map(toml_string));
         line("instructions", d.instructions.as_deref().map(toml_string));
     }
     if !config.secrets.is_empty() {
@@ -1173,12 +2346,69 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
             out.push_str(&format!("terminal = {}\n", toml_string(name)));
         }
     }
+    let c = &config.connectors;
+    if !c.is_empty() {
+        out.push_str(
+            "\n# The connector gateway (Anvil) and default grants; see docs/connectors.md.\n\
+             [connectors]\n",
+        );
+        for (key, value) in [
+            ("gateway", &c.gateway),
+            ("sandbox_gateway", &c.sandbox_gateway),
+            ("bundles", &c.bundles),
+            ("anvil", &c.anvil),
+            ("listen", &c.listen),
+            ("vault_key", &c.vault_key),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!("{key} = {}\n", toml_string(value)));
+            }
+        }
+        if !c.grants.is_empty() {
+            let grants: Vec<String> = c.grants.iter().map(|g| toml_string(g)).collect();
+            out.push_str(&format!("grants = [{}]\n", grants.join(", ")));
+        }
+    }
+    let n = &config.network;
+    if !n.is_empty() {
+        out.push_str(
+            "\n# The hosts a new branch's harness may reach; see docs/egress.md.\n[network]\n",
+        );
+        if let Some(allow) = &n.allow {
+            let rules: Vec<String> = allow.iter().map(|r| toml_string(r)).collect();
+            out.push_str(&format!("allow = [{}]\n", rules.join(", ")));
+        }
+        if let Some(enforce) = n.enforce {
+            let name = match enforce {
+                NetworkEnforceMode::BestEffort => "best_effort",
+                NetworkEnforceMode::Required => "required",
+            };
+            out.push_str(&format!("enforce = {}\n", toml_string(name)));
+        }
+    }
+    if !config.models.is_empty() {
+        out.push_str(
+            "\n# The model gateway: backends, routes, budgets; see docs/model-gateway.md.\n",
+        );
+        let table: BTreeMap<&str, &ModelsConfig> =
+            [("models", &config.models)].into_iter().collect();
+        out.push_str(&toml::to_string(&table).unwrap_or_default());
+    }
     if let Some(workspace) = &config.workspace {
         out.push_str(
             "\n# What each new branch's worktree gets before its first turn, and what runs when\n\
              # it is removed. Scripts run only after `by workspace trust`. See docs/workspace.md.\n",
         );
         render_workspace(&mut out, "workspace", workspace);
+    }
+    if !config.fleet.is_empty() {
+        out.push_str(
+            "\n# Who runs each kind of task; `by run` without --harness routes among them.\n\
+             # See docs/fleet.md.\n",
+        );
+        let table: BTreeMap<&str, &BTreeMap<String, FleetConfig>> =
+            [("fleet", &config.fleet)].into_iter().collect();
+        out.push_str(&toml::to_string(&table).unwrap_or_default());
     }
     for (root, project) in &config.projects {
         if let Some(workspace) = &project.workspace {
@@ -1206,6 +2436,31 @@ fn render_workspace(out: &mut String, table: &str, workspace: &WorkspaceConfig) 
     }
     if !workspace.teardown.is_empty() {
         out.push_str(&format!("teardown = {}\n", workspace.teardown.render()));
+    }
+    if workspace.prepare {
+        out.push_str("prepare = true\n");
+    }
+    for (key, list) in [("inputs", &workspace.inputs), ("share", &workspace.share)] {
+        if !list.is_empty() {
+            let items: Vec<String> = list.iter().map(|g| toml_string(g)).collect();
+            out.push_str(&format!("{key} = [{}]\n", items.join(", ")));
+        }
+    }
+    if let Some(pool) = &workspace.pool {
+        out.push_str(&format!("\n[{table}.pool]\nsize = {}\n", pool.size));
+        if !pool.labels.is_empty() {
+            let items: Vec<String> = pool.labels.iter().map(|g| toml_string(g)).collect();
+            out.push_str(&format!("labels = [{}]\n", items.join(", ")));
+        }
+        if let Some(minutes) = pool.max_age_minutes {
+            out.push_str(&format!("max_age_minutes = {minutes}\n"));
+        }
+        if let Some(behind) = pool.max_behind {
+            out.push_str(&format!("max_behind = {behind}\n"));
+        }
+        if let Some(base) = &pool.base {
+            out.push_str(&format!("base = {}\n", toml_string(base)));
+        }
     }
     for (name, run) in &workspace.run {
         out.push_str(&format!("\n[{table}.run.{name}]\n"));
@@ -1249,6 +2504,23 @@ pass_env = ["OPENAI_API_KEY"]
 [notify]
 desktop = true
 terminal = "osc777"
+[fleet.default]
+candidates = [{ harness = "claude-code", model = "large", effort = "high" }, { harness = "codex" }]
+attempts = 2
+budget_usd = 3
+failover = true
+judge = { harness = "claude-code", rubric = "Prefer small diffs." }
+[fleet.docs]
+candidates = [{ harness = "codex", effort = "low" }]
+exploration = 0
+connectors = ["github"]
+environment = "rust"
+[connectors]
+gateway = "http://127.0.0.1:8931/mcp"
+sandbox_gateway = "http://192.168.127.1:8931/mcp"
+bundles = "connectors"
+anvil = "node /opt/anvil/bin-anvil.js"
+grants = ["github:read", "linear@work:write:issues.*"]
 "#;
 
     #[test]
@@ -1265,9 +2537,161 @@ terminal = "osc777"
     }
 
     #[test]
+    fn network_and_permission_presets_are_checked_and_render_back() {
+        let text = "version = 1\n\n[defaults]\npermissions = \"edit-worktree\"\n\n[network]\n\
+                    allow = [\"github.com\", \"*.npmjs.org:443\"]\nenforce = \"required\"\n";
+        let config = parse(text).unwrap();
+        assert_eq!(
+            config.defaults.permissions,
+            Some(PermissionsMode::EditWorktree)
+        );
+        let network = config.network.policy().unwrap().unwrap();
+        assert_eq!(
+            network.to_string(),
+            "github.com, *.npmjs.org:443 (required)"
+        );
+        assert_eq!(parse(&render(&config, "test")).unwrap(), config);
+        assert_eq!(
+            parse("[network]\nallow = []\n")
+                .unwrap()
+                .network
+                .policy()
+                .unwrap(),
+            Some(branchyard_provision::network::Network::none())
+        );
+        assert_eq!(
+            parse("version = 1\n").unwrap().network.policy().unwrap(),
+            None
+        );
+        for (text, needle) in [
+            ("[network]\nallow = [\"https://x.com\"]\n", "network.allow"),
+            ("[network]\nallow = [\"*\"]\n", "network.allow"),
+            ("[network]\nenforce = \"required\"\n", "nothing to enforce"),
+            ("[network]\nenforce = \"always\"\n", "best_effort"),
+            ("[network]\nports = [1]\n", "ports"),
+            ("[defaults]\npermissions = \"yolo\"\n", "edit-worktree"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_model_gateway_is_checked_and_renders_back() {
+        let text = "version = 1\n\n[secrets]\nanthropic = \"ANTHROPIC_API_KEY\"\n\n[models]\n\
+                    allow = [\"claude-*\"]\nseed = 7\n\n\
+                    [models.backends.anthropic]\napi = \"anthropic\"\nkey = \"anthropic\"\n\n\
+                    [models.backends.spare]\napi = \"anthropic\"\nurl = \"https://spare.example\"\n\n\
+                    [[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"anthropic\"]\n\
+                    fallbacks = [\"spare\"]\nrequests_per_minute = 60\n\n\
+                    [models.budget]\ndaily_usd = 20.0\nalert_at = 0.5\n\n\
+                    [models.prices.\"local-*\"]\ninput = 0.5\noutput = 1.5\n";
+        let config = parse(text).unwrap();
+        assert_eq!(config.models.access().unwrap().unwrap().allow, ["claude-*"]);
+        assert_eq!(config.models.routes[0].fallbacks, ["spare"]);
+        assert_eq!(config.models.budget.as_ref().unwrap().daily_usd, Some(20.0));
+        assert_eq!(parse(&render(&config, "test")).unwrap(), config);
+        assert_eq!(
+            parse("version = 1\n").unwrap().models.access().unwrap(),
+            None
+        );
+        for (text, needle) in [
+            ("[models]\nallow = [\"a b\"]\n", "models.allow"),
+            (
+                "[models.backends.a]\napi = \"gemini\"\n",
+                "models.backends.a.api",
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\nkey = \"sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789\"\n",
+                "models.backends.a.key",
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\nkey = \"@/run/key\"\n",
+                "not a file",
+            ),
+            (
+                "[[models.routes]]\nmodel = \"*\"\nbackends = [\"x\"]\n",
+                "no backend x",
+            ),
+            ("[models]\nlisten = 1\n", "expected a string"),
+            ("[models]\nkeys = 1\n", "keys"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn connectors_are_checked_with_the_flags_parser() {
+        let config = parse(FULL).unwrap();
+        let grants = config.connectors.grant_entries().unwrap();
+        assert_eq!(grants[1].to_string(), "linear@work:write:issues.*");
+        assert_eq!(
+            config.flatten()["connectors.gateway"],
+            "http://127.0.0.1:8931/mcp"
+        );
+        for (text, needle) in [
+            (
+                "[connectors]\ngateway = \"127.0.0.1:8931\"\n",
+                "connectors.gateway",
+            ),
+            (
+                "[connectors]\ngateway = \"http://h/mcp\"\ngrants = [\"github:admin\"]\n",
+                "connectors.grants",
+            ),
+            ("[connectors]\ngrants = [\"github\"]\n", "need a gateway"),
+            (
+                "[connectors]\ngateway = \"http://h/mcp\"\nbundles = \" \"\n",
+                "connectors.bundles",
+            ),
+            ("[connectors]\ngatway = \"http://h/mcp\"\n", "gatway"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
     fn unknown_keys_and_bad_values_are_refused_by_name() {
         for (text, needle) in [
             ("[defaults]\nharnes = \"codex\"", "harnes"),
+            (
+                "[fleet.chores]\ncandidates = [{ harness = \"codex\" }]",
+                "fleet.chores",
+            ),
+            ("[fleet.docs]\ncandidates = []", "fleet.docs.candidates"),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"nope\" }]",
+                "fleet.docs.candidates[0].harness",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\", effort = \"max\" }]",
+                "fleet.docs.candidates[0].effort",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }, { harness = \"codex\" }]",
+                "is listed twice",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\", modle = \"x\" }]",
+                "modle",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\nattempts = 0",
+                "fleet.docs.attempts",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\nexploration = 2",
+                "fleet.docs.exploration",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\njudge = { harness = \"x\" }",
+                "fleet.docs.judge.harness",
+            ),
+            (
+                "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\nbudget = 3",
+                "budget",
+            ),
             ("[defaults]\nharness = \"nope\"", "defaults.harness"),
             ("[defaults]\neffort = \"extreme\"", "defaults.effort"),
             ("[defaults]\nbudget_usd = -1", "defaults.budget_usd"),
@@ -1437,6 +2861,38 @@ command = ["pnpm build", "pnpm worker"]
                 "[projects.\"relative\".workspace]\nsetup = \"x\"",
                 "absolute",
             ),
+            ("[workspace]\nprepare = true", "workspace.prepare"),
+            (
+                "[workspace]\nsetup = \"x\"\nshare = [\"node_modules\"]",
+                "only used with prepare",
+            ),
+            (
+                "[workspace]\nsetup = \"x\"\nprepare = true\nshare = [\"node_*\"]",
+                "literal",
+            ),
+            (
+                "[workspace]\nsetup = \"x\"\nprepare = true\nshare = [\"../x\"]",
+                "workspace.share",
+            ),
+            (
+                "[workspace]\nsetup = \"x\"\nprepare = true\ninputs = [\"/etc/x\"]",
+                "workspace.inputs",
+            ),
+            ("[workspace.pool]\nsize = 33", "workspace.pool.size"),
+            ("[workspace.pool]\nmax_age_minutes = 5", "size"),
+            (
+                "[workspace.pool]\nsize = 1\nlabels = [\"GPU\"]",
+                "workspace.pool.labels",
+            ),
+            (
+                "[workspace.pool]\nsize = 1\nmax_age_minutes = 0",
+                "workspace.pool.max_age_minutes",
+            ),
+            (
+                "[workspace.pool]\nsize = 1\nbase = \"-x\"",
+                "workspace.pool.base",
+            ),
+            ("[workspace.pool]\nsize = 1\nwarm = true", "warm"),
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
@@ -1465,6 +2921,56 @@ command = ["pnpm build", "pnpm worker"]
         let mut same = base;
         same.setup = Script::Many(vec!["pnpm install".into()]);
         assert_eq!(same.digest(), digest);
+    }
+
+    #[test]
+    fn a_prepared_workspace_parses_renders_back_and_changes_the_digest_only_when_on() {
+        let text = "[workspace]\nsetup = \"pnpm install\"\nprepare = true\n\
+                    inputs = [\"pnpm-lock.yaml\", \"packages/*/package.json\"]\n\
+                    share = [\"node_modules/\"]\n";
+        let config = parse(text).unwrap();
+        let workspace = config.workspace.clone().unwrap();
+        assert!(workspace.prepare);
+        assert_eq!(workspace.inputs.len(), 2);
+        assert_eq!(
+            parse(&render(&config, "")).unwrap().workspace,
+            config.workspace
+        );
+        let mut off = workspace.clone();
+        off.prepare = false;
+        off.inputs.clear();
+        off.share.clear();
+        let plain = parse("[workspace]\nsetup = \"pnpm install\"").unwrap();
+        assert_eq!(off.digest(), plain.workspace.unwrap().digest());
+        assert_ne!(workspace.digest(), off.digest());
+        let mut shared = workspace.clone();
+        shared.share.push("vendor/bundle".into());
+        assert_ne!(shared.digest(), workspace.digest());
+    }
+
+    #[test]
+    fn a_pool_parses_renders_back_and_leaves_the_digest_alone() {
+        let text = "[workspace]\nsetup = \"pnpm install\"\nprepare = true\n\
+                    [workspace.pool]\nsize = 2\nlabels = [\"linux\"]\n\
+                    max_age_minutes = 90\nmax_behind = 5\nbase = \"main\"\n\
+                    [workspace.run.dev]\ncommand = \"pnpm dev\"\n";
+        let config = parse(text).unwrap();
+        let workspace = config.workspace.clone().unwrap();
+        let pool = workspace.pool.clone().unwrap();
+        assert_eq!(pool.size, 2);
+        assert_eq!(pool.labels, ["linux"]);
+        assert_eq!(pool.max_age_secs(), Some(5400));
+        assert_eq!(pool.max_behind, Some(5));
+        assert_eq!(pool.base.as_deref(), Some("main"));
+        assert_eq!(workspace.run.len(), 1);
+        assert_eq!(
+            parse(&render(&config, "")).unwrap().workspace,
+            config.workspace
+        );
+        // A pool runs nothing setup does not: trust is unchanged.
+        let mut without = workspace.clone();
+        without.pool = None;
+        assert_eq!(without.digest(), workspace.digest());
     }
 
     #[test]

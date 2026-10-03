@@ -43,7 +43,10 @@
 
 #![cfg(unix)]
 
+pub mod egress;
 mod local;
+#[cfg(target_os = "linux")]
+mod netns;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
@@ -66,6 +69,11 @@ use branchyard_sandbox::{ExecSpec, Process, SandboxProvider};
 use serde_json::json;
 
 pub use local::{LocalProcess, LocalProvider};
+
+/// `off` in this variable makes [`LocalProvider::confinement`] report that
+/// a local process's network cannot be confined, without trying; see
+/// `docs/egress.md`.
+pub const ENV_EGRESS_NETNS: &str = "BRANCHYARD_EGRESS_NETNS";
 
 /// Lines buffered between the stdout reader and the session. When full, the
 /// reader stops reading and the harness blocks on its own writes.
@@ -321,6 +329,26 @@ impl Session {
         Session::launch(driver, open, env.resolve(), transcript, |spec| {
             LocalProvider::spawn(spec).map(|p| Box::new(p) as Box<dyn Process>)
         })
+    }
+
+    /// Like [`Session::start`], but confined to its own network namespace
+    /// with one listener on `127.0.0.1:port` inside it, which is returned
+    /// for the caller to serve ([`LocalProvider::spawn_confined`]).
+    pub fn start_confined(
+        driver: Box<dyn Driver>,
+        open: Open,
+        env: &Environment,
+        transcript: Option<&Path>,
+        port: u16,
+    ) -> Result<(Session, std::net::TcpListener), RuntimeError> {
+        let mut listener = None;
+        let session = Session::launch(driver, open, env.resolve(), transcript, |spec| {
+            let (process, bound) = LocalProvider::spawn_confined(spec, port)?;
+            listener = Some(bound);
+            Ok(Box::new(process) as Box<dyn Process>)
+        })?;
+        let listener = listener.expect("a started confined process has its listener");
+        Ok((session, listener))
     }
 
     /// Like [`Session::start`], but exec the launch inside `sandbox` through

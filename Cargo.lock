@@ -633,25 +633,33 @@ dependencies = [
 name = "branchyard"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "branchyard-bridge",
+ "branchyard-controls",
  "branchyard-harness",
  "branchyard-microsandbox",
  "branchyard-provision",
+ "branchyard-recipe",
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-substrate",
  "branchyard-workspace",
  "glob",
+ "httparse",
  "postgres",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustix",
+ "rustls",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml_edit",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -675,8 +683,11 @@ dependencies = [
  "branchyard",
  "branchyard-bridge",
  "branchyard-client",
+ "branchyard-controls",
  "branchyard-harness",
  "branchyard-mcp",
+ "branchyard-recipe",
+ "branchyard-sandbox",
  "branchyard-server",
  "branchyard-setup",
  "branchyard-substrate",
@@ -690,6 +701,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "shlex",
  "tempfile",
  "toml_edit",
@@ -716,6 +728,11 @@ dependencies = [
 [[package]]
 name = "branchyard-controls"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml",
+]
 
 [[package]]
 name = "branchyard-harness"
@@ -787,6 +804,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-recipe"
+version = "0.0.1"
+dependencies = [
+ "branchyard-sandbox",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "branchyard-runtime"
 version = "0.0.1"
 dependencies = [
@@ -806,6 +834,7 @@ version = "0.0.1"
 dependencies = [
  "axum",
  "backon",
+ "base64 0.22.1",
  "blake3",
  "branchyard",
  "branchyard-client",
@@ -816,9 +845,13 @@ dependencies = [
  "hmac",
  "hyper",
  "hyper-util",
+ "jiff",
  "postgres",
+ "prost",
  "reqwest",
+ "ring",
  "rusqlite",
+ "rustix",
  "rustls",
  "rustls-pki-types",
  "schemars 1.2.2",

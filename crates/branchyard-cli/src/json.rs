@@ -162,6 +162,8 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             env,
             secrets,
             unused_secrets,
+            connectors,
+            knowledge,
         } => json!({
             "activity": "provisioned",
             "auth": auth,
@@ -169,6 +171,8 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "env": env,
             "secrets": secrets,
             "unused_secrets": unused_secrets,
+            "connectors": connectors,
+            "knowledge": knowledge,
         }),
         Activity::Steered { id, by, text } => json!({
             "activity": "steered",
@@ -226,10 +230,53 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             value["activity"] = json!("workspace");
             value
         }
+        Activity::ConnectorCall(call) => json!({
+            "activity": "connector_call",
+            "connector_call": call,
+        }),
+        Activity::Egress(egress) => json!({
+            "activity": "egress",
+            "egress": egress,
+            "text": egress.describe(),
+        }),
+        Activity::Adopted(adoption) => json!({
+            "activity": "adopted",
+            "adopted": adoption,
+        }),
         Activity::Sandbox(event) => json!({
             "activity": "sandbox",
             "sandbox": event,
             "text": event.describe(),
+        }),
+        Activity::Fleet(activity) => json!({
+            "activity": "fleet",
+            "fleet": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Knowledge(activity) => json!({
+            "activity": "knowledge",
+            "knowledge": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Plan(activity) => json!({
+            "activity": "plan",
+            "plan": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Goal(activity) => json!({
+            "activity": "goal",
+            "goal": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Model(activity) => json!({
+            "activity": "model",
+            "model": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Access(activity) => json!({
+            "activity": "access",
+            "access": activity,
+            "text": activity.describe(),
         }),
     };
     value["at_ms"] = json!(recorded.at_ms);

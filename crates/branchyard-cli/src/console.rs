@@ -19,6 +19,8 @@ use crate::render::{compact_input, Renderer};
 pub enum Choice {
     AllowAll,
     Ask,
+    /// A named preset's rules.
+    Preset(branchyard::PolicyPreset),
     /// Deny everything; `notice` says why, because the user chose nothing.
     DenyAll {
         notice: bool,
@@ -31,6 +33,7 @@ pub fn choose(permissions: Permissions, stdin_tty: bool, stderr_tty: bool) -> Ch
     match permissions {
         Permissions::Yes => Choice::AllowAll,
         Permissions::Ask => Choice::Ask,
+        Permissions::Preset(preset) => Choice::Preset(preset),
         Permissions::Unset if stdin_tty && stderr_tty => Choice::Ask,
         Permissions::Unset => Choice::DenyAll { notice: true },
     }
@@ -153,6 +156,7 @@ pub fn policy(choice: Choice, console: Arc<Console>) -> Policy {
     match choice {
         Choice::Ask => Policy::ask(move |branch, request| console.ask(branch, request)),
         Choice::AllowAll => Policy::allow_all(),
+        Choice::Preset(preset) => preset.policy(),
         Choice::DenyAll { .. } => Policy::deny_all(),
     }
 }

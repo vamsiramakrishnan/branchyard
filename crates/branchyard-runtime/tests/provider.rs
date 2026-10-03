@@ -7,14 +7,15 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use branchyard_harness::SessionMode;
 use branchyard_runtime::{LocalProvider, Session};
 use branchyard_sandbox::conformance::{self, Setup};
 use branchyard_sandbox::{
-    admit, ExecSpec, Mount, ProviderError, Requirements, Resources, SandboxProvider, SandboxSpec,
-    SandboxState,
+    admit, Capabilities, ExecSpec, Mount, Process, ProviderError, Requirements, Resources,
+    SandboxInfo, SandboxProvider, SandboxSpec, SandboxState,
 };
 use common::{alive, workdir, WAIT};
 
@@ -50,7 +51,71 @@ conformance!(
     teardown_names_survivors,
     drop_tears_down,
     stop_ends_processes,
+    egress_confinement,
 );
+
+/// The local provider, except that the background child of
+/// `teardown_names_survivors`'s script stays a forked, un-exec'd `sh` until
+/// the second exec after it: the interleaving a loaded scheduler produces
+/// when it runs the shell to exit before its child has exec'd `sleep`.
+struct ExecLate {
+    local: LocalProvider,
+    flag: PathBuf,
+    execs: AtomicUsize,
+}
+
+impl SandboxProvider for ExecLate {
+    fn capabilities(&self) -> Capabilities {
+        self.local.capabilities()
+    }
+    fn ensure(&self, spec: &SandboxSpec) -> Result<SandboxInfo, ProviderError> {
+        self.local.ensure(spec)
+    }
+    fn inspect(&self, name: &str) -> Result<Option<SandboxInfo>, ProviderError> {
+        self.local.inspect(name)
+    }
+    fn exec(&self, name: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
+        let mut spec = spec.clone();
+        if spec
+            .argv
+            .last()
+            .is_some_and(|script| script == "sleep 300 & echo $!")
+        {
+            // Builtins only, so the child stays `sh` and alone in the group.
+            let script = format!(
+                "{{ while [ ! -e '{}' ]; do :; done; exec sleep 300; }} & echo $!",
+                self.flag.display()
+            );
+            *spec.argv.last_mut().unwrap() = script;
+            self.execs.store(1, Ordering::SeqCst);
+        } else if self.execs.load(Ordering::SeqCst) > 0
+            && self.execs.fetch_add(1, Ordering::SeqCst) == 2
+        {
+            std::fs::write(&self.flag, "").unwrap();
+        }
+        self.local.exec(name, &spec)
+    }
+    fn stop(&self, name: &str) -> Result<(), ProviderError> {
+        self.local.stop(name)
+    }
+    fn destroy(&self, name: &str) -> Result<(), ProviderError> {
+        self.local.destroy(name)
+    }
+}
+
+/// Teardown names a background child it finds before the exec `sh`, so
+/// `teardown_names_survivors` must wait for the exec rather than assume it.
+#[test]
+fn teardown_names_survivors_waits_for_the_exec() {
+    let setup = setup("teardown-exec-late");
+    let provider = ExecLate {
+        local: LocalProvider::new(),
+        flag: setup.workspace.join("exec"),
+        execs: AtomicUsize::new(0),
+    };
+    conformance::teardown_names_survivors(&provider, &setup);
+    assert!(provider.flag.exists(), "the script was not slowed");
+}
 
 #[test]
 fn the_local_provider_declares_exec_only() {

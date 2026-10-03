@@ -45,10 +45,12 @@ const STEER_WAIT: Duration = Duration::from_secs(10);
 
 // Issues.
 
-/// The first line of a prompt made from an issue; see [`issue_prompt`].
-const ISSUE_HEADER: &str = "Resolve GitHub issue #";
+/// The start of a prompt made from an issue: `Resolve <Tracker> issue `;
+/// see [`issue_prompt`].
+const ISSUE_HEADER: &str = "Resolve ";
 
-/// An issue as `gh issue view` gives it.
+/// An issue as `gh issue view` (or a tracker's API, `crate::trackers`)
+/// gives it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Issue {
     pub number: u64,
@@ -56,6 +58,10 @@ pub struct Issue {
     pub body: String,
     pub url: String,
     pub labels: Vec<String>,
+    /// `None` for GitHub; else `linear`, `jira` or `gitlab`.
+    pub tracker: Option<crate::trackers::Tracker>,
+    /// The tracker's own reference (`ENG-123`), when not GitHub's `#n`.
+    pub key: Option<String>,
 }
 
 impl Issue {
@@ -64,8 +70,54 @@ impl Issue {
             number: self.number,
             url: self.url.clone(),
             title: self.title.clone(),
+            tracker: self.tracker.map(|t| t.id().to_owned()),
+            key: self.key.clone(),
         }
     }
+
+    fn reference(&self) -> String {
+        reference(self.key.as_deref(), self.number)
+    }
+
+    fn tracker_name(&self) -> &'static str {
+        self.tracker
+            .map_or("GitHub", crate::trackers::Tracker::name)
+    }
+}
+
+impl From<crate::trackers::Fetched> for Issue {
+    fn from(f: crate::trackers::Fetched) -> Issue {
+        Issue {
+            number: f.number,
+            title: f.title,
+            body: f.body,
+            url: f.url,
+            labels: f.labels,
+            tracker: Some(f.tracker),
+            key: Some(f.key),
+        }
+    }
+}
+
+/// `#12`, or a tracker's key as it is.
+fn reference(key: Option<&str>, number: u64) -> String {
+    match key {
+        Some(key) => key.to_owned(),
+        None => format!("#{number}"),
+    }
+}
+
+/// How an issue link reads in the log: `#42`, `ENG-123`.
+pub fn link_reference(link: &IssueLink) -> String {
+    reference(link.key.as_deref(), link.number)
+}
+
+/// What a branch started from, recorded once it exists: an issue, or a
+/// pull request whose head it continues (`--pr`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Link {
+    Issue(IssueLink),
+    PullRequest(PullRequestRef),
 }
 
 /// `--issue`'s value as `gh issue view` takes it: a URL as given, `#12` or
@@ -79,7 +131,7 @@ pub fn issue_ref(text: &str) -> Result<String, Failure> {
     match number.parse::<u64>() {
         Ok(n) if n > 0 => Ok(n.to_string()),
         _ => Err(Failure::Message(format!(
-            "--issue takes an issue URL, #N or N, not {text:?}"
+            "--issue takes a GitHub issue URL, #N or N, or linear:KEY, jira:KEY,              gitlab:GROUP/PROJECT#N or a Linear, Jira or GitLab issue URL, not {text:?}"
         ))),
     }
 }
@@ -108,6 +160,8 @@ pub fn fetch_issue(gh: &Gh, reference: &str) -> Result<Issue, Failure> {
             .as_array()
             .map(|labels| labels.iter().map(|l| text(&l["name"])).collect())
             .unwrap_or_default(),
+        tracker: None,
+        key: None,
     })
 }
 
@@ -119,8 +173,11 @@ fn text(value: &Value) -> String {
 /// text, and `extra` instructions after it.
 pub fn issue_prompt(issue: &Issue, extra: &str) -> String {
     let mut prompt = format!(
-        "{ISSUE_HEADER}{}: {}\n{}\n",
-        issue.number, issue.title, issue.url
+        "{ISSUE_HEADER}{} issue {}: {}\n{}\n",
+        issue.tracker_name(),
+        issue.reference(),
+        issue.title,
+        issue.url
     );
     if !issue.labels.is_empty() {
         prompt.push_str(&format!("Labels: {}\n", issue.labels.join(", ")));
@@ -144,44 +201,112 @@ pub fn issue_prompt(issue: &Issue, extra: &str) -> String {
 /// inside a harness, a run on a server).
 pub fn issue_from_prompt(prompt: &str) -> Option<IssueLink> {
     let mut lines = prompt.lines();
-    let (number, title) = lines.next()?.strip_prefix(ISSUE_HEADER)?.split_once(": ")?;
+    let rest = lines.next()?.strip_prefix(ISSUE_HEADER)?;
+    let (tracker, rest) = rest.split_once(" issue ")?;
+    let (reference, title) = rest.split_once(": ")?;
     let url = lines.next()?.trim();
     if !url.starts_with("http") {
         return None;
     }
+    let (tracker, key, number) = match tracker {
+        "GitHub" => (None, None, reference.strip_prefix('#')?.parse().ok()?),
+        "Linear" | "Jira" | "GitLab" => (
+            Some(tracker.to_ascii_lowercase()),
+            Some(reference.to_owned()),
+            reference.rsplit(['-', '#']).next()?.parse().ok()?,
+        ),
+        _ => return None,
+    };
     Some(IssueLink {
-        number: number.parse().ok()?,
+        number,
         url: url.to_owned(),
         title: title.to_owned(),
+        tracker,
+        key,
     })
 }
 
-/// `issue-<n>-<slug of its title>`.
+/// `issue-<n>-<slug of its title>`; a Linear or Jira issue is named by its
+/// key (`eng-123-<slug>`).
 pub fn issue_branch_name(issue: &Issue) -> String {
+    let stem = match (issue.tracker, &issue.key) {
+        (Some(crate::trackers::Tracker::Linear | crate::trackers::Tracker::Jira), Some(key)) => {
+            branchyard::slug(key)
+        }
+        _ => format!("issue-{}", issue.number),
+    };
     let slug = branchyard::slug(&issue.title);
     match slug.as_str() {
-        "task" if issue.title.trim().is_empty() => format!("issue-{}", issue.number),
-        _ => format!("issue-{}-{slug}", issue.number),
+        "task" if issue.title.trim().is_empty() => stem,
+        _ => format!("{stem}-{slug}"),
     }
 }
 
-/// For `run`, `fan` and `spawn` with `--issue`: fetch the issue and return
-/// the prompt and task options to use, with the branch named after the
-/// issue unless `--name` was given, and the issue to link once the branch
-/// exists. Without `--issue`, the prompt and options unchanged.
+/// Fetch a Linear, Jira or GitLab issue, with credentials from the
+/// environment or, when configured, through the connector gateway.
+fn fetch_tracked(
+    reference: &crate::trackers::IssueRef,
+    yard: Option<&Yard>,
+) -> Result<Issue, Failure> {
+    let cwd = std::env::current_dir()?;
+    let env = |name: &str| std::env::var(name).ok();
+    let config = crate::defaults::config_at(&cwd, &env)
+        .map_err(Failure::Message)?
+        .unwrap_or_default();
+    let gateway = match yard {
+        Some(yard) => crate::gateway_cmd::configured(yard)?,
+        None => None,
+    };
+    let call = |tool: &str, arguments: Value| -> Result<Value, String> {
+        let gateway = gateway.as_ref().ok_or("no connector gateway")?;
+        let connector = tool
+            .split_once("__")
+            .map_or(reference.tracker.id(), |(c, _)| c);
+        let grant = branchyard::connectors::GrantEntry::parse(&format!("{connector}:read"))
+            .map_err(|e: String| e)?;
+        let token = gateway
+            .person_token_granted(vec![grant], Duration::from_secs(300))
+            .map_err(|e| e.to_string())?;
+        crate::trackers::gateway_call(&gateway.url, &token, tool, arguments)
+    };
+    let sources = crate::trackers::Sources {
+        env: &env,
+        config: &config.trackers,
+        gateway: gateway
+            .is_some()
+            .then_some(&call as &dyn Fn(&str, Value) -> Result<Value, String>),
+    };
+    crate::trackers::fetch(reference, &sources)
+        .map(Issue::from)
+        .map_err(Failure::Message)
+}
+
+/// For `run`, `fan` and `spawn` with `--issue` or `--pr`: fetch the issue
+/// (or the pull request) and return the prompt and task options to use,
+/// with the branch named after it unless `--name` was given, and what to
+/// link once the branch exists. Without either, the prompt and options
+/// unchanged.
 pub fn issue_task(
     prompt: &str,
     task: &TaskArgs,
     yard: Option<&Yard>,
-) -> Result<(String, TaskArgs, Option<IssueLink>), Failure> {
-    let Some(reference) = &task.issue else {
+) -> Result<(String, TaskArgs, Option<Link>), Failure> {
+    if let Some(number) = task.pr {
+        return pr_task(prompt, task, number, yard);
+    }
+    let Some(given) = &task.issue else {
         return Ok((prompt.to_owned(), task.clone(), None));
     };
-    let reference = issue_ref(reference)?;
-    let dir = std::env::current_dir()?;
-    let gh = Gh::new(&dir, None);
-    gh.ready()?;
-    let issue = fetch_issue(&gh, &reference)?;
+    let issue = match crate::trackers::parse(given).map_err(Failure::Message)? {
+        Some(tracked) => fetch_tracked(&tracked, yard)?,
+        None => {
+            let reference = issue_ref(given)?;
+            let dir = std::env::current_dir()?;
+            let gh = Gh::new(&dir, None);
+            gh.ready()?;
+            fetch_issue(&gh, &reference)?
+        }
+    };
     let mut task = task.clone();
     task.issue = None;
     if task.name.is_none() {
@@ -192,10 +317,135 @@ pub fn issue_task(
         });
     }
     eprintln!(
-        "by: issue #{}: {} ({})",
-        issue.number, issue.title, issue.url
+        "by: {} issue {}: {} ({})",
+        issue.tracker_name(),
+        issue.reference(),
+        issue.title,
+        issue.url
     );
-    Ok((issue_prompt(&issue, prompt), task, Some(issue.link())))
+    Ok((
+        issue_prompt(&issue, prompt),
+        task,
+        Some(Link::Issue(issue.link())),
+    ))
+}
+
+/// `--pr N`: start from pull request N's head commit, fetched from
+/// `origin` when it is not here yet. The prompt names the pull request;
+/// when its head is a branch of this repository (not a fork), `by pr`
+/// later pushes to it and updates the pull request.
+fn pr_task(
+    prompt: &str,
+    task: &TaskArgs,
+    number: u64,
+    yard: Option<&Yard>,
+) -> Result<(String, TaskArgs, Option<Link>), Failure> {
+    let Some(yard) = yard else {
+        return Err(Failure::Message(
+            "--pr starts from a pull request's head commit fetched into this repository; it \
+             works in local mode only, and not inside a harness"
+                .into(),
+        ));
+    };
+    if task.base.is_some() {
+        return Err(Failure::Message(
+            "--pr starts from the pull request's head; it takes no --base".into(),
+        ));
+    }
+    let gh = Gh::new(yard.root(), None);
+    gh.ready()?;
+    let value: Value = gh.json(
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "number,title,body,url,headRefName,headRefOid,baseRefName,isCrossRepository,state",
+        ],
+        false,
+    )?;
+    let head = text(&value["headRefOid"]);
+    if head.len() < 7 || !head.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Failure::Message(format!(
+            "gh gave no head commit for pull request #{number}"
+        )));
+    }
+    let have = |commit: &str| {
+        Git::new(yard.root())
+            .args(["cat-file", "-e"])
+            .arg(format!("{commit}^{{commit}}"))
+            .succeeds()
+            .unwrap_or(false)
+    };
+    if !have(&head) {
+        // GitHub keeps every pull request's head as refs/pull/N/head, fork
+        // or not.
+        Git::new(yard.root())
+            .args(["fetch", "--no-tags", "--quiet", "origin"])
+            .arg(format!("refs/pull/{number}/head"))
+            .run()
+            .map_err(|e| {
+                Failure::Message(format!(
+                    "could not fetch pull request #{number}'s head from origin: {e}"
+                ))
+            })?;
+        if !have(&head) {
+            return Err(Failure::Message(format!(
+                "fetched pull request #{number}, but its head {head} is not here"
+            )));
+        }
+    }
+    let title = text(&value["title"]);
+    let url = text(&value["url"]);
+    let head_ref = text(&value["headRefName"]);
+    let cross = value["isCrossRepository"].as_bool().unwrap_or(false);
+    let mut task = task.clone();
+    task.pr = None;
+    task.base = Some(head.clone());
+    if task.name.is_none() {
+        let slug = branchyard::slug(&title);
+        let name = match slug.as_str() {
+            "task" if title.trim().is_empty() => format!("pr-{number}"),
+            _ => format!("pr-{number}-{slug}"),
+        };
+        task.name = Some(free_name(yard, &name)?);
+    }
+    let mut text_prompt = format!(
+        "Continue GitHub pull request #{number}: {title}\n{url}\nIts head, {head_ref} at {}, is \
+         this branch's base.\n\n",
+        short(&head)
+    );
+    let body = text(&value["body"]);
+    text_prompt.push_str(match body.trim() {
+        "" => "(The pull request has no description.)",
+        body => body,
+    });
+    text_prompt.push('\n');
+    if !prompt.trim().is_empty() {
+        text_prompt.push_str(&format!("\nAdditional instructions:\n{}\n", prompt.trim()));
+    }
+    eprintln!(
+        "by: pull request #{number}: {title} ({url}), from {}",
+        short(&head)
+    );
+    let link = match cross {
+        // A fork's branch is not ours to push to.
+        true => {
+            eprintln!(
+                "by: its head is in a fork; by pr will open a new pull request rather than push \
+                 to the fork"
+            );
+            None
+        }
+        false => Some(Link::PullRequest(PullRequestRef {
+            number,
+            url,
+            head: head_ref,
+            base: Some(text(&value["baseRefName"])).filter(|b| !b.is_empty()),
+            draft: false,
+        })),
+    };
+    Ok((text_prompt, task, link))
 }
 
 /// `name`, or `name-2`, `name-3`, ... if a branch has it, as automatic
@@ -219,9 +469,12 @@ fn free_name(yard: &Yard, name: &str) -> Result<String, Failure> {
         .ok_or_else(|| Failure::Message(format!("no free branch name like {name}")))
 }
 
-/// Record on `branch` that it works on `issue`.
-pub fn link_issue(branch: &Branch, issue: &IssueLink) -> Result<(), Failure> {
-    branch.record_pull_request(PullRequestActivity::IssueLinked(issue.clone()))?;
+/// Record on `branch` what it started from.
+pub fn link_issue(branch: &Branch, link: &Link) -> Result<(), Failure> {
+    branch.record_pull_request(match link {
+        Link::Issue(issue) => PullRequestActivity::IssueLinked(issue.clone()),
+        Link::PullRequest(pr) => PullRequestActivity::Started(pr.clone()),
+    })?;
     Ok(())
 }
 
@@ -241,6 +494,8 @@ pub struct PrState {
     pub delivered: BTreeSet<String>,
     /// How many times feedback was delivered.
     pub rounds: u32,
+    /// Review threads the watch answered and resolved, or tried to.
+    pub resolved_threads: BTreeSet<String>,
 }
 
 impl PrState {
@@ -262,6 +517,7 @@ pub fn state(info: &BranchInfo, events: &[RecordedEvent]) -> PrState {
         };
         match activity.as_ref() {
             PullRequestActivity::IssueLinked(link) => state.issue = Some(link.clone()),
+            PullRequestActivity::Started(pr) => state.pull_request = Some(pr.clone()),
             PullRequestActivity::Checked(run) => state.check = Some((event.at_ms, run.clone())),
             PullRequestActivity::Pushed(pushed) => state.pushed = Some(pushed.clone()),
             PullRequestActivity::Opened(pr) | PullRequestActivity::Updated(pr) => {
@@ -281,6 +537,11 @@ pub fn state(info: &BranchInfo, events: &[RecordedEvent]) -> PrState {
                 state.rounds = state.rounds.saturating_sub(1);
             }
             PullRequestActivity::WatchStopped { .. } => {}
+            PullRequestActivity::ThreadsResolved { threads, .. } => {
+                state
+                    .resolved_threads
+                    .extend(threads.iter().map(|t| t.id.clone()));
+            }
         }
     }
     state
@@ -517,8 +778,17 @@ pub fn log_line(activity: &PullRequestActivity) -> (String, Tone) {
     match activity {
         PullRequestActivity::IssueLinked(link) => (
             format!(
-                "issue #{} linked: {} ({})",
-                link.number, link.title, link.url
+                "issue {} linked: {} ({})",
+                link_reference(link),
+                link.title,
+                link.url
+            ),
+            Tone::Cyan,
+        ),
+        PullRequestActivity::Started(pr) => (
+            format!(
+                "started from pull request #{}'s head ({}): {}",
+                pr.number, pr.head, pr.url
             ),
             Tone::Cyan,
         ),
@@ -585,6 +855,34 @@ pub fn log_line(activity: &PullRequestActivity) -> (String, Tone) {
             format!("stopped watching the pull request: {reason}"),
             Tone::Dim,
         ),
+        PullRequestActivity::ThreadsResolved { commit, threads } => {
+            let done: Vec<&str> = threads
+                .iter()
+                .filter(|t| t.resolved)
+                .map(|t| t.path.as_str())
+                .collect();
+            let failed = threads.len() - done.len();
+            let mut text = format!(
+                "{} review thread{} addressed in {} resolved",
+                done.len(),
+                plural(done.len() as u32),
+                short(commit)
+            );
+            if !done.is_empty() {
+                text.push_str(&format!(" ({})", done.join(", ")));
+            }
+            if failed > 0 {
+                text.push_str(&format!(", {failed} not"));
+            }
+            (
+                text,
+                if failed > 0 {
+                    Tone::Yellow
+                } else {
+                    Tone::Green
+                },
+            )
+        }
     }
 }
 
@@ -864,6 +1162,24 @@ fn diffstat(root: &Path, base: &str, commit: &str) -> String {
     }
 }
 
+/// The line in a pull request's body that names its issue: a closing
+/// keyword where the tracker acts on one (GitHub; Linear's GitHub
+/// integration closes `ENG-123` on merge), a reference otherwise (Jira
+/// links a key it sees but closes nothing; a GitHub pull request cannot
+/// close a GitLab issue).
+pub fn closing_line(issue: &IssueLink, same_repo: bool) -> String {
+    let key = link_reference(issue);
+    match issue.tracker.as_deref() {
+        Some("linear") => format!("Closes {key}\n"),
+        Some("jira") => format!("Refs {key} ({})\n", issue.url),
+        Some(_) => format!("Related: {key} ({})\n", issue.url),
+        None => match (same_repo, repo_of(&issue.url)) {
+            (false, Some((_, owner, repo))) => format!("Closes {owner}/{repo}#{}\n", issue.number),
+            _ => format!("Closes #{}\n", issue.number),
+        },
+    }
+}
+
 /// The default title: the issue's, or the prompt's first line.
 fn title(info: &BranchInfo, state: &PrState) -> String {
     if let Some(issue) = &state.issue {
@@ -919,12 +1235,7 @@ pub fn body(
             _ => true,
         };
         body.push('\n');
-        match (same_repo, repo_of(&issue.url)) {
-            (false, Some((_, owner, repo))) => {
-                body.push_str(&format!("Closes {owner}/{repo}#{}\n", issue.number))
-            }
-            _ => body.push_str(&format!("Closes #{}\n", issue.number)),
-        }
+        body.push_str(&closing_line(issue, same_repo));
     }
     body.push_str("\n## Branchyard\n\n| | |\n|---|---|\n");
     body.push_str(&format!(
@@ -993,16 +1304,32 @@ pub struct Feedback {
 
 const THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
      repository(owner: $owner, name: $name) { pullRequest(number: $number) { \
-     reviewThreads(first: 100) { nodes { isResolved path line comments(first: 50) { \
+     reviewThreads(first: 100) { nodes { id isResolved path line comments(first: 50) { \
      nodes { id author { login } body path line url } } } } } } }";
 
+/// A review thread as the watch last observed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewThread {
+    /// Its GraphQL node ID; empty when `gh` gave none.
+    pub id: String,
+    pub path: Option<String>,
+    pub resolved: bool,
+    /// The feedback keys of its comments with a body (`thread:<comment>`).
+    pub keys: Vec<String>,
+}
+
+/// What [`observe`] saw.
+pub struct Observed {
+    pub observation: PullRequestObservation,
+    /// Feedback among it, without the log of failed runs (see
+    /// [`failed_log`]).
+    pub feedback: Vec<Feedback>,
+    pub threads: Vec<ReviewThread>,
+}
+
 /// Ask `gh` about `pr`: its state, checks, reviews, comments and review
-/// threads; and the feedback among them, without the log of failed runs
-/// (see [`failed_log`]).
-pub fn observe(
-    gh: &Gh,
-    pr: &PullRequestRef,
-) -> Result<(PullRequestObservation, Vec<Feedback>), Failure> {
+/// threads, and the feedback among them.
+pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
     let number = pr.number.to_string();
     let view: Value = gh.json(
         &[
@@ -1127,8 +1454,23 @@ pub fn observe(
         });
     }
     let mut unresolved = 0;
+    let mut review_threads = Vec::new();
     for thread in &threads {
-        if thread["isResolved"].as_bool().unwrap_or(false) {
+        let resolved = thread["isResolved"].as_bool().unwrap_or(false);
+        let keys: Vec<String> = thread["comments"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| !text(&c["body"]).trim().is_empty())
+            .map(|c| format!("thread:{}", text(&c["id"])))
+            .collect();
+        review_threads.push(ReviewThread {
+            id: text(&thread["id"]),
+            path: thread["path"].as_str().map(str::to_owned),
+            resolved,
+            keys,
+        });
+        if resolved {
             continue;
         }
         unresolved += 1;
@@ -1165,7 +1507,11 @@ pub fn observe(
         ci,
         unresolved_threads: unresolved,
     };
-    Ok((observation, feedback))
+    Ok(Observed {
+        observation,
+        feedback,
+        threads: review_threads,
+    })
 }
 
 fn quote(body: &str) -> String {
@@ -1299,8 +1645,8 @@ pub fn refresh(yard: &Yard, name: &str) -> Outcome {
     };
     let gh = Gh::new(yard.root(), None);
     gh.ready()?;
-    let (observation, _) = observe(&gh, pr)?;
-    record_observation(&branch, &state, observation)?;
+    let observed = observe(&gh, pr)?;
+    record_observation(&branch, &state, observed.observation)?;
     Ok(())
 }
 
@@ -1344,8 +1690,12 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
         let state = state(branch.info(), &branch.events()?);
         let mut feedback = Vec::new();
         let mut active = false;
+        let mut pushed = None;
         match push_if_new(&branch, gh, args, &state)? {
-            PushOutcome::Pushed => active = true,
+            PushOutcome::Pushed { from, to } => {
+                active = true;
+                pushed = from.map(|from| (from, to));
+            }
             PushOutcome::CheckFailed(item) => feedback.push(item),
             PushOutcome::Nothing => {}
         }
@@ -1355,7 +1705,14 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
             .pull_request
             .clone()
             .ok_or_else(|| Failure::Message(format!("{name} has no pull request")))?;
-        let (observation, observed) = observe(gh, &pr)?;
+        let Observed {
+            observation,
+            feedback: observed,
+            threads,
+        } = observe(gh, &pr)?;
+        if let (Some((from, to)), false) = (&pushed, args.no_resolve) {
+            resolve_addressed(yard, &branch, gh, &pr, &state, &threads, from, to)?;
+        }
         if record_observation(&branch, &state, observation.clone())? {
             active = true;
             print(&format!(
@@ -1413,7 +1770,12 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
 /// What [`push_if_new`] did.
 enum PushOutcome {
     Nothing,
-    Pushed,
+    /// The candidate `to` was pushed over `from`, the commit pushed
+    /// before (none on a first push).
+    Pushed {
+        from: Option<String>,
+        to: String,
+    },
     /// The check failed on the new candidate: this feedback says so.
     CheckFailed(Feedback),
 }
@@ -1441,7 +1803,10 @@ fn push_if_new(
     match publish(branch, gh, &update) {
         Ok(published) => {
             print(&published_text(&published))?;
-            Ok(PushOutcome::Pushed)
+            Ok(PushOutcome::Pushed {
+                from: state.pushed.as_ref().map(|p| p.commit.clone()),
+                to: published.pushed.commit,
+            })
         }
         Err(PublishError::CheckFailed(run)) => {
             print(&format!(
@@ -1464,6 +1829,88 @@ fn push_if_new(
         }
         Err(PublishError::Other(failure)) => Err(failure),
     }
+}
+
+/// The review threads to answer and resolve after `to` was pushed over
+/// `from`: unresolved ones, not tried before, every comment of which was
+/// delivered as feedback, on a file the push changed.
+pub fn addressed_threads<'a>(
+    state: &PrState,
+    threads: &'a [ReviewThread],
+    changed: &BTreeSet<String>,
+) -> Vec<&'a ReviewThread> {
+    threads
+        .iter()
+        .filter(|t| !t.resolved && !t.id.is_empty() && !t.keys.is_empty())
+        .filter(|t| !state.resolved_threads.contains(&t.id))
+        .filter(|t| t.keys.iter().all(|k| state.delivered.contains(k)))
+        .filter(|t| t.path.as_ref().is_some_and(|p| changed.contains(p)))
+        .collect()
+}
+
+/// After a push, answer "Addressed in <commit>" in each review thread the
+/// watch fed back whose file the pushed commits changed, resolve it, and
+/// record what happened, so no thread is tried twice. A failure is
+/// recorded and said, and the watch carries on.
+#[allow(clippy::too_many_arguments)]
+fn resolve_addressed(
+    yard: &Yard,
+    branch: &Branch,
+    gh: &Gh,
+    pr: &PullRequestRef,
+    state: &PrState,
+    threads: &[ReviewThread],
+    from: &str,
+    to: &str,
+) -> Outcome {
+    let changed: BTreeSet<String> = Git::new(yard.root())
+        .args(["diff", "--name-only", "--no-renames", from, to, "--"])
+        .run()
+        .map(|out| out.lines().map(str::to_owned).collect())
+        .unwrap_or_default();
+    let threads = addressed_threads(state, threads, &changed);
+    if threads.is_empty() {
+        return Ok(());
+    }
+    let host = repo_of(&pr.url)
+        .map(|(host, _, _)| host)
+        .filter(|host| host != "github.com");
+    let reply = format!("Addressed in {to}.");
+    let mut results = Vec::new();
+    for thread in threads {
+        let path = thread.path.clone().unwrap_or_default();
+        let replied =
+            crate::pr_threads::reply_to_review_thread(gh, host.as_deref(), &thread.id, &reply);
+        let resolved = replied.as_ref().map_err(|e| e.to_string()).and_then(|()| {
+            crate::pr_threads::resolve_review_thread(gh, host.as_deref(), &thread.id, true)
+                .map_err(|e| e.to_string())
+        });
+        let result = branchyard::ResolvedThread {
+            id: thread.id.clone(),
+            path: path.clone(),
+            replied: replied.is_ok(),
+            resolved: resolved == Ok(true),
+            error: match resolved {
+                Ok(true) => None,
+                Ok(false) => Some("GitHub did not report the thread resolved".into()),
+                Err(error) => Some(error),
+            },
+        };
+        match &result.error {
+            None => print(&format!(
+                "resolved the review thread on {path}, addressed in {}
+",
+                short(to)
+            ))?,
+            Some(error) => eprintln!("by: could not resolve the review thread on {path}: {error}"),
+        }
+        results.push(result);
+    }
+    branch.record_pull_request(PullRequestActivity::ThreadsResolved {
+        commit: to.to_owned(),
+        threads: results,
+    })?;
+    Ok(())
 }
 
 /// Send `feedback` into the branch: into its running turn by steering, or
@@ -1589,6 +2036,8 @@ mod tests {
             body: "It panics.\n".into(),
             url: "https://github.com/acme/widgets/issues/12".into(),
             labels: vec!["bug".into(), "parser".into()],
+            tracker: None,
+            key: None,
         }
     }
 
@@ -1631,6 +2080,52 @@ mod tests {
             ..issue()
         };
         assert_eq!(issue_branch_name(&untitled), "issue-12");
+    }
+
+    #[test]
+    fn other_trackers_prompt_name_and_close_by_their_own_keys() {
+        let linear = Issue {
+            number: 123,
+            title: "Parser panics".into(),
+            body: String::new(),
+            url: "https://linear.app/acme/issue/ENG-123".into(),
+            labels: Vec::new(),
+            tracker: Some(crate::trackers::Tracker::Linear),
+            key: Some("ENG-123".into()),
+        };
+        let prompt = issue_prompt(&linear, "");
+        assert!(prompt.starts_with(
+            "Resolve Linear issue ENG-123: Parser panics\nhttps://linear.app/acme/issue/ENG-123\n"
+        ));
+        assert_eq!(issue_from_prompt(&prompt), Some(linear.link()));
+        assert_eq!(issue_branch_name(&linear), "eng-123-parser-panics");
+        let gitlab = Issue {
+            key: Some("acme/widgets#12".into()),
+            tracker: Some(crate::trackers::Tracker::GitLab),
+            number: 12,
+            ..linear.clone()
+        };
+        assert_eq!(issue_branch_name(&gitlab), "issue-12-parser-panics");
+        assert_eq!(
+            issue_from_prompt(&issue_prompt(&gitlab, "")).map(|l| l.key),
+            Some(Some("acme/widgets#12".into()))
+        );
+        let jira = IssueLink {
+            tracker: Some("jira".into()),
+            key: Some("PROJ-7".into()),
+            ..linear.link()
+        };
+        assert_eq!(closing_line(&linear.link(), true), "Closes ENG-123\n");
+        assert_eq!(
+            closing_line(&jira, true),
+            "Refs PROJ-7 (https://linear.app/acme/issue/ENG-123)\n"
+        );
+        assert!(closing_line(&gitlab.link(), true).starts_with("Related: acme/widgets#12 ("));
+        assert_eq!(closing_line(&issue().link(), true), "Closes #12\n");
+        assert_eq!(
+            log_line(&PullRequestActivity::IssueLinked(linear.link())).0,
+            "issue ENG-123 linked: Parser panics (https://linear.app/acme/issue/ENG-123)"
+        );
     }
 
     #[test]
@@ -1778,6 +2273,39 @@ mod tests {
         let text = body(&branch, &state, "", elsewhere);
         assert!(text.contains("\nCloses acme/widgets#12\n"), "{text}");
         assert!(!text.contains("<details>"));
+    }
+
+    #[test]
+    fn only_delivered_threads_on_changed_files_are_resolved_once() {
+        let thread = |id: &str, path: &str, resolved: bool, keys: &[&str]| ReviewThread {
+            id: id.into(),
+            path: Some(path.into()),
+            resolved,
+            keys: keys.iter().map(|k| (*k).to_owned()).collect(),
+        };
+        let threads = [
+            thread("T1", "a.rs", false, &["thread:C1"]),
+            // A reply not delivered yet: the reviewer is still talking.
+            thread("T2", "a.rs", false, &["thread:C2", "thread:C3"]),
+            thread("T3", "b.rs", false, &["thread:C4"]),
+            thread("T4", "a.rs", true, &["thread:C5"]),
+            thread("", "a.rs", false, &["thread:C6"]),
+            thread("T5", "a.rs", false, &["thread:C7"]),
+            thread("T6", "a.rs", false, &[]),
+        ];
+        let mut state = PrState::default();
+        for key in ["C1", "C2", "C4", "C5", "C6", "C7"] {
+            state.delivered.insert(format!("thread:{key}"));
+        }
+        // T5 was tried after an earlier push.
+        state.resolved_threads.insert("T5".into());
+        let changed: BTreeSet<String> = ["a.rs".to_owned()].into();
+        let ids: Vec<&str> = addressed_threads(&state, &threads, &changed)
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(ids, ["T1"]);
+        assert!(addressed_threads(&state, &threads, &BTreeSet::new()).is_empty());
     }
 
     #[test]

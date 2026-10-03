@@ -21,9 +21,11 @@
 //!   reparented to the bridge, which reaps it, so no zombie accumulates
 //!   whether or not the bridge is process 1. SIGTERM or SIGINT is
 //!   forwarded to every exec's process group; after a grace period the
-//!   groups are killed and the bridge exits with status 0. As process 1,
-//!   it ignores those signals when a process inside the sandbox sends them,
-//!   so only the container runtime can stop it.
+//!   groups are killed, and once every exec's last output and exit status
+//!   have been sent to its client (or 2 more seconds have passed) the
+//!   bridge exits with status 0. As process 1, it ignores those signals
+//!   when a process inside the sandbox sends them, so only the container
+//!   runtime can stop it.
 //! - With `run_as`, execs run as that user and group with no supplementary
 //!   groups, and files and trees are read and written with that user's
 //!   file-system identity, so they belong to it and a link it planted is
@@ -56,7 +58,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
@@ -77,6 +79,9 @@ const MAX_EXECS: usize = 64;
 pub const IDENTITY_FILES: [&str; 3] = ["atespace", "name", "uid"];
 /// How long execs get to exit after SIGTERM is forwarded to them.
 pub const TERM_GRACE: Duration = Duration::from_secs(10);
+/// How long, once the execs have ended at shutdown, the bridge waits for
+/// their last output and exit statuses to reach their clients.
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// How the bridge is configured.
 #[derive(Clone, Debug)]
@@ -113,6 +118,10 @@ struct Group {
     /// Set, under the lock, when the leader is reaped. A kill checks it
     /// under the same lock, so it never signals a reused PID.
     reaped: Mutex<bool>,
+    /// What the exec has yet to send its client: its stdout to the end,
+    /// its stderr to the end and its exit status, one count each. A
+    /// shutting-down bridge waits for zero before it exits.
+    undelivered: Arc<AtomicUsize>,
 }
 
 impl Group {
@@ -351,6 +360,17 @@ impl Shared {
         }
         self.teardown(|_| true);
         self.reap_orphans();
+        // The groups have ended, but their pipes may still hold output the
+        // pumps have not sent, and the waiters may not have sent the exit
+        // status: exiting now would cut both off from the clients.
+        let deadline = Instant::now() + DRAIN_GRACE;
+        while Instant::now() < deadline
+            && groups
+                .iter()
+                .any(|g| g.undelivered.load(Ordering::Acquire) > 0)
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -914,6 +934,7 @@ fn exec(
         started: Instant::now(),
         done: AtomicBool::new(false),
         reaped: Mutex::new(false),
+        undelivered: Arc::new(AtomicUsize::new(3)),
     });
     shared
         .groups
@@ -927,11 +948,19 @@ fn exec(
 
     {
         let send = send.clone();
-        thread::spawn(move || pump(stdout, send, Frame::Stdout, Frame::StdoutClosed));
+        let undelivered = group.undelivered.clone();
+        thread::spawn(move || {
+            pump(stdout, send, Frame::Stdout, Frame::StdoutClosed);
+            undelivered.fetch_sub(1, Ordering::AcqRel);
+        });
     }
     {
         let send = send.clone();
-        thread::spawn(move || pump(stderr, send, Frame::Stderr, Frame::StderrClosed));
+        let undelivered = group.undelivered.clone();
+        thread::spawn(move || {
+            pump(stderr, send, Frame::Stderr, Frame::StderrClosed);
+            undelivered.fetch_sub(1, Ordering::AcqRel);
+        });
     }
     // Stdin is written on its own thread, so a process that stops reading
     // cannot keep this loop from seeing a kill or teardown.
@@ -966,6 +995,7 @@ fn exec(
                 Err(error) => Frame::failed(&error),
             };
             let _ = send(frame);
+            group.undelivered.fetch_sub(1, Ordering::AcqRel);
         })
     };
 

@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use branchyard::{
     Activity, After, Binding, BranchInfo, Budget, Envelope, GraphEdit, HarnessInfo, Inspection,
-    Merged, Policy, Provider, Provisioning, RecordedEvent, Seats, StallAction,
+    MapItem, MapReport, MapSummary, Merged, Policy, Provider, Provisioning, RecordedEvent, Seats,
+    StallAction,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -106,6 +107,8 @@ pub struct RuleSpec {
 }
 
 /// A permission policy: rules in order, then the mode. Defaults to deny.
+/// With a preset, its rules follow these rules and its default replaces
+/// `mode`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +117,10 @@ pub struct PolicySpec {
     pub mode: PolicyMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<RuleSpec>,
+    /// A named preset (`read-only`, `edit-worktree`, `full`) standing for
+    /// its explicit rules; see `docs/egress.md#permission-presets`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<branchyard::PolicyPreset>,
 }
 
 impl PolicySpec {
@@ -121,20 +128,40 @@ impl PolicySpec {
         PolicySpec {
             mode: PolicyMode::Allow,
             rules: Vec::new(),
+            preset: None,
+        }
+    }
+
+    /// Only the preset's rules and default.
+    pub fn preset(preset: branchyard::PolicyPreset) -> Self {
+        PolicySpec {
+            preset: Some(preset),
+            ..PolicySpec::default()
         }
     }
 
     pub fn to_policy(&self) -> Policy {
-        let base = match self.mode {
-            PolicyMode::Allow => Policy::allow_all(),
-            PolicyMode::Deny => Policy::deny_all(),
+        let preset = self.preset.map(|p| p.rules());
+        let default_allow = match &preset {
+            Some(rules) => rules.default_allow,
+            None => self.mode == PolicyMode::Allow,
         };
-        self.rules
+        let base = match default_allow {
+            true => Policy::allow_all(),
+            false => Policy::deny_all(),
+        };
+        let policy = self
+            .rules
             .iter()
             .fold(base, |policy, rule| match rule.allow {
                 true => policy.allow(rule.tool.clone()),
                 false => policy.deny(rule.tool.clone()),
-            })
+            });
+        let Some(preset) = preset else {
+            return policy;
+        };
+        let policy = preset.deny.iter().fold(policy, |p, tool| p.deny(*tool));
+        preset.allow.iter().fold(policy, |p, tool| p.allow(*tool))
     }
 }
 
@@ -198,10 +225,95 @@ pub struct TaskRequest {
     /// held to the same rules as `provision`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seats: Option<Seats>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// Plan first, like `by run --plan`: the first turn runs read-only and
+    /// the branch waits for `POST .../plan/approve`. See
+    /// `docs/plans-and-goals.md`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plan: bool,
+    /// A goal a judge verifies, like `by run --goal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalRequest>,
+}
+
+/// A task's goal: its text, the follow-up turns it may get, and the judge
+/// harness (one of the server's) that verifies it; without one, the
+/// branch's check and a non-empty diff decide.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalRequest {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// `POST /v1/repos/{repo}/maps`: a wide map, run as one operation. See
+/// `docs/map.md`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MapRequest {
+    /// The map's name (default: a slug of the prompt). Running a map of
+    /// this name again skips its items done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The items, each with its id, as `branchyard::parse_map_items` reads
+    /// them from a file.
+    pub items: Vec<MapItem>,
+    /// The JSON Schema every answer must match (the subset in
+    /// `docs/map.md#schemas`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce: Option<String>,
+    /// Remove an item's branches once its answer is recorded.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove_done: bool,
+    /// Run the items that failed in an earlier run again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retry_failed: bool,
+    /// Every branch's options, as a task's; `prompt` is the template, and
+    /// `name`, `harnesses`, `seats`, `plan` and `goal` are refused.
+    pub task: TaskRequest,
+}
+
+/// `POST /v1/repos/{repo}/maps/{name}/resume`: run a recorded map again
+/// with the request that started it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MapResumeRequest {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retry_failed: bool,
+}
+
+/// `GET /v1/repos/{repo}/maps`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapList {
+    pub maps: Vec<MapSummary>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/send`.
@@ -240,6 +352,16 @@ pub struct SendRequest {
     /// runs, refused unless it allows client commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<Provisioning>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/fork`.
@@ -289,6 +411,16 @@ pub struct ForkRequest {
     /// runs, refused unless it allows client commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<Provisioning>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/reincarnate`: a new branch from
@@ -329,6 +461,16 @@ pub struct ReincarnateRequest {
     /// kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<Provisioning>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/merge`. Without a target, the
@@ -383,6 +525,20 @@ pub struct SpawnRequest {
     pub after: After,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    /// Worker labels the operation needs: only a worker started with every
+    /// one of them (`by worker --label gpu`) claims it. See
+    /// `docs/server.md#worker-labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_labels: Vec<String>,
+    /// The operation's priority, -10 to 10 (default 0): higher runs first,
+    /// and the server caps it at the tenant's `max_priority`. See
+    /// `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// The child's connector grant, like [`branchyard::Spawn::connectors`]:
+    /// narrowed to its parent's; unset is its seat's or its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connectors: Option<Vec<branchyard::connectors::GrantEntry>>,
 }
 
 fn is_settled(after: &After) -> bool {
@@ -486,6 +642,12 @@ pub enum OperationKind {
     Integrate,
     /// A branch started with `POST .../reincarnate`.
     Reincarnate,
+    /// A plan approved with `POST .../plan/approve`, run as a turn.
+    ApprovePlan,
+    /// A plan rejected with `POST .../plan/reject`.
+    RejectPlan,
+    /// A wide map started with `POST .../maps` or `.../maps/{name}/resume`.
+    Map,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -528,6 +690,10 @@ pub struct OperationResult {
     /// A spawned child, inspected once its turn ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection: Option<Inspection>,
+    /// A map's rows and progress once it ended; its `branches` above are
+    /// the branches that answered or were tried last, where they remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<MapReport>,
 }
 
 /// A long operation, run in the background. Durable on the server from
@@ -557,6 +723,24 @@ pub struct Operation {
     pub result: Option<OperationResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorBody>,
+    /// Worker labels the operation needs; only a worker carrying all of
+    /// them claims it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+    /// Why a queued operation has not been claimed, once it has waited
+    /// longer than the server's `unclaimable_after`: no live worker serving
+    /// its repository carries the labels it requires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
+    /// Its priority as admitted (after the tenant's cap; a spawn's
+    /// inherited from its parent when its request named none). Claims take
+    /// higher priorities first; see `docs/server.md#scheduling`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub priority: i32,
+}
+
+fn is_zero(value: &i32) -> bool {
+    *value == 0
 }
 
 /// A structured error. `code` is stable; `message` is for people.
@@ -602,6 +786,15 @@ pub struct BranchList {
     pub branches: Vec<BranchInfo>,
 }
 
+/// `GET /v1/repos/{repo}/operations[?branch=NAME]`: the caller's tenant's
+/// queued and running operations of the repository, oldest first, each
+/// saying why it waits when no live worker can claim it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OperationList {
+    pub operations: Vec<Operation>,
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diff {
@@ -638,6 +831,36 @@ pub struct HarnessList {
     pub harnesses: Vec<HarnessInfo>,
 }
 
+/// One worker's machine and the harnesses it has
+/// (docs/harness-lifecycle.md).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkerInventory {
+    /// The worker's ID, as its claims record it.
+    pub id: String,
+    pub host: String,
+    /// The labels it claims with, `harness:<id>` ones included.
+    pub labels: Vec<String>,
+    /// The repositories it serves (only those the caller can see).
+    pub repos: Vec<String>,
+    /// Milliseconds since its last beat.
+    pub seen_ms_ago: u64,
+    /// The server that answered is this worker.
+    #[serde(default)]
+    pub this: bool,
+    /// What it advertised; `None` when it advertises nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<branchyard::inventory::Inventory>,
+}
+
+/// `GET /v1/inventory`: the live workers serving the caller's repositories,
+/// the answering server's first, and the harnesses each one's machine has.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InventoryReport {
+    pub workers: Vec<WorkerInventory>,
+}
+
 /// A merge on the wire: [`branchyard::Merged`]'s own serde form.
 pub type MergedInfo = Merged;
 
@@ -646,6 +869,52 @@ mod tests {
     use super::*;
     use branchyard::{BranchStatus, PermissionKey, PermissionRequest};
     use serde_json::json;
+
+    #[test]
+    fn a_preset_follows_the_request_rules_and_sets_the_default() {
+        let spec: PolicySpec = serde_json::from_value(json!({
+            "preset": "edit-worktree",
+            "rules": [{"tool": "Bash", "allow": true}, {"tool": "Write", "allow": false}],
+        }))
+        .unwrap();
+        let policy = spec.to_policy();
+        let decide = |tool: &str| {
+            let request = PermissionRequest {
+                key: PermissionKey("1".into()),
+                tool: tool.into(),
+                input: Value::Null,
+            };
+            matches!(
+                policy.decide("b", &request),
+                branchyard::PermissionDecision::Allow
+            )
+        };
+        // The request's own rules come first.
+        assert!(decide("Bash"));
+        assert!(!decide("Write"));
+        // Then the preset's.
+        assert!(decide("Edit") && decide("Read"));
+        assert!(!decide("WebFetch"));
+        // Its default: deny.
+        assert!(!decide("mcp__other"));
+        let full = PolicySpec::preset(branchyard::PolicyPreset::Full).to_policy();
+        let request = PermissionRequest {
+            key: PermissionKey("1".into()),
+            tool: "anything".into(),
+            input: Value::Null,
+        };
+        assert_eq!(
+            full.decide("b", &request),
+            branchyard::PermissionDecision::Allow
+        );
+        let wire = serde_json::to_value(PolicySpec::preset(branchyard::PolicyPreset::ReadOnly));
+        assert_eq!(
+            wire.unwrap(),
+            json!({"mode": "deny", "preset": "read-only"})
+        );
+        let unknown = serde_json::from_value::<PolicySpec>(json!({"preset": "yolo"}));
+        assert!(unknown.unwrap_err().to_string().contains("unknown variant"));
+    }
 
     #[test]
     fn budgets_refuse_nonpositive_values() {

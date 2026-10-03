@@ -216,6 +216,9 @@ fn admit_only(url: &str, request: TaskRequest, key: &str) -> Operation {
                 principal: Principal::default_for("tester"),
                 creates: Vec::new(),
                 quota: AdmissionQuota::default(),
+                requires: Vec::new(),
+                priority: 0,
+                trace: None,
             },
             Work::Task { request }.to_value().unwrap(),
         )
@@ -360,8 +363,8 @@ fn an_expired_claim_is_taken_over_and_a_started_operation_is_not_run_again() {
     };
     let lease = Duration::from_millis(500);
     let repos = ["app".to_owned()];
-    let first = store.claim(&ghost, &repos, lease).unwrap().unwrap();
-    let second = store.claim(&ghost, &repos, lease).unwrap().unwrap();
+    let first = store.claim(&ghost, &repos, &[], lease).unwrap().unwrap();
+    let second = store.claim(&ghost, &repos, &[], lease).unwrap().unwrap();
     assert_eq!(first.operation.operation.id, unstarted.id);
     assert_eq!(second.operation.operation.id, started.id);
     let mut running = second.operation.clone();
@@ -574,6 +577,9 @@ fn stored(id: &str, tenant: &str, lock: &str, creates: &[&str]) -> StoredOperati
             finished_at_ms: None,
             result: None,
             error: None,
+            requires: Vec::new(),
+            waiting: None,
+            priority: 0,
         },
         idempotency: Some(Idempotency {
             caller: format!("{tenant}/ci"),
@@ -584,6 +590,7 @@ fn stored(id: &str, tenant: &str, lock: &str, creates: &[&str]) -> StoredOperati
         tenant: tenant.into(),
         principal: Some(principal),
         creates: creates.iter().map(|s| s.to_string()).collect(),
+        trace: None,
     }
 }
 
@@ -691,6 +698,9 @@ fn a_worker_runs_another_tenants_operation_as_its_principal_without_leaking_it()
                 principal: acme,
                 creates: vec!["acme-work".into()],
                 quota: AdmissionQuota::default(),
+                requires: Vec::new(),
+                priority: 0,
+                trace: None,
             },
             Work::Task {
                 request: task("WRITE w.txt=acme", "acme-work"),
@@ -789,6 +799,9 @@ fn admit(url: &str, work: Work, branches: &[&str], locks: &[&str]) -> Operation 
                 principal: Principal::default_for("tester"),
                 creates: owned(branches),
                 quota: AdmissionQuota::default(),
+                requires: Vec::new(),
+                priority: 0,
+                trace: None,
             },
             work.to_value().unwrap(),
         )
@@ -1001,4 +1014,276 @@ fn servers_and_a_worker_resuming_graphs_on_one_database_start_a_dependent_once()
     assert_eq!(repo.branch("second").unwrap().turns, 1);
     assert_eq!(prompts(&b.client(), "second"), 1);
     drop(worker);
+}
+
+/// The worker-label conformance on PostgreSQL (two workers racing for
+/// labeled work through `FOR UPDATE SKIP LOCKED`), on a queue created
+/// before the `requires` column existed.
+#[test]
+fn worker_labels_conform_on_postgres() {
+    let Some(url) = database() else { return };
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(
+            "CREATE TABLE by_operations (id TEXT PRIMARY KEY, \
+                 seq BIGINT GENERATED ALWAYS AS IDENTITY, body TEXT NOT NULL); \
+             CREATE TABLE by_operation_queue (id TEXT PRIMARY KEY REFERENCES by_operations (id), \
+                 seq BIGINT GENERATED ALWAYS AS IDENTITY, repo TEXT NOT NULL, work TEXT NOT NULL, \
+                 attempt BIGINT NOT NULL DEFAULT 0, worker TEXT, host TEXT, pid BIGINT, \
+                 start TEXT, lease_until TIMESTAMPTZ)",
+        )
+        .unwrap();
+    drop(client);
+    let store = PostgresStore::open(&url).unwrap();
+    branchyard_server::store::check_labels(&store, "pg");
+}
+
+/// Two servers on one database send each push notification once: each
+/// claims the feed entries it read before sending.
+#[test]
+fn push_claims_conform_on_postgres() {
+    let Some(url) = database() else { return };
+    let (one, other) = (
+        PostgresStore::open(&url).unwrap(),
+        PostgresStore::open(&url).unwrap(),
+    );
+    branchyard_server::companion::push::check_claims(&one, &other, "pg");
+}
+
+/// A queue as it was before the `requires` column and the workers table,
+/// with one operation queued.
+fn old_queue(url: &str) {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(
+            "CREATE TABLE by_operations (id TEXT PRIMARY KEY, \
+                 seq BIGINT GENERATED ALWAYS AS IDENTITY, body TEXT NOT NULL); \
+             CREATE TABLE by_operation_queue (id TEXT PRIMARY KEY REFERENCES by_operations (id), \
+                 seq BIGINT GENERATED ALWAYS AS IDENTITY, repo TEXT NOT NULL, work TEXT NOT NULL, \
+                 attempt BIGINT NOT NULL DEFAULT 0, worker TEXT, host TEXT, pid BIGINT, \
+                 start TEXT, lease_until TIMESTAMPTZ); \
+             INSERT INTO by_operations (id, body) VALUES ('op-old', '{}'); \
+             INSERT INTO by_operation_queue (id, repo, work) VALUES ('op-old', 'app', '{}')",
+        )
+        .unwrap();
+}
+
+/// Open the registry from several threads at once.
+fn open_together(url: &str, n: usize) {
+    let barrier = std::sync::Barrier::new(n);
+    std::thread::scope(|scope| {
+        let opens: Vec<_> = (0..n)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    PostgresStore::open(url).map(drop)
+                })
+            })
+            .collect();
+        for open in opens {
+            open.join().unwrap().unwrap();
+        }
+    });
+}
+
+/// The old queue's row, migrated: it requires nothing, has priority 0,
+/// belongs to the default tenant and was admitted at the epoch; and the
+/// tenants' usage table exists.
+fn requires_of_old(url: &str) -> Vec<String> {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    let row = client
+        .query_one(
+            "SELECT requires, priority, tenant, enqueued_ms FROM by_operation_queue \
+             WHERE id = 'op-old'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(row.get::<_, i32>(1), 0);
+    assert_eq!(row.get::<_, String>(2), "default");
+    assert_eq!(row.get::<_, i64>(3), 0);
+    let usage: i64 = client
+        .query_one("SELECT COUNT(*) FROM by_tenant_usage", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(usage, 0);
+    row.get(0)
+}
+
+/// A schema as the release before scheduling made it: every table, the
+/// `requires` column and the workers table, but no priority, tenant or
+/// enqueue time on the queue and no tenants' usage; with one operation
+/// queued.
+fn previous_release(url: &str) {
+    PostgresStore::open(url).unwrap();
+    let mut client = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(
+            "ALTER TABLE by_operation_queue DROP COLUMN priority, DROP COLUMN tenant, \
+                 DROP COLUMN enqueued_ms; \
+             DROP TABLE by_tenant_usage; \
+             INSERT INTO by_operations (id, body) VALUES ('op-old', '{}'); \
+             INSERT INTO by_operation_queue (id, repo, work) VALUES ('op-old', 'app', '{}')",
+        )
+        .unwrap();
+}
+
+/// Servers and workers starting together on one database, on a fresh one
+/// and on one whose queue needs the migration, all open the registry.
+#[test]
+fn registries_opened_at_once_make_and_migrate_the_schema_once() {
+    let Some(url) = database() else { return };
+    open_together(&url, 8);
+    open_together(&url, 8);
+    let store = PostgresStore::open(&url).unwrap();
+    assert!(store.load().unwrap().is_empty());
+
+    let Some(url) = database() else { return };
+    old_queue(&url);
+    open_together(&url, 8);
+    assert!(requires_of_old(&url).is_empty());
+
+    let Some(url) = database() else { return };
+    previous_release(&url);
+    open_together(&url, 8);
+    assert!(requires_of_old(&url).is_empty());
+}
+
+/// A registry opened while another server is between the two writes of
+/// its `start` or `finish` (the queue row, then the operation) neither
+/// deadlocks with it nor fails it. Opening used to run the whole schema
+/// in one transaction: `CREATE UNIQUE INDEX IF NOT EXISTS` held a `SHARE`
+/// lock on `by_operations` while `CREATE INDEX IF NOT EXISTS` waited for
+/// one on the queue, held by the other server, which waited for the first
+/// lock to write the operation.
+#[test]
+fn a_registry_opened_beside_a_working_server_does_not_deadlock_with_it() {
+    for (old, previous) in [(false, false), (true, false), (true, true)] {
+        let Some(url) = database() else { return };
+        if previous {
+            previous_release(&url);
+        } else if old {
+            old_queue(&url);
+        } else {
+            PostgresStore::open(&url).unwrap();
+            let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+            client
+                .batch_execute(
+                    "INSERT INTO by_operations (id, body) VALUES ('op-old', '{}'); \
+                     INSERT INTO by_operation_queue (id, repo, work) VALUES ('op-old', 'app', '{}')",
+                )
+                .unwrap();
+        }
+        let mut working = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        let mut tx = working.transaction().unwrap();
+        tx.execute(
+            "UPDATE by_operation_queue SET attempt = attempt + 1 WHERE id = 'op-old'",
+            &[],
+        )
+        .unwrap();
+        std::thread::scope(|scope| {
+            let opening = scope.spawn(|| PostgresStore::open(&url).map(drop));
+            // Long enough for the open to reach the queue.
+            std::thread::sleep(Duration::from_millis(500));
+            tx.execute(
+                "UPDATE by_operations SET body = '{\"done\":true}' WHERE id = 'op-old'",
+                &[],
+            )
+            .expect("the working server's write");
+            tx.commit().expect("the working server's commit");
+            opening.join().unwrap().expect("the registry opens");
+        });
+        if old {
+            assert!(requires_of_old(&url).is_empty());
+        }
+    }
+}
+
+/// The scheduling conformance on PostgreSQL (priority, weighted fair share,
+/// aging, two workers racing through the single-statement claim, and the
+/// model check over random submissions), on a queue made by the release
+/// before scheduling and migrated when opened.
+#[test]
+fn scheduling_conforms_on_postgres() {
+    let Some(url) = database() else { return };
+    previous_release(&url);
+    let store = PostgresStore::open(&url).unwrap();
+    // The old row is the default tenant's; it is claimed like any other.
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client
+        .batch_execute("DELETE FROM by_operation_queue; DELETE FROM by_operations")
+        .unwrap();
+    branchyard_server::store::check_scheduling(&store, "pg");
+}
+
+/// Workers in other processes' threads, each with its own connection,
+/// claiming from one queue at once through the scheduling claim: each
+/// operation once, and the tenants' usage counts every claim.
+#[test]
+fn concurrent_scheduled_claims_on_separate_connections_never_double_claim() {
+    use branchyard_server::store::{Scheduling, Worker};
+    let Some(url) = database() else { return };
+    let admitting = PostgresStore::open(&url).unwrap();
+    for n in 0..60 {
+        let mut op = stored(
+            &format!("op-{n}"),
+            &format!("t{}", n % 3),
+            &format!("b{n}"),
+            &[],
+        );
+        op.operation.priority = n % 7 - 3;
+        op.operation.created_at_ms = 1_000 + n as u64;
+        assert_eq!(
+            admitting
+                .admit(&op, &serde_json::json!({}), &AdmissionQuota::default())
+                .unwrap(),
+            branchyard_server::store::Admission::Admitted
+        );
+    }
+    let scheduling = Scheduling {
+        weights: [("t0".to_owned(), 2.0)].into(),
+        ..Scheduling::default()
+    };
+    let mut won: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|w| {
+                let (url, scheduling) = (url.clone(), scheduling.clone());
+                scope.spawn(move || {
+                    let store = PostgresStore::open(&url).unwrap();
+                    let worker = Worker {
+                        id: format!("racer-{w}"),
+                        ..Worker::current()
+                    };
+                    let mut got = Vec::new();
+                    while let Some(claim) = store
+                        .claim_next(
+                            &worker,
+                            &["app".to_owned()],
+                            &[],
+                            Duration::from_secs(300),
+                            &scheduling,
+                        )
+                        .unwrap()
+                    {
+                        got.push(claim.operation.operation.id.clone());
+                    }
+                    got
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    won.sort();
+    let mut expected: Vec<String> = (0..60).map(|n| format!("op-{n}")).collect();
+    expected.sort();
+    assert_eq!(won, expected, "each operation claimed exactly once");
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let used: f64 = client
+        .query_one("SELECT SUM(used) FROM by_tenant_usage", &[])
+        .unwrap()
+        .get(0);
+    assert!((used - 60.0).abs() < 0.5, "{used}");
+    assert!(admitting.queue().unwrap().iter().all(|q| q.claimed));
 }

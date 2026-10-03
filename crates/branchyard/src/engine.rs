@@ -118,6 +118,10 @@ pub(crate) struct Driven {
     pub session: Option<NativeSession>,
     /// The harness's latest cumulative cost estimate.
     pub cost: Option<f64>,
+    /// What this turn's calls through the model gateway cost, metered;
+    /// when set, the branch's cost is this added to what it had, and the
+    /// harness's estimate is not used.
+    pub metered: Option<f64>,
 }
 
 enum Phase {
@@ -150,7 +154,12 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     let mut recorder = Recorder::fenced(&store, &fence, turn.options.observer.clone());
     let bounds = Bounds {
         budget: delegation::effective_budget(&record, &turn.options.budget),
-        policy: delegation::effective_policy(&record, &turn.options.policy),
+        // A branch writing its plan runs read-only, whatever the caller
+        // passed; a delegating parent's denials still come first.
+        policy: delegation::effective_policy(
+            &record,
+            &crate::plan::policy_for(&record, &turn.options.policy),
+        ),
     };
     let result = (|| {
         recorder.record(Activity::Status(record.info.status.clone()))?;
@@ -221,6 +230,20 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     };
     // Siblings waiting for this branch may start, or be blocked, now.
     graph::settled(turn.yard, &fence.branch, Some(turn.options));
+    // The outcome store learns how the turn ended; best-effort, it never
+    // changes what happened.
+    if result.is_ok() {
+        let _ = crate::fleet::observe(turn.yard, &fence.branch, None);
+        // A delegated child's plan awaiting approval goes to its parent.
+        crate::plan::settled(turn.yard, &fence.branch);
+        if matches!(&result, Ok(b) if b.info.status == BranchStatus::Ready) {
+            crate::knowledge::on_end(
+                turn.yard,
+                &fence.branch,
+                crate::knowledge::DistillTrigger::Ready,
+            );
+        }
+    }
     result
 }
 
@@ -315,6 +338,7 @@ fn run(
         submitted: false,
         session: None,
         cost: None,
+        metered: None,
     };
     let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     // Revoked when this function returns, after the harness and its
@@ -349,13 +373,95 @@ fn run(
         }
         Err(_) => None,
     };
+    // The branch's connectors: packages, index and this turn's gateway
+    // token in its home, before the sandbox exists. The token file is
+    // removed, and the gateway's audit log read a last time, when this
+    // function returns.
+    let deadline_ms = deadline.map(|at| {
+        now_ms().saturating_add(at.saturating_duration_since(Instant::now()).as_millis() as u64)
+    });
+    // One scope: the person's ceiling over what the branch asked for,
+    // which its connectors, models, network and token all follow.
+    let (scoped, narrowed) = crate::access::scoped(turn.yard, record);
+    if let Some(narrowed) = narrowed {
+        recorder.record(Activity::Access(Box::new(narrowed)))?;
+    }
+    let scopes = crate::access::TokenScopes::of(&scoped);
+    let connectors = match crate::connectors::prepare(turn.yard, &scoped, deadline_ms, &scopes) {
+        Ok(connectors) => connectors,
+        Err(reason) => {
+            driven.end = End::failed(format!("could not provide connectors: {reason}"));
+            return Ok(driven);
+        }
+    };
+    // The model gateway, on the same token when the turn has one; it
+    // stops when this function returns, after the harness is gone.
+    let models = match crate::models::prepare(
+        turn.yard,
+        &scoped,
+        connectors.as_ref().map(|c| c.token.as_str()),
+        deadline_ms,
+        &scopes,
+        bounds.budget.clone(),
+        delegation::reserved(&store, record),
+    ) {
+        Ok(models) => models,
+        Err(reason) => {
+            driven.end = End::failed(format!("could not provide the model gateway: {reason}"));
+            return Ok(driven);
+        }
+    };
+    let mut model_gateway = None;
+    let mut egress_extra = Vec::new();
+    let mut model_env = Vec::new();
+    let mut model_scrub = Vec::new();
+    match models {
+        None => {}
+        Some(crate::models::Prepared::Direct { hosts, activity }) => {
+            recorder.record(Activity::Model(Box::new(activity)))?;
+            egress_extra.extend(hosts);
+        }
+        Some(crate::models::Prepared::Gateway {
+            gateway,
+            env,
+            scrub,
+            url,
+            activity,
+        }) => {
+            recorder.record(Activity::Model(Box::new(activity)))?;
+            egress_extra.extend(crate::egress::gateway_rule(&url));
+            model_env = env;
+            model_scrub = scrub;
+            model_gateway = Some(gateway);
+        }
+    }
+    let _audit = connectors
+        .as_ref()
+        .map(|_| crate::connectors::AuditTail::start(turn.yard));
     // The one path for MCP servers and instructions, the task's and the
     // delegation tools', and for everything else the home needs. Applied
     // before a sandbox exists, so its mount or home transfer carries it.
+    // Adopted repository knowledge that matches the branch, in its
+    // instructions; see `crate::knowledge`.
+    let briefing = crate::knowledge::briefing_for(turn.yard, record);
+    if !briefing.omitted.is_empty() {
+        recorder.record(Activity::Warning(format!(
+            "knowledge {} matched but did not fit the {}-token budget",
+            briefing
+                .omitted
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            turn.yard.knowledge_settings().budget_tokens
+        )))?;
+    }
     let provisioned = match crate::provisioning::prepare(
         record,
         turn.profile,
         projection.as_ref(),
+        connectors.as_ref(),
+        Some(&briefing),
         store.dir(),
     ) {
         Ok(provisioned) => provisioned,
@@ -433,6 +539,37 @@ fn run(
     }
     for var in &provisioned.env {
         placement.set_env(&var.name, &var.value);
+    }
+    // The model gateway's variables replace the provider's own, and the
+    // credentials that would reach the provider around it are taken out.
+    for name in &model_scrub {
+        placement.remove_env(name);
+    }
+    for (name, value) in &model_env {
+        placement.set_env(name, value);
+    }
+    if let Some(parent) = &turn.options.trace_parent {
+        placement.set_env(crate::ENV_TRACEPARENT, parent);
+    }
+    // The branch's network policy: its proxy's variables last, so nothing
+    // above replaces them, and its namespace when the harness starts. The
+    // proxy lives with the placement, after the harness is gone.
+    if let Some(gateway) = connectors
+        .as_ref()
+        .and_then(|c| crate::egress::gateway_rule(&c.gateway_url))
+    {
+        egress_extra.push(gateway);
+    }
+    match crate::egress::prepare(turn.yard, &scoped, egress_extra) {
+        Ok(None) => {}
+        Ok(Some(egress)) => {
+            recorder.record(egress.applied())?;
+            placement.egress(egress);
+        }
+        Err(reason) => {
+            driven.end = End::failed(format!("could not apply the network policy: {reason}"));
+            return Ok(driven);
+        }
     }
     // A per-turn MCP file lives until this function returns, after the
     // harness is gone.
@@ -590,6 +727,35 @@ fn run(
             _ => {}
         }
         steering.poll(recorder, &mut session, &store, fence, &phase)?;
+        // A turn on the model gateway is metered exactly; its limit is
+        // held here as a harness's own estimate is below.
+        if let Some(gateway) = &model_gateway {
+            let metered = gateway.metered();
+            if driven.metered != Some(metered) && metered > 0.0 {
+                driven.metered = Some(metered);
+                let own = record.info.cost_usd.unwrap_or(0.0) + metered;
+                if let Some(projection) = &projection {
+                    projection.observe_cost(own);
+                }
+                let over = bounds
+                    .budget
+                    .max_usd
+                    .is_some_and(|max| own + delegation::reserved(&store, record) > max);
+                if let (true, Phase::Running(n)) = (over, &phase) {
+                    let n = *n;
+                    if let Err(error) = session.interrupt() {
+                        recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                        kill = true;
+                        break End::budget("max_usd");
+                    }
+                    phase = Phase::Stopping {
+                        turn: n,
+                        why: Stop::Limit("max_usd"),
+                        since: Instant::now(),
+                    };
+                }
+            }
+        }
         if let (Phase::Running(n), Some(window)) = (&phase, bounds.budget.stall_after) {
             let n = *n;
             let idle = now.duration_since(last_activity);
@@ -769,6 +935,10 @@ fn run(
                 }
             }
             Event::UsageObserved { usage, .. } if usage.cumulative => {
+                // On the model gateway, the metered cost is the branch's.
+                if model_gateway.is_some() {
+                    continue;
+                }
                 let Some(cost) = usage.cost_usd else { continue };
                 driven.cost = Some(driven.cost.map_or(cost, |c: f64| c.max(cost)));
                 if let Some(projection) = &projection {
@@ -850,6 +1020,9 @@ fn run(
         for activity in placement.release(turn.yard, record, fence) {
             recorder.record(activity)?;
         }
+        if let Some(gateway) = model_gateway {
+            driven.metered = Some(gateway.finish());
+        }
         return Ok(driven);
     }
     match session.close(CLOSE_GRACE) {
@@ -877,6 +1050,11 @@ fn run(
     }
     for activity in placement.release(turn.yard, record, fence) {
         recorder.record(activity)?;
+    }
+    // Calls still in flight are given a moment; what the turn's calls
+    // cost is the branch's.
+    if let Some(gateway) = model_gateway {
+        driven.metered = Some(gateway.finish());
     }
     Ok(driven)
 }
@@ -1188,8 +1366,10 @@ pub(crate) fn conclude(
     if let Some(session) = &driven.session {
         info.session = Some(session.to_string());
     }
-    if let Some(cost) = driven.cost {
-        info.cost_usd = Some(spent(cost, record.cost_baseline));
+    match (driven.metered, driven.cost) {
+        (Some(metered), _) => info.cost_usd = Some(info.cost_usd.unwrap_or(0.0) + metered),
+        (None, Some(cost)) => info.cost_usd = Some(spent(cost, record.cost_baseline)),
+        (None, None) => {}
     }
     let message = format!("{}: turn {}\n\n{}\n", info.git_branch, info.turns, prompt);
     let previous = info.candidate.as_ref().map(|c| c.commit.clone());
@@ -1306,6 +1486,8 @@ pub(crate) fn conclude(
             true => record.checkpoint = None,
         }
     }
+    // A planning turn that completed proposes its plan and waits.
+    crate::plan::conclude(yard, record, recorder, changed)?;
     Ok(())
 }
 

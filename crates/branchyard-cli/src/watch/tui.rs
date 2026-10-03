@@ -54,6 +54,12 @@ pub struct Snapshot {
     pub now_ms: u64,
     /// The branch `by try` has applied to this checkout, if any.
     pub trying: Option<String>,
+    /// `by usage`'s one-line summary of the local logins (local only).
+    pub usage: Option<String>,
+    /// The maps running or unfinished and their progress (local only).
+    pub maps: Option<String>,
+    /// Each branch's listening ports, one line each (local only).
+    pub ports: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// A key, as the dashboard reads it.
@@ -161,6 +167,9 @@ pub struct Invocation {
     pub argv: Vec<String>,
     /// Detached, with its output in a log, rather than waited for.
     pub background: bool,
+    /// Run in this terminal, which the dashboard leaves to it until it
+    /// exits ([`Run::Terminal`]).
+    pub terminal: bool,
 }
 
 /// What keys do right now.
@@ -368,6 +377,12 @@ pub struct Model {
     pub notified: notify::Tracker,
     /// The branch `by try` has applied to this checkout.
     pub trying: Option<String>,
+    /// `by usage`'s summary line, shown under the header.
+    pub usage: Option<String>,
+    /// The maps' progress, in the header.
+    pub maps: Option<String>,
+    /// Each branch's listening ports.
+    pub ports: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// One row of the tree as shown.
@@ -515,6 +530,9 @@ impl Model {
         self.now_ms = snapshot.now_ms;
         self.infos = snapshot.infos;
         self.trying = snapshot.trying;
+        self.usage = snapshot.usage;
+        self.maps = snapshot.maps;
+        self.ports = snapshot.ports;
         if self
             .toast
             .as_ref()
@@ -867,7 +885,7 @@ fn trigger(model: &mut Model, action: &'static Action) -> Vec<Cmd> {
 /// input box.
 fn start(model: &mut Model, action: &Action, branch: &str, text: &str, off: bool) -> Vec<Cmd> {
     match action.run {
-        Run::Background(_) | Run::Wait(_) | Run::Toggle { .. } => {
+        Run::Background(_) | Run::Wait(_) | Run::Toggle { .. } | Run::Terminal(_) => {
             let argv = actions::command(action, branch, text, off).unwrap_or_default();
             let shown: Vec<String> = argv
                 .iter()
@@ -880,6 +898,7 @@ fn start(model: &mut Model, action: &Action, branch: &str, text: &str, off: bool
                 branch: branch.to_owned(),
                 argv,
                 background: matches!(action.run, Run::Background(_)),
+                terminal: matches!(action.run, Run::Terminal(_)),
             })]
         }
         Run::Pane(kind) => {
@@ -1029,6 +1048,10 @@ fn status_style(status: &BranchStatus) -> (&'static str, Style) {
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         BranchStatus::Merged { .. } => ("◆", Style::new().fg(Color::Blue)),
+        BranchStatus::AwaitingPlanApproval => (
+            "?",
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
     }
 }
 
@@ -1178,6 +1201,22 @@ fn header_line(model: &Model) -> Line<'static> {
     }
     if infos.iter().any(|i| i.cost_usd.is_some()) {
         spans.push(Span::raw(format!(" · {} reported", render::usd(cost))));
+    }
+    if let Some(maps) = &model.maps {
+        spans.push(Span::styled(
+            format!(" · map {maps}"),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
+    if let Some(usage) = &model.usage {
+        spans.push(Span::styled(
+            format!(" · usage {usage}"),
+            Style::new().fg(if usage.contains("full") {
+                Color::Red
+            } else {
+                Color::DarkGray
+            }),
+        ));
     }
     Line::from(spans)
 }
@@ -1490,6 +1529,21 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
             Span::styled(
                 crate::pr::readiness_text(&readiness, model.now_ms, render::Style { color: false }),
                 look,
+            ),
+        ]));
+    }
+    if let Some(ports) = model.ports.get(&info.name).filter(|p| !p.is_empty()) {
+        for (i, port) in ports.iter().enumerate() {
+            lines.push(Line::from(vec![
+                label(if i == 0 { "ports" } else { "" }),
+                Span::raw(port.clone()),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            label(""),
+            Span::styled(
+                "b opens one in a browser · K stops them",
+                Style::new().fg(Color::DarkGray),
             ),
         ]));
     }
@@ -1979,6 +2033,21 @@ pub fn run<F: Effects>(
                         let plan = effects.editor(&branch);
                         open_editor(&mut terminal, plan, branch, &tx)?;
                     }
+                    // `by review`: the command gets the terminal (for its
+                    // editor) until it exits, then the dashboard is redrawn.
+                    Cmd::Run(invocation) if invocation.terminal => {
+                        use ratatui::crossterm::terminal::{
+                            disable_raw_mode, enable_raw_mode, EnterAlternateScreen,
+                            LeaveAlternateScreen,
+                        };
+                        let mut stdout = std::io::stdout();
+                        execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+                        disable_raw_mode()?;
+                        effects.perform(Cmd::Run(invocation), &tx);
+                        enable_raw_mode()?;
+                        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+                        terminal.clear()?;
+                    }
                     cmd => effects.perform(cmd, &tx),
                 }
             }
@@ -2056,6 +2125,9 @@ mod tests {
                 .collect(),
             now_ms: 1_130_000,
             trying: None,
+            usage: None,
+            maps: None,
+            ports: Default::default(),
         }
     }
 
@@ -2328,7 +2400,7 @@ mod tests {
         assert!(
             screen[23].starts_with(
                 "j/k move  Enter focus  / filter  S steer  x cancel  f fork  l log  y copy name  \
-                 Y copy path  o open  c compare  ? keys  q quit"
+                 Y copy path  o open  c compare  b browse  K stop ports"
             ),
             "{}",
             screen[23]
@@ -2804,6 +2876,12 @@ mod tests {
         let watch = yes(&mut m, 'P');
         assert_eq!(watch.argv, ["pr", "--watch", "--", "done"]);
         assert!(watch.background);
+        // v: by review in this terminal (its editor gets the screen), the
+        // comments then sent in the background.
+        let review = run_of(&press(&mut m, &[Key::Char('v')])).clone();
+        assert_eq!(review.argv, ["review", "--detach", "--", "done"]);
+        assert!(review.terminal && !review.background);
+        assert_eq!(review.action, ActionId::Review);
         // o: the dashboard opens the editor itself.
         assert_eq!(press(&mut m, &[Key::Char('o')]), [Cmd::Open("done".into())]);
         update(

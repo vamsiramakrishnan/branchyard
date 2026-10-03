@@ -246,6 +246,16 @@ pub struct Spawn {
     pub after: After,
     /// Scratch areas the child is bound to for every turn.
     pub bindings: Vec<Binding>,
+    /// The child's connector grant (`--connector`). It is always narrowed
+    /// to the parent's grant, an entry the parent allows nothing of being
+    /// refused. Unset: its seat's, else its parent's. See
+    /// `docs/connectors.md`.
+    pub connectors: Option<Vec<crate::connectors::GrantEntry>>,
+    /// Plan first: the child's first turn runs read-only and proposes a
+    /// plan, which is escalated to this branch's inbox; it changes nothing
+    /// until this branch (or a person) approves it. See
+    /// `docs/plans-and-goals.md`.
+    pub plan: bool,
 }
 
 impl Spawn {
@@ -569,6 +579,35 @@ impl Delegate {
     ) -> Result<Inspection, Error> {
         self.send(branch, prompt)?;
         self.wait(branch, timeout)
+    }
+
+    /// Approve a descendant's plan, which awaits approval, as proposed or
+    /// as `edited`, and start the turn that carries it out; see
+    /// `docs/plans-and-goals.md`. Returns once that turn has started.
+    pub fn approve_plan(&self, branch: &str, edited: Option<&str>) -> Result<Sent, Error> {
+        match &self.via {
+            Via::Local(local) => local.approve_plan(branch, edited),
+            Via::Remote(_) => {
+                self.typed("approve_plan", json!({"branch": branch, "edited": edited}))
+            }
+        }
+    }
+
+    /// Reject a descendant's plan: the descendant fails, or with `replan`,
+    /// it plans again with `reason` (that turn started when this returns).
+    pub fn reject_plan(
+        &self,
+        branch: &str,
+        reason: Option<&str>,
+        replan: bool,
+    ) -> Result<Sent, Error> {
+        match &self.via {
+            Via::Local(local) => local.reject_plan(branch, reason, replan),
+            Via::Remote(_) => self.typed(
+                "reject_plan",
+                json!({"branch": branch, "reason": reason, "replan": replan}),
+            ),
+        }
     }
 
     /// Merge a descendant's candidate into this branch's own git branch
@@ -1665,14 +1704,72 @@ impl Local {
         let seat = seated.as_ref().map(|(_, seat, _)| seat);
         let isolated =
             caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
-        let provision = match seat.and_then(|s| s.provision.clone()) {
+        let mut provision = match seat.and_then(|s| s.provision.clone()) {
             Some(own) => Some(own),
             None => caller.provision.clone(),
         };
+        // Connectors: what the request asks for, else its seat's, else the
+        // parent's; always within the parent's grant.
+        let parent_grant = caller
+            .provision
+            .as_ref()
+            .map(|p| p.connectors.clone())
+            .unwrap_or_default();
+        let asked = request.connectors.clone().or_else(|| {
+            seat.and_then(|s| s.provision.as_ref())
+                .map(|p| p.connectors.clone())
+        });
+        let granted = branchyard_provision::connectors::narrow(asked.as_deref(), &parent_grant)
+            .map_err(|why| Error::Denied(format!("{} may not grant that: {why}", self.branch)))?;
+        match (&mut provision, granted.is_empty()) {
+            (Some(spec), _) => spec.connectors = granted,
+            (None, true) => {}
+            (None, false) => {
+                provision = Some(crate::Provisioning {
+                    connectors: granted,
+                    ..Default::default()
+                })
+            }
+        }
+        // Its network policy: its seat's (or what it inherited), within
+        // the parent's.
+        let network = branchyard_provision::network::narrow(
+            provision.as_ref().and_then(|p| p.network.as_ref()),
+            caller.provision.as_ref().and_then(|p| p.network.as_ref()),
+        )
+        .map_err(|why| Error::Denied(format!("{} may not grant that: {why}", self.branch)))?;
+        match (&mut provision, network) {
+            (Some(spec), network) => spec.network = network,
+            (None, None) => {}
+            (None, Some(network)) => {
+                provision = Some(crate::Provisioning {
+                    network: Some(network),
+                    ..Default::default()
+                })
+            }
+        }
+        // Its models: its seat's (or what it inherited), within the
+        // parent's; a child of a branch on the model gateway stays on it.
+        let models = branchyard_provision::models::narrow(
+            provision.as_ref().and_then(|p| p.models.as_ref()),
+            caller.provision.as_ref().and_then(|p| p.models.as_ref()),
+        )
+        .map_err(|why| Error::Denied(format!("{} may not grant that: {why}", self.branch)))?;
+        match (&mut provision, models) {
+            (Some(spec), models) => spec.models = models,
+            (None, None) => {}
+            (None, Some(models)) => {
+                provision = Some(crate::Provisioning {
+                    models: Some(models),
+                    ..Default::default()
+                })
+            }
+        }
         crate::provisioning::check(
             provision.as_ref(),
             isolated || crate::placement::sandboxed(caller.provider.as_ref()),
         )?;
+        crate::egress::check(provision.as_ref(), caller.provider.as_ref())?;
         graph::check_bindings(&store, &self.branch, &request.bindings)?;
         let base = match &request.base {
             Some(rev) => Some(run::resolve_base(&self.yard, Some(rev))?),
@@ -1710,11 +1807,20 @@ impl Local {
                 // Resolved when it starts, from its parent as it is then
                 // (`crate::graph`).
                 seed: None,
+                actor: caller.actor.clone(),
             },
         )?;
         record.info.status = BranchStatus::Waiting;
         record.bindings = request.bindings.clone();
         record.start_base = base;
+        if request.plan {
+            crate::plan::check_profile(profile)?;
+            record.plan = Some(crate::plan::PlanState {
+                phase: crate::plan::PlanPhase::Planning,
+                plan: None,
+                round: 1,
+            });
+        }
         let mut depends_on = Vec::new();
         for prerequisite in &request.depends_on {
             if !depends_on.contains(prerequisite) {
@@ -1985,6 +2091,78 @@ impl Local {
         let prepared = run::prepare_send(&self.yard, branch, &self.child_options(), true)?;
         let info = prepared.record.info.clone();
         self.start(prepared, prompt.to_owned())?;
+        Ok(Sent {
+            name: info.name,
+            status: info.status,
+        })
+    }
+
+    fn approve_plan(&self, branch: &str, edited: Option<&str>) -> Result<Sent, Error> {
+        let result = self.try_approve_plan(branch, edited);
+        self.note("approve_plan", branch, &result, |_| {
+            "approved its plan; its turn started".into()
+        });
+        result
+    }
+
+    fn try_approve_plan(&self, branch: &str, edited: Option<&str>) -> Result<Sent, Error> {
+        self.require_descendant(branch, false)?;
+        let _spawning = lock(&self.yard.hub.spawning);
+        let (prepared, prompt) = crate::plan::prepare_approval(
+            &self.yard,
+            branch,
+            edited,
+            &self.branch,
+            &self.child_options(),
+        )?;
+        let info = prepared.record.info.clone();
+        self.start(prepared, prompt)?;
+        Ok(Sent {
+            name: info.name,
+            status: info.status,
+        })
+    }
+
+    fn reject_plan(&self, branch: &str, reason: Option<&str>, replan: bool) -> Result<Sent, Error> {
+        let result = self.try_reject_plan(branch, reason, replan);
+        self.note("reject_plan", branch, &result, |_| match replan {
+            true => "rejected its plan; it plans again".into(),
+            false => "rejected its plan".into(),
+        });
+        result
+    }
+
+    fn try_reject_plan(
+        &self,
+        branch: &str,
+        reason: Option<&str>,
+        replan: bool,
+    ) -> Result<Sent, Error> {
+        self.require_descendant(branch, false)?;
+        let _spawning = lock(&self.yard.hub.spawning);
+        if !replan {
+            let ended = crate::plan::reject(
+                &self.yard,
+                branch,
+                reason,
+                false,
+                &self.branch,
+                &self.child_options(),
+            )?;
+            return Ok(Sent {
+                name: ended.info().name.clone(),
+                status: ended.info().status.clone(),
+            });
+        }
+        let (prepared, prompt) = crate::plan::prepare_replan(
+            &self.yard,
+            branch,
+            reason,
+            &self.branch,
+            &self.child_options(),
+        )?;
+        let info = prepared.record.info.clone();
+        self.start(prepared, prompt)?;
         Ok(Sent {
             name: info.name,
             status: info.status,
@@ -2312,6 +2490,8 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         depends_on: request.depends_on.clone(),
         after: request.after,
         bindings,
+        connectors: request.connectors.clone(),
+        plan: request.plan,
     })
 }
 
@@ -2363,6 +2543,24 @@ struct EventsArgs {
 struct SendArgs {
     branch: String,
     prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovePlanArgs {
+    branch: String,
+    #[serde(default)]
+    edited: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RejectPlanArgs {
+    branch: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    replan: bool,
 }
 
 #[derive(Deserialize)]
@@ -2483,6 +2681,14 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "send" => {
             let args: SendArgs = parse(tool, arguments)?;
             to_json(&local.send(&args.branch, &args.prompt)?)
+        }
+        "approve_plan" => {
+            let args: ApprovePlanArgs = parse(tool, arguments)?;
+            to_json(&local.approve_plan(&args.branch, args.edited.as_deref())?)
+        }
+        "reject_plan" => {
+            let args: RejectPlanArgs = parse(tool, arguments)?;
+            to_json(&local.reject_plan(&args.branch, args.reason.as_deref(), args.replan)?)
         }
         "propose_integration" | "integrate" => {
             let args: TargetArgs = parse(tool, arguments)?;
@@ -2647,6 +2853,9 @@ mod tests {
             context: None,
             workspace: None,
             sandbox_seed: None,
+            actor: None,
+            plan: None,
+            goal: None,
         }
     }
 

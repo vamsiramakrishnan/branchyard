@@ -127,11 +127,26 @@ impl Resolved {
             setup: self.workspace.setup.commands(),
             teardown: self.workspace.teardown.commands(),
             digest: Some(self.digest.clone()),
+            prepare: self.workspace.prepare,
+            inputs: self.workspace.inputs.clone(),
+            share: self.workspace.share.clone(),
+            pool: self.workspace.pool.as_ref().map(pool_spec),
         }
     }
 
     fn runs_ok(&self) -> bool {
         matches!(self.trust, TrustState::NotNeeded | TrustState::Trusted)
+    }
+}
+
+/// What the engine stores for `[workspace.pool]`.
+pub fn pool_spec(pool: &config::PoolConfig) -> branchyard::PoolSpec {
+    branchyard::PoolSpec {
+        size: pool.size,
+        labels: pool.labels.clone(),
+        max_age_secs: pool.max_age_secs(),
+        max_behind: pool.max_behind,
+        base: pool.base.clone(),
     }
 }
 
@@ -200,7 +215,7 @@ fn read(path: &Path) -> Result<ProjectConfig, Failure> {
 }
 
 /// Inside a harness running on a branch.
-fn in_harness() -> Option<String> {
+pub(crate) fn in_harness() -> Option<String> {
     std::env::var(branchyard::ENV_BRANCH)
         .ok()
         .filter(|v| !v.is_empty())
@@ -281,7 +296,7 @@ fn trust(resolved: &Resolved) -> Result<(), Failure> {
 
 /// Require that `resolved`'s scripts may run: trusted already, or trusted
 /// now on the terminal.
-fn require_trust(env: &Env, resolved: &Resolved) -> Result<(), Failure> {
+pub(crate) fn require_trust(env: &Env, resolved: &Resolved) -> Result<(), Failure> {
     if resolved.runs_ok() {
         return Ok(());
     }
@@ -307,7 +322,9 @@ pub fn for_new_branch(env: &Env, root: &Path) -> Result<Option<WorkspaceSpec>, F
         return Ok(None);
     }
     let Some(resolved) = resolve(root)? else {
-        return Ok(None);
+        // `.worktreeinclude` alone: its files are copied, nothing runs.
+        let include = root.join(branchyard_workspace::include::WORKTREE_INCLUDE_FILE);
+        return Ok(include.is_file().then(WorkspaceSpec::default));
     };
     require_trust(env, &resolved)?;
     Ok(Some(resolved.spec()))
@@ -327,6 +344,15 @@ pub fn main(env: &Env, target: &Target, action: &WorkspaceAction, json: bool) ->
         WorkspaceAction::Trust => trust_command(json),
         WorkspaceAction::Untrust => untrust_command(json),
         WorkspaceAction::Run { args, detach } => run(env, args, *detach, json),
+        WorkspaceAction::Ports { branch } => ports(branch.as_deref(), json),
+        WorkspaceAction::Browse {
+            branch,
+            port,
+            print,
+        } => browse(branch.as_deref(), *port, *print, json),
+        WorkspaceAction::Kill { branch, port, yes } => {
+            kill(env, branch.as_deref(), *port, *yes, json)
+        }
     }
 }
 
@@ -342,7 +368,14 @@ fn show(branch: Option<&str>, json: bool) -> Outcome {
     if let Some(branch) = branch {
         let info = yard.workspace(branch)?;
         if json {
-            return print(&to_json(&serde_json::to_value(&info).unwrap_or_default()));
+            let mut value = serde_json::to_value(&info).unwrap_or_default();
+            value["listening"] = serde_json::to_value(
+                crate::ports::of_yard(&yard)
+                    .remove(branch)
+                    .unwrap_or_default(),
+            )
+            .unwrap_or_default();
+            return print(&to_json(&value));
         }
         let mut text = format!(
             "branch    {}\nworktree  {}\n",
@@ -374,6 +407,12 @@ fn show(branch: Option<&str>, json: bool) -> Outcome {
         match info.port {
             Some(port) => text.push_str(&format!("port      {port}\n")),
             None => text.push_str("port      none reserved\n"),
+        }
+        let listening = crate::ports::of_yard(&yard)
+            .remove(branch)
+            .unwrap_or_default();
+        for line in crate::ports::lines(&listening) {
+            text.push_str(&format!("listening {line}\n"));
         }
         return print(&text);
     }
@@ -522,28 +561,74 @@ fn untrust_command(json: bool) -> Outcome {
     }
 }
 
-/// `by workspace run [BRANCH] [NAME]`: which branch and which script.
-fn pick(yard: &Yard, args: &[String]) -> Result<(String, Option<String>), Failure> {
+/// `by workspace run [BRANCH] [NAME...]`: which branch and which scripts
+/// (none: the default one).
+fn pick(yard: &Yard, args: &[String]) -> Result<(String, Vec<String>), Failure> {
     let inside = in_harness();
     let known = |name: &str| yard.branch(name).is_ok();
     match (args, inside) {
-        ([branch, name], _) => Ok((branch.clone(), Some(name.clone()))),
-        ([one], _) if known(one) => Ok((one.clone(), None)),
-        ([name], Some(branch)) => Ok((branch, Some(name.clone()))),
-        ([one], None) => Err(branchyard::Error::UnknownBranch(one.clone()).into()),
-        ([], Some(branch)) => Ok((branch, None)),
+        ([], Some(branch)) => Ok((branch, Vec::new())),
         ([], None) => Err(Failure::Message(
-            "name the branch whose worktree it runs in: by workspace run BRANCH [NAME]".into(),
+            "name the branch whose worktree it runs in: by workspace run BRANCH [NAME...]".into(),
         )),
-        _ => Err(Failure::Message(
-            "by workspace run takes a branch and a script name".into(),
-        )),
+        ([first, rest @ ..], _) if known(first) => Ok((first.clone(), rest.to_vec())),
+        (names, Some(branch)) => Ok((branch, names.to_vec())),
+        ([first, ..], None) => Err(branchyard::Error::UnknownBranch(first.clone()).into()),
     }
+}
+
+/// The ports reserved by the store, or listened on at 127.0.0.1, other
+/// than by this process.
+fn taken_ports(yard: &Yard) -> std::collections::BTreeSet<u16> {
+    yard.branches()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|b| yard.workspace(&b.name).ok()?.port)
+        .collect()
+}
+
+fn listening(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+/// The port the `index`th of several detached scripts gets: the branch's
+/// own for the first, then the next ports after it that no branch holds
+/// and nothing listens on.
+fn script_ports(
+    base: Option<u16>,
+    count: usize,
+    taken: &std::collections::BTreeSet<u16>,
+) -> Vec<Option<u16>> {
+    let Some(base) = base else {
+        return vec![None; count];
+    };
+    let mut out = vec![Some(base)];
+    let mut next = base;
+    while out.len() < count {
+        next = match next.checked_add(1) {
+            Some(n) => n,
+            None => break,
+        };
+        if !taken.contains(&next) && !listening(next) {
+            out.push(Some(next));
+        }
+    }
+    out.resize(count, None);
+    out
 }
 
 fn run(env: &Env, args: &[String], detach: bool, json: bool) -> Outcome {
     let yard = commands::open()?;
-    let (branch, name) = pick(&yard, args)?;
+    let (branch, names) = pick(&yard, args)?;
+    if names.len() > 1 {
+        if !detach {
+            return Err(Failure::Message(
+                "several run scripts run at once only in the background: add --detach".into(),
+            ));
+        }
+        return run_many(env, &yard, &branch, &names, json);
+    }
+    let name = names.into_iter().next();
     let info = yard.workspace(&branch)?;
     let resolved = resolve(yard.root())?.ok_or_else(|| {
         Failure::Message(format!(
@@ -656,4 +741,305 @@ fn run(env: &Env, args: &[String], detach: bool, json: bool) -> Outcome {
         true => Ok(()),
         false => Err(Failure::Reported),
     }
+}
+
+/// One script started in the background: what `run_many` reports.
+#[derive(Serialize)]
+struct Started {
+    script: String,
+    pid: u32,
+    port: Option<u16>,
+    log: PathBuf,
+}
+
+/// `by workspace run BRANCH A B ... --detach`: each named script in its own
+/// process group, at once, the first with the branch's port and each next
+/// with the next free one (as `BRANCHYARD_PORT`; the branch's own is
+/// `BRANCHYARD_BRANCH_PORT` for all of them). Each start is a `run` event.
+fn run_many(env: &Env, yard: &Yard, branch: &str, names: &[String], json: bool) -> Outcome {
+    use std::os::unix::process::CommandExt;
+    let info = yard.workspace(branch)?;
+    let resolved = resolve(yard.root())?.ok_or_else(|| {
+        Failure::Message(format!(
+            "{} has no [workspace] with run scripts",
+            canonical(yard.root()).display()
+        ))
+    })?;
+    let mut seen = std::collections::BTreeSet::new();
+    let scripts = names
+        .iter()
+        .map(|name| {
+            if !seen.insert(name.as_str()) {
+                return Err(Failure::Message(format!("{name} is named twice")));
+            }
+            resolved
+                .workspace
+                .run_script(Some(name))
+                .map_err(Failure::Message)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    require_trust(env, &resolved)?;
+    if !info.worktree.is_dir() {
+        return Err(Failure::Message(format!(
+            "{branch}'s worktree {} is missing",
+            info.worktree.display()
+        )));
+    }
+    let vars = yard.workspace_env(branch)?;
+    let base = vars
+        .iter()
+        .find(|(name, _)| name == branchyard::ENV_PORT)
+        .and_then(|(_, v)| v.parse::<u16>().ok());
+    let mut taken = taken_ports(yard);
+    if let Some(base) = base {
+        taken.remove(&base);
+    }
+    let ports = script_ports(base, scripts.len(), &taken);
+    let logs = yard.root().join(".branchyard/logs");
+    fs::create_dir_all(&logs)?;
+    let mut started = Vec::new();
+    for ((name, commands), port) in scripts.into_iter().zip(ports) {
+        let log = logs.join(format!("{branch}.{name}.log"));
+        let out = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)?;
+        let mut args = vec![
+            "-c".to_owned(),
+            "for command do sh -c \"$command\" || exit; done".to_owned(),
+            "by-workspace-run".to_owned(),
+        ];
+        args.extend(commands.iter().cloned());
+        let mut command = Command::new("sh");
+        command
+            .args(&args)
+            .current_dir(&info.worktree)
+            .envs(vars.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        for name in [branchyard::ENV_TOKEN, branchyard::ENV_BY] {
+            command.env_remove(name);
+        }
+        if let Some(port) = port {
+            command.env(branchyard::ENV_PORT, port.to_string());
+        }
+        if let Some(base) = base {
+            command.env("BRANCHYARD_BRANCH_PORT", base.to_string());
+        }
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(out.try_clone()?)
+            .stderr(out)
+            .process_group(0)
+            .spawn()
+            .map_err(|e| Failure::Message(format!("could not start sh: {e}")))?;
+        let mut report = WorkspaceReport::new(WorkspacePhase::Run, port);
+        report.commands = commands.clone();
+        report.output = format!("{name}: pid {}, output in {}", child.id(), log.display());
+        yard.record_workspace(branch, report)?;
+        started.push(Started {
+            script: name,
+            pid: child.id(),
+            port,
+            log,
+        });
+    }
+    if json {
+        return print(&to_json(&json!({ "branch": branch, "started": started })));
+    }
+    let mut text = String::new();
+    for s in &started {
+        text.push_str(&format!(
+            "started {} in {branch} (pid {}, port {}); output in {}\n",
+            s.script,
+            s.pid,
+            s.port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".into()),
+            s.log.display()
+        ));
+    }
+    print(&text)
+}
+
+/// The branch an action on ports is for: the one named, else the harness's.
+fn ports_branch(branch: Option<&str>, what: &str) -> Result<String, Failure> {
+    match (branch, in_harness()) {
+        (Some(branch), _) => Ok(branch.to_owned()),
+        (None, Some(branch)) => Ok(branch),
+        (None, None) => Err(Failure::Message(format!(
+            "name the branch: by workspace {what} BRANCH"
+        ))),
+    }
+}
+
+/// `by workspace ports [BRANCH]`.
+fn ports(branch: Option<&str>, json: bool) -> Outcome {
+    let yard = commands::open()?;
+    if let Some(branch) = branch {
+        yard.branch(branch)?;
+    }
+    let mut all = crate::ports::of_yard(&yard);
+    if let Some(branch) = branch {
+        all.retain(|b, _| b == branch);
+    }
+    if json {
+        let list: Vec<&crate::ports::Listener> = all.values().flatten().collect();
+        return print(&to_json(&serde_json::to_value(list).unwrap_or_default()));
+    }
+    if all.is_empty() {
+        return print(&match branch {
+            Some(branch) => format!("{branch}'s processes listen on no TCP port\n"),
+            None => "no branch's processes listen on a TCP port\n".to_owned(),
+        });
+    }
+    let mut text = String::new();
+    for (branch, listeners) in &all {
+        for line in crate::ports::lines(listeners) {
+            text.push_str(&format!("{branch}  {line}\n"));
+        }
+    }
+    print(&text)
+}
+
+/// `by workspace browse [BRANCH] [--port N] [--print]`.
+fn browse(branch: Option<&str>, port: Option<u16>, print_only: bool, json: bool) -> Outcome {
+    let yard = commands::open()?;
+    let branch = ports_branch(branch, "browse")?;
+    let info = yard.workspace(&branch)?;
+    let listening = crate::ports::of_yard(&yard)
+        .remove(&branch)
+        .unwrap_or_default();
+    let chosen = match port {
+        Some(port) => listening.iter().find(|l| l.port == port).cloned(),
+        None => match listening.as_slice() {
+            [one] => Some(one.clone()),
+            many => many
+                .iter()
+                .find(|l| Some(l.port) == info.port)
+                .cloned()
+                .or_else(|| many.iter().find(|l| l.protocol != "unknown").cloned()),
+        },
+    };
+    let Some(listener) = chosen else {
+        return Err(Failure::Message(match (port, listening.is_empty()) {
+            (Some(port), _) => format!("{branch} does not listen on port {port}"),
+            (None, true) => format!(
+                "{branch}'s processes listen on no TCP port; start one with by workspace run \
+                 {branch} --detach"
+            ),
+            (None, false) => format!(
+                "{branch} listens on several ports ({}); pick one with --port",
+                listening
+                    .iter()
+                    .map(|l| l.port.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }));
+    };
+    let url = listener.url();
+    if json {
+        return print(&to_json(
+            &json!({ "branch": branch, "port": listener.port, "url": url }),
+        ));
+    }
+    if print_only {
+        return print(&format!("{url}\n"));
+    }
+    crate::ports::open_browser(&url).map_err(Failure::Message)?;
+    print(&format!("opened {url} ({branch})\n"))
+}
+
+/// `by workspace kill [BRANCH] [--port N] [--yes]`: SIGTERM to each
+/// process listening on the branch's ports.
+fn kill(env: &Env, branch: Option<&str>, port: Option<u16>, yes: bool, json: bool) -> Outcome {
+    let yard = commands::open()?;
+    let branch = ports_branch(branch, "kill")?;
+    yard.branch(&branch)?;
+    let listening = crate::ports::of_yard(&yard)
+        .remove(&branch)
+        .unwrap_or_default();
+    let mut pids: Vec<(u32, u16, String)> = listening
+        .iter()
+        .filter(|l| port.is_none_or(|p| l.port == p))
+        .filter_map(|l| Some((l.pid?, l.port, l.process.clone().unwrap_or_default())))
+        .collect();
+    pids.sort();
+    pids.dedup_by_key(|p| p.0);
+    if pids.is_empty() {
+        return Err(Failure::Message(match port {
+            Some(port) => format!("no process of {branch} listens on port {port}"),
+            None => format!("{branch}'s processes listen on no TCP port"),
+        }));
+    }
+    let described: Vec<String> = pids
+        .iter()
+        .map(|(pid, port, name)| format!("{name} (pid {pid}) on :{port}"))
+        .collect();
+    if !yes {
+        if !env.stdin_tty {
+            return Err(Failure::Message(format!(
+                "would stop {}; pass --yes to do it without a terminal",
+                described.join(", ")
+            )));
+        }
+        eprint!("stop {}? [y/N] ", described.join(", "));
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            return print("nothing stopped\n");
+        }
+    }
+    let mut stopped = Vec::new();
+    for (pid, port, _) in &pids {
+        let ok = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        stopped.push(json!({ "pid": pid, "port": port, "signalled": ok }));
+    }
+    if json {
+        return print(&to_json(&json!({ "branch": branch, "stopped": stopped })));
+    }
+    print(&format!("sent SIGTERM to {}\n", described.join(", ")))
+}
+
+/// The digest trusted under `key` in the trust file, if any: for trust
+/// decisions about something other than a repository's `[workspace]`,
+/// such as one of its `[recipes]` (docs/recipes.md), whose keys are the
+/// repository's canonical root with a suffix of their own.
+pub(crate) fn trusted_digest(key: &str) -> Result<Option<String>, Failure> {
+    Ok(read_trust()?
+        .repositories
+        .get(key)
+        .map(|t| t.digest.clone()))
+}
+
+/// Record `digest` as trusted under `key`.
+pub(crate) fn record_trust(key: &str, digest: &str) -> Result<(), Failure> {
+    let mut file = read_trust()?;
+    file.version = TRUST_VERSION;
+    file.repositories.insert(
+        key.to_owned(),
+        Trusted {
+            digest: digest.to_owned(),
+            trusted_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        },
+    );
+    write_trust(&file)
+}
+
+/// Forget the decision under `key`; whether there was one.
+pub(crate) fn forget_trust(key: &str) -> Result<bool, Failure> {
+    let mut file = read_trust()?;
+    let removed = file.repositories.remove(key).is_some();
+    if removed {
+        file.version = TRUST_VERSION;
+        write_trust(&file)?;
+    }
+    Ok(removed)
 }

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "snapshotId": "src-55f03fd1f1c4148d",
+  "origin": {
+    "kind": "filesystem",
+    "uri": "/tmp/branchyard-anvil-e2e-14758/src/openapi.yaml"
+  },
+  "status": "valid",
+  "importedAt": "2026-10-01T01:24:26.183Z",
+  "sourceHash": "sha256:55f03fd1f1c4148df4a028329bab5688cf51b239a3b49a2fb58e7818545ff54a",
+  "entrypoints": [
+    {
+      "path": "openapi.yaml",
+      "format": "openapi",
+      "version": "3.0"
+    }
+  ],
+  "files": [
+    {
+      "path": "openapi.yaml",
+      "sha256": "2226a520ecd9544c09536314534cfdbfc2949f07570204e5feda498ebb40c360",
+      "bytes": 3885,
+      "syntax": "yaml",
+      "role": "entrypoint"
+    }
+  ],
+  "diagnostics": [],
+  "metadata": {}
+}

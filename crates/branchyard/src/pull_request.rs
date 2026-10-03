@@ -49,15 +49,51 @@ pub enum PullRequestActivity {
     FeedbackUndelivered { keys: Vec<String>, reason: String },
     /// `by pr --watch` stopped following the pull request.
     WatchStopped { reason: String },
+    /// Review threads whose comments were delivered as feedback, and whose
+    /// files `commit` (just pushed) changed, were answered "Addressed in
+    /// <commit>" and resolved; each thread is attempted once.
+    ThreadsResolved {
+        commit: String,
+        threads: Vec<ResolvedThread>,
+    },
+    /// The branch started from this pull request's head (`by run --pr`);
+    /// its pull request is that one, so `by pr` pushes to its head and
+    /// updates it.
+    Started(PullRequestRef),
+}
+
+/// One review thread `by pr --watch` answered and resolved, or tried to.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedThread {
+    /// The thread's GraphQL node ID.
+    pub id: String,
+    pub path: String,
+    /// The "Addressed in" reply was posted.
+    pub replied: bool,
+    /// GitHub reports the thread resolved.
+    pub resolved: bool,
+    /// Why not, when either failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// An issue a branch works on.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueLink {
+    /// The issue's number: GitHub's and GitLab's, or the number in a Linear
+    /// or Jira key (`123` of `ENG-123`).
     pub number: u64,
     pub url: String,
     pub title: String,
+    /// The tracker, when not GitHub: `linear`, `jira` or `gitlab`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<String>,
+    /// The tracker's own reference when it is not `#number`: `ENG-123`,
+    /// `PROJ-7`, `group/project#12`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// A check run on one commit; see [`Branch::verify_candidate`].

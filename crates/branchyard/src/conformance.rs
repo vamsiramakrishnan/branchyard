@@ -7,13 +7,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+use crate::fleet::{BranchOutcome, OutcomeBackend, OutcomeRecord, TaskKind};
 use crate::graph::GraphBackend;
+use crate::knowledge::KnowledgeBackend;
+use crate::models::UsageBackend;
 use crate::state::{
-    now_ms, Acquired, Backend, Begun, Fence, Owner, PortBackend, ProcessRow, Record,
-    SandboxBackend, SandboxKind, SandboxRow,
+    now_ms, Acquired, Backend, Begun, Fence, Owner, PoolBackend, PortBackend, ProcessRow, Record,
+    SandboxBackend, SandboxKind, SandboxRow, SlotRow, SlotState,
 };
 use crate::storage::StorageBackend;
 use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
+use crate::{KnowledgeEntry, KnowledgeScope, KnowledgeSource, KnowledgeStatus};
 
 const TTL: Duration = Duration::from_secs(30);
 
@@ -34,6 +38,22 @@ pub(crate) struct Opened {
     pub sandboxes: Arc<dyn SandboxBackend>,
     /// [`Opened::again`], as [`SandboxBackend`].
     pub again_sandboxes: Box<dyn Fn() -> Arc<dyn SandboxBackend> + Send + Sync>,
+    /// The same backend, as [`OutcomeBackend`].
+    pub outcomes: Arc<dyn OutcomeBackend>,
+    /// [`Opened::again`], as [`OutcomeBackend`].
+    pub again_outcomes: Box<dyn Fn() -> Arc<dyn OutcomeBackend> + Send + Sync>,
+    /// The same backend, as [`KnowledgeBackend`].
+    pub knowledge: Arc<dyn KnowledgeBackend>,
+    /// [`Opened::again`], as [`KnowledgeBackend`].
+    pub again_knowledge: Box<dyn Fn() -> Arc<dyn KnowledgeBackend> + Send + Sync>,
+    /// The same backend, as [`PoolBackend`].
+    pub pool: Arc<dyn PoolBackend>,
+    /// [`Opened::again`], as [`PoolBackend`].
+    pub again_pool: Box<dyn Fn() -> Arc<dyn PoolBackend> + Send + Sync>,
+    /// The same backend, as [`UsageBackend`].
+    pub usage: Arc<dyn UsageBackend>,
+    /// [`Opened::again`], as [`UsageBackend`].
+    pub again_usage: Box<dyn Fn() -> Arc<dyn UsageBackend> + Send + Sync>,
     _cleanup: Box<dyn std::any::Any>,
 }
 
@@ -70,11 +90,35 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn SandboxBackend>
     };
+    let open_outcomes = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn OutcomeBackend>
+    };
+    let open_knowledge = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn KnowledgeBackend>
+    };
+    let open_pool = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn PoolBackend>
+    };
+    let open_usage = {
+        let dir = dir.clone();
+        move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn UsageBackend>
+    };
     Opened {
+        pool: shared.clone(),
+        again_pool: Box::new(open_pool),
+        usage: shared.clone(),
+        again_usage: Box::new(open_usage),
         backend: shared.clone(),
         storage: shared.clone(),
         graph: shared.clone(),
         ports: shared.clone(),
+        outcomes: shared.clone(),
+        again_outcomes: Box::new(open_outcomes),
+        knowledge: shared.clone(),
+        again_knowledge: Box::new(open_knowledge),
         sandboxes: shared,
         again: Box::new(open),
         again_ports: Box::new(open_ports),
@@ -113,11 +157,43 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
             Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn SandboxBackend>
         }
     };
+    let open_outcomes = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || {
+            Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn OutcomeBackend>
+        }
+    };
+    let open_knowledge = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || {
+            Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn KnowledgeBackend>
+        }
+    };
+    let open_pool = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn PoolBackend>
+    };
+    let open_usage = {
+        let url = url.clone();
+        let scope = scope.clone();
+        move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn UsageBackend>
+    };
     Some(Opened {
+        pool: shared.clone(),
+        again_pool: Box::new(open_pool),
+        usage: shared.clone(),
+        again_usage: Box::new(open_usage),
         backend: shared.clone(),
         storage: shared.clone(),
         graph: shared.clone(),
         ports: shared.clone(),
+        outcomes: shared.clone(),
+        again_outcomes: Box::new(open_outcomes),
+        knowledge: shared.clone(),
+        again_knowledge: Box::new(open_knowledge),
         sandboxes: shared,
         again_ports: Box::new(open_ports),
         again_sandboxes: Box::new(open_sandboxes),
@@ -1531,11 +1607,321 @@ pub(crate) fn sandboxes(s: Opened) {
     assert_eq!(rows.sandboxes("c").unwrap().len(), 1);
 }
 
+/// Outcomes: rows survive a reopen, are replaced by id, list oldest first
+/// by kind or all, keep every field, and outlive their branch.
+/// Model gateway usage: rows kept as written, read from a time on, oldest
+/// first, by any handle; a row written twice is kept once.
+pub(crate) fn usage(s: Opened) {
+    use crate::models::{Api, Tokens, UsageRecord};
+    let row = |id: &str, at_ms: u64, cost: Option<f64>| UsageRecord {
+        id: id.into(),
+        at_ms,
+        branch: "app/b".into(),
+        turn: 2,
+        subject: "local:me".into(),
+        model: "claude-sonnet-4-6".into(),
+        api: Api::Anthropic,
+        backend: "anthropic".into(),
+        tokens: Tokens {
+            input: 10,
+            output: 5,
+            cache_read: 100,
+            cache_write: 30,
+            cache_write_1h: 10,
+        },
+        cost_usd: cost,
+        latency_ms: 812,
+        status: 200,
+        streamed: true,
+    };
+    let (a, b, c) = (
+        row("a", 2_000, Some(0.000_307_5)),
+        row("b", 1_000, None),
+        row("c", 3_000, Some(1.5)),
+    );
+    for r in [&a, &b, &c] {
+        s.usage.put_usage(r).unwrap();
+    }
+    s.usage.put_usage(&a).unwrap();
+    let again = (s.again_usage)();
+    assert_eq!(
+        again.usage_since(0).unwrap(),
+        [b.clone(), a.clone(), c.clone()]
+    );
+    assert_eq!(s.usage.usage_since(2_000).unwrap(), [a, c.clone()]);
+    assert_eq!(again.usage_since(3_001).unwrap(), []);
+    let mut other = row("d", 4_000, Some(0.25));
+    other.api = Api::Openai;
+    other.streamed = false;
+    again.put_usage(&other).unwrap();
+    assert_eq!(s.usage.usage_since(3_000).unwrap(), [c, other]);
+}
+
+pub(crate) fn outcomes(s: Opened) {
+    let rows = &s.outcomes;
+    let row = |id: &str, kind, outcome, at| OutcomeRecord {
+        id: id.into(),
+        repo: "/src/app".into(),
+        branch: id.split('#').next().unwrap().into(),
+        kind,
+        harness: "codex".into(),
+        model: Some("large".into()),
+        effort: Some("high".into()),
+        outcome,
+        score: None,
+        cost_usd: Some(0.25),
+        duration_ms: Some(1500),
+        turns: 2,
+        routed: true,
+        recorded_ms: at,
+    };
+    rows.put_outcome(&row("a#1", TaskKind::Bugfix, BranchOutcome::Ready, 10))
+        .unwrap();
+    rows.put_outcome(&row("b#2", TaskKind::Docs, BranchOutcome::Failed, 5))
+        .unwrap();
+    let plain = OutcomeRecord {
+        model: None,
+        effort: None,
+        score: None,
+        cost_usd: None,
+        duration_ms: None,
+        routed: false,
+        ..row("c#3", TaskKind::Bugfix, BranchOutcome::Interrupted, 20)
+    };
+    rows.put_outcome(&plain).unwrap();
+    // Replaced by id, not duplicated: judged best with a score.
+    let judged = OutcomeRecord {
+        score: Some(87.5),
+        outcome: BranchOutcome::JudgedBest,
+        recorded_ms: 30,
+        ..row("a#1", TaskKind::Bugfix, BranchOutcome::Ready, 10)
+    };
+    rows.put_outcome(&judged).unwrap();
+    let again = (s.again_outcomes)();
+    assert_eq!(again.outcome("a#1").unwrap(), Some(judged.clone()));
+    assert_eq!(again.outcome("nope#0").unwrap(), None);
+    assert_eq!(
+        again.outcomes(Some(TaskKind::Bugfix)).unwrap(),
+        vec![plain.clone(), judged.clone()],
+        "oldest first"
+    );
+    let all: Vec<String> = again
+        .outcomes(None)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(all, ["b#2", "c#3", "a#1"]);
+    assert!(again.outcomes(Some(TaskKind::Tests)).unwrap().is_empty());
+
+    // A removed branch's outcome stays: it is what the router learns from.
+    let branches = &s.backend;
+    assert!(branches.reserve("a", &owner("o")).unwrap());
+    granted(branches.acquire(&record("a"), &owner("o"), TTL).unwrap());
+    branches.delete("a").unwrap();
+    assert_eq!(rows.outcome("a#1").unwrap(), Some(judged));
+}
+
+pub(crate) fn knowledge(s: Opened) {
+    let store = &s.knowledge;
+    assert!(store.knowledge_entries().unwrap().is_empty());
+    let entry = |text: &str, scope: KnowledgeScope, status| KnowledgeEntry {
+        id: 0,
+        scope,
+        text: text.into(),
+        source: KnowledgeSource::Branch {
+            branch: "fix".into(),
+            turn: Some(2),
+            via: "send".into(),
+        },
+        status,
+        created_ms: 0,
+        adopted_by: None,
+        decided_ms: None,
+        note: Some("why".into()),
+    };
+    let a = store
+        .add_knowledge(&entry(
+            "Run fmt",
+            KnowledgeScope::repo(),
+            KnowledgeStatus::Proposed,
+        ))
+        .unwrap();
+    let b = store
+        .add_knowledge(&entry(
+            "Parser rule",
+            KnowledgeScope {
+                path: Some("src/parser/**".into()),
+                kind: Some(TaskKind::Bugfix),
+            },
+            KnowledgeStatus::Adopted,
+        ))
+        .unwrap();
+    assert!(a.id >= 1 && b.id > a.id, "ids grow: {} {}", a.id, b.id);
+    assert!(a.created_ms > 0);
+    // Another engine on the same store reads the same rows, by id.
+    let again = (s.again_knowledge)();
+    assert_eq!(again.knowledge(b.id).unwrap(), Some(b.clone()));
+    assert_eq!(again.knowledge_entries().unwrap(), [a.clone(), b.clone()]);
+    assert_eq!(again.knowledge(b.id + 1000).unwrap(), None);
+    // An update is a compare-and-swap on the status.
+    let adopted = KnowledgeEntry {
+        status: KnowledgeStatus::Adopted,
+        adopted_by: Some("ana".into()),
+        decided_ms: Some(5),
+        text: "Run cargo fmt".into(),
+        ..a.clone()
+    };
+    assert!(!store
+        .put_knowledge(&adopted, KnowledgeStatus::Rejected)
+        .unwrap());
+    assert!(store
+        .put_knowledge(&adopted, KnowledgeStatus::Proposed)
+        .unwrap());
+    assert!(!again
+        .put_knowledge(&adopted, KnowledgeStatus::Proposed)
+        .unwrap());
+    assert_eq!(again.knowledge(a.id).unwrap(), Some(adopted.clone()));
+    // Concurrent adds from two handles get distinct ids.
+    let handles: Vec<_> = (0..2)
+        .map(|n| {
+            let store = (s.again_knowledge)();
+            std::thread::spawn(move || {
+                (0..5)
+                    .map(|i| {
+                        store
+                            .add_knowledge(&KnowledgeEntry {
+                                id: 0,
+                                scope: KnowledgeScope::repo(),
+                                text: format!("rule {n}-{i}"),
+                                source: KnowledgeSource::Person { name: "p".into() },
+                                status: KnowledgeStatus::Proposed,
+                                created_ms: 1,
+                                adopted_by: None,
+                                decided_ms: None,
+                                note: None,
+                            })
+                            .unwrap()
+                            .id
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut ids: Vec<u64> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 10);
+    assert_eq!(store.knowledge_entries().unwrap().len(), 12);
+    // Entries outlive the branches they came from, and delete by id.
+    assert!(s.backend.reserve("fix", &owner("o")).unwrap());
+    granted(s.backend.acquire(&record("fix"), &owner("o"), TTL).unwrap());
+    s.backend.delete("fix").unwrap();
+    assert_eq!(store.knowledge(b.id).unwrap(), Some(b.clone()));
+    assert!(store.remove_knowledge(b.id).unwrap());
+    assert!(!again.remove_knowledge(b.id).unwrap());
+    assert_eq!(store.knowledge(b.id).unwrap(), None);
+}
+
+/// Warm pool slots: inserted once by id, listed per place oldest first,
+/// changed only from the state expected, claimed by exactly one of several
+/// engines racing for a ready one and never ready again, deleted by id, and
+/// left alone when a branch is deleted.
+pub(crate) fn pools(s: Opened) {
+    let pool = &s.pool;
+    let row = |id: &str, place: &str, created_ms| SlotRow {
+        id: id.into(),
+        place: place.into(),
+        recipe: "r1".into(),
+        state: SlotState::Filling,
+        base: "c0ffee".into(),
+        path: format!("/repo/.branchyard/pool/{id}"),
+        detail: "{}".into(),
+        host: "h/boot".into(),
+        pid: 42,
+        start: "s".into(),
+        branch: None,
+        created_ms,
+        changed_ms: created_ms,
+    };
+    pool.insert_slot(&row("a", "h:/repo", 10)).unwrap();
+    assert!(pool.insert_slot(&row("a", "h:/repo", 11)).is_err());
+    pool.insert_slot(&row("b", "h:/repo", 20)).unwrap();
+    pool.insert_slot(&row("c", "elsewhere:/repo", 5)).unwrap();
+    let ids = |rows: Vec<SlotRow>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+    assert_eq!(ids(pool.slots(Some("h:/repo")).unwrap()), ["a", "b"]);
+    assert_eq!(ids(pool.slots(None).unwrap()), ["c", "a", "b"]);
+    assert_eq!(
+        pool.slots(Some("h:/repo")).unwrap()[0],
+        row("a", "h:/repo", 10)
+    );
+
+    // Filling to ready, once.
+    let ready = SlotRow {
+        state: SlotState::Ready,
+        detail: r#"{"key":"k"}"#.into(),
+        changed_ms: 30,
+        ..row("a", "h:/repo", 10)
+    };
+    assert!(pool.update_slot(&ready, SlotState::Filling).unwrap());
+    assert!(!pool.update_slot(&ready, SlotState::Filling).unwrap());
+    let again = (s.again_pool)();
+    assert_eq!(again.slots(Some("h:/repo")).unwrap()[0], ready);
+
+    // Engines claiming the ready slot at once: exactly one gets it.
+    let barrier = Barrier::new(6);
+    let won: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..6)
+            .map(|i| {
+                let handle = (s.again_pool)();
+                let barrier = &barrier;
+                let claim = SlotRow {
+                    state: SlotState::Claimed,
+                    branch: Some(format!("racer-{i}")),
+                    pid: 100 + i,
+                    changed_ms: 40,
+                    ..ready.clone()
+                };
+                scope.spawn(move || {
+                    barrier.wait();
+                    handle.update_slot(&claim, SlotState::Ready).unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(won.iter().filter(|w| **w).count(), 1, "{won:?}");
+    let claimed = pool.slots(Some("h:/repo")).unwrap().remove(0);
+    assert_eq!(claimed.state, SlotState::Claimed);
+    let winner = won.iter().position(|w| *w).unwrap();
+    assert_eq!(claimed.branch, Some(format!("racer-{winner}")));
+    assert_eq!(claimed.pid, 100 + winner as u32);
+    // Never ready again.
+    assert!(!pool.update_slot(&ready, SlotState::Ready).unwrap());
+
+    // Rows belong to no branch.
+    assert!(s.backend.reserve("racer-0", &owner("o")).unwrap());
+    granted(
+        s.backend
+            .acquire(&record("racer-0"), &owner("o"), TTL)
+            .unwrap(),
+    );
+    s.backend.delete("racer-0").unwrap();
+    assert_eq!(pool.slots(None).unwrap().len(), 3);
+    assert!(pool.delete_slot("a").unwrap());
+    assert!(!again.delete_slot("a").unwrap());
+    assert_eq!(ids(again.slots(Some("h:/repo")).unwrap()), ["b"]);
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
-            concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes);
+            concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes,
+            outcomes, knowledge, pools, usage);
     };
     ($open:expr; $($check:ident),*) => {
         $(

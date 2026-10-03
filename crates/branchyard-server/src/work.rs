@@ -18,8 +18,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use branchyard::{Branch, Spawn, TaskOptions, Yard};
 use branchyard_client::api::{
-    ErrorBody, ForkRequest, OperationKind, OperationResult, ReincarnateRequest, SendRequest,
-    SpawnRequest, TaskRequest,
+    ErrorBody, ForkRequest, MapRequest, OperationKind, OperationResult, ReincarnateRequest,
+    SendRequest, SpawnRequest, TaskRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,6 +63,19 @@ pub enum Work {
     /// `POST .../branches/{branch}/integrate`, into the parent found at
     /// admission.
     Integrate { branch: String, parent: String },
+    /// `POST .../branches/{branch}/plan/approve`.
+    ApprovePlan {
+        branch: String,
+        request: branchyard_client::knowledge_api::PlanApproveRequest,
+    },
+    /// `POST .../branches/{branch}/plan/reject`.
+    RejectPlan {
+        branch: String,
+        request: branchyard_client::knowledge_api::PlanRejectRequest,
+    },
+    /// `POST /v1/repos/{repo}/maps` or `.../maps/{name}/resume`, with the
+    /// items a resume takes from the recorded map.
+    Map { request: MapRequest },
 }
 
 impl Work {
@@ -75,6 +88,9 @@ impl Work {
             Work::Merge { .. } => OperationKind::Merge,
             Work::Spawn { .. } => OperationKind::Spawn,
             Work::Integrate { .. } => OperationKind::Integrate,
+            Work::ApprovePlan { .. } => OperationKind::ApprovePlan,
+            Work::RejectPlan { .. } => OperationKind::RejectPlan,
+            Work::Map { .. } => OperationKind::Map,
         }
     }
 
@@ -85,13 +101,30 @@ impl Work {
     }
 
     /// Run the work against `repo` on `app`'s configuration.
-    fn run(self, app: &App, repo: &RepoState) -> Result<OperationResult, ErrorBody> {
+    fn run(
+        self,
+        app: &App,
+        repo: &RepoState,
+        principal: Option<&crate::config::Principal>,
+        trace: Option<&str>,
+    ) -> Result<OperationResult, ErrorBody> {
+        let trace_parent = trace.map(str::to_owned);
         let sdk = |e: branchyard::Error| *error::sdk(&e).body;
         let api = |e: ApiError| *e.body;
         let yard = &repo.yard;
+        // A new branch acts for the principal that asked for it at the
+        // connector gateway; see docs/connectors.md.
+        let actor = principal.map(|p| branchyard::connectors::Actor {
+            subject: p.name.clone(),
+            tenant: p.tenant.clone(),
+        });
         match self {
             Work::Task { request } => {
-                let options = task_options(app, repo, &request).map_err(api)?;
+                let options = TaskOptions {
+                    actor: actor.clone(),
+                    trace_parent: trace_parent.clone(),
+                    ..task_options(app, repo, &request).map_err(api)?
+                };
                 let builder = yard.task(request.prompt.clone()).options(options);
                 let ran = match request.harnesses.is_empty() {
                     true => builder.run().map(|b| vec![b]),
@@ -103,7 +136,10 @@ impl Work {
                 ran.and_then(finished).map_err(sdk)
             }
             Work::Send { branch, request } => {
-                let options = send_options(app, repo, &request).map_err(api)?;
+                let options = TaskOptions {
+                    trace_parent: trace_parent.clone(),
+                    ..send_options(app, repo, &request).map_err(api)?
+                };
                 let target = yard.branch(&branch).map_err(sdk)?;
                 send_allowed(app, &target, &branch, &request).map_err(api)?;
                 target
@@ -112,14 +148,22 @@ impl Work {
                     .map_err(sdk)
             }
             Work::Fork { branch, request } => {
-                let options = fork_options(app, repo, &request).map_err(api)?;
+                let options = TaskOptions {
+                    actor: actor.clone(),
+                    trace_parent: trace_parent.clone(),
+                    ..fork_options(app, repo, &request).map_err(api)?
+                };
                 yard.branch(&branch)
                     .and_then(|source| source.fork(&request.prompt, request.fresh_session, options))
                     .and_then(|b| finished(vec![b]))
                     .map_err(sdk)
             }
             Work::Reincarnate { branch, request } => {
-                let options = reincarnate_options(app, repo, &request).map_err(api)?;
+                let options = TaskOptions {
+                    actor: actor.clone(),
+                    trace_parent: trace_parent.clone(),
+                    ..reincarnate_options(app, repo, &request).map_err(api)?
+                };
                 yard.branch(&branch)
                     .and_then(|source| source.reincarnate(options))
                     .and_then(|b| finished(vec![b]))
@@ -142,7 +186,8 @@ impl Work {
                 name,
                 request,
             } => {
-                let (options, spawn) = spawn_parts(app, repo, &request, name).map_err(api)?;
+                let (mut options, spawn) = spawn_parts(app, repo, &request, name).map_err(api)?;
+                options.trace_parent = trace_parent.clone();
                 let run = || {
                     let source = yard.branch(&parent)?;
                     let delegate = source.delegate(options)?;
@@ -157,6 +202,60 @@ impl Work {
                     })
                 };
                 run().map_err(sdk)
+            }
+            Work::ApprovePlan { branch, request } => {
+                let options = TaskOptions {
+                    trace_parent: trace_parent.clone(),
+                    ..plan_send_options(app, repo, &request.send).map_err(api)?
+                };
+                let by = person(principal);
+                yard.approve_plan(&branch, request.edited.as_deref(), &by, &options)
+                    .and_then(|b| finished(vec![b]))
+                    .map_err(sdk)
+            }
+            Work::RejectPlan { branch, request } => {
+                let options = TaskOptions {
+                    trace_parent: trace_parent.clone(),
+                    ..plan_send_options(app, repo, &request.send).map_err(api)?
+                };
+                let by = person(principal);
+                yard.reject_plan(
+                    &branch,
+                    request.reason.as_deref(),
+                    request.replan,
+                    &by,
+                    &options,
+                )
+                .and_then(|b| finished(vec![b]))
+                .map_err(sdk)
+            }
+            Work::Map { request } => {
+                let spec = map_spec(&request).map_err(api)?;
+                let options = branchyard::MapOptions {
+                    task: TaskOptions {
+                        actor: actor.clone(),
+                        trace_parent: trace_parent.clone(),
+                        ..task_options(app, repo, &request.task).map_err(api)?
+                    },
+                    retry_failed: request.retry_failed,
+                    ..branchyard::MapOptions::default()
+                };
+                let report = yard.map(spec, &options).map_err(sdk)?;
+                // The branches that answered, or were tried last, where
+                // they remain.
+                let branches = report
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.branch.as_deref())
+                    .chain(report.reduce.as_ref().and_then(|r| r.branch.as_deref()))
+                    .filter_map(|name| yard.branch(name).ok())
+                    .map(|b| b.info().clone())
+                    .collect();
+                Ok(OperationResult {
+                    branches,
+                    map: Some(report),
+                    ..OperationResult::default()
+                })
             }
             Work::Integrate { branch, parent } => {
                 let run = || {
@@ -204,9 +303,31 @@ impl Executor for AppExecutor {
                 end_cursor: None,
             };
         };
+        let observability = app.registry.observability();
+        // What the branches had spent before, so the operation's cost is
+        // what they spent during it; and the trace their activity belongs
+        // to, for webhook deliveries.
+        let mut before = std::collections::BTreeMap::new();
+        for name in &operation.branches {
+            if let Ok(branch) = repo.yard.branch(name) {
+                if let Some(cost) = branch.info().cost_usd {
+                    before.insert(name.clone(), cost);
+                }
+            }
+            if let Some(trace) = &stored.trace {
+                observability.tracer.note_branch(&repo.name, name, trace);
+            }
+        }
         let result = serde_json::from_value::<Work>(work.clone())
             .map_err(|e| *ApiError::internal(format!("unreadable operation description: {e}")).body)
-            .and_then(|work| work.run(app, repo));
+            .and_then(|work| {
+                work.run(
+                    app,
+                    repo,
+                    stored.principal.as_ref(),
+                    stored.trace.as_deref(),
+                )
+            });
         // Read the feed's head so the end cursor covers all the activity.
         let end_cursor = match repo.feed.sync() {
             Ok(head) => Some(head),
@@ -215,7 +336,86 @@ impl Executor for AppExecutor {
                 None
             }
         };
+        observe_run(app, repo, stored, &before, &result, end_cursor);
         Finished { result, end_cursor }
+    }
+}
+
+/// Most feed entries an operation's metrics and spans are read from.
+const OBSERVED_ENTRIES: usize = 100_000;
+
+/// Count and trace what an operation did: its branches' cost, and the
+/// turns, tool calls and connector calls its events record between its
+/// admission and its end (see [`crate::observe`]).
+fn observe_run(
+    app: &App,
+    repo: &RepoState,
+    stored: &StoredOperation,
+    before: &std::collections::BTreeMap<String, f64>,
+    result: &Result<OperationResult, ErrorBody>,
+    end_cursor: Option<u64>,
+) {
+    let observability = app.registry.observability();
+    let operation = &stored.operation;
+    let mut infos: Vec<branchyard::BranchInfo> = Vec::new();
+    if let Ok(result) = result {
+        infos.extend(result.branches.iter().cloned());
+        infos.extend(result.descendants.iter().cloned());
+    }
+    for name in &operation.branches {
+        if !infos.iter().any(|i| &i.name == name) {
+            if let Ok(branch) = repo.yard.branch(name) {
+                infos.push(branch.info().clone());
+            }
+        }
+    }
+    crate::observe::record_cost(&observability.metrics, stored, before, &infos);
+    let Some(end) = end_cursor else { return };
+    let branches: std::collections::BTreeSet<String> = infos
+        .iter()
+        .map(|i| i.name.clone())
+        .chain(operation.branches.iter().cloned())
+        .collect();
+    let mut entries = Vec::new();
+    let mut cursor = operation.cursor;
+    while cursor < end && entries.len() < OBSERVED_ENTRIES {
+        match repo.feed.read_after(cursor, 1000) {
+            Ok(page) if page.is_empty() => break,
+            Ok(page) => {
+                cursor = page.last().map(|e| e.seq).unwrap_or(end);
+                entries.extend(page.into_iter().filter(|e| e.seq <= end));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reading an operation's events for its metrics");
+                return;
+            }
+        }
+    }
+    let harness: std::collections::BTreeMap<String, String> = infos
+        .iter()
+        .map(|i| (i.name.clone(), i.harness.clone()))
+        .collect();
+    let harness_of = |b: &str| harness.get(b).cloned().unwrap_or_else(|| "unknown".into());
+    let parent = stored
+        .trace
+        .as_deref()
+        .and_then(crate::telemetry::SpanContext::parse);
+    crate::observe::record_events(
+        observability,
+        &branches,
+        &harness_of,
+        &entries,
+        parent.as_ref(),
+    );
+    if operation.kind == OperationKind::Task {
+        let created = operation.branches.iter().cloned().collect();
+        crate::observe::record_starts(
+            &observability.metrics,
+            &repo.name,
+            operation.created_at_ms,
+            &created,
+            &entries,
+        );
     }
 }
 
@@ -272,6 +472,52 @@ pub(crate) fn finished(branches: Vec<Branch>) -> Result<OperationResult, branchy
     })
 }
 
+/// The map a request describes, checked as running it would check it, or
+/// why this server refuses it. Its `launch` is the request without its
+/// items (the spec keeps them), for `.../maps/{name}/resume`.
+pub(crate) fn map_spec(request: &MapRequest) -> Result<branchyard::MapSpec, ApiError> {
+    let task = &request.task;
+    for (given, what) in [
+        (task.name.is_some(), "task.name (the map's name is name)"),
+        (
+            !task.harnesses.is_empty(),
+            "task.harnesses (a map runs each item on one branch)",
+        ),
+        (task.seats.is_some(), "task.seats"),
+        (task.plan, "task.plan"),
+        (task.goal.is_some(), "task.goal"),
+    ] {
+        if given {
+            return Err(ApiError::bad_request(format!("a map takes no {what}")));
+        }
+    }
+    if request.items.is_empty() {
+        return Err(ApiError::bad_request("the map has no items"));
+    }
+    let name = request
+        .name
+        .clone()
+        .unwrap_or_else(|| branchyard::map_default_name(&task.prompt));
+    let mut spec = branchyard::MapSpec::new(name, task.prompt.clone(), request.items.clone());
+    spec.schema = request.schema.clone();
+    spec.concurrency = request
+        .concurrency
+        .unwrap_or(branchyard::MAP_DEFAULT_CONCURRENCY);
+    spec.retries = request.retries.unwrap_or(branchyard::MAP_DEFAULT_RETRIES);
+    spec.total_usd = request.total_usd;
+    spec.reduce = request.reduce.clone();
+    spec.remove_done = request.remove_done;
+    branchyard::check_map_spec(&spec).map_err(|e| crate::error::sdk(&e))?;
+    let launch = MapRequest {
+        items: Vec::new(),
+        retry_failed: false,
+        ..request.clone()
+    };
+    spec.launch = serde_json::to_value(&launch)
+        .map_err(|e| ApiError::internal(format!("could not record the map's request: {e}")))?;
+    Ok(spec)
+}
+
 /// A task's options, or why this server refuses it.
 pub(crate) fn task_options(
     app: &App,
@@ -316,6 +562,8 @@ pub(crate) fn task_options(
         provision: app.provision(request.provision.clone())?,
         seats: app.seats(request.seats.clone())?,
         workspace: app.workspace(repo)?,
+        plan: request.plan,
+        goal: goal(app, request)?,
         ..app.options(
             repo,
             budget,
@@ -327,6 +575,58 @@ pub(crate) fn task_options(
             provider,
         )
     })
+}
+
+/// Who a plan decision names: the request's principal, through the server.
+fn person(principal: Option<&crate::config::Principal>) -> String {
+    match principal {
+        Some(p) => format!("{} through the server", p.name),
+        None => "a person through the server".into(),
+    }
+}
+
+/// The options of a plan approval's or re-plan's turn: a send's, whose
+/// prompt the plan replaces.
+pub(crate) fn plan_send_options(
+    app: &App,
+    repo: &RepoState,
+    request: &SendRequest,
+) -> Result<TaskOptions, ApiError> {
+    let request = SendRequest {
+        prompt: "plan".into(),
+        ..request.clone()
+    };
+    send_options(app, repo, &request)
+}
+
+/// A task's goal, as the server runs it: its judge is one of the server's
+/// harnesses, launched with the server's command for it.
+pub(crate) fn goal(app: &App, request: &TaskRequest) -> Result<Option<branchyard::Goal>, ApiError> {
+    let Some(goal) = &request.goal else {
+        return Ok(None);
+    };
+    if goal.text.trim().is_empty() {
+        return Err(ApiError::bad_request("goal.text is empty"));
+    }
+    let judge = match &goal.judge {
+        Some(harness) => Some(branchyard::JudgeSpec {
+            harness: harness.clone(),
+            model: None,
+            effort: None,
+            command: app.command(None, &[Some(harness)])?,
+            rubric: None,
+        }),
+        None => None,
+    };
+    Ok(Some(branchyard::Goal {
+        text: goal.text.clone(),
+        rounds: goal
+            .rounds
+            .unwrap_or(branchyard::GOAL_DEFAULT_ROUNDS)
+            .min(20),
+        judge,
+        custom: None,
+    }))
 }
 
 /// A send's options, or why this server refuses it. See also
@@ -519,6 +819,7 @@ pub(crate) fn spawn_parts(
         depends_on: request.depends_on.clone(),
         after: request.after,
         bindings: request.bindings.clone(),
+        connectors: request.connectors.clone(),
         ..Spawn::default()
     };
     Ok((options, spawn))

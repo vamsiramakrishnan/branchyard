@@ -94,7 +94,7 @@ pub fn check_scope_name(name: &str) -> Result<(), String> {
     }
 }
 
-fn check_principal(principal: &Principal) -> Result<(), String> {
+pub(crate) fn check_principal(principal: &Principal) -> Result<(), String> {
     if principal.name.is_empty() || principal.name.len() > 128 {
         return Err(format!(
             "principal {:?} is not a usable subject name",
@@ -198,6 +198,15 @@ pub struct TenantPolicy {
     /// repositories.
     #[serde(default)]
     pub max_artifact_bytes: Option<u64>,
+    /// This tenant's share of the queue against other tenants at the same
+    /// priority (default 1): claims go to the tenant with the lowest usage
+    /// per unit of weight. See `docs/server.md#scheduling`.
+    #[serde(default)]
+    pub weight: Option<f64>,
+    /// The highest priority this tenant's operations may carry; a request
+    /// asking for more is admitted at this. Default 10, the highest.
+    #[serde(default)]
+    pub max_priority: Option<i32>,
 }
 
 impl TenantPolicy {
@@ -330,6 +339,11 @@ pub struct Config {
     pub tls: Option<TlsFiles>,
     /// Serve plain HTTP on a non-loopback address. Only from the flag.
     pub insecure_bind: bool,
+    /// Listen on this Unix domain socket instead of `listen` (plain HTTP,
+    /// mode 0600, in a directory only its owner may enter). Only from the
+    /// flag, `--listen-unix`; it is how `by --remote ssh://` reaches a
+    /// server it starts (docs/remote-ssh.md).
+    pub listen_unix: Option<PathBuf>,
     pub max_body_bytes: usize,
     /// Largest artifact a `POST .../artifacts` upload may publish; larger
     /// ones are refused with `413 body_too_large` before being written
@@ -343,6 +357,20 @@ pub struct Config {
     /// Only run queued operations: bind no listener and deliver no
     /// webhooks. Needs `database`.
     pub worker_only: bool,
+    /// The labels this server's worker carries (`gpu`, `linux`): it claims
+    /// only operations whose `require_labels` are all among them. See
+    /// `docs/server.md#worker-labels`.
+    pub labels: Vec<String>,
+    /// Detect the harnesses on this machine and advertise them with the
+    /// worker's beats, adding a `harness:<id>` label for each that can run
+    /// (docs/harness-lifecycle.md). On by default.
+    pub inventory: bool,
+    /// How to detect it; `None` uses the process's source
+    /// (`crate::ops::inventory_source`). For embedding and tests.
+    pub inventory_source: Option<crate::ops::InventorySource>,
+    /// How long an operation may wait queued before it says why no live
+    /// worker can claim it.
+    pub unclaimable_after: Duration,
     /// How long shutdown waits for running operations.
     pub shutdown_grace: Duration,
     /// Executable per harness, used when a request names none.
@@ -387,6 +415,145 @@ pub struct Config {
     pub webhooks: Vec<WebhookConfig>,
     /// Allow a webhook's `http://` URL off loopback. Only from the flag.
     pub webhook_insecure: bool,
+    /// The connector gateway its branches' turns are given, and whether
+    /// this server runs it; see `docs/connectors.md`. `None`: off.
+    pub connectors: Option<ConnectorsConfig>,
+    /// The model gateway (docs/model-gateway.md), as `[models]` in
+    /// branchyard.toml says it. `None`: off.
+    pub models: Option<branchyard_setup::config::ModelsConfig>,
+    /// Each principal's ceiling: the most a branch acting for it may reach
+    /// (docs/model-gateway.md#one-scope).
+    pub ceilings: BTreeMap<String, branchyard::Ceiling>,
+    /// Waiting this long queued raises an operation's effective priority
+    /// by one; `None` turns aging off. See `docs/server.md#scheduling`.
+    pub aging: Option<Duration>,
+    /// How long a claim keeps counting toward its tenant's usage, as the
+    /// time constant of its decay.
+    pub fair_share_window: Duration,
+    /// `/metrics`; `None` (the default): not served.
+    pub metrics: Option<MetricsConfig>,
+    /// The metrics registry and tracer to use, for embedding and tests;
+    /// `None` (the default): a fresh registry, and traces as the
+    /// OpenTelemetry variables configure them. Never from a file or flag.
+    pub observability: Option<crate::observe::Observability>,
+    /// Triggers and schedules: the public URL in webhook URLs, which
+    /// repositories' triggers may run prechecks, the dispatcher's tick and
+    /// clock. See `docs/triggers.md`.
+    pub triggers: crate::triggers::Settings,
+    /// The web companion at `/app/`, pairing links and Web Push; off by
+    /// default. See `docs/companion.md`.
+    pub app: AppConfig,
+}
+
+/// Push services a subscription may name by default: Chrome's (FCM),
+/// Firefox's (Mozilla autopush), Edge's (WNS) and Safari's (Apple).
+pub const DEFAULT_PUSH_SERVICES: &[&str] = &[
+    "fcm.googleapis.com",
+    "*.push.services.mozilla.com",
+    "*.notify.windows.com",
+    "*.push.apple.com",
+];
+
+/// `app` in the configuration file, `--app` on the command line: the web
+/// companion. See `docs/companion.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppConfig {
+    /// Serve the page at `/app/`, accept pairing codes and paired tokens.
+    pub enabled: bool,
+    /// Send Web Push notifications to subscribed browsers.
+    pub push: bool,
+    /// The VAPID private key (PKCS#8, made if missing). Default:
+    /// `<data_dir>/companion/vapid.pk8`. Servers sharing a database that
+    /// all send push need the same key.
+    pub vapid_key: Option<PathBuf>,
+    /// The VAPID `sub`: a `mailto:` or `https:` contact for push services.
+    /// Default: `public_url` when it is `https://`, else
+    /// `mailto:branchyard@localhost`.
+    pub push_subject: Option<String>,
+    /// Hosts subscriptions may name (`host` or `*.suffix`).
+    pub push_services: Vec<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> AppConfig {
+        AppConfig {
+            enabled: false,
+            push: true,
+            vapid_key: None,
+            push_subject: None,
+            push_services: DEFAULT_PUSH_SERVICES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn vapid_key_path(&self, data_dir: &Path) -> PathBuf {
+        self.vapid_key
+            .clone()
+            .unwrap_or_else(|| data_dir.join("companion").join("vapid.pk8"))
+    }
+
+    /// The VAPID subject for `config`.
+    pub fn subject(&self, config: &Config) -> String {
+        if let Some(subject) = &self.push_subject {
+            return subject.clone();
+        }
+        match &config.triggers.public_url {
+            Some(url) if url.starts_with("https://") => url.clone(),
+            _ => "mailto:branchyard@localhost".into(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(subject) = &self.push_subject {
+            if !(subject.starts_with("mailto:") || subject.starts_with("https://")) {
+                return Err(format!(
+                    "app.push_subject: {subject:?} is not a mailto: or https: URL"
+                ));
+            }
+        }
+        for service in &self.push_services {
+            let host = service.strip_prefix("*.").unwrap_or(service);
+            if host.is_empty() || host.contains(['/', ' ', '*', '@']) {
+                return Err(format!(
+                    "app.push_services: {service:?} is not a host name or *.suffix"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `connectors` in the configuration file: the connector gateway.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectorsConfig {
+    /// The gateway's canonical `/mcp` URL: every token's audience.
+    pub gateway: String,
+    /// The gateway as a sandboxed harness reaches it.
+    pub sandbox_gateway: Option<String>,
+    /// Every token's issuer. Default: this server's URL.
+    pub issuer: Option<String>,
+    /// The signing key file (a private JWKS, made if missing). Default:
+    /// `<data_dir>/gateway/key`.
+    pub signing_key: Option<PathBuf>,
+    /// The gateway's audit log, read into `connector_call` events.
+    /// Default: `<data_dir>/gateway/audit.jsonl`.
+    pub audit_file: Option<PathBuf>,
+    /// The bundle root the gateway serves.
+    pub bundles: PathBuf,
+    /// Anvil's command and leading arguments. Default `["anvil"]`.
+    pub anvil: Vec<String>,
+    /// Run the gateway beside the server, supervised.
+    pub run_gateway: bool,
+    /// The address the gateway listens on when run here, when not
+    /// loopback.
+    pub listen: Option<String>,
+    /// The gateway's vault key file. Default: `<data_dir>/gateway/vault.key`,
+    /// made if missing.
+    pub vault_key: Option<PathBuf>,
 }
 
 impl Config {
@@ -402,11 +569,16 @@ impl Config {
             tenants: BTreeMap::new(),
             tls: None,
             insecure_bind: false,
+            listen_unix: None,
             max_body_bytes: 1024 * 1024,
             max_artifact_bytes: DEFAULT_MAX_ARTIFACT_BYTES,
             max_running: 8,
             operation_lease: crate::ops::DEFAULT_LEASE,
             worker_only: false,
+            labels: Vec::new(),
+            inventory: true,
+            inventory_source: None,
+            unclaimable_after: crate::ops::DEFAULT_UNCLAIMABLE_AFTER,
             shutdown_grace: Duration::from_secs(60),
             harness_commands: BTreeMap::new(),
             allow_client_commands: false,
@@ -422,6 +594,30 @@ impl Config {
             log_requests: true,
             webhooks: Vec::new(),
             webhook_insecure: false,
+            connectors: None,
+            models: None,
+            ceilings: BTreeMap::new(),
+            aging: Some(crate::store::DEFAULT_AGING),
+            fair_share_window: crate::store::DEFAULT_FAIR_SHARE_WINDOW,
+            metrics: None,
+            observability: None,
+            triggers: crate::triggers::Settings::default(),
+            app: AppConfig::default(),
+        }
+    }
+
+    /// How this server's dispatcher orders its claims: the configured
+    /// tenants' weights, aging and fair-share window.
+    pub fn scheduling(&self) -> crate::store::Scheduling {
+        crate::store::Scheduling {
+            weights: self
+                .tenants
+                .iter()
+                .filter_map(|(name, t)| t.weight.map(|w| (name.clone(), w)))
+                .collect(),
+            aging: self.aging,
+            window: self.fair_share_window,
+            clock_ms: None,
         }
     }
 
@@ -465,11 +661,42 @@ impl Config {
         if self.repos.is_empty() {
             return Err("no repositories to serve".into());
         }
+        if let Some(c) = &self.connectors {
+            for url in std::iter::once(&c.gateway).chain(&c.sandbox_gateway) {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err(format!(
+                        "connectors: {url:?} is not an http:// or https:// URL"
+                    ));
+                }
+            }
+            if c.anvil.is_empty() {
+                return Err("connectors.anvil names no command".into());
+            }
+        }
+        self.app.validate()?;
         if self.tokens.is_empty() && self.credentials.is_empty() && !self.worker_only {
             return Err("no tokens or credentials configured; every request needs one".into());
         }
         for (name, _) in &self.repos {
             check_repo_name(name)?;
+        }
+        if let Some(url) = &self.triggers.public_url {
+            if !(url.starts_with("https://") || url.starts_with("http://"))
+                || url.contains(char::is_whitespace)
+            {
+                return Err(format!(
+                    "public_url: {url:?} is not an http:// or https:// URL"
+                ));
+            }
+        }
+        if let WorkspaceScripts::Repos(allowed) = &self.triggers.allow_prechecks {
+            for name in allowed {
+                if !self.repos.iter().any(|(n, _)| n == name) {
+                    return Err(format!(
+                        "allow_trigger_prechecks names {name}, which this server does not serve"
+                    ));
+                }
+            }
         }
         if let WorkspaceScripts::Repos(allowed) = &self.allow_workspace_scripts {
             for name in allowed {
@@ -562,8 +789,53 @@ impl Config {
         if self.operation_lease < Duration::from_millis(100) {
             return Err("operation_lease must be at least 100 milliseconds".into());
         }
+        if let Some(bad) = self.labels.iter().find(|l| !crate::store::valid_label(l)) {
+            return Err(format!(
+                "label {bad:?} is not a worker label: 1 to 63 of a-z, 0-9, '.', '_' and '-', \
+                 starting with a letter or digit"
+            ));
+        }
         if self.max_body_bytes < 1024 {
             return Err("max_body_bytes must be at least 1024".into());
+        }
+        for (name, tenant) in &self.tenants {
+            if let Some(weight) = tenant.weight {
+                if !(weight.is_finite() && weight > 0.0 && weight <= 1e6) {
+                    return Err(format!(
+                        "tenant {name}: weight {weight} must be a positive number up to 1000000"
+                    ));
+                }
+            }
+            if let Some(max) = tenant.max_priority {
+                let range = crate::store::MIN_PRIORITY..=crate::store::MAX_PRIORITY;
+                if !range.contains(&max) {
+                    return Err(format!(
+                        "tenant {name}: max_priority {max} is outside {} to {}",
+                        crate::store::MIN_PRIORITY,
+                        crate::store::MAX_PRIORITY
+                    ));
+                }
+            }
+        }
+        if let Some(metrics) = &self.metrics {
+            if let Some(addr) = metrics.listen {
+                if !addr.ip().is_loopback() && !self.insecure_bind {
+                    return Err(format!(
+                        "refusing to serve metrics over plain HTTP on {addr}, which is not a \
+                         loopback address; pass --insecure-bind to allow it"
+                    ));
+                }
+                if !addr.ip().is_loopback() && metrics.token_sha256.is_none() {
+                    return Err(format!(
+                        "the metrics listener on {addr} is not loopback: give it a metrics token"
+                    ));
+                }
+                if addr == self.listen && addr.port() != 0 && !self.worker_only {
+                    return Err(format!(
+                        "the metrics listener {addr} is the server's own listen address"
+                    ));
+                }
+            }
         }
         if self.max_artifact_bytes < 1024 {
             return Err("max_artifact_bytes must be at least 1024".into());
@@ -585,6 +857,18 @@ impl Config {
                 check_webhook_event_kind(kind)?;
             }
         }
+        if let Some(path) = &self.listen_unix {
+            if self.tls.is_some() {
+                return Err("--listen-unix serves plain HTTP on a socket; it takes no TLS".into());
+            }
+            if !path.is_absolute() {
+                return Err(format!(
+                    "--listen-unix {} must be an absolute path",
+                    path.display()
+                ));
+            }
+            return Ok(None);
+        }
         if self.listen.ip().is_loopback() || self.tls.is_some() {
             return Ok(None);
         }
@@ -604,12 +888,38 @@ impl Config {
     }
 }
 
+/// `/metrics` (docs/observability.md): served on the main listener to a
+/// principal with the `admin` scope or the metrics token, and, with
+/// `listen`, on a listener of its own.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MetricsConfig {
+    /// A separate plain-HTTP listener serving only `/metrics`.
+    pub listen: Option<SocketAddr>,
+    /// SHA-256 of the metrics token, which reads `/metrics` and nothing
+    /// else. Without one, the separate listener needs no token.
+    pub token_sha256: Option<String>,
+}
+
+impl fmt::Debug for MetricsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MetricsConfig")
+            .field("listen", &self.listen)
+            .field("token", &self.token_sha256.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// The providers a server can allow requests to name.
 pub const PROVIDERS: &[&str] = &["local", "microsandbox", "substrate"];
 
 pub fn check_provider_name(name: &str) -> Result<(), String> {
     match PROVIDERS.contains(&name) {
         true => Ok(()),
+        false if name == "recipe" => Err(
+            "\"recipe\" cannot be allowed: a server never runs environment recipes, which run \
+             where the repository is, as the person who trusted them (docs/recipes.md)"
+                .into(),
+        ),
         false => Err(format!(
             "{name:?} is not a provider; allow one of {}",
             PROVIDERS.join(", ")
@@ -700,10 +1010,180 @@ pub(crate) struct FileConfig {
     #[serde(default)]
     secrets: BTreeMap<String, String>,
     database: Option<String>,
+    /// The labels this server's worker carries; it claims only operations
+    /// whose `require_labels` are all among them. See
+    /// docs/server.md#worker-labels.
+    #[serde(default)]
+    labels: Vec<String>,
+    /// Detect the harnesses installed on this machine and advertise them,
+    /// with a `harness:<id>` label for each that can run. Default true. See
+    /// docs/harness-lifecycle.md.
+    inventory: Option<bool>,
+    /// How long an operation may wait queued before it says why no live
+    /// worker can claim it. Default 60.
+    unclaimable_after_seconds: Option<f64>,
     #[serde(default)]
     webhooks: Vec<FileWebhook>,
     #[serde(default)]
     webhook_insecure: bool,
+    /// The connector gateway (docs/connectors.md): where it is, which
+    /// bundles it serves, and whether this server runs it.
+    connectors: Option<FileConnectors>,
+    /// The model gateway (docs/model-gateway.md): backends, routes,
+    /// budgets and prices, as `[models]` in branchyard.toml. A backend's
+    /// `key` names an entry of `secrets`, else a variable of this server.
+    models: Option<branchyard_setup::config::ModelsConfig>,
+    /// Each principal's ceiling, by its name: the connectors, models and
+    /// hosts any branch acting for it may have at most, whatever a request
+    /// asks for (docs/model-gateway.md#one-scope).
+    #[serde(default)]
+    ceilings: BTreeMap<String, FileCeiling>,
+    /// Seconds an operation waits queued before its effective priority
+    /// rises by one, so low-priority work cannot starve; 0 turns aging
+    /// off. Default 60. See docs/server.md#scheduling.
+    aging_seconds: Option<f64>,
+    /// Seconds a claim keeps counting toward its tenant's fair share (the
+    /// time constant of its exponential decay); 0 counts only running
+    /// operations. Default 300.
+    fair_share_window_seconds: Option<f64>,
+    /// Serve Prometheus metrics at /metrics (docs/observability.md). Off
+    /// without this.
+    metrics: Option<FileMetrics>,
+    /// This server's URL as webhook senders reach it (behind a proxy, its
+    /// public address): the base of each event trigger's webhook URL.
+    /// Default: http(s)://<listen>. See docs/triggers.md.
+    public_url: Option<String>,
+    /// Let triggers of served repositories run a precheck command before
+    /// firing: `true` for every repository, or a list of repository names.
+    /// Off by default; see docs/triggers.md.
+    allow_trigger_prechecks: Option<FileWorkspaceScripts>,
+    /// The web companion at /app/ (docs/companion.md): `true`, or its
+    /// settings. Off by default.
+    app: Option<FileApp>,
+}
+
+/// `app`: `true`/`false`, or the companion's settings (which turn it on
+/// unless `enabled` is false).
+#[derive(Deserialize)]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum FileApp {
+    On(bool),
+    Settings(FileAppSettings),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileAppSettings {
+    /// Default true.
+    enabled: Option<bool>,
+    /// Send Web Push notifications to subscribed browsers. Default true.
+    push: Option<bool>,
+    /// The VAPID private key, made if missing. Default:
+    /// `<data_dir>/companion/vapid.pk8`.
+    vapid_key: Option<PathBuf>,
+    /// The VAPID contact, `mailto:` or `https:`. Default: `public_url` when
+    /// https, else mailto:branchyard@localhost.
+    push_subject: Option<String>,
+    /// Push service hosts subscriptions may name (`host` or `*.suffix`).
+    /// Default: FCM, Mozilla, Windows and Apple push services.
+    push_services: Option<Vec<String>>,
+}
+
+/// `metrics`: Prometheus metrics at `/metrics`; see docs/observability.md.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileMetrics {
+    /// A separate plain-HTTP listener (`IP:port`) serving only /metrics,
+    /// as `--metrics-addr` sets it.
+    listen: Option<String>,
+    /// A token that reads /metrics and nothing else, at least 16
+    /// characters. Exactly one of `token` and `token_file`, or neither.
+    token: Option<String>,
+    token_file: Option<PathBuf>,
+}
+
+/// One principal's ceiling. Unset parts leave that scope as requested.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileCeiling {
+    /// The widest connector grant, in `--connector` form (`github:read`).
+    connectors: Option<Vec<String>>,
+    /// The models its branches may call through the model gateway, as
+    /// globs (`claude-*`).
+    models: Option<Vec<String>>,
+    /// The hosts its branches may reach, as `--network` rules; `[]` is
+    /// none.
+    network: Option<Vec<String>>,
+}
+
+impl FileCeiling {
+    fn ceiling(self, name: &str) -> Result<branchyard::Ceiling, String> {
+        let at = |e: String| format!("ceilings.{name}: {e}");
+        Ok(branchyard::Ceiling {
+            connectors: self
+                .connectors
+                .map(|grants| {
+                    grants
+                        .iter()
+                        .map(|g| branchyard::connectors::GrantEntry::parse(g))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()
+                .map_err(at)?,
+            models: match self.models {
+                Some(allow) => {
+                    let access = branchyard::models::ModelAccess { allow };
+                    access.check().map_err(at)?;
+                    Some(access)
+                }
+                None => None,
+            },
+            network: self
+                .network
+                .map(|rules| {
+                    branchyard::Network::from_rules(&rules, branchyard::NetworkEnforce::BestEffort)
+                })
+                .transpose()
+                .map_err(at)?,
+        })
+    }
+}
+
+/// `connectors`: the connector gateway; see `docs/connectors.md`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileConnectors {
+    /// The gateway's canonical `/mcp` URL, such as
+    /// `http://127.0.0.1:8931/mcp`: every token's audience.
+    gateway: String,
+    /// The gateway as a sandboxed harness reaches it.
+    sandbox_gateway: Option<String>,
+    /// Every token's issuer. Default: this server's URL.
+    issuer: Option<String>,
+    /// The signing key, a private JSON Web Key Set made if missing.
+    /// Default: `<data_dir>/gateway/key`. Its public keys are served at
+    /// `GET /.well-known/jwks.json`.
+    signing_key: Option<PathBuf>,
+    /// The gateway's audit log. Default: `<data_dir>/gateway/audit.jsonl`.
+    audit_file: Option<PathBuf>,
+    /// The bundle root the gateway serves.
+    bundles: PathBuf,
+    /// Anvil's command and leading arguments. Default `["anvil"]`.
+    anvil: Option<Vec<String>>,
+    /// Run the gateway beside the server, supervised. Default false.
+    #[serde(default)]
+    run_gateway: bool,
+    /// The address the gateway listens on when run here, when not
+    /// loopback.
+    listen: Option<String>,
+    /// The gateway's vault key (a 0600 file of 64 hex characters).
+    /// Default: `<data_dir>/gateway/vault.key`, made if missing.
+    vault_key: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -759,6 +1239,12 @@ pub(crate) struct FileTenantPolicy {
     max_branches: Option<usize>,
     max_cost_usd: Option<f64>,
     max_artifact_bytes: Option<u64>,
+    /// The tenant's share of the queue against other tenants at the same
+    /// priority. Default 1.
+    weight: Option<f64>,
+    /// The highest priority its operations may carry (-10 to 10); higher
+    /// requests are admitted at this. Default 10.
+    max_priority: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -812,8 +1298,22 @@ pub struct Partial {
     pub allow_workspace_scripts: WorkspaceScripts,
     pub secrets: BTreeMap<String, branchyard::SecretSource>,
     pub database: Option<String>,
+    pub labels: Vec<String>,
+    pub inventory: Option<bool>,
+    pub unclaimable_after: Option<Duration>,
     pub webhooks: Vec<WebhookConfig>,
     pub webhook_insecure: bool,
+    pub connectors: Option<ConnectorsConfig>,
+    pub models: Option<branchyard_setup::config::ModelsConfig>,
+    pub ceilings: BTreeMap<String, branchyard::Ceiling>,
+    /// `aging_seconds`: `Some(None)` turns aging off.
+    pub aging: Option<Option<Duration>>,
+    pub fair_share_window: Option<Duration>,
+    pub metrics: Option<MetricsConfig>,
+    pub public_url: Option<String>,
+    pub allow_trigger_prechecks: WorkspaceScripts,
+    /// `app`, when the file sets it.
+    pub app: Option<AppConfig>,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -922,6 +1422,8 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
                     max_branches: p.max_branches,
                     max_cost_usd: p.max_cost_usd,
                     max_artifact_bytes: p.max_artifact_bytes,
+                    weight: p.weight,
+                    max_priority: p.max_priority,
                 },
             )
         })
@@ -945,7 +1447,53 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         Some(s) => return Err(format!("shutdown_grace_seconds {s} is not usable")),
         None => None,
     };
+    let unclaimable_after = match file.unclaimable_after_seconds {
+        Some(s) if (0.0..1e9).contains(&s) => Some(Duration::from_secs_f64(s)),
+        Some(s) => return Err(format!("unclaimable_after_seconds {s} is not usable")),
+        None => None,
+    };
+    let seconds = |name: &str, value: Option<f64>| match value {
+        Some(s) if (0.0..1e9).contains(&s) => Ok(Some(Duration::from_secs_f64(s))),
+        Some(s) => Err(format!("{name} {s} is not usable")),
+        None => Ok(None),
+    };
+    let aging = seconds("aging_seconds", file.aging_seconds)?.map(|d| (!d.is_zero()).then_some(d));
+    let fair_share_window = seconds("fair_share_window_seconds", file.fair_share_window_seconds)?;
+    let metrics = match file.metrics {
+        None => None,
+        Some(m) => {
+            let token = match (m.token, m.token_file) {
+                (Some(token), None) => {
+                    if let Some(warning) = readable_by_others(path) {
+                        warnings.push(warning);
+                    }
+                    Some(token)
+                }
+                (None, Some(file)) => Some(read_token_file(&resolve(file), &mut warnings)?),
+                (None, None) => None,
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "config {}: metrics takes token or token_file, not both",
+                        path.display()
+                    ))
+                }
+            };
+            if token.as_ref().is_some_and(|t| t.len() < 16) {
+                return Err(format!(
+                    "config {}: the metrics token is shorter than 16 characters",
+                    path.display()
+                ));
+            }
+            Some(MetricsConfig {
+                listen: m.listen.as_deref().map(parse_listen).transpose()?,
+                token_sha256: token.map(|t| sha256_hex(t.as_bytes())),
+            })
+        }
+    };
     Ok(Partial {
+        aging,
+        fair_share_window,
+        metrics,
         listen,
         data_dir: file.data_dir.map(resolve),
         repos: file
@@ -971,13 +1519,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         allow_delegation: file.allow_delegation,
         by_path: file.by_path.map(resolve),
         allow_unapproved_tools: file.allow_unapproved_tools,
-        allow_workspace_scripts: match file.allow_workspace_scripts {
-            None | Some(FileWorkspaceScripts::All(false)) => WorkspaceScripts::Denied,
-            Some(FileWorkspaceScripts::All(true)) => WorkspaceScripts::All,
-            Some(FileWorkspaceScripts::Repos(repos)) => {
-                WorkspaceScripts::Repos(repos.into_iter().collect())
-            }
-        },
+        allow_workspace_scripts: scripts(file.allow_workspace_scripts),
         secrets: file
             .secrets
             .into_iter()
@@ -988,6 +1530,9 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             })
             .collect::<Result<_, String>>()?,
         database: file.database,
+        labels: file.labels,
+        inventory: file.inventory,
+        unclaimable_after,
         webhooks: file
             .webhooks
             .into_iter()
@@ -1016,8 +1561,64 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             })
             .collect::<Result<_, String>>()?,
         webhook_insecure: file.webhook_insecure,
+        connectors: file.connectors.map(|c| ConnectorsConfig {
+            gateway: c.gateway,
+            sandbox_gateway: c.sandbox_gateway,
+            issuer: c.issuer,
+            signing_key: c.signing_key.map(resolve),
+            audit_file: c.audit_file.map(resolve),
+            bundles: resolve(c.bundles),
+            anvil: c.anvil.unwrap_or_else(|| vec!["anvil".to_owned()]),
+            run_gateway: c.run_gateway,
+            listen: c.listen,
+            vault_key: c.vault_key.map(resolve),
+        }),
+        models: match file.models {
+            Some(models) => {
+                models
+                    .check()
+                    .map_err(|e| format!("config {}: {e}", path.display()))?;
+                Some(models)
+            }
+            None => None,
+        },
+        ceilings: file
+            .ceilings
+            .into_iter()
+            .map(|(name, c)| c.ceiling(&name).map(|c| (name, c)))
+            .collect::<Result<_, String>>()
+            .map_err(|e| format!("config {}: {e}", path.display()))?,
+        public_url: file.public_url,
+        allow_trigger_prechecks: scripts(file.allow_trigger_prechecks),
+        app: file.app.map(|app| match app {
+            FileApp::On(enabled) => AppConfig {
+                enabled,
+                ..AppConfig::default()
+            },
+            FileApp::Settings(s) => {
+                let default = AppConfig::default();
+                AppConfig {
+                    enabled: s.enabled.unwrap_or(true),
+                    push: s.push.unwrap_or(default.push),
+                    vapid_key: s.vapid_key.map(&resolve),
+                    push_subject: s.push_subject,
+                    push_services: s.push_services.unwrap_or(default.push_services),
+                }
+            }
+        }),
         warnings,
     })
+}
+
+/// `true`, `false` or repository names, as the operator wrote them.
+fn scripts(written: Option<FileWorkspaceScripts>) -> WorkspaceScripts {
+    match written {
+        None | Some(FileWorkspaceScripts::All(false)) => WorkspaceScripts::Denied,
+        Some(FileWorkspaceScripts::All(true)) => WorkspaceScripts::All,
+        Some(FileWorkspaceScripts::Repos(repos)) => {
+            WorkspaceScripts::Repos(repos.into_iter().collect())
+        }
+    }
 }
 
 /// `NAME`, `NAME=VAR` or `NAME=@FILE`, always with its source: a bare
@@ -1162,6 +1763,90 @@ mod tests {
     }
 
     #[test]
+    fn the_model_gateway_and_ceilings_load_and_are_checked() {
+        let temp = tempfile::Builder::new()
+            .prefix("branchyard-config-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("t.token"), "0123456789abcdef\n").unwrap();
+        let path = dir.join("server.json");
+        let write = |models: &str, ceilings: &str| {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"listen": "127.0.0.1:0", "data_dir": "data", "repos": {{"app": "repo"}},
+                    "tokens": [{{"name": "ci", "token_file": "t.token"}}],
+                    "secrets": {{"anthropic": "@anthropic.key"}},
+                    "models": {models}, "ceilings": {ceilings}}}"#
+                ),
+            )
+            .unwrap();
+        };
+        write(
+            r#"{"backends": {"anthropic": {"api": "anthropic", "key": "anthropic"}},
+                "routes": [{"model": "claude-*", "backends": ["anthropic"]}],
+                "budget": {"monthly_usd": 100}}"#,
+            r#"{"ci": {"models": ["claude-haiku-*"], "network": ["api.github.com:443"],
+                       "connectors": ["github:read"]}}"#,
+        );
+        let partial = load_file(&path).unwrap();
+        let models = partial.models.clone().unwrap();
+        assert_eq!(
+            models.backends["anthropic"].key.as_deref(),
+            Some("anthropic")
+        );
+        let ceiling = &partial.ceilings["ci"];
+        assert_eq!(ceiling.models.as_ref().unwrap().allow, ["claude-haiku-*"]);
+        assert_eq!(
+            ceiling.network.as_ref().unwrap().rules(),
+            ["api.github.com:443"]
+        );
+        assert_eq!(
+            ceiling.connectors.as_ref().unwrap()[0].to_string(),
+            "github:read"
+        );
+        // The repository's gateway: the key from the server's secrets,
+        // branches named under the repository.
+        let mut config = Config::new(dir.join("data"));
+        config.secrets = partial.secrets.clone();
+        config.models = partial.models.clone();
+        let gateway = crate::models::gateway_for(&config, "app").unwrap().unwrap();
+        assert_eq!(gateway.branch_scope.as_deref(), Some("app"));
+        assert_eq!(
+            gateway.backends[0].key,
+            Some(branchyard::models::KeySource::File(
+                dir.join("anthropic.key")
+            ))
+        );
+        assert_eq!(gateway.budget.monthly_usd, Some(100.0));
+        config.models = None;
+        assert!(crate::models::gateway_for(&config, "app")
+            .unwrap()
+            .is_none());
+        // Refused by name.
+        for (models, ceilings, needle) in [
+            (
+                r#"{"routes": [{"model": "*", "backends": ["x"]}]}"#,
+                "{}",
+                "no backend x",
+            ),
+            (
+                r#"{"backends": {"a": {"api": "x"}}}"#,
+                "{}",
+                "models.backends.a.api",
+            ),
+            ("{}", r#"{"ci": {"models": ["a b"]}}"#, "ceilings.ci"),
+            ("{}", r#"{"ci": {"network": ["https://x"]}}"#, "ceilings.ci"),
+            ("{}", r#"{"ci": {"budget": 1}}"#, "budget"),
+        ] {
+            write(models, ceilings);
+            let error = load_file(&path).unwrap_err();
+            assert!(error.contains(needle), "{models} {ceilings}: {error}");
+        }
+    }
+
+    #[test]
     fn files_resolve_relative_paths_and_reject_unknown_keys() {
         let temp = tempfile::Builder::new()
             .prefix("branchyard-config-")
@@ -1175,10 +1860,17 @@ mod tests {
             r#"{"listen": "127.0.0.1:0", "data_dir": "data", "repos": {"app": "repo"},
                 "tokens": [{"name": "ci", "token_file": "t.token"}],
                 "harness_commands": {"codex": ["/bin/codex"]},
-                "secrets": {"ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@codex.json"}}"#,
+                "secrets": {"ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@codex.json"},
+                "connectors": {"gateway": "http://127.0.0.1:8931/mcp", "bundles": "bundles",
+                               "signing_key": "gw.key", "run_gateway": true}}"#,
         )
         .unwrap();
         let partial = load_file(&path).unwrap();
+        let connectors = partial.connectors.clone().unwrap();
+        assert_eq!(connectors.bundles, dir.join("bundles"));
+        assert_eq!(connectors.signing_key, Some(dir.join("gw.key")));
+        assert_eq!(connectors.anvil, ["anvil"]);
+        assert!(connectors.run_gateway);
         assert_eq!(partial.data_dir, Some(dir.join("data")));
         assert_eq!(partial.repos, [("app".to_owned(), dir.join("repo"))]);
         assert_eq!(partial.tokens[0].secret, "0123456789abcdef");

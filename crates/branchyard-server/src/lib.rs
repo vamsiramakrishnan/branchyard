@@ -66,14 +66,23 @@
 pub mod api;
 pub mod auth;
 pub mod cli;
+pub mod companion;
 pub mod config;
+pub mod connectors;
 pub mod error;
 pub mod feed;
+pub mod knowledge_routes;
 pub mod logging;
+pub mod map_routes;
+pub mod metrics;
+pub mod models;
+pub mod observe;
 pub mod ops;
 pub mod serve;
 pub mod storage_routes;
 pub mod store;
+pub mod telemetry;
+pub mod triggers;
 pub mod webhook;
 pub mod work;
 

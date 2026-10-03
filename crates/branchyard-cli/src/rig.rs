@@ -132,6 +132,16 @@ pub struct SeatSpec {
     pub auth: Option<String>,
     pub secrets: Vec<String>,
     pub mcp: Vec<McpServerSpec>,
+    /// Connector grants (`--connector` form); a seat's is narrowed to its
+    /// parent seat's when it is spawned.
+    pub connectors: Vec<branchyard::connectors::GrantEntry>,
+    /// The hosts its harness may reach; unset, its parent's (the root's:
+    /// open). Within its parent seat's.
+    pub network: Option<branchyard::Network>,
+    /// The models its harness may call through the model gateway; unset,
+    /// its parent's (the root's: off the gateway). Within its parent
+    /// seat's.
+    pub models: Option<branchyard::models::ModelAccess>,
     pub telemetry: Option<Telemetry>,
     pub isolated: bool,
     pub budget: ChildBudget,
@@ -181,6 +191,9 @@ pub struct PolicySpec {
     /// Allow the harness's own `by` delegation commands, as
     /// `--allow-delegation` does.
     pub delegation_commands: bool,
+    /// `permission_policy`: a named preset whose rules follow these (a
+    /// child seat's contributes its denials only).
+    pub preset: Option<branchyard::PolicyPreset>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -236,6 +249,10 @@ pub struct PolicyPlan {
     pub deny: Vec<String>,
     pub allow: Vec<String>,
     pub delegation_commands: bool,
+    /// The preset `permission_policy` named, whose rules are in `deny`,
+    /// `allow` and `default` already.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<branchyard::PolicyPreset>,
 }
 
 /// OpenRig fields, and others a reader may expect, that Branchyard refuses
@@ -255,7 +272,7 @@ const REFUSED_RIG: &[(&str, &str)] = &[
     ),
     (
         "permission_policy",
-        "permission presets are not implemented; set the root seat's policy",
+        "a preset belongs to a seat: set seats.<name>.permission_policy",
     ),
     (
         "managed_blocks",
@@ -283,10 +300,6 @@ const REFUSED_SEAT: &[(&str, &str)] = &[
     (
         "continuity_policy",
         "Branchyard does not rebuild a conversation from briefs; a send resumes the harness's own session or fails",
-    ),
-    (
-        "permission_policy",
-        "permission presets are not implemented; set policy (the root's) or policy.deny (a child's)",
     ),
     (
         "cwd",
@@ -703,6 +716,22 @@ struct RawSeat {
         schemars(schema_with = "schema::ordered::<String>")
     )]
     mcp: Option<Ordered<String>>,
+    /// Connectors the seat's harness may call through the gateway, as
+    /// `by run --connector` takes them (github:read, github:write:issues.*);
+    /// each must be within its parent seat's. Needs isolated = true here
+    /// or above.
+    connectors: Option<Vec<String>>,
+    /// The hosts the seat's harness may reach (docs/egress.md): "open",
+    /// "none", or { allow = ["github.com", "*.npmjs.org:443"], enforce =
+    /// "required" }. Unset: its parent seat's. Within its parent seat's.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema::network"))]
+    network: Option<branchyard::Network>,
+    /// Models the seat's harness may call through the model gateway
+    /// (docs/model-gateway.md), as globs ("claude-*"); its model calls then
+    /// go through the gateway. Unset: its parent seat's. Within its parent
+    /// seat's.
+    models: Option<Vec<String>>,
     /// `off`, or an http:// or https:// OTLP collector endpoint.
     telemetry: Option<String>,
     /// Run in a home private to the branch; inherited by the seats below.
@@ -714,6 +743,11 @@ struct RawSeat {
     #[cfg_attr(feature = "schema", schemars(schema_with = "schema::check"))]
     check: Option<RawCheck>,
     policy: Option<RawPolicy>,
+    /// A permission preset: read-only, edit-worktree or full. Its rules
+    /// follow the seat's own policy; a child seat takes its denials only.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema::preset"))]
+    permission_policy: Option<String>,
     /// The seats this seat may spawn.
     delegates_to: Option<Vec<String>>,
     /// Ancestor seats, besides its parent, this seat may escalate to.
@@ -1024,6 +1058,17 @@ impl RawSeat {
                 .map_err(|e| fail(&format!("mcp.{server}"), e))?;
             seat.mcp.push(spec);
         }
+        for grant in self.connectors.unwrap_or_default() {
+            let entry = branchyard::connectors::GrantEntry::parse(&grant)
+                .map_err(|e| fail("connectors", e))?;
+            seat.connectors.push(entry);
+        }
+        seat.network = self.network;
+        if let Some(models) = self.models {
+            let access = branchyard::models::ModelAccess { allow: models };
+            access.check().map_err(|e| fail("models", e))?;
+            seat.models = Some(access);
+        }
         if let Some(text) = self.telemetry {
             seat.telemetry = Some(Telemetry::parse(&text).map_err(|e| fail("telemetry", e))?);
         }
@@ -1074,6 +1119,11 @@ impl RawSeat {
             seat.policy.deny = tools(policy.deny).map_err(|m| fail("policy.deny", m))?;
             seat.policy.allow = tools(policy.allow).map_err(|m| fail("policy.allow", m))?;
             seat.policy.delegation_commands = policy.delegation_commands.unwrap_or(false);
+        }
+        if let Some(name) = self.permission_policy {
+            seat.policy.preset = Some(
+                branchyard::PolicyPreset::parse(&name).map_err(|e| fail("permission_policy", e))?,
+            );
         }
         seat.delegates_to = self.delegates_to.unwrap_or_default();
         let mut seen = BTreeSet::new();
@@ -1308,6 +1358,29 @@ pub mod schema {
             "anyOf": [
                 { "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
                 { "type": "integer", "minimum": 0, "maximum": 100 },
+            ],
+        })
+    }
+
+    pub(super) fn preset(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "enum": branchyard::PolicyPreset::ALL.map(|p| p.name()),
+        })
+    }
+
+    pub(super) fn network(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "anyOf": [
+                { "type": "string", "enum": ["open", "none"] },
+                {
+                    "type": "object",
+                    "properties": {
+                        "allow": { "type": "array", "items": { "type": "string" } },
+                        "enforce": { "type": "string", "enum": ["best_effort", "required"] },
+                    },
+                    "additionalProperties": false,
+                },
             ],
         })
     }
@@ -1564,6 +1637,53 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
                  true on this seat or one above it",
             ));
         }
+        if !seat.connectors.is_empty() && !own {
+            return Err(seat.error(
+                "connectors",
+                "connectors are placed only into a home private to the branch; set isolated = \
+                 true on this seat or one above it",
+            ));
+        }
+    }
+    // A seat's connectors are within its parent seat's, as a spawn will
+    // narrow them; one with nothing in common is refused now.
+    for seat in &order {
+        let Some(up) = parent.get(seat.name.as_str()) else {
+            continue;
+        };
+        let above = order
+            .iter()
+            .find(|s| s.name == *up)
+            .map(|s| s.connectors.clone())
+            .unwrap_or_default();
+        if !seat.connectors.is_empty() {
+            branchyard::connectors::narrow(Some(&seat.connectors), &above)
+                .map_err(|why| seat.error("connectors", why))?;
+        }
+    }
+    // So is its network policy: what it would have once spawned, its own
+    // or its parent's, refused now if wider.
+    let mut networks: BTreeMap<&str, Option<branchyard::Network>> = BTreeMap::new();
+    for seat in &order {
+        let above = parent
+            .get(seat.name.as_str())
+            .and_then(|up| networks.get(up).cloned().flatten());
+        if let Some(network) = &seat.network {
+            network.check().map_err(|why| seat.error("network", why))?;
+        }
+        let effective = branchyard::network_narrow(seat.network.as_ref(), above.as_ref())
+            .map_err(|why| seat.error("network", why))?;
+        networks.insert(&seat.name, effective);
+    }
+    // And its models.
+    let mut models: BTreeMap<&str, Option<branchyard::models::ModelAccess>> = BTreeMap::new();
+    for seat in &order {
+        let above = parent
+            .get(seat.name.as_str())
+            .and_then(|up| models.get(up).cloned().flatten());
+        let effective = branchyard::models::narrow(seat.models.as_ref(), above.as_ref())
+            .map_err(|why| seat.error("models", why))?;
+        models.insert(&seat.name, effective);
     }
 
     // Lower.
@@ -1579,7 +1699,7 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
                 harness: harness[seat.name.as_str()].clone(),
                 budget: seat.budget.clone(),
                 check: seat.check.clone(),
-                deny: seat.policy.deny.clone(),
+                deny: child_denials(&seat.policy),
                 isolated: seat.isolated,
                 provision: Some(provision(spec, seat, &by_name, &harness, &mut skipped)),
                 delegates_to: seat.delegates_to.clone(),
@@ -1611,12 +1731,7 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
             harness: root_harness,
             profile: profile.profile,
             budget: root.budget.clone(),
-            policy: PolicyPlan {
-                default: root.policy.default.unwrap_or(Fallback::Deny),
-                deny: root.policy.deny.clone(),
-                allow: root.policy.allow.clone(),
-                delegation_commands: root.policy.delegation_commands,
-            },
+            policy: root_policy(&root.policy),
             check: root.check.clone(),
             isolated: root.isolated,
             provision: root_provision,
@@ -1711,11 +1826,51 @@ fn provision(
         mcp_servers: seat.mcp.clone(),
         // A rig declares only stdio servers.
         remote_mcp_servers: Vec::new(),
+        connectors: seat.connectors.clone(),
+        network: seat.network.clone(),
+        models: seat.models.clone(),
         instructions: Some(text),
         model: seat.model.clone(),
         effort: seat.effort,
         telemetry: seat.telemetry.clone(),
     }
+}
+
+/// The root's policy: its own rules, then its preset's, then the default
+/// it names or else its preset's.
+fn root_policy(policy: &PolicySpec) -> PolicyPlan {
+    let preset = policy.preset.map(|p| p.rules());
+    let extend = |own: &[String], more: Option<&[&str]>| {
+        let mut all = own.to_vec();
+        for tool in more.unwrap_or_default() {
+            if !all.iter().any(|t| t == tool) {
+                all.push((*tool).to_owned());
+            }
+        }
+        all
+    };
+    let default = policy.default.unwrap_or(match &preset {
+        Some(rules) if rules.default_allow => Fallback::Allow,
+        _ => Fallback::Deny,
+    });
+    PolicyPlan {
+        default,
+        deny: extend(&policy.deny, preset.as_ref().map(|r| r.deny.as_slice())),
+        allow: extend(&policy.allow, preset.as_ref().map(|r| r.allow.as_slice())),
+        delegation_commands: policy.delegation_commands,
+        preset: policy.preset,
+    }
+}
+
+/// A child seat's denials: its own, then its preset's.
+fn child_denials(policy: &PolicySpec) -> Vec<String> {
+    let mut deny = policy.deny.clone();
+    for tool in policy.preset.map(|p| p.rules().deny).unwrap_or_default() {
+        if !deny.iter().any(|t| t == tool) {
+            deny.push(tool.to_owned());
+        }
+    }
+    deny
 }
 
 /// `by rig check`'s text: the root, its envelope, and each seat.
@@ -1736,11 +1891,24 @@ pub fn render(plan: &RigPlan) -> String {
     }
     let policy = &root.policy;
     let mut rules = Vec::new();
-    if !policy.deny.is_empty() {
-        rules.push(format!("deny {}", policy.deny.join(", ")));
+    let preset = policy.preset.map(|p| p.rules());
+    let own = |tools: &[String], preset: Option<&Vec<&str>>| -> Vec<String> {
+        tools
+            .iter()
+            .filter(|t| preset.is_none_or(|p| !p.contains(&t.as_str())))
+            .cloned()
+            .collect()
+    };
+    if let Some(name) = policy.preset {
+        rules.push(format!("preset {name} ({})", name.summary()));
     }
-    if !policy.allow.is_empty() {
-        rules.push(format!("allow {}", policy.allow.join(", ")));
+    let deny = own(&policy.deny, preset.as_ref().map(|r| &r.deny));
+    if !deny.is_empty() {
+        rules.push(format!("deny {}", deny.join(", ")));
+    }
+    let allow = own(&policy.allow, preset.as_ref().map(|r| &r.allow));
+    if !allow.is_empty() {
+        rules.push(format!("allow {}", allow.join(", ")));
     }
     if policy.delegation_commands {
         rules.push("allow by delegation commands".into());
@@ -1855,6 +2023,23 @@ fn provision_text(provision: &Provisioning) -> String {
         let names: Vec<&str> = provision.secrets.iter().map(|s| s.name.as_str()).collect();
         out.push_str(&format!("{pad}secrets {}\n", names.join(", ")));
     }
+    if !provision.connectors.is_empty() {
+        out.push_str(&format!(
+            "{pad}connectors {}\n",
+            provision
+                .connectors
+                .iter()
+                .map(|g| g.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    if let Some(models) = &provision.models {
+        out.push_str(&format!("{pad}models {models}\n"));
+    }
+    if let Some(network) = &provision.network {
+        out.push_str(&format!("{pad}network {network}\n"));
+    }
     if !provision.mcp_servers.is_empty() {
         let names: Vec<&str> = provision
             .mcp_servers
@@ -1908,6 +2093,192 @@ delegates_to = ["worker"]
         let header = format!("[{table}]\n");
         assert!(MINIMAL.contains(&header), "{table}");
         MINIMAL.replacen(&header, &format!("{header}{line}\n"), 1)
+    }
+
+    #[test]
+    fn seat_networks_lower_to_provisioning_and_stay_within_their_parents() {
+        let both = |root: &str, worker: &str| {
+            with("seats.lead", root).replacen(
+                "[seats.worker]\n",
+                &format!("[seats.worker]\n{worker}\n"),
+                1,
+            )
+        };
+        let planned = plan(
+            &parse(&both(
+                "network = { allow = [\"*.example.com:443\", \"github.com\"], enforce = \"required\" }",
+                "network = { allow = [\"api.example.com:443\"] }",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let root = planned.root.provision.network.as_ref().unwrap();
+        assert_eq!(root.to_string(), "*.example.com:443, github.com (required)");
+        let worker = planned.seats.as_ref().unwrap().table["worker"]
+            .provision
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            worker.network.as_ref().unwrap().rules(),
+            ["api.example.com:443"]
+        );
+        assert!(render(&planned).contains("network *.example.com:443, github.com (required)"));
+        // A seat that names none takes its parent's when it is spawned.
+        let silent = plan(&parse(&with("seats.lead", "network = \"none\"")).unwrap()).unwrap();
+        let worker = &silent.seats.as_ref().unwrap().table["worker"];
+        assert_eq!(worker.provision.as_ref().unwrap().network, None);
+        // Wider than its parent's, or not a rule: refused by field and line.
+        for (root, worker, needle) in [
+            ("network = \"none\"", "network = \"open\"", "open network"),
+            (
+                "network = { allow = [\"github.com:443\"] }",
+                "network = { allow = [\"github.com\"] }",
+                "not within the parent",
+            ),
+            ("", "network = { allow = [\"https://x\"] }", "not a URL"),
+            ("", "network = \"closed\"", "is not \"open\""),
+            (
+                "",
+                "network = { enforce = \"required\" }",
+                "nothing to enforce",
+            ),
+        ] {
+            let error = refused(&both(root, worker), "seats.worker.network", needle);
+            assert!(error.line.is_some(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn seat_models_lower_to_provisioning_and_stay_within_their_parents() {
+        let both = |root: &str, worker: &str| {
+            with("seats.lead", root).replacen(
+                "[seats.worker]\n",
+                &format!("[seats.worker]\n{worker}\n"),
+                1,
+            )
+        };
+        let planned = plan(
+            &parse(&both(
+                "models = [\"claude-*\"]",
+                "models = [\"claude-haiku-*\"]",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let root = planned.root.provision.models.as_ref().unwrap();
+        assert_eq!(root.allow, ["claude-*"]);
+        let worker = planned.seats.as_ref().unwrap().table["worker"]
+            .provision
+            .as_ref()
+            .unwrap();
+        assert_eq!(worker.models.as_ref().unwrap().allow, ["claude-haiku-*"]);
+        assert!(render(&planned).contains("models claude-*"));
+        for (root, worker, needle) in [
+            (
+                "models = [\"claude-*\"]",
+                "models = [\"gpt-*\"]",
+                "not within the parent",
+            ),
+            ("", "models = [\"a b\"]", "' '"),
+        ] {
+            let error = refused(&both(root, worker), "seats.worker.models", needle);
+            assert!(error.line.is_some(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn permission_presets_expand_on_the_root_and_deny_on_a_child() {
+        let text = with(
+            "seats.lead",
+            "permission_policy = \"edit-worktree\"\npolicy = { deny = [\"Write\"] }",
+        )
+        .replacen(
+            "[seats.worker]\n",
+            "[seats.worker]\npermission_policy = \"read-only\"\n",
+            1,
+        );
+        let planned = plan(&parse(&text).unwrap()).unwrap();
+        let policy = &planned.root.policy;
+        assert_eq!(policy.preset, Some(branchyard::PolicyPreset::EditWorktree));
+        assert_eq!(policy.default, Fallback::Deny);
+        // The seat's own rules come first, then the preset's.
+        assert_eq!(policy.deny[0], "Write");
+        assert!(policy.deny.contains(&"Bash".to_owned()));
+        assert!(policy.allow.contains(&"Edit".to_owned()));
+        assert!(policy.allow.contains(&"Read".to_owned()));
+        let shown = render(&planned);
+        assert!(
+            shown.contains("policy preset edit-worktree (read, search and edit files"),
+            "{shown}"
+        );
+        assert!(shown.contains("; deny Write; then deny"), "{shown}");
+        // A child seat's preset adds its denials only.
+        let worker = &planned.seats.as_ref().unwrap().table["worker"];
+        for tool in ["Edit", "Bash", "WebFetch"] {
+            assert!(worker.deny.contains(&tool.to_owned()), "{tool}");
+        }
+        // `full` as the root's preset allows by default.
+        let full =
+            plan(&parse(&with("seats.lead", "permission_policy = \"full\"")).unwrap()).unwrap();
+        assert_eq!(full.root.policy.default, Fallback::Allow);
+        // The JSON plan names the preset; a plan without one is unchanged.
+        let json = serde_json::to_value(&planned.root.policy).unwrap();
+        assert_eq!(json["preset"], "edit-worktree");
+        let plain = plan(&parse(MINIMAL).unwrap()).unwrap();
+        assert!(serde_json::to_value(&plain.root.policy)
+            .unwrap()
+            .get("preset")
+            .is_none());
+    }
+
+    #[test]
+    fn seat_connectors_are_parsed_isolated_and_within_their_parents() {
+        let isolated = |root: &str, worker: &str| {
+            let text = with("seats.lead", &format!("isolated = true\n{root}"));
+            text.replacen(
+                "[seats.worker]\n",
+                &format!("[seats.worker]\n{worker}\n"),
+                1,
+            )
+        };
+        let planned = plan(
+            &parse(&isolated(
+                "connectors = [\"github:write:issues.*\"]",
+                "connectors = [\"github:read:issues.list\"]",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            planned.root.provision.connectors[0].to_string(),
+            "github:write:issues.*"
+        );
+        let seats = planned.seats.unwrap();
+        let worker = seats.table["worker"].provision.as_ref().unwrap();
+        assert_eq!(worker.connectors[0].to_string(), "github:read:issues.list");
+        assert!(render(
+            &plan(&parse(&isolated("connectors = [\"github\"]", "")).unwrap()).unwrap()
+        )
+        .contains("connectors github:read"));
+        // Outside the parent seat's grant.
+        refused(
+            &isolated(
+                "connectors = [\"github:read\"]",
+                "connectors = [\"slack:read\"]",
+            ),
+            "seats.worker.connectors",
+            "not within the parent's grant",
+        );
+        refused(
+            &with("seats.worker", "connectors = [\"github:admin\"]"),
+            "seats.worker.connectors",
+            "mode",
+        );
+        refused(
+            &with("seats.worker", "connectors = [\"github\"]"),
+            "seats.worker.connectors",
+            "isolated = true",
+        );
     }
 
     #[test]
@@ -2182,7 +2553,7 @@ escalates_to = ["lead"]
             ("continuity_policy = {}", "does not rebuild a conversation"),
             (
                 "permission_policy = \"builtin:yolo\"",
-                "presets are not implemented",
+                "not a permission preset",
             ),
             ("cwd = \".\"", "own git worktree"),
             ("command = \"x\"", "a seat names a harness"),
@@ -2207,7 +2578,10 @@ escalates_to = ["lead"]
             ("culture_file = \"c.md\"", "no culture files"),
             ("services = {}", "does not manage services"),
             ("edges = []", "delegates_to"),
-            ("permission_policy = \"builtin:standard\"", "presets"),
+            (
+                "permission_policy = \"builtin:standard\"",
+                "belongs to a seat",
+            ),
         ] {
             let text = format!("{field}\n{MINIMAL}");
             refused(&text, field.split(' ').next().unwrap(), needle);

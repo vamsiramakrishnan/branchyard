@@ -34,18 +34,25 @@
 //! commit that was sent, with hooks disabled.
 //!
 //! The actor needs `git` on its `PATH`.
+//!
+//! The steps reach the sandbox through [`Guest`]: a Substrate actor's
+//! bridge ([`Endpoint`]), or any [`SandboxProvider`] that can exec
+//! ([`Exec`]), whose files cross as `cat` and `tar` streams over the
+//! exec's standard input and output (an environment recipe's machine,
+//! reached over ssh). The second needs `sh`, `cat`, `tar` and `mkdir`
+//! there too, and `tar` on this host.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use branchyard_bridge::Endpoint;
-use branchyard_sandbox::{ExecSpec, Process, ProviderError};
+use branchyard_sandbox::{ExecSpec, Process, ProviderError, SandboxProvider};
 use branchyard_workspace::Git;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +112,235 @@ impl From<io::Error> for Error {
 impl From<ProviderError> for Error {
     fn from(error: ProviderError) -> Self {
         Error::Guest(error.to_string())
+    }
+}
+
+/// How the transfer reaches a sandbox: run a program there, and move
+/// files and directory trees in and out.
+pub trait Guest {
+    /// Start `spec` in the sandbox, with stdin, stdout and stderr piped.
+    fn exec(&self, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError>;
+    /// Write `content` to `path` (its parent made) with permission bits
+    /// `mode`.
+    fn put_file(&self, path: &Path, mode: u32, content: &mut dyn Read) -> io::Result<()>;
+    /// Copy `path` into `out`.
+    fn get_file(&self, path: &Path, out: &mut dyn Write) -> io::Result<()>;
+    /// Copy the host directory `from` to `to` in the sandbox.
+    fn put_tree(&self, from: &Path, to: &Path) -> io::Result<()>;
+    /// Copy the sandbox directory `from` into the host directory `to`,
+    /// which must not exist; `NotFound` when `from` does not exist.
+    fn get_tree(&self, from: &Path, to: &Path) -> io::Result<()>;
+}
+
+impl Guest for Endpoint {
+    fn exec(&self, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
+        Endpoint::exec(self, spec).map(|p| Box::new(p) as Box<dyn Process>)
+    }
+
+    fn put_file(&self, path: &Path, mode: u32, content: &mut dyn Read) -> io::Result<()> {
+        Endpoint::put_file(self, path, mode, content)
+    }
+
+    fn get_file(&self, path: &Path, out: &mut dyn Write) -> io::Result<()> {
+        Endpoint::get_file(self, path, out)
+    }
+
+    fn put_tree(&self, from: &Path, to: &Path) -> io::Result<()> {
+        Endpoint::put_tree(self, from, to)
+    }
+
+    fn get_tree(&self, from: &Path, to: &Path) -> io::Result<()> {
+        Endpoint::get_tree(self, from, to)
+    }
+}
+
+/// A [`Guest`] over one sandbox of any provider that can exec: files cross
+/// as byte streams of `cat` and `tar` on the sandbox's side, through the
+/// exec's standard input and output.
+pub struct Exec<'a> {
+    provider: &'a dyn SandboxProvider,
+    sandbox: &'a str,
+}
+
+/// `$1` is the path, `$2` the mode in octal; the content is stdin.
+const PUT_FILE: &str = r#"umask 077
+case $1 in */*) mkdir -p -- "${1%/*}" || exit 1 ;; esac
+cat >"$1.by-incoming" && chmod "$2" "$1.by-incoming" && mv -f "$1.by-incoming" "$1""#;
+
+/// `$1` is the directory; a tar stream on stdin is unpacked into it.
+const PUT_TREE: &str = r#"umask 077
+mkdir -p -- "$1" && tar -x -f - -C "$1""#;
+
+/// `$1` is the directory; its tar stream goes to stdout. Exit 3: missing.
+const GET_TREE: &str = r#"[ -d "$1" ] || exit 3
+tar -c -f - -C "$1" ."#;
+
+impl<'a> Exec<'a> {
+    pub fn new(provider: &'a dyn SandboxProvider, sandbox: &'a str) -> Exec<'a> {
+        Exec { provider, sandbox }
+    }
+
+    /// `sh -c script sh args...` in the sandbox.
+    fn sh(&self, script: &str, args: &[&str]) -> io::Result<Box<dyn Process>> {
+        let spec = ExecSpec {
+            argv: ["sh", "-c", script, "sh"]
+                .iter()
+                .chain(args)
+                .map(|a| (*a).to_owned())
+                .collect(),
+            cwd: PathBuf::from("/"),
+            env: BTreeMap::from([("LC_ALL".into(), "C".into())]),
+        };
+        self.provider
+            .exec(self.sandbox, &spec)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+}
+
+/// Wait for `process`, whose stdin and stdout are already taken; its
+/// stderr joins the error. Exit 3 of [`GET_TREE`] is `NotFound`.
+fn finish(mut process: Box<dyn Process>, what: &str) -> io::Result<()> {
+    let errors = process.take_stderr().map(|mut stderr| {
+        thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        })
+    });
+    let status = process.wait()?;
+    let stderr = errors.and_then(|e| e.join().ok()).unwrap_or_default();
+    process.teardown();
+    match (status.success(), status.code) {
+        (true, _) => Ok(()),
+        (false, Some(3)) if what.starts_with("get_tree") => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{what}: no such directory"),
+        )),
+        (false, _) => Err(io::Error::other(format!(
+            "{what} failed with {status}: {}",
+            stderr.trim()
+        ))),
+    }
+}
+
+/// Copy `from` into the exec's stdin, then close it.
+fn pump(from: &mut dyn Read, to: Option<Box<dyn Write + Send>>) -> io::Result<()> {
+    let mut to = to.ok_or_else(|| io::Error::other("the exec's stdin is not piped"))?;
+    io::copy(from, &mut to)?;
+    to.flush()
+}
+
+/// `tar` on this host, reading or writing a stream.
+fn host_tar(args: &[&str], dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("tar");
+    command.args(args).arg("-C").arg(dir).env("LC_ALL", "C");
+    command
+}
+
+fn utf8(path: &Path) -> io::Result<&str> {
+    path.to_str()
+        .ok_or_else(|| io::Error::other(format!("{} is not UTF-8", path.display())))
+}
+
+impl Guest for Exec<'_> {
+    fn exec(&self, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
+        self.provider.exec(self.sandbox, spec)
+    }
+
+    fn put_file(&self, path: &Path, mode: u32, content: &mut dyn Read) -> io::Result<()> {
+        let path = utf8(path)?;
+        let mut process = self.sh(PUT_FILE, &[path, &format!("{mode:o}")])?;
+        let sent = pump(content, process.take_stdin());
+        drop(process.take_stdout());
+        let finished = finish(process, &format!("put_file {path}"));
+        finished.and(sent)
+    }
+
+    fn get_file(&self, path: &Path, out: &mut dyn Write) -> io::Result<()> {
+        let path = utf8(path)?;
+        let mut process = self.sh(r#"exec cat -- "$1""#, &[path])?;
+        drop(process.take_stdin());
+        let mut stdout = process
+            .take_stdout()
+            .ok_or_else(|| io::Error::other("the exec's stdout is not piped"))?;
+        let copied = io::copy(&mut stdout, out).map(|_| ());
+        drop(stdout);
+        let finished = finish(process, &format!("get_file {path}"));
+        finished.and(copied)
+    }
+
+    fn put_tree(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let to = utf8(to)?;
+        let mut tar = host_tar(&["-c", "-f", "-"], from)
+            .arg(".")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let mut process = match self.sh(PUT_TREE, &[to]) {
+            Ok(process) => process,
+            Err(error) => {
+                let _ = tar.kill();
+                let _ = tar.wait();
+                return Err(error);
+            }
+        };
+        let mut stream = tar.stdout.take().expect("piped");
+        let sent = pump(&mut stream, process.take_stdin());
+        drop(stream);
+        drop(process.take_stdout());
+        let finished = finish(process, &format!("put_tree {to}"));
+        let packed = tar.wait_with_output()?;
+        if !packed.status.success() {
+            return Err(io::Error::other(format!(
+                "tar of {} failed: {}",
+                from.display(),
+                String::from_utf8_lossy(&packed.stderr).trim()
+            )));
+        }
+        finished.and(sent)
+    }
+
+    fn get_tree(&self, from: &Path, to: &Path) -> io::Result<()> {
+        if to.symlink_metadata().is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} already exists", to.display()),
+            ));
+        }
+        let from = utf8(from)?;
+        let mut process = self.sh(GET_TREE, &[from])?;
+        drop(process.take_stdin());
+        let mut stdout = process
+            .take_stdout()
+            .ok_or_else(|| io::Error::other("the exec's stdout is not piped"))?;
+        fs::create_dir_all(to)?;
+        let unpacked = host_tar(&["-x", "-f", "-"], to)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut tar| {
+                let mut sink = tar.stdin.take().expect("piped");
+                let copied = io::copy(&mut stdout, &mut sink).map(|_| ());
+                drop(sink);
+                let out = tar.wait_with_output()?;
+                copied?;
+                match out.status.success() {
+                    true => Ok(()),
+                    false => Err(io::Error::other(format!(
+                        "unpacking {from} failed: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ))),
+                }
+            });
+        drop(stdout);
+        let finished = finish(process, &format!("get_tree {from}"));
+        let done = finished.and(unpacked);
+        if done.is_err() {
+            let _ = fs::remove_dir_all(to);
+        }
+        done
     }
 }
 
@@ -270,7 +506,7 @@ fn snapshot_host(dir: &Path, env: &[(OsString, OsString)], message: &str) -> Res
 
 /// Run git in the actor in `cwd` and return stdout.
 fn guest(
-    endpoint: &Endpoint,
+    endpoint: &dyn Guest,
     cwd: &Path,
     args: &[&str],
     env: &[(&str, String)],
@@ -328,14 +564,14 @@ fn path_str(path: &Path) -> Result<&str, Error> {
 /// Recreate the host `worktree` at `guest_dir` in the actor, which must not
 /// hold a repository yet. The staging repository is a new directory under
 /// the system's temporary directory; see [`push_staged`] to choose it.
-pub fn push(endpoint: &Endpoint, worktree: &Path, guest_dir: &Path) -> Result<Pushed, Error> {
+pub fn push(endpoint: &dyn Guest, worktree: &Path, guest_dir: &Path) -> Result<Pushed, Error> {
     push_staged(endpoint, worktree, guest_dir, None)
 }
 
 /// [`push`], staging in `stage` (replaced if it exists), so that whoever
 /// recovers from a crash knows what to delete.
 pub fn push_staged(
-    endpoint: &Endpoint,
+    endpoint: &dyn Guest,
     worktree: &Path,
     guest_dir: &Path,
     stage: Option<&Path>,
@@ -458,7 +694,7 @@ pub fn reopen_staged(worktree: &Path, guest_dir: &Path, stage: &Path) -> Result<
 /// whose `HEAD` must still be the commit [`push`] sent and whose files
 /// must still be exactly what it sent. The harness's commits move the
 /// host branch; its uncommitted changes land in the working tree.
-pub fn pull(endpoint: &Endpoint, pushed: &Pushed, worktree: &Path) -> Result<Pulled, Error> {
+pub fn pull(endpoint: &dyn Guest, pushed: &Pushed, worktree: &Path) -> Result<Pulled, Error> {
     let dir = &pushed.guest;
     let meta = dir.join(".git/branchyard");
     let index = path_str(&meta.join("result.index"))?.to_owned();
@@ -718,15 +954,30 @@ exit 0"#;
 /// Make a resumed or branched actor ready for [`push`] again: its old
 /// worktree repository and the files git sees in it are removed (ignored
 /// files stay), and its home is removed. The actor needs `sh` and `git`.
-pub fn clear_for_push(endpoint: &Endpoint, workdir: &Path, home: &Path) -> Result<(), Error> {
+pub fn clear_for_push(endpoint: &dyn Guest, workdir: &Path, home: &Path) -> Result<(), Error> {
+    clear(endpoint, CLEAR, workdir, path_str(home)?)
+}
+
+/// Make a machine that may be reused, though its sandbox is new (a
+/// recipe's static machine), ready for [`push`]: only a worktree
+/// repository an earlier push made (it has `.git/branchyard`) is cleared
+/// as [`clear_for_push`] clears it; any other repository there is left,
+/// and the push then refuses it. The home is left: what is sent is
+/// written over it.
+pub fn clear_previous_push(endpoint: &dyn Guest, workdir: &Path) -> Result<(), Error> {
+    let script = format!("[ -d \"$1/.git/branchyard\" ] || exit 0\n{CLEAR}");
+    clear(endpoint, &script, workdir, "")
+}
+
+fn clear(endpoint: &dyn Guest, script: &str, workdir: &Path, home: &str) -> Result<(), Error> {
     let spec = ExecSpec {
         argv: vec![
             "sh".into(),
             "-c".into(),
-            CLEAR.into(),
+            script.into(),
             "sh".into(),
             path_str(workdir)?.to_owned(),
-            path_str(home)?.to_owned(),
+            home.to_owned(),
         ],
         cwd: PathBuf::from("/"),
         env: BTreeMap::from([("LC_ALL".into(), "C".into())]),
@@ -753,7 +1004,7 @@ pub fn clear_for_push(endpoint: &Endpoint, workdir: &Path, home: &Path) -> Resul
 }
 
 /// Copy the host directory `from` to `to` in the actor, if it exists.
-pub fn push_tree(endpoint: &Endpoint, from: &Path, to: &Path) -> Result<(), Error> {
+pub fn push_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Error> {
     if !from.is_dir() {
         return Ok(());
     }
@@ -763,7 +1014,7 @@ pub fn push_tree(endpoint: &Endpoint, from: &Path, to: &Path) -> Result<(), Erro
 /// Replace the host directory `to` with the actor's `from`, if the actor
 /// has it. The new tree is received beside `to` and swapped in, so a failed
 /// transfer leaves `to` as it was.
-pub fn pull_tree(endpoint: &Endpoint, from: &Path, to: &Path) -> Result<(), Error> {
+pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Error> {
     let name = to
         .file_name()
         .and_then(|n| n.to_str())

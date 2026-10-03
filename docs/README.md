@@ -4,6 +4,9 @@
 |---|---|
 | [Setup](setup.md) | How do I set Branchyard up by interview, in a terminal wizard or through my coding harness, and what do `branchyard.toml` and `by init`'s protocol look like? |
 | [Workspace lifecycle](workspace.md) | How does each new branch's worktree get its `.env`, its install and its own port before the first turn, what cleans up after it, and why does a repository's script never run until I trust it? |
+| [Prepared environments](environments.md) | How does setup run once per lockfile and every new branch start from its result, cloned, linked or branched from a sandbox snapshot, with the last good build when one fails, and how do `by env` and `.worktreeinclude` work? |
+| [Roadmap](roadmap.md) | What comes next, in which order, and what each piece is learned from? |
+| [Connectors](connectors.md) | How does a branch use GitHub, Slack or an internal API through a skill, an SDK and one gateway, without holding a credential? |
 | [Architecture](design.md) | What does the SDK own, where do harnesses run, and how do topology, budgets, storage, recovery, and merging work? |
 | [Harness integration](harness-integration.md) | How do we control sixteen harnesses through ACP and native interfaces? |
 | [Implementation plan](implementation-plan.md) | What do we build next, in what order, and what proves each milestone works? |
@@ -13,11 +16,17 @@
 | [Sandbox providers](providers.md) | What is the provider contract, what does the local provider guarantee, and how do I run harnesses in Microsandbox microVMs or Agent Substrate actors? |
 | [Sandbox snapshots](sandbox-snapshots.md) | How does a branch keep its sandbox paused between turns, take a provider snapshot with each checkpoint, and fork, rewind, delegate and fan from it, with git and setup as the fallback? |
 | [Agent Substrate](substrate.md) | How does Branchyard run harnesses in Agent Substrate actors: the bridge and its protocol, per-attempt credentials, git transfer, and what is still unqualified? |
+| [Fleet: routing, judging and failover](fleet.md) | How does `by run` pick a harness, model and effort for each kind of task and learn from outcomes, how does `by judge` score a fan's attempts and propose one, and when does a failed harness fail over to the next? |
+| [Repository knowledge](knowledge.md) | How does Branchyard propose rules from how branches went, how do I review and adopt them, and how are adopted ones given to each matching harness within a budget and traced? |
+| [Plans and goals](plans-and-goals.md) | How does a branch plan read-only and wait for my approval, edits or rejection (or its parent's), and how does a goal get verified by a judge, with follow-up turns until it is met? |
 | [Checkpoints, rewind, try and compare](checkpoints.md) | How do I fork or rewind a branch to any turn, try a branch in my own checkout and take it back out exactly, and compare attempts and pick one? |
 | [Durable execution](durability.md) | What survives a crash, how leases, journaled steps, cancellation and recovery work, what is never replayed, and how the store maps onto PostgreSQL? |
-| [Pull requests](pull-requests.md) | How do I start a branch from a GitHub issue, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |
+| [Pull requests](pull-requests.md) | How do I start a branch from a GitHub, Linear, Jira or GitLab issue or a pull request's head, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |
+| [Usage and adopting sessions](usage.md) | How much of each Claude Code and Codex login's 5-hour and weekly limits is used, how do `by run` and the router avoid a login near its limit, and how do I turn a session already on this machine into a branch? |
 | [Surfaces](surfaces.md) | Which operations and options work in the SDK, `by`, `by --remote`, the HTTP API, the Rust client and delegation, and which are refused where? |
+| [Triggers and schedules](triggers.md) | How does a task start on a cron schedule, at an interval, or from a signed GitHub, Slack, Linear or generic webhook, with conditions, a precheck, a test run and a pause after repeated failures, and why does nothing fire twice? |
 | [Server and remote mode](server.md) | How do I run `by serve`, call its HTTP API, and drive it with `by --remote`? What is durable, and what is not isolated? |
+| [Web companion](companion.md) | How do I watch and steer branches from a phone with `by serve --app`, pair it with a link and a QR code, get push notifications, and why is it safe? |
 | [Distribution](distribution.md) | How do I install the Branchyard skill for Claude Code or Codex, or build reproducible plugin, skill and SDK archives? |
 | [Deploying `by serve`](deploy.md) | How do I run the server in a container or behind PostgreSQL with compose, and check a host is ready to? |
 | [Driver qualification](qualification/README.md) | Which driver profiles passed live protocol qualification, and what did it find? |

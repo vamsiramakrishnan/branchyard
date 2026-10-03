@@ -283,6 +283,18 @@ pub fn workspace_line(report: &branchyard::WorkspaceReport, style: Style) -> Str
             )
         }
     };
+    if let Some(pool) = &report.pool {
+        let reason = pool.reason.as_deref().unwrap_or("no ready slot");
+        match &pool.slot {
+            Some(slot) => {
+                line.push_str(&format!("; worktree from warm pool slot {slot}"));
+                if let Some(how) = &pool.reason {
+                    line.push_str(&format!(" ({how})"));
+                }
+            }
+            None => line.push_str(&format!("; no warm pool slot ({reason})")),
+        }
+    }
     let tone = match report.ok {
         true => Tone::Dim,
         false => Tone::Red,
@@ -349,10 +361,25 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             env,
             secrets,
             unused_secrets,
+            connectors,
+            knowledge,
         } => {
             let mut parts = Vec::new();
             if let Some(auth) = auth {
                 parts.push(format!("auth {auth}"));
+            }
+            if !knowledge.is_empty() {
+                parts.push(format!(
+                    "knowledge {}",
+                    knowledge
+                        .iter()
+                        .map(|id| format!("#{id}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !connectors.is_empty() {
+                parts.push(format!("connectors {}", connectors.join(", ")));
             }
             if !files.is_empty() {
                 parts.push(format!("wrote {}", files.join(", ")));
@@ -403,6 +430,41 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
         ),
         Activity::Resumed => style.paint(Tone::Cyan, "resumed: activity seen again"),
         Activity::Workspace(report) => workspace_line(report, style),
+        Activity::Adopted(adoption) => style.paint(
+            Tone::Cyan,
+            &format!(
+                "adopted {} session {} at {} ({}){}",
+                adoption.harness,
+                adoption.session,
+                short_commit(&adoption.base),
+                adoption.how,
+                match adoption.diff_files.len() {
+                    0 => String::new(),
+                    n => format!(
+                        ", {n} changed file{} applied",
+                        if n == 1 { "" } else { "s" }
+                    ),
+                }
+            ),
+        ),
+        Activity::ConnectorCall(call) => style.paint(
+            match call.decision.as_str() {
+                "allowed" => Tone::Cyan,
+                _ => Tone::Yellow,
+            },
+            &format!("connector: {}", call.describe()),
+        ),
+        Activity::Egress(egress) => style.paint(
+            match egress.as_ref() {
+                branchyard::EgressActivity::Decision { allowed: true, .. }
+                | branchyard::EgressActivity::Applied {
+                    enforcement: branchyard::EgressEnforcement::Enforced,
+                    ..
+                } => Tone::Cyan,
+                _ => Tone::Yellow,
+            },
+            &egress.describe(),
+        ),
         Activity::Sandbox(event) => style.paint(
             match event.as_ref() {
                 branchyard::SandboxEvent::Started {
@@ -414,6 +476,42 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 _ => Tone::Cyan,
             },
             &event.describe(),
+        ),
+        Activity::Fleet(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::FleetActivity::FailedOver { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &activity.describe(),
+        ),
+        Activity::Knowledge(activity) => style.paint(Tone::Cyan, &activity.describe()),
+        Activity::Plan(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::PlanActivity::Proposed(_)
+                | branchyard::PlanActivity::Rejected { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &activity.describe(),
+        ),
+        Activity::Model(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::models::ModelActivity::Call(call) if call.decision == "allowed" => {
+                    Tone::Cyan
+                }
+                branchyard::models::ModelActivity::Gateway { .. } => Tone::Cyan,
+                _ => Tone::Yellow,
+            },
+            &activity.describe(),
+        ),
+        Activity::Access(activity) => style.paint(Tone::Yellow, &activity.describe()),
+        Activity::Goal(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::GoalActivity::Verdict { met: true, .. } => Tone::Green,
+                branchyard::GoalActivity::Verdict { met: false, .. }
+                | branchyard::GoalActivity::Exhausted { .. } => Tone::Yellow,
+                _ => Tone::Cyan,
+            },
+            &activity.describe(),
         ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
@@ -725,6 +823,7 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
         BranchStatus::Merged { target, .. } => (format!("merged into {target}"), Tone::Blue),
         BranchStatus::Waiting => ("waiting".into(), Tone::Dim),
         BranchStatus::Blocked { reason } => (format!("blocked: {reason}"), Tone::Red),
+        BranchStatus::AwaitingPlanApproval => ("awaiting plan approval".into(), Tone::Yellow),
     }
 }
 
@@ -973,6 +1072,11 @@ pub fn next_commands(info: &BranchInfo) -> Vec<String> {
             format!("by rm {name}"),
         ],
         BranchStatus::Running => vec![format!("by log {name}")],
+        BranchStatus::AwaitingPlanApproval => vec![
+            format!("by plan show {name}"),
+            format!("by plan approve {name} [--edit]"),
+            format!("by plan reject {name} --reason \"...\" [--replan]"),
+        ],
         BranchStatus::Merged { .. } => vec![format!("by rm {name}")],
         BranchStatus::Waiting | BranchStatus::Blocked { .. } => {
             let parent = info.parent.as_deref().map(shell_quote).unwrap_or_default();

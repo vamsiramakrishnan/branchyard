@@ -9,9 +9,14 @@
 //! - The process's environment is exactly [`ExecSpec::env`]: nothing is
 //!   inherited from this process.
 //!
+//! - With [`LocalProvider::spawn_confined`] (and `exec_confined`), on Linux
+//!   where unprivileged user and network namespaces are allowed, the
+//!   process and its descendants have no network but one listener the
+//!   caller serves ([`crate::egress`]).
+//!
 //! What it does not guarantee:
 //!
-//! - Isolation of any kind. A "sandbox" is a record; the process sees the
+//! - Isolation of any kind, beyond that confinement. A "sandbox" is a record; the process sees the
 //!   host filesystem, network and every file this user can read. Mounts are
 //!   identity only (host path equals sandbox path) and must be writable,
 //!   since nothing could enforce read-only access. An image or resource
@@ -30,8 +35,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use std::net::TcpListener;
+
 use branchyard_sandbox::{
-    Capabilities, ExecSpec, ExitStatus, Mount, Process, ProviderError, SandboxInfo,
+    Capabilities, ExecSpec, ExitStatus, Mount, Operation, Process, ProviderError, SandboxInfo,
     SandboxProvider, SandboxSpec, SandboxState,
 };
 
@@ -72,6 +79,45 @@ impl LocalProvider {
     /// Start `spec` directly, outside any named sandbox: in its own process
     /// group, without a shell, with exactly `spec.env`.
     pub fn spawn(spec: &ExecSpec) -> io::Result<LocalProcess> {
+        let mut command = LocalProvider::command(spec)?;
+        LocalProcess::new(command.spawn()?)
+    }
+
+    /// Like [`LocalProvider::spawn`], but confined to its own network
+    /// namespace whose only way out is the returned listener, bound to
+    /// `127.0.0.1:port` inside it: Linux only, where unprivileged user and
+    /// network namespaces are allowed ([`LocalProvider::confinement`]).
+    pub fn spawn_confined(spec: &ExecSpec, port: u16) -> io::Result<(LocalProcess, TcpListener)> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut command = LocalProvider::command(spec)?;
+            let (child, listener) = crate::netns::spawn(&mut command, port)?;
+            Ok((LocalProcess::new(child)?, listener))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (spec, port);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                LocalProvider::confinement().unwrap_err(),
+            ))
+        }
+    }
+
+    /// Whether [`LocalProvider::spawn_confined`] works on this host, and
+    /// why not; detected once per process.
+    pub fn confinement() -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::netns::supported()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("confining a local process's network needs Linux network namespaces".into())
+        }
+    }
+
+    fn command(spec: &ExecSpec) -> io::Result<Command> {
         let Some((program, args)) = spec.argv.split_first() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -89,28 +135,7 @@ impl LocalProvider {
             .stderr(Stdio::piped())
             // Its own process group, so teardown reaches every descendant.
             .process_group(0);
-        let mut child = command.spawn()?;
-        let group = Arc::new(Group {
-            pgid: child.id(),
-            done: AtomicBool::new(false),
-        });
-        Ok(LocalProcess {
-            stdin: child
-                .stdin
-                .take()
-                .map(|p| Box::new(p) as Box<dyn Write + Send>),
-            stdout: child
-                .stdout
-                .take()
-                .map(|p| Box::new(p) as Box<dyn Read + Send>),
-            stderr: child
-                .stderr
-                .take()
-                .map(|p| Box::new(p) as Box<dyn Read + Send>),
-            child,
-            group,
-            reaped: false,
-        })
+        Ok(command)
     }
 
     fn check(spec: &SandboxSpec) -> Result<(), ProviderError> {
@@ -157,6 +182,7 @@ impl SandboxProvider for LocalProvider {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             exec: true,
+            egress: LocalProvider::confinement().is_ok(),
             ..Capabilities::default()
         }
     }
@@ -197,6 +223,28 @@ impl SandboxProvider for LocalProvider {
         local.groups.retain(|group| group.strong_count() > 0);
         local.groups.push(Arc::downgrade(&process.group));
         Ok(Box::new(process))
+    }
+
+    fn exec_confined(
+        &self,
+        name: &str,
+        spec: &ExecSpec,
+        port: u16,
+    ) -> Result<(Box<dyn Process>, TcpListener), ProviderError> {
+        if LocalProvider::confinement().is_err() {
+            return Err(ProviderError::unsupported(Operation::Egress));
+        }
+        let mut sandboxes = self.lock();
+        let local = sandboxes
+            .get_mut(name)
+            .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;
+        if !local.running {
+            return Err(ProviderError::Runtime(format!("sandbox {name} is stopped")));
+        }
+        let (process, listener) = LocalProvider::spawn_confined(spec, port)?;
+        local.groups.retain(|group| group.strong_count() > 0);
+        local.groups.push(Arc::downgrade(&process.group));
+        Ok((Box::new(process), listener))
     }
 
     fn stop(&self, name: &str) -> Result<(), ProviderError> {
@@ -241,6 +289,30 @@ impl std::fmt::Debug for LocalProcess {
 }
 
 impl LocalProcess {
+    fn new(mut child: Child) -> io::Result<LocalProcess> {
+        let group = Arc::new(Group {
+            pgid: child.id(),
+            done: AtomicBool::new(false),
+        });
+        Ok(LocalProcess {
+            stdin: child
+                .stdin
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Write + Send>),
+            stdout: child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+            stderr: child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+            child,
+            group,
+            reaped: false,
+        })
+    }
+
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
@@ -311,6 +383,8 @@ impl Drop for LocalProcess {
 
 /// Command names of the live (non-zombie) members of process group `pgid`:
 /// from `/proc` on Linux, else from `ps`. Empty when neither is available.
+/// A member forked but not yet exec'd still carries its parent's name,
+/// such as `sh` for a shell's background job.
 fn group_members(pgid: u32) -> Vec<String> {
     #[cfg(target_os = "linux")]
     {

@@ -47,8 +47,11 @@
 
 pub mod apply;
 pub mod auth;
+pub mod connectors;
 pub mod edit;
 pub mod instructions;
+pub mod models;
+pub mod network;
 pub mod toml;
 
 mod antigravity;
@@ -106,6 +109,25 @@ pub struct Provisioning {
     pub effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<Telemetry>,
+    /// Connectors the harness may call through the connector gateway, and
+    /// what it may do with each (`--connector`); see `docs/connectors.md`.
+    /// Needs a private home, like secrets. A delegated child's is narrowed
+    /// to its parent's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connectors: Vec<connectors::GrantEntry>,
+    /// Which hosts the harness may reach (`--network`): `open` (unset),
+    /// `none`, or an allowlist, enforced through Branchyard's egress
+    /// proxy; see `docs/egress.md`. A connector grant adds the gateway's
+    /// host. A delegated child's is narrowed to its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<network::Network>,
+    /// Whether the harness calls its model provider through Branchyard's
+    /// model gateway (`--model-gateway`), and which models it may call
+    /// there; see `docs/model-gateway.md`. Unset: the harness calls its
+    /// provider itself. A delegated child of a branch on the gateway stays
+    /// on it, within its parent's models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<models::ModelAccess>,
 }
 
 impl Provisioning {

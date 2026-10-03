@@ -87,7 +87,8 @@ pub enum SnapshotMethod {
 }
 
 impl SnapshotMethod {
-    fn describe(self) -> &'static str {
+    /// How it reads in a log: `live branch` or `checkpoint`.
+    pub fn describe(self) -> &'static str {
         match self {
             SnapshotMethod::LiveBranch => "live branch",
             SnapshotMethod::Checkpoint => "checkpoint",
@@ -156,6 +157,17 @@ pub enum SandboxOrigin {
     Prepared {
         branch: String,
         method: SnapshotMethod,
+    },
+    /// Branched from the prepared environment of its key (`key`), or, when
+    /// that key's build failed, from the last good one (`used`, with
+    /// `reason`). See `docs/environments.md`.
+    Environment {
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        used: Option<String>,
+        method: SnapshotMethod,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 
@@ -226,6 +238,27 @@ impl SandboxEvent {
                     "sandbox: branched from the fan's prepared sandbox, set up once in {branch}'s \
                      worktree ({provider} {})",
                     method.describe()
+                ),
+                SandboxOrigin::Environment {
+                    key,
+                    used: None,
+                    method,
+                    ..
+                } => format!(
+                    "sandbox: branched from prepared environment {} ({provider} {})",
+                    &key[..key.len().min(12)],
+                    method.describe()
+                ),
+                SandboxOrigin::Environment {
+                    used: Some(used),
+                    method,
+                    reason,
+                    ..
+                } => format!(
+                    "sandbox: branched from the last good environment {} ({provider} {}): {}",
+                    &used[..used.len().min(12)],
+                    method.describe(),
+                    reason.as_deref().unwrap_or("its own build failed")
                 ),
             },
             SandboxEvent::Kept { provider, sandbox } => {
@@ -345,6 +378,8 @@ pub(crate) fn lifecycle(provider: Option<&Provider>) -> Option<Lifecycle> {
         Provider::Local => return None,
         Provider::Microsandbox(o) => (o.keep, o.snapshots, o.max_paused),
         Provider::Substrate(o) => (o.keep, o.snapshots, o.max_paused),
+        // A recipe's machine has no checkpoints to keep.
+        Provider::Recipe(o) => (o.keep, Some(0), o.max_paused),
     };
     Some(Lifecycle {
         keep: keep == SandboxKeep::Pause,
@@ -359,6 +394,7 @@ pub(crate) fn provider_name(provider: &Provider) -> &'static str {
         Provider::Local => "local",
         Provider::Microsandbox(_) => "microsandbox",
         Provider::Substrate(_) => "substrate",
+        Provider::Recipe(_) => "recipe",
     }
 }
 
@@ -373,6 +409,7 @@ pub(crate) fn provider_key(provider: &Provider) -> String {
             o.atespace(),
             o.template
         ),
+        Provider::Recipe(o) => format!("recipe:{}", o.name),
         other => provider_name(other).to_owned(),
     }
 }
@@ -429,6 +466,7 @@ pub(crate) fn open(yard: &Yard, provider: &Provider) -> Result<Arc<dyn SandboxPr
     match provider {
         Provider::Local => Err("a local harness has no sandbox".into()),
         Provider::Microsandbox(options) => crate::placement::microsandbox(yard, options),
+        Provider::Recipe(options) => Ok(crate::placement::recipe_provider(yard, options)),
         Provider::Substrate(options) => crate::placement::substrate_signed(options)
             .map(|p| Arc::new(p) as Arc<dyn SandboxProvider>),
     }
@@ -445,6 +483,7 @@ pub(crate) struct Acquired {
 /// fresh one from `spec`. `journal` is called with the sandbox's name
 /// before anything is created or resumed. A kept or seeded sandbox that
 /// cannot be used is a fallback to a fresh one, with the reason.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn acquire(
     store: &Store,
     record: &Record,
@@ -452,6 +491,7 @@ pub(crate) fn acquire(
     provider: &dyn SandboxProvider,
     key: &str,
     spec: &SandboxSpec,
+    environment: Option<&crate::environments::SandboxEnvironment>,
     journal: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<Acquired, String> {
     let mut reasons: Vec<String> = Vec::new();
@@ -523,6 +563,34 @@ pub(crate) fn acquire(
             }
             Ok(None) => {}
             Err(reason) => reasons.push(reason),
+        }
+    }
+    // The prepared environment of its key: setup already ran there.
+    if let Some(env) = environment {
+        journal(&spec.name)?;
+        let used = env.info.key.clone();
+        match env
+            .info
+            .snapshot
+            .as_ref()
+            .map(|s| branch_environment(provider, s, spec))
+        {
+            Some(Ok(method)) => {
+                return Ok(Acquired {
+                    name: spec.name.clone(),
+                    origin: SandboxOrigin::Environment {
+                        key: env.key.clone(),
+                        used: (used != env.key).then_some(used),
+                        method,
+                        reason: env.reason.clone(),
+                    },
+                })
+            }
+            Some(Err(why)) => reasons.push(format!(
+                "could not branch from prepared environment {}: {why}",
+                &used[..used.len().min(12)]
+            )),
+            None => {}
         }
     }
     journal(&spec.name)?;
@@ -623,6 +691,121 @@ fn branch_from_seed(
 
 fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
+}
+
+/// How a running sandbox is snapshotted as a prepared environment, and the
+/// name the snapshot will have. Only a live branch leaves the running
+/// sandbox undisturbed mid-turn: a provider that can only checkpoint (a
+/// Substrate actor is paused, ending its attempt) keeps no environment.
+pub(crate) fn plan_environment(
+    capabilities: &Capabilities,
+    sandbox: &str,
+    key: &str,
+) -> Result<(SnapshotMethod, String), String> {
+    match method(capabilities)? {
+        SnapshotMethod::LiveBranch => Ok((
+            SnapshotMethod::LiveBranch,
+            named(
+                &format!("by-env-{}", &key[..key.len().min(12)]),
+                &format!("{}", now_ms() % 1_000_000_000),
+                63,
+            ),
+        )),
+        SnapshotMethod::Checkpoint => Err(format!(
+            "provider can't snapshot a running sandbox without pausing it (it can only \
+             checkpoint {sandbox}): prepared sandbox environments need live branch"
+        )),
+    }
+}
+
+/// Snapshot the running `sandbox` into the paused `planned`, the way
+/// [`plan_environment`] chose; the handle and its details.
+pub(crate) fn take_environment(
+    provider: &dyn SandboxProvider,
+    sandbox: &str,
+    planned: &str,
+) -> Result<(String, serde_json::Value), String> {
+    let capabilities = provider.capabilities();
+    let child = SandboxSpec::new(planned).persist();
+    provider
+        .branch_live(sandbox, std::slice::from_ref(&child))
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Err(ProviderError::Runtime("no child was made".into())))
+        .and_then(|_| provider.pause(planned))
+        .map(|()| {
+            let guarantee = capabilities.full_snapshot().unwrap_or(SnapshotGuarantee {
+                scope: SnapshotScope::Full,
+                consistency: Consistency::Crash,
+                locality: Locality::SameHost,
+            });
+            let detail = Detail {
+                method: Some(SnapshotMethod::LiveBranch),
+                sandbox: Some(sandbox.to_owned()),
+                ..Detail::of(&guarantee)
+            };
+            (
+                planned.to_owned(),
+                serde_json::to_value(detail).unwrap_or_default(),
+            )
+        })
+        .map_err(|e| {
+            let _ = provider.destroy(planned);
+            e.to_string()
+        })
+}
+
+/// Branch `spec` from an environment's snapshot, running.
+fn branch_environment(
+    provider: &dyn SandboxProvider,
+    snapshot: &crate::environments::EnvironmentSnapshot,
+    spec: &SandboxSpec,
+) -> Result<SnapshotMethod, String> {
+    let detail: Detail = serde_json::from_value(snapshot.detail.clone()).unwrap_or_default();
+    let made: Result<SandboxInfo, ProviderError> = match snapshot.method {
+        SnapshotMethod::LiveBranch => provider
+            .branch_live(&snapshot.handle, std::slice::from_ref(spec))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Err(ProviderError::Runtime("no child was made".into()))),
+        SnapshotMethod::Checkpoint => {
+            let checkpoint = ProviderCheckpoint {
+                sandbox: detail.sandbox.clone().unwrap_or_default(),
+                reference: snapshot.handle.clone(),
+                guarantee: detail.guarantee(),
+            };
+            provider
+                .branch(&checkpoint, spec)
+                .and_then(|info| match info.state {
+                    SandboxState::Running => Ok(info),
+                    _ => provider.resume(&spec.name),
+                })
+        }
+    };
+    match made {
+        Ok(_) => Ok(snapshot.method),
+        Err(error) => {
+            let _ = provider.destroy(&spec.name);
+            Err(error.to_string())
+        }
+    }
+}
+
+/// Release an environment's snapshot.
+pub(crate) fn release_environment(
+    provider: &dyn SandboxProvider,
+    snapshot: &crate::environments::EnvironmentSnapshot,
+) -> Result<(), String> {
+    let detail: Detail = serde_json::from_value(snapshot.detail.clone()).unwrap_or_default();
+    let released = match snapshot.method {
+        SnapshotMethod::Checkpoint => provider.release_checkpoint(&ProviderCheckpoint {
+            sandbox: detail.sandbox.clone().unwrap_or_default(),
+            reference: snapshot.handle.clone(),
+            guarantee: detail.guarantee(),
+        }),
+        SnapshotMethod::LiveBranch => provider.destroy(&snapshot.handle),
+    };
+    released.map_err(|e| e.to_string())
 }
 
 /// End a turn's sandbox `name`: park it (pause and record it for the next
@@ -1046,6 +1229,34 @@ pub(crate) fn inherited(
 ) -> Option<crate::workspace::Inherit> {
     let from = match origin {
         SandboxOrigin::Branched { branch, .. } | SandboxOrigin::Prepared { branch, .. } => branch,
+        SandboxOrigin::Environment {
+            key,
+            used,
+            method,
+            reason,
+        } => {
+            let used_key = used.as_deref().unwrap_or(key);
+            let info = crate::environments::good(&yard.root, used_key)?;
+            let mut environment = crate::environments::new_use(
+                key,
+                match used {
+                    Some(_) => crate::environments::EnvironmentOrigin::LastGood,
+                    None => crate::environments::EnvironmentOrigin::Restored,
+                },
+            );
+            environment.used = used.clone();
+            environment.reason = reason.clone();
+            environment.built_by = Some(info.built_by.clone());
+            environment.method = serde_json::to_value(method)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned));
+            return Some(crate::workspace::Inherit {
+                from: format!("environment {}", &used_key[..used_key.len().min(12)]),
+                worktree: mounted.then(|| crate::environments::tree(&yard.root, used_key)),
+                produced: info.produced,
+                environment: Some(Box::new(environment)),
+            });
+        }
         _ => return None,
     };
     if *from == record.info.name {
@@ -1058,6 +1269,7 @@ pub(crate) fn inherited(
         from: from.clone(),
         worktree: mounted.then(|| source.info.worktree.clone()),
         produced: theirs.produced.clone(),
+        environment: None,
     })
 }
 

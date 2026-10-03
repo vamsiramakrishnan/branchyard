@@ -136,6 +136,9 @@ impl Served {
             "--quiet",
             "--shutdown-grace",
             "5",
+            // Never this machine's real harnesses or usage files; the
+            // inventory is tested in tests/harnesses.rs with fakes.
+            "--no-inventory",
         ]);
         serve.arg("--data-dir").arg(&data);
         for (name, root) in repos {
@@ -227,8 +230,16 @@ fn text(bytes: &[u8]) -> String {
 /// paths, commit IDs and times.
 fn normalize(text: &str, root: &Path) -> String {
     let text = text.replace(&root.display().to_string(), "<root>");
+    // A table's AGE column is relative to when each side ran, which can
+    // differ by seconds under load: compare the rest of the row.
+    let aged = text.lines().next().is_some_and(|h| h.ends_with(" AGE"));
     let mut out = String::new();
     for line in text.lines() {
+        let line = if aged {
+            mask_age(line)
+        } else {
+            line.to_owned()
+        };
         let line = match line.get(..24) {
             Some(stamp) if stamp.as_bytes()[10] == b'T' && stamp.ends_with('Z') => {
                 format!("<time>{}", &line[24..])
@@ -239,6 +250,22 @@ fn normalize(text: &str, root: &Path) -> String {
         out.push('\n');
     }
     out
+}
+
+/// A row's last field, when it is an age such as `now` or `12s`, becomes
+/// `<age>`.
+fn mask_age(line: &str) -> String {
+    let Some((rest, age)) = line.rsplit_once(' ') else {
+        return line.to_owned();
+    };
+    let unit = age.strip_suffix(['s', 'm', 'h', 'd']);
+    let is_age = age == "now"
+        || unit.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if is_age {
+        format!("{rest} <age>")
+    } else {
+        line.to_owned()
+    }
 }
 
 /// Runs of 7 or more hex digits containing a digit become `<sha>`.
@@ -393,7 +420,7 @@ fn remote_commands_print_what_local_ones_do() {
         &["diff", "hello"],
         &["log", "hello"],
         &["log", "p"],
-        &["harnesses"],
+        &["harnesses", "--profiles"],
     ] {
         same(args);
     }
@@ -401,7 +428,7 @@ fn remote_commands_print_what_local_ones_do() {
         &["ls", "--json"][..],
         &["show", "hello", "--json"],
         &["log", "hello", "--json"],
-        &["harnesses", "--json"],
+        &["harnesses", "--profiles", "--json"],
     ] {
         same_json(args);
     }
@@ -1538,4 +1565,248 @@ fn compare_works_remotely_and_local_only_commands_say_so() {
             text(&refused.stderr)
         );
     }
+}
+
+#[test]
+fn work_requiring_a_label_no_worker_carries_says_why_in_by_show() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &[
+            "--allow-client-commands",
+            "--label",
+            "linux",
+            "--unclaimable-after",
+            "0",
+        ],
+    );
+    let args = with_agent(&[
+        "run",
+        "WRITE x.txt=1",
+        "--name",
+        "on-gpu",
+        "--require-label",
+        "gpu",
+        "--yes",
+    ]);
+    let running = command(BY, &dir.0)
+        .arg("--remote")
+        .arg(&server.url)
+        .arg("--token-file")
+        .arg(&server.token_file)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(dir.0.join("run.err")).unwrap())
+        .spawn()
+        .unwrap();
+    let mut running = Killed(running);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let shown = loop {
+        let out = server.by(&dir.0, &["show", "on-gpu"]);
+        let shown = text(&out.stdout);
+        if shown.contains("waiting") {
+            break shown;
+        }
+        assert!(Instant::now() < deadline, "never said why: {shown}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(shown.contains("not created yet"), "{shown}");
+    assert!(shown.contains("requires  gpu"), "{shown}");
+    assert!(shown.contains("no live worker carries"), "{shown}");
+    let json: Value =
+        serde_json::from_slice(&server.by(&dir.0, &["show", "on-gpu", "--json"]).stdout).unwrap();
+    assert_eq!(json["operation"]["requires"][0], "gpu");
+    assert_eq!(json["operation"]["state"], "queued");
+    // The waiting `by run` says so on its standard error.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !fs::read_to_string(dir.0.join("run.err"))
+        .unwrap_or_default()
+        .contains("is still queued: no live worker carries")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "{}",
+            fs::read_to_string(dir.0.join("run.err")).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(running.0.try_wait().unwrap().is_none());
+    drop(running);
+    // Locally there are no workers to choose among.
+    let local = command(BY, &there)
+        .args(with_agent(&["run", "x", "--require-label", "gpu"]))
+        .output()
+        .unwrap();
+    assert_eq!(local.status.code(), Some(1));
+    assert!(
+        text(&local.stderr).contains("use it with --remote"),
+        "{}",
+        text(&local.stderr)
+    );
+}
+
+/// A child killed when dropped.
+struct Killed(Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `--priority` reaches the server's queue, and `by stats` summarizes the
+/// branches locally (with the turns' outcomes from the event store) and
+/// remotely (with the server's queue by priority); locally `--priority` is
+/// refused, since there is no queue.
+#[test]
+fn priority_reaches_the_queue_and_by_stats_summarizes_it() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &["--allow-client-commands", "--label", "linux"],
+    );
+    let done = server.by(
+        &dir.0,
+        &with_agent(&[
+            "run",
+            "WRITE a.txt=1",
+            "--name",
+            "done",
+            "--priority",
+            "-3",
+            "--yes",
+        ])
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>(),
+    );
+    assert!(done.status.success(), "{}", text(&done.stderr));
+    // Requires a label no worker carries: it stays queued, at priority 7.
+    let args = with_agent(&[
+        "run",
+        "WRITE x.txt=1",
+        "--name",
+        "queued",
+        "--require-label",
+        "gpu",
+        "--priority",
+        "7",
+        "--yes",
+    ]);
+    let running = command(BY, &dir.0)
+        .arg("--remote")
+        .arg(&server.url)
+        .arg("--token-file")
+        .arg(&server.token_file)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let running = Killed(running);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let stats = loop {
+        let out = server.by(&dir.0, &["stats", "--json"]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let stats: Value = serde_json::from_slice(&out.stdout).unwrap();
+        if stats["queue"]["queued"]["7"] == 1 {
+            break stats;
+        }
+        assert!(Instant::now() < deadline, "never queued: {stats}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(stats["branches"]["ready"], 1, "{stats}");
+    assert_eq!(stats["turns"]["gemini-cli"], 1, "{stats}");
+    let shown = text(&server.by(&dir.0, &["stats"]).stdout);
+    assert!(
+        shown.contains("queue     1 queued (priority 7: 1)"),
+        "{shown}"
+    );
+    drop(running);
+
+    // Locally: no queue, so no priority; the stats read the event store.
+    let refused = local(&there, &["run", "x", "--priority", "2"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(text(&refused.stderr).contains("use it with --remote"));
+    let out = local(&there, &["run", "WRITE b.txt=1", "--name", "here", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    // The server's SQLite state is the repository's own, so the branch
+    // it ran counts here too.
+    let stats: Value = serde_json::from_slice(&local(&there, &["stats", "--json"]).stdout).unwrap();
+    assert_eq!(stats["branches"]["ready"], 2, "{stats}");
+    assert_eq!(stats["outcomes"]["completed"], 2, "{stats}");
+    assert_eq!(stats["turn_seconds"]["count"], 2, "{stats}");
+    assert!(stats.get("queue").is_none(), "{stats}");
+    let bad = local(&there, &["run", "x", "--priority", "11"]);
+    assert_eq!(bad.status.code(), Some(2), "{}", text(&bad.stderr));
+}
+
+#[test]
+fn plan_and_knowledge_commands_work_against_a_server() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let by = |args: &[&str]| -> Output {
+        let args = with_agent(args);
+        server.by(&dir.0, &args.iter().map(String::as_str).collect::<Vec<_>>())
+    };
+    let ok_json = |args: &[&str]| -> Value {
+        let out = by(args);
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    // A planned run waits on the server; its plan is shown and approved
+    // with an edit made here, in this machine's editor.
+    let out = by(&[
+        "run",
+        "Mark it PERMISSION WRITE marker.txt=x",
+        "--name",
+        "planned",
+        "--plan",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let plan = ok_json(&["plan", "show", "planned", "--json"]);
+    assert_eq!(plan["phase"], "awaiting", "{plan}");
+    let editor = "sh -c 'printf \"WRITE edited.txt=1\" > \"$0\"'";
+    let approved = ok_json(&[
+        "plan", "approve", "planned", "--edit", "--editor", editor, "--yes", "--json",
+    ]);
+    assert_eq!(approved["status"]["state"], "ready", "{approved}");
+    let show = ok_json(&["show", "planned", "--json"]);
+    assert_eq!(show["plan"]["phase"], "approved", "{show}");
+
+    // Knowledge: added and adopted as the server's caller, then given to
+    // the server's next task.
+    let added = ok_json(&["knowledge", "add", "Keep commits small.", "--json"]);
+    assert_eq!(added["status"], "adopted", "{added}");
+    let proposed = ok_json(&[
+        "knowledge",
+        "add",
+        "Notes are dated.",
+        "--propose",
+        "--json",
+    ]);
+    let id = proposed["id"].as_u64().unwrap().to_string();
+    let list = ok_json(&["knowledge", "list", "--status", "proposed", "--json"]);
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    ok_json(&["knowledge", "adopt", &id, "--json"]);
+    let markdown = text(&by(&["knowledge", "export"]).stdout);
+    assert!(markdown.contains("Notes are dated."), "{markdown}");
+    let out = by(&["run", "SHOW_INSTRUCTIONS", "--name", "told", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let log = text(&by(&["log", "told"]).stdout);
+    assert!(
+        log.contains(&format!("knowledge #{}, #{id}", added["id"])),
+        "{log}"
+    );
+    // A harness distiller runs only where its harness does.
+    let refused = by(&["knowledge", "distill", "told", "--harness", "gemini-cli"]);
+    assert!(!refused.status.success());
 }

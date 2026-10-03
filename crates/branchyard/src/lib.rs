@@ -94,25 +94,41 @@
 //! surfaces, the envelope and the authority model, which in local mode
 //! stops honest mistakes, not a hostile harness.
 
+mod access;
+mod adopt;
 mod broker;
 mod bundle;
 mod checkpoint;
 mod compare;
 #[cfg(test)]
 mod conformance;
+pub mod connectors;
 mod delegation;
+mod egress;
 mod engine;
+mod environments;
+mod fleet;
 mod git;
+mod goal;
 mod graph;
 mod harness;
 mod inbox;
+pub mod inventory;
+mod json_schema;
+mod judge;
+mod knowledge;
 mod lock;
+mod map;
+mod map_input;
+pub mod models;
 mod names;
 mod ops;
 #[cfg(feature = "postgres")]
 mod pg;
 mod placement;
+mod plan;
 mod policy;
+mod pool;
 mod proc;
 mod projection;
 mod provisioning;
@@ -139,8 +155,13 @@ pub use git::current_branch;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
+pub use access::{AccessActivity, Ceiling, DelegationScope, NetworkScope};
+pub use adopt::{AdoptSpec, Adoption};
 pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
+};
+pub use branchyard_provision::network::{
+    narrow as network_narrow, Enforce as NetworkEnforce, HostRule as NetworkRule, Network,
 };
 pub use branchyard_provision::{
     Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport, SecretFrom,
@@ -157,15 +178,69 @@ pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
     Sent, Spawn, Spawned,
 };
+pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
+pub use environments::{
+    EnvironmentBuild, EnvironmentInfo, EnvironmentInput, EnvironmentOrigin, EnvironmentSnapshot,
+    EnvironmentState, EnvironmentUse, Pruned as EnvironmentsPruned,
+    DEFAULT_INPUTS as ENVIRONMENT_DEFAULT_INPUTS, DEFAULT_KEEP as ENVIRONMENT_DEFAULT_KEEP,
+    DEFAULT_MAX_AGE as ENVIRONMENT_DEFAULT_MAX_AGE,
+};
+pub use fleet::{
+    classify, credit, fresh_seed as fleet_seed, harness_fault, recorded_route,
+    stats as fleet_stats, BranchOutcome, CandidateStats, Classification, Excluded, Fleet,
+    FleetActivity, FleetCandidate, FleetEntry, JudgeMark, JudgeSpec, OutcomeRecord, Route,
+    RouteDecision, RouteOptions, RoutePick, Routed, TaskKind, DEFAULT_EXPLORATION,
+};
+pub use goal::{
+    follow_up_prompt as goal_follow_up_prompt, from_events as goal_from_events,
+    judge_prompt as goal_judge_prompt, parse_goal_verdict, Goal, GoalActivity, GoalCheck, GoalInfo,
+    GoalVerdict, DEFAULT_ROUNDS as GOAL_DEFAULT_ROUNDS,
+};
 pub use graph::{
     Access, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphEdit, GraphNode,
     GraphProposal, SpawnSpec, MAX_EDITS,
 };
 pub use inbox::{DeliveryHook, SteerDelivery};
+pub use json_schema::JsonSchema;
+pub use judge::{
+    deterministic_scores, harness_judge, parse_verdict, prompt as judge_prompt, HarnessJudge,
+    Judge, JudgeOptions, JudgedBy, Judgement, Scored, Verdict,
+};
+pub use knowledge::{
+    export as export_knowledge, parse_distilled, DistillTrigger, Distilled, KnowledgeActivity,
+    KnowledgeEdit, KnowledgeEntry, KnowledgeScope, KnowledgeSettings, KnowledgeSource,
+    KnowledgeStatus, NewKnowledge, DEFAULT_BUDGET_TOKENS as KNOWLEDGE_DEFAULT_BUDGET_TOKENS,
+    TEXT_MAX as KNOWLEDGE_TEXT_MAX,
+};
+pub use map::{
+    check_spec as check_map_spec, default_name as map_default_name,
+    follow_up_prompt as map_follow_up_prompt, item_prompt as map_item_prompt,
+    reduce_prompt as map_reduce_prompt, rows_csv as map_rows_csv, rows_jsonl as map_rows_jsonl,
+    MapOptions, MapProgress, MapReduce, MapReport, MapRow, MapSpec, MapStatus, MapSummary,
+    ProgressFn as MapProgressFn, DEFAULT_CONCURRENCY as MAP_DEFAULT_CONCURRENCY,
+    DEFAULT_RETRIES as MAP_DEFAULT_RETRIES, MAX_CONCURRENCY as MAP_MAX_CONCURRENCY,
+};
+pub use map_input::{
+    check_template as check_map_template, item_id as map_item_id, parse_answer as parse_map_answer,
+    parse_items as parse_map_items, render as render_map_prompt, ItemFormat, MapItem,
+    TemplateContext,
+};
+pub use plan::{
+    approved_prompt, from_events as plan_from_events, parse_tasks as parse_plan_tasks,
+    planning_prompt, read_only as read_only_policy, Plan, PlanActivity, PlanInfo, PlanPhase,
+    PlanTask, READ_ONLY_TOOLS,
+};
+pub use policy::{PolicyPreset, PresetRules, EDIT_TOOLS, SHELL_TOOLS, WEB_TOOLS};
+pub use pool::{
+    recipe as pool_recipe, PoolDrained, PoolFill, PoolKeeper, PoolSlot, PoolSlotState, PoolSpec,
+    PoolStatus, PoolUse, DEFAULT_MAX_AGE as POOL_DEFAULT_MAX_AGE,
+    DEFAULT_MAX_BEHIND as POOL_DEFAULT_MAX_BEHIND, KEEP_EVERY as POOL_KEEP_EVERY,
+    MAX_SIZE as POOL_MAX_SIZE,
+};
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use pull_request::{
     slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
-    PullRequestRef, Pushed,
+    PullRequestRef, Pushed, ResolvedThread,
 };
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
@@ -313,6 +388,76 @@ impl Yard {
         steer::wait(&self.store(), branch, id, timeout)
     }
 
+    /// Give this yard's branches the connector gateway `gateway`: a
+    /// branch with a connector grant gets a signed token for each turn and
+    /// its granted packages; see `docs/connectors.md`. Replaces any gateway
+    /// set before. Shared by every clone of this `Yard`.
+    pub fn use_connectors(&self, gateway: connectors::Gateway) {
+        *self
+            .hub
+            .connectors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+    }
+
+    /// Give this yard's branches the model gateway `gateway`: a branch on
+    /// it (`Provisioning::models`) gets a gateway of its own for each turn;
+    /// see `docs/model-gateway.md`. Replaces any set before. Shared by
+    /// every clone of this `Yard`.
+    pub fn use_models(&self, gateway: models::Gateway) {
+        *self.hub.models.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+    }
+
+    /// The model gateway set with [`Yard::use_models`], if any.
+    pub fn models(&self) -> Option<Arc<models::Gateway>> {
+        self.hub
+            .models
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Calls through the model gateway at or after `since_ms` (since the
+    /// Unix epoch), oldest first, from every branch, removed ones too.
+    pub fn model_usage(&self, since_ms: u64) -> Result<Vec<models::UsageRecord>, Error> {
+        self.store().usage().usage_since(since_ms)
+    }
+
+    /// Cap what every branch acting for each person may reach: the
+    /// connectors, models and network of a turn are its request's within
+    /// its person's [`Ceiling`] (by subject: `local:<user>` locally, a
+    /// server's principal). Replaces any set before. See
+    /// `docs/model-gateway.md#one-scope`.
+    pub fn use_ceilings(&self, ceilings: std::collections::BTreeMap<String, Ceiling>) {
+        *self.hub.ceilings.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(ceilings);
+    }
+
+    /// The ceiling of `subject`, if one is set.
+    pub fn ceiling(&self, subject: &str) -> Option<Ceiling> {
+        self.hub
+            .ceilings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(subject)
+            .cloned()
+    }
+
+    /// The connector gateway set with [`Yard::use_connectors`], if any.
+    pub fn connectors(&self) -> Option<Arc<connectors::Gateway>> {
+        self.hub
+            .connectors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Record the gateway's new audit lines on the branches they name, as
+    /// [`Activity::ConnectorCall`] events; see [`connectors::ingest`].
+    /// Returns how many were recorded; none without a gateway.
+    pub fn ingest_connector_audit(&self) -> Result<usize, Error> {
+        connectors::ingest(self)
+    }
+
     /// Try `hook` before a message waits for its recipient's next turn to
     /// start; see [`DeliveryHook`]. Replaces any hook set before. Shared by
     /// every clone of this `Yard`.
@@ -409,7 +554,12 @@ impl Yard {
     /// branch's check. Refuses if `target` moved since the check started, if
     /// the check fails, or if the merge conflicts.
     pub fn merge(&self, branch: &str, target: &str) -> Result<Merged, Error> {
-        ops::merge(self, branch, target)
+        let merged = ops::merge(self, branch, target)?;
+        // The outcome store learns the merge; it never undoes one.
+        let _ = fleet::observe(self, branch, None);
+        // So may the knowledge store, as proposals a person reviews.
+        knowledge::on_end(self, branch, DistillTrigger::Merged);
+        Ok(merged)
     }
 
     /// Remove a branch's worktree and record; deletes the git branch unless
@@ -450,6 +600,81 @@ impl Yard {
             copied: workspace::excluded(&record),
             port,
         })
+    }
+
+    /// The prepared environments under `.branchyard/environments/`, and
+    /// the builds recorded as failed, newest built first. See
+    /// `docs/environments.md`.
+    pub fn environments(&self) -> Vec<EnvironmentInfo> {
+        environments::list(&self.root)
+    }
+
+    /// The environment key `spec` has on this host for the repository's
+    /// checkout at its root, as a branch created from it now would.
+    pub fn environment_key(&self, spec: &WorkspaceSpec) -> String {
+        environments::current_key(&self.root, spec)
+    }
+
+    /// Build `spec`'s environment on this host now, from `HEAD`, in a
+    /// temporary worktree, replacing the key's environment only when setup
+    /// succeeds; a failure is recorded and the last good build stays. The
+    /// caller decides whether `spec`'s scripts may run, as for
+    /// [`TaskOptions::workspace`].
+    pub fn rebuild_environment(&self, spec: &WorkspaceSpec) -> Result<EnvironmentBuild, Error> {
+        environments::rebuild(self, spec)
+    }
+
+    /// Remove environments beyond the newest `keep` of each recipe or unused
+    /// for longer than `max_age`, and old failures; never the newest good
+    /// one of a recipe, nor one a branch links into. With `only`, just those
+    /// keys.
+    pub fn prune_environments(
+        &self,
+        keep: usize,
+        max_age: Duration,
+        only: &[String],
+    ) -> environments::Pruned {
+        environments::prune(self, keep, max_age, only)
+    }
+
+    /// `spec`'s warm pool on this host: its slots, oldest first. See
+    /// `docs/pools.md`.
+    pub fn pool_status(&self, spec: &WorkspaceSpec) -> Result<PoolStatus, Error> {
+        pool::status(self, spec)
+    }
+
+    /// Every warm pool slot on this host, of any pool.
+    pub fn pool_slots(&self) -> Result<Vec<PoolSlot>, Error> {
+        pool::slots(self)
+    }
+
+    /// Discard `spec`'s stale slots and make new ones until its pool has
+    /// `size` ready, after any other process filling it. A slot whose
+    /// environment key has none built runs setup to build it: the caller
+    /// decides whether `spec`'s scripts may run, as for
+    /// [`TaskOptions::workspace`].
+    pub fn fill_pool(&self, spec: &WorkspaceSpec) -> Result<PoolFill, Error> {
+        pool::fill(self, spec)
+    }
+
+    /// Remove every ready slot on this host, and what stopped processes
+    /// left.
+    pub fn drain_pool(&self) -> Result<PoolDrained, Error> {
+        pool::drain(self)
+    }
+
+    /// Keep the pool `spec` returns (read again each time) filled from a
+    /// thread of its own: at once, whenever a branch in this process claims
+    /// a slot or finds none, and otherwise every `every`. `on_fill` sees
+    /// each fill. Stops when the keeper is dropped (without waiting for a
+    /// fill under way) or stopped ([`PoolKeeper::stop`], which waits).
+    pub fn keep_pool(
+        &self,
+        spec: impl Fn() -> Option<WorkspaceSpec> + Send + 'static,
+        every: Duration,
+        on_fill: impl Fn(&PoolFill) + Send + 'static,
+    ) -> PoolKeeper {
+        PoolKeeper::start(self.clone(), Box::new(spec), every, Box::new(on_fill))
     }
 
     /// The variables `branch`'s scripts and harness get:
@@ -503,6 +728,14 @@ impl Yard {
         compare::compare(self, branches, run_checks)
     }
 
+    /// Make a branch of a harness session that already exists on this
+    /// machine: a worktree at `spec.base` (with `spec.diff` applied), the
+    /// session recorded as the branch's, settled `no_changes`, so its next
+    /// turn resumes the session. Records [`Activity::Adopted`].
+    pub fn adopt(&self, spec: AdoptSpec) -> Result<Branch, Error> {
+        adopt::adopt(self, spec)
+    }
+
     /// The branches one `by fan` started as `<name>-<harness>`.
     pub fn fan_branches(&self, name: &str) -> Result<Vec<String>, Error> {
         compare::fan(self, name)
@@ -511,6 +744,217 @@ impl Yard {
     /// The diff from branch `a`'s candidate (or base) to `b`'s.
     pub fn diff_between(&self, a: &str, b: &str) -> Result<String, Error> {
         compare::between(self, a, b)
+    }
+
+    /// What the router would choose for `prompt` under `fleet`, without
+    /// running anything: the kind, the entry, the candidates picked (one,
+    /// or `attempts`) and those excluded, and why. See `docs/fleet.md`.
+    pub fn route(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        fleet: &Fleet,
+        how: &RouteOptions,
+        attempts: Option<u32>,
+    ) -> Result<Route, Error> {
+        fleet::route(self, prompt, options, fleet, how, attempts).map(|(route, _)| route)
+    }
+
+    /// Run `prompt` on the candidate the router picks from `fleet`, failing
+    /// over to the next while its harness fails, when the entry (or `how`)
+    /// asks for failover. `options.harness` is ignored.
+    pub fn run_routed(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        fleet: &Fleet,
+        how: &RouteOptions,
+    ) -> Result<Routed, Error> {
+        fleet::run_routed(self, prompt, options, fleet, how, false)
+    }
+
+    /// A fan of the entry's attempts (or `how.attempts`) on the candidates
+    /// the router picks, each failing over as [`Yard::run_routed`] does.
+    /// Named `<name>-<harness>`, then `-2`, `-3` for a harness picked again.
+    pub fn fan_routed(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        fleet: &Fleet,
+        how: &RouteOptions,
+    ) -> Result<Routed, Error> {
+        fleet::run_routed(self, prompt, options, fleet, how, true)
+    }
+
+    /// Run `prompt` on `options.harness` as [`TaskBuilder::run`] does,
+    /// recording `kind` on the branch for the outcome store.
+    pub fn run_with_kind(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        kind: TaskKind,
+    ) -> Result<Branch, Error> {
+        let branch = fleet::run_with_kind(self, prompt, options, kind)?;
+        goal::pursue(self, branch, options)
+    }
+
+    /// When `branch`'s last turn failed because of its harness and it was
+    /// routed with failover, start its task on the next candidate and
+    /// return that branch; `None` otherwise. Routed runs and fans do this
+    /// themselves; call it after a send.
+    pub fn failover(&self, branch: &str, options: &TaskOptions) -> Result<Option<Branch>, Error> {
+        fleet::failover(self, branch, options)
+    }
+
+    /// Judge attempts at one task: their checks, a deterministic score,
+    /// optionally a judge's verdict, a ranking and a proposed pick. See
+    /// `docs/fleet.md`.
+    pub fn judge(&self, branches: &[String], options: &JudgeOptions) -> Result<Judgement, Error> {
+        judge::judge(self, branches, options)
+    }
+
+    /// Run a wide map: `spec.prompt` over every item of `spec.items`, each
+    /// on its own branch, at most `spec.concurrency` at once, each answer
+    /// checked against `spec.schema`, then the reduce turn. Recorded in
+    /// `.branchyard/maps/<name>/`; running it again skips the items done.
+    /// See `docs/map.md`.
+    pub fn map(&self, spec: MapSpec, options: &MapOptions) -> Result<MapReport, Error> {
+        map::run(self, spec, options)
+    }
+
+    /// Every recorded map, oldest first.
+    pub fn maps(&self) -> Result<Vec<MapSummary>, Error> {
+        map::list(self)
+    }
+
+    /// A recorded map's rows and progress.
+    pub fn map_report(&self, name: &str) -> Result<MapReport, Error> {
+        map::report(self, name)
+    }
+
+    /// A recorded map's spec, with its items, for running it again.
+    pub fn map_spec(&self, name: &str) -> Result<MapSpec, Error> {
+        map::spec(self, name)
+    }
+
+    /// Forget a map's record; its branches stay. Refused while it runs.
+    pub fn remove_map(&self, name: &str) -> Result<(), Error> {
+        map::remove(self, name)
+    }
+
+    /// How this yard (and its clones) learns and uses repository
+    /// knowledge; see `docs/knowledge.md`. Replaces the settings set
+    /// before; without a call, [`KnowledgeSettings::default`].
+    pub fn use_knowledge(&self, settings: KnowledgeSettings) {
+        *projection::lock(&self.hub.knowledge) = Some(Arc::new(settings));
+    }
+
+    /// The settings [`Yard::use_knowledge`] set, or the defaults.
+    pub fn knowledge_settings(&self) -> Arc<KnowledgeSettings> {
+        projection::lock(&self.hub.knowledge)
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// The repository's knowledge entries, or those of `status`, by id.
+    pub fn knowledge(&self, status: Option<KnowledgeStatus>) -> Result<Vec<KnowledgeEntry>, Error> {
+        knowledge::list(self, status)
+    }
+
+    /// One knowledge entry.
+    pub fn knowledge_entry(&self, id: u64) -> Result<KnowledgeEntry, Error> {
+        knowledge::get(self, id)
+    }
+
+    /// Add an entry written by `by`: adopted, unless `new.propose`.
+    pub fn add_knowledge(&self, new: &NewKnowledge, by: &str) -> Result<KnowledgeEntry, Error> {
+        knowledge::add(self, new, by)
+    }
+
+    /// Adopt entry `id` as `by`: from now on, matching branches are given
+    /// it.
+    pub fn adopt_knowledge(&self, id: u64, by: &str) -> Result<KnowledgeEntry, Error> {
+        knowledge::decide(self, id, KnowledgeStatus::Adopted, by, None)
+    }
+
+    /// Reject entry `id` as `by`, with an optional reason: it is not used,
+    /// and the same text is not proposed again.
+    pub fn reject_knowledge(
+        &self,
+        id: u64,
+        by: &str,
+        reason: Option<&str>,
+    ) -> Result<KnowledgeEntry, Error> {
+        knowledge::decide(self, id, KnowledgeStatus::Rejected, by, reason)
+    }
+
+    /// Change entry `id`'s text or scope; it keeps its status.
+    pub fn edit_knowledge(
+        &self,
+        id: u64,
+        change: &KnowledgeEdit,
+        by: &str,
+    ) -> Result<KnowledgeEntry, Error> {
+        knowledge::edit(self, id, change, by)
+    }
+
+    /// Delete entry `id`, returning what it was.
+    pub fn remove_knowledge(&self, id: u64) -> Result<KnowledgeEntry, Error> {
+        knowledge::remove(self, id)
+    }
+
+    /// Propose knowledge from `branch` now: with `distiller`, its answer,
+    /// else (or when its answer is refused) the deterministic extractor's.
+    /// Nothing is adopted. Recorded on the branch.
+    pub fn distill(
+        &self,
+        branch: &str,
+        distiller: Option<Arc<dyn Judge>>,
+    ) -> Result<Distilled, Error> {
+        knowledge::distill(self, branch, distiller.as_ref(), "asked")
+    }
+
+    /// `branch`'s plan, when it was started with one; see
+    /// `docs/plans-and-goals.md`.
+    pub fn plan(&self, branch: &str) -> Result<PlanInfo, Error> {
+        plan::info(self, branch)
+    }
+
+    /// Approve `branch`'s plan as `by`, or `edited` in its place, and run
+    /// it as the next turn under `options` (its policy, observer, limits);
+    /// then pursue the branch's goal, if it has one.
+    pub fn approve_plan(
+        &self,
+        branch: &str,
+        edited: Option<&str>,
+        by: &str,
+        options: &TaskOptions,
+    ) -> Result<Branch, Error> {
+        plan::approve(self, branch, edited, by, options)
+    }
+
+    /// Reject `branch`'s plan as `by`: the branch fails, or with `replan`,
+    /// another read-only planning turn runs with `reason`.
+    pub fn reject_plan(
+        &self,
+        branch: &str,
+        reason: Option<&str>,
+        replan: bool,
+        by: &str,
+        options: &TaskOptions,
+    ) -> Result<Branch, Error> {
+        plan::reject(self, branch, reason, replan, by, options)
+    }
+
+    /// `branch`'s goal and its latest verdict, when it has one.
+    pub fn goal(&self, branch: &str) -> Result<Option<GoalInfo>, Error> {
+        goal::info(self, branch)
+    }
+
+    /// Finished branches' outcomes, or those of `kind`, oldest first; they
+    /// outlive their branches.
+    pub fn outcomes(&self, kind: Option<TaskKind>) -> Result<Vec<OutcomeRecord>, Error> {
+        self.store().outcomes().outcomes(kind)
     }
 
     /// Apply `branch`'s candidate diff to this checkout, which must be
@@ -790,7 +1234,34 @@ pub struct TaskOptions {
     /// parent's. Whether a repository's scripts may run is the caller's
     /// decision: `by` asks you to trust them. See `docs/workspace.md`.
     pub workspace: Option<WorkspaceSpec>,
+    /// Who a new branch acts for at the connector gateway: its tokens'
+    /// `sub` and `by_tenant`. Read only when a branch is created (run, fan,
+    /// fork, reincarnate); a fork without one keeps its parent's, and a
+    /// delegated child always has its parent's. `None`: the yard's gateway
+    /// default (`local:<user>` locally). A server sets it to the request's
+    /// principal. See `docs/connectors.md`.
+    pub actor: Option<connectors::Actor>,
+    /// A W3C `traceparent` for this call's turns: each turn's harness gets
+    /// it as `TRACEPARENT`, so what it calls (a connector SDK putting it in
+    /// the gateway call's `_meta`, a tool exporting its own spans) joins
+    /// the caller's trace. Not stored with the branch. A server sets it to
+    /// its operation's span; see `docs/observability.md`.
+    pub trace_parent: Option<String>,
+    /// Plan first: a new branch's first turn runs read-only with a planning
+    /// prompt and the branch then waits, `awaiting_plan_approval`, for
+    /// [`Yard::approve_plan`] or [`Yard::reject_plan`]. Read only when a
+    /// branch is created by `run`, `run_on` or a routed run; see
+    /// `docs/plans-and-goals.md`.
+    pub plan: bool,
+    /// A goal a judge verifies when a new branch's turn ends ready: unmet,
+    /// it gets follow-up turns with what is missing. Read only when a
+    /// branch is created by `run`, `run_on` or a routed run; stored with
+    /// it, except a custom judge.
+    pub goal: Option<Goal>,
 }
+
+/// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.
+pub const ENV_TRACEPARENT: &str = "TRACEPARENT";
 
 /// Where a branch's harness runs.
 ///
@@ -813,6 +1284,11 @@ pub enum Provider {
     /// Branchyard bridge and has the harness installed. Unqualified: see
     /// `docs/substrate.md`.
     Substrate(SubstrateOptions),
+    /// A machine an environment recipe's scripts make, per turn (or kept
+    /// paused between turns when the recipe can suspend and resume),
+    /// reached over ssh or the recipe's exec command; the worktree and the
+    /// private home are copied in and back. See `docs/recipes.md`.
+    Recipe(RecipeOptions),
 }
 
 /// A sandboxed harness's image, limits and credentials.
@@ -945,6 +1421,80 @@ impl SubstrateOptions {
     }
 }
 
+/// An environment recipe a branch's harness runs on, as it was trusted when
+/// the branch was given it: its commands are stored with the branch, so
+/// every later turn, its recovery and its removal run what was trusted,
+/// not what the configuration says by then. Resolved and trust-checked by
+/// the caller (`by run --provider recipe:NAME`); see `docs/recipes.md`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RecipeOptions {
+    /// The recipe's name, `[recipes.NAME]`.
+    pub name: String,
+    /// Prints the new machine's result (`create`).
+    pub create: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+    /// As written: `"none"` disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destroy: Option<String>,
+    /// Per script; unset: 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    /// The SHA-256 of the commands that were trusted, for messages.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub digest: String,
+    /// Where the worktree is placed on the machine. Empty means
+    /// `/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this
+    /// repository's branch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workdir: String,
+    /// The harness's `HOME` on the machine. Empty means the same directory's
+    /// `home`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub home: String,
+    /// Variables copied by name from this process to the machine. Names
+    /// are stored with the branch; values are not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pass_env: Vec<String>,
+    /// Destroy the machine when a turn ends (the default), or suspend it
+    /// for the next turn; pausing needs both `suspend` and `resume`.
+    #[serde(default, skip_serializing_if = "SandboxKeep::is_destroy")]
+    pub keep: SandboxKeep,
+    /// At most this many kept machines of this recipe in the repository;
+    /// parking one more destroys the least recently used. Unset: 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_paused: Option<u32>,
+}
+
+impl RecipeOptions {
+    /// The default directory on the machine for `worktree`'s branch
+    /// `branch`: `/tmp/branchyard/<branch>-<8 hex of the worktree path>`.
+    fn base(branch: &str, worktree: &std::path::Path) -> String {
+        let hash = blake3::hash(worktree.as_os_str().as_encoded_bytes());
+        format!("/tmp/branchyard/{branch}-{}", &hash.to_hex().as_str()[..8])
+    }
+
+    /// [`RecipeOptions::workdir`], defaulted for the branch whose worktree
+    /// is `worktree`.
+    pub fn workdir(&self, branch: &str, worktree: &std::path::Path) -> String {
+        match self.workdir.is_empty() {
+            true => format!("{}/workspace", RecipeOptions::base(branch, worktree)),
+            false => self.workdir.clone(),
+        }
+    }
+
+    /// [`RecipeOptions::home`], defaulted likewise.
+    pub fn home(&self, branch: &str, worktree: &std::path::Path) -> String {
+        match self.home.is_empty() {
+            true => format!("{}/home", RecipeOptions::base(branch, worktree)),
+            false => self.home.clone(),
+        }
+    }
+}
+
 /// Receives every activity as it is recorded, from any branch's thread.
 pub type Observer = Arc<dyn Fn(&BranchEvent) + Send + Sync>;
 
@@ -1036,6 +1586,18 @@ impl TaskBuilder {
         self
     }
 
+    /// Plan first; see [`TaskOptions::plan`].
+    pub fn plan(mut self, plan: bool) -> Self {
+        self.options.plan = plan;
+        self
+    }
+
+    /// Verify `goal` with a judge; see [`TaskOptions::goal`].
+    pub fn goal(mut self, goal: Goal) -> Self {
+        self.options.goal = Some(goal);
+        self
+    }
+
     /// Replace every option at once.
     pub fn options(mut self, options: TaskOptions) -> Self {
         self.options = options;
@@ -1054,7 +1616,8 @@ impl TaskBuilder {
     /// Errors mean nothing ran: an unknown or missing harness, an invalid
     /// name or base, or unwritable state.
     pub fn run(self) -> Result<Branch, Error> {
-        run::run(&self.yard, &self.prompt, &self.options)
+        let branch = run::run(&self.yard, &self.prompt, &self.options)?;
+        goal::pursue(&self.yard, branch, &self.options)
     }
 
     /// Run the same task on several harnesses in parallel, one branch each,
@@ -1062,7 +1625,8 @@ impl TaskBuilder {
     /// any branch is created. A failure on one branch does not stop the
     /// others; it is recorded in that branch's status.
     pub fn run_on(self, harnesses: &[&str]) -> Result<Vec<Branch>, Error> {
-        run::run_on(&self.yard, &self.prompt, &self.options, harnesses)
+        let branches = run::run_on(&self.yard, &self.prompt, &self.options, harnesses)?;
+        goal::pursue_all(&self.yard, branches, &self.options)
     }
 }
 
@@ -1349,6 +1913,10 @@ pub enum BranchStatus {
     },
     /// The last turn completed and produced a candidate.
     Ready,
+    /// A planning turn proposed a plan, and the branch waits for it to be
+    /// approved, edited or rejected before anything changes; see
+    /// [`Yard::approve_plan`].
+    AwaitingPlanApproval,
     /// The last turn completed without changing any file.
     NoChanges,
     Interrupted,
@@ -1620,6 +2188,16 @@ pub enum Activity {
         secrets: Vec<Delivery>,
         /// Secrets given that this harness does not read.
         unused_secrets: Vec<String>,
+        /// Connectors granted for the turn, whose packages and index were
+        /// placed in the home and whose gateway token was written there
+        /// (never shown); see `docs/connectors.md`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        connectors: Vec<String>,
+        /// The adopted knowledge entries given to the harness in its
+        /// instructions this turn, most specific first; see
+        /// `docs/knowledge.md`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        knowledge: Vec<u64>,
     },
     /// Input from `by` was written into the running turn; see
     /// [`Branch::steer`]. The harness's `steer_accepted` or
@@ -1688,6 +2266,37 @@ pub enum Activity {
     /// provider snapshot) and what became of it: kept, destroyed, evicted,
     /// a snapshot released. See `docs/sandbox-snapshots.md`.
     Sandbox(Box<SandboxEvent>),
+    /// Routing, failover and judging: the router's choice for this branch,
+    /// its harness failing over to the next candidate, a judge's scratch
+    /// branch, or a judge's score. See [`FleetActivity`] and
+    /// `docs/fleet.md`.
+    Fleet(Box<FleetActivity>),
+    /// A call the harness made through the connector gateway, from the
+    /// gateway's audit log: allowed, denied, or refused for want of
+    /// confirmation. See `docs/connectors.md`.
+    ConnectorCall(Box<connectors::ConnectorCall>),
+    /// The turn's egress policy and how it was applied, and each
+    /// destination the egress proxy allowed or denied. See
+    /// [`EgressActivity`] and `docs/egress.md`.
+    Egress(Box<EgressActivity>),
+    /// The branch was made from a harness session that already existed on
+    /// this machine (`by adopt`); its next turn resumes that session.
+    Adopted(Box<Adoption>),
+    /// Repository knowledge: the branch was distilled into proposed
+    /// entries. See [`KnowledgeActivity`] and `docs/knowledge.md`.
+    Knowledge(Box<KnowledgeActivity>),
+    /// Plan approval: planning, a proposed plan, its approval, rejection or
+    /// escalation. See [`PlanActivity`] and `docs/plans-and-goals.md`.
+    Plan(Box<PlanActivity>),
+    /// A goal and its judge's verdicts. See [`GoalActivity`].
+    Goal(Box<GoalActivity>),
+    /// The model gateway: how the turn's harness reaches its models, each
+    /// call it made through the gateway, and budget alerts. See
+    /// [`models::ModelActivity`] and `docs/model-gateway.md`.
+    Model(Box<models::ModelActivity>),
+    /// The person's ceiling narrowed what the turn may reach. See
+    /// [`AccessActivity`].
+    Access(Box<AccessActivity>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the
@@ -1999,6 +2608,10 @@ pub enum Error {
     BranchExists(String),
     /// No message with this id in the branch's inbox.
     UnknownMessage(u64),
+    /// No knowledge entry with this id.
+    UnknownKnowledge(u64),
+    /// The branch has no plan, or none awaiting approval.
+    NoPlan(String),
     /// Not a usable branch name: lowercase `[a-z0-9._-]`, starting with a
     /// letter or digit, one path segment.
     InvalidName {
@@ -2078,6 +2691,8 @@ impl fmt::Display for Error {
             Error::UnknownBranch(name) => write!(f, "no branch named {name}"),
             Error::BranchExists(name) => write!(f, "branch {name} already exists"),
             Error::UnknownMessage(id) => write!(f, "no message #{id} in this inbox"),
+            Error::UnknownKnowledge(id) => write!(f, "no knowledge entry #{id}"),
+            Error::NoPlan(why) => write!(f, "no plan: {why}"),
             Error::InvalidName { name, reason } => {
                 write!(f, "{name:?} is not a usable branch name: {reason}")
             }
@@ -2146,6 +2761,8 @@ impl Error {
             Error::UnknownBranch(_) => "unknown_branch",
             Error::BranchExists(_) => "branch_exists",
             Error::UnknownMessage(_) => "unknown_message",
+            Error::UnknownKnowledge(_) => "unknown_knowledge",
+            Error::NoPlan(_) => "no_plan",
             Error::InvalidName { .. } => "invalid_name",
             Error::UnknownHarness(_) => "unknown_harness",
             Error::HarnessUnavailable { .. } => "harness_unavailable",

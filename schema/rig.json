@@ -169,6 +169,51 @@
             "type": "string"
           }
         },
+        "connectors": {
+          "description": "Connectors the seat's harness may call through the gateway, as\n`by run --connector` takes them (github:read, github:write:issues.*);\neach must be within its parent seat's. Needs isolated = true here\nor above.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "network": {
+          "description": "The hosts the seat's harness may reach (docs/egress.md): \"open\",\n\"none\", or { allow = [\"github.com\", \"*.npmjs.org:443\"], enforce =\n\"required\" }. Unset: its parent seat's. Within its parent seat's.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "open",
+                "none"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "enforce": {
+                  "type": "string",
+                  "enum": [
+                    "best_effort",
+                    "required"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "models": {
+          "description": "Models the seat's harness may call through the model gateway\n(docs/model-gateway.md), as globs (\"claude-*\"); its model calls then\ngo through the gateway. Unset: its parent seat's. Within its parent\nseat's.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "telemetry": {
           "description": "`off`, or an http:// or https:// OTLP collector endpoint.",
           "type": "string"
@@ -198,6 +243,15 @@
         },
         "policy": {
           "$ref": "#/$defs/Policy"
+        },
+        "permission_policy": {
+          "description": "A permission preset: read-only, edit-worktree or full. Its rules\nfollow the seat's own policy; a child seat takes its denials only.",
+          "type": "string",
+          "enum": [
+            "read-only",
+            "edit-worktree",
+            "full"
+          ]
         },
         "delegates_to": {
           "description": "The seats this seat may spawn.",

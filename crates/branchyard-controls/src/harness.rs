@@ -23,6 +23,12 @@ pub struct Harness {
     pub herdr_resume: Option<(&'static str, &'static str)>,
     /// Scion harness directory.
     pub scion: Option<&'static str>,
+    /// Plugin `id` in emdash's agent registry
+    /// (`packages/plugins/src/agents/impl/<id>`).
+    pub emdash: Option<&'static str>,
+    /// Keys of Orca's `TUI_AGENT_CONFIG` (`src/shared/tui-agent-config.ts`);
+    /// several when Orca launches one harness more than one way.
+    pub orca: &'static [&'static str],
 }
 
 const fn harness(id: &'static str) -> Harness {
@@ -32,6 +38,8 @@ const fn harness(id: &'static str) -> Harness {
         herdr_manifest: None,
         herdr_resume: None,
         scion: None,
+        emdash: None,
+        orca: &[],
     }
 }
 
@@ -52,6 +60,14 @@ impl Harness {
         self.scion = Some(directory);
         self
     }
+    const fn emdash(mut self, id: &'static str) -> Self {
+        self.emdash = Some(id);
+        self
+    }
+    const fn orca(mut self, keys: &'static [&'static str]) -> Self {
+        self.orca = keys;
+        self
+    }
 }
 
 /// Every harness named by a vendored source or the integration matrix.
@@ -61,86 +77,169 @@ pub const HARNESSES: &[Harness] = &[
         .target("Claude Code")
         .herdr_manifest("claude")
         .herdr_resume("herdr:claude", "claude")
-        .scion("claude"),
+        .scion("claude")
+        .emdash("claude")
+        // Agent Teams is an Orca launch mode of the same `claude` binary.
+        .orca(&["claude", "claude-agent-teams"]),
     harness("codex")
         .target("Codex")
         .herdr_manifest("codex")
         .herdr_resume("herdr:codex", "codex")
-        .scion("codex"),
+        .scion("codex")
+        .emdash("codex")
+        .orca(&["codex"]),
     harness("antigravity")
         .target("Antigravity")
         .herdr_manifest("agy")
         .herdr_resume("herdr:antigravity_cli", "agy")
-        .scion("antigravity"),
+        .scion("antigravity")
+        .emdash("antigravity")
+        .orca(&["antigravity"]),
     harness("oh-my-pi")
         .target("Oh My Pi")
-        .herdr_resume("herdr:omp", "omp"),
-    harness("deepseek-harness").target("DeepSeek Harness"),
+        .herdr_resume("herdr:omp", "omp")
+        .emdash("oh-my-pi")
+        .orca(&["omp"]),
+    harness("deepseek-harness")
+        .target("DeepSeek Harness")
+        .orca(&["dsh"]),
     harness("gemini-cli")
         .target("Gemini CLI")
         .herdr_manifest("gemini")
-        .scion("gemini-cli"),
+        .scion("gemini-cli")
+        .orca(&["gemini"]),
     harness("opencode")
         .target("OpenCode")
         .herdr_manifest("opencode")
         .herdr_resume("herdr:opencode", "opencode")
-        .scion("opencode"),
+        .scion("opencode")
+        .emdash("opencode")
+        // `opencode2` is OpenCode 2's beta binary, with the same flags.
+        .orca(&["opencode", "opencode2"]),
     harness("pi")
         .target("Pi")
         .herdr_manifest("pi")
-        .herdr_resume("herdr:pi", "pi"),
-    harness("goose").target("Goose"),
-    harness("aider").target("Aider"),
+        .herdr_resume("herdr:pi", "pi")
+        .emdash("pi")
+        .orca(&["pi"]),
+    harness("goose")
+        .target("Goose")
+        .emdash("goose")
+        .orca(&["goose"]),
+    harness("aider").target("Aider").orca(&["aider"]),
     harness("cursor")
         .target("Cursor CLI")
         .herdr_manifest("cursor")
-        .herdr_resume("herdr:cursor", "cursor"),
+        .herdr_resume("herdr:cursor", "cursor")
+        .emdash("cursor")
+        .orca(&["cursor"]),
     harness("github-copilot")
         .target("GitHub Copilot CLI")
         .herdr_manifest("copilot")
         .herdr_resume("herdr:copilot", "copilot")
-        .scion("copilot"),
-    harness("amp").target("Amp").herdr_manifest("amp"),
+        .scion("copilot")
+        .emdash("copilot")
+        .orca(&["copilot"]),
+    harness("amp")
+        .target("Amp")
+        .herdr_manifest("amp")
+        .emdash("amp")
+        .orca(&["amp"]),
     harness("qwen-code")
         .target("Qwen Code")
         .herdr_manifest("qwen")
-        .herdr_resume("herdr:qwen", "qwen"),
+        .herdr_resume("herdr:qwen", "qwen")
+        .emdash("qwen")
+        .orca(&["qwen-code"]),
     harness("kimi-cli")
         .target("Kimi CLI")
         .herdr_manifest("kimi")
-        .herdr_resume("herdr:kimi", "kimi"),
+        .herdr_resume("herdr:kimi", "kimi")
+        .emdash("kimi")
+        .orca(&["kimi"]),
     harness("hermes")
         .target("Hermes")
         .herdr_manifest("hermes")
         .herdr_resume("herdr:hermes", "hermes")
-        .scion("hermes"),
+        .scion("hermes")
+        .emdash("hermes")
+        .orca(&["hermes"]),
     // Named by vendored sources; not integration targets.
-    harness("cline").herdr_manifest("cline"),
+    harness("cline")
+        .herdr_manifest("cline")
+        .emdash("cline")
+        .orca(&["cline"]),
     harness("devin")
         .herdr_manifest("devin")
-        .herdr_resume("herdr:devin", "devin"),
+        .herdr_resume("herdr:devin", "devin")
+        .emdash("devin")
+        .orca(&["devin"]),
     harness("droid")
         .herdr_manifest("droid")
-        .herdr_resume("herdr:droid", "droid"),
+        .herdr_resume("herdr:droid", "droid")
+        .emdash("droid")
+        .orca(&["droid"]),
     harness("grok-build")
         .herdr_manifest("grok")
         .herdr_resume("herdr:grok", "grok")
-        .scion("grok-build"),
+        .scion("grok-build")
+        .emdash("grok")
+        .orca(&["grok"]),
     harness("kilo")
         .herdr_manifest("kilo")
-        .herdr_resume("herdr:kilo", "kilo"),
-    harness("kiro").herdr_manifest("kiro"),
+        .herdr_resume("herdr:kilo", "kilo")
+        .emdash("kilocode")
+        .orca(&["kilo"]),
+    harness("kiro")
+        .herdr_manifest("kiro")
+        .emdash("kiro")
+        .orca(&["kiro"]),
     harness("letta")
         .herdr_manifest("letta")
-        .herdr_resume("herdr:letta", "letta"),
+        .herdr_resume("herdr:letta", "letta")
+        .emdash("letta"),
     harness("maki").herdr_manifest("maki"),
     harness("mastracode").herdr_resume("herdr:mastracode", "mastracode"),
     harness("muse-code")
         .herdr_manifest("muse")
-        .scion("muse-code"),
+        .scion("muse-code")
+        .emdash("muse")
+        .orca(&["muse"]),
     harness("qodercli")
         .herdr_manifest("qodercli")
-        .herdr_resume("herdr:qodercli", "qodercli"),
+        .herdr_resume("herdr:qodercli", "qodercli")
+        .emdash("qoder")
+        .orca(&["qoder"]),
+    // Named by emdash's or Orca's agent registries only.
+    harness("ante").orca(&["ante"]),
+    harness("auggie").emdash("auggie").orca(&["aug"]),
+    harness("autohand").emdash("autohand").orca(&["autohand"]),
+    harness("codebuddy")
+        .emdash("codebuddy")
+        .orca(&["codebuddy"]),
+    harness("codebuff").emdash("codebuff").orca(&["codebuff"]),
+    harness("command-code")
+        .emdash("commandcode")
+        .orca(&["command-code"]),
+    harness("continue").emdash("continue").orca(&["continue"]),
+    // emdash files Crush under its maker, Charm.
+    harness("crush").emdash("charm").orca(&["crush"]),
+    harness("freebuff").emdash("freebuff").orca(&["freebuff"]),
+    harness("jules").emdash("jules"),
+    harness("junie").emdash("junie"),
+    harness("mimo-code").emdash("mimocode").orca(&["mimo-code"]),
+    harness("mistral-vibe")
+        .emdash("mistral")
+        .orca(&["mistral-vibe"]),
+    harness("openclaude").orca(&["openclaude"]),
+    harness("openclaw").orca(&["openclaw"]),
+    harness("prime-agent")
+        .emdash("prime-agent")
+        .orca(&["prime-agent"]),
+    harness("rovo-dev").emdash("rovo").orca(&["rovo"]),
+    harness("trae").orca(&["trae"]),
+    harness("zcode").orca(&["zcode"]),
+    harness("zero").emdash("zero"),
 ];
 
 /// Look up a harness by Branchyard ID.
@@ -158,6 +257,16 @@ pub fn from_herdr_resume(source: &str, agent: &str) -> Option<&'static Harness> 
     HARNESSES
         .iter()
         .find(|h| h.herdr_resume == Some((source, agent)))
+}
+
+/// The harness emdash's agent plugin `id` describes.
+pub fn from_emdash(id: &str) -> Option<&'static Harness> {
+    HARNESSES.iter().find(|h| h.emdash == Some(id))
+}
+
+/// The harness one of Orca's agent keys describes.
+pub fn from_orca(key: &str) -> Option<&'static Harness> {
+    HARNESSES.iter().find(|h| h.orca.contains(&key))
 }
 
 /// The harness a Scion harness directory provisions.
@@ -267,6 +376,7 @@ mod tests {
             |h: &Harness| h.herdr_manifest.map(str::to_owned),
             |h: &Harness| h.herdr_resume.map(|(s, a)| format!("{s}/{a}")),
             |h: &Harness| h.scion.map(str::to_owned),
+            |h: &Harness| h.emdash.map(str::to_owned),
         ] {
             let values: Vec<_> = HARNESSES.iter().filter_map(key).collect();
             let unique: BTreeSet<_> = values.iter().collect();
@@ -276,6 +386,13 @@ mod tests {
                 "a source name maps to two harnesses"
             );
         }
+        let orca: Vec<_> = HARNESSES.iter().flat_map(|h| h.orca).collect();
+        let unique: BTreeSet<_> = orca.iter().collect();
+        assert_eq!(
+            orca.len(),
+            unique.len(),
+            "an Orca key maps to two harnesses"
+        );
     }
 
     #[test]
@@ -344,6 +461,88 @@ mod tests {
             registered, targets,
             "registry order or names differ from the matrix"
         );
+    }
+
+    /// Every agent emdash's plugin registry ships is mapped, and every
+    /// mapping names a plugin that exists, with the `id` its directory says.
+    #[test]
+    fn every_emdash_agent_is_registered() {
+        let agents = crate::upstream::emdash_agents();
+        assert_eq!(agents.len(), 37);
+        for (directory, agent) in &agents {
+            let id = agent.meta["id"].as_str().unwrap();
+            assert_eq!(id, directory, "emdash plugin {directory} declares id {id}");
+            assert!(
+                from_emdash(id).is_some(),
+                "unregistered emdash agent {id}: map it in HARNESSES"
+            );
+        }
+        for harness in HARNESSES {
+            if let Some(id) = harness.emdash {
+                assert!(agents.contains_key(id), "no emdash agent {id}");
+            }
+        }
+    }
+
+    /// Every agent Orca's launcher table knows is mapped, its `TuiAgent`
+    /// union lists the same keys, and every mapping names a key that exists.
+    #[test]
+    fn every_orca_agent_is_registered() {
+        let agents = crate::upstream::orca_agents();
+        let names = crate::upstream::orca_agent_names();
+        assert_eq!(agents.len(), 43);
+        assert_eq!(
+            agents.keys().collect::<Vec<_>>(),
+            names.keys().collect::<Vec<_>>(),
+            "Orca's TuiAgent union and TUI_AGENT_CONFIG disagree"
+        );
+        for key in agents.keys() {
+            assert!(
+                from_orca(key).is_some(),
+                "unregistered Orca agent {key}: map it in HARNESSES"
+            );
+        }
+        for harness in HARNESSES {
+            for key in harness.orca {
+                assert!(agents.contains_key(*key), "no Orca agent {key}");
+            }
+        }
+    }
+
+    /// Where both registries know a harness, they agree on its executable,
+    /// which is the evidence a mapping rests on.
+    #[test]
+    fn emdash_and_orca_agree_on_each_mapped_executable() {
+        let emdash = crate::upstream::emdash_agents();
+        let orca = crate::upstream::orca_agents();
+        // Known disagreements, each with why the mapping still holds.
+        const EXCEPTIONS: &[(&str, &str)] = &[(
+            "rovo-dev",
+            "both name Atlassian's Rovo Dev CLI (homepage and display name); emdash runs it \
+             through `acli rovodev`, Orca looks for a `rovo` executable",
+        )];
+        let mut checked = 0;
+        for harness in HARNESSES {
+            let (Some(id), [key, ..]) = (harness.emdash, harness.orca) else {
+                continue;
+            };
+            if EXCEPTIONS.iter().any(|(e, _)| *e == harness.id) {
+                continue;
+            }
+            let binaries = crate::catalog::tests::emdash_binaries(&emdash[id]);
+            let config = &orca[*key];
+            let mut detect = vec![config["detectCmd"].as_str().unwrap().to_owned()];
+            for alias in config["detectCmdAliases"].as_array().into_iter().flatten() {
+                detect.push(alias.as_str().unwrap().to_owned());
+            }
+            assert!(
+                binaries.iter().any(|b| detect.contains(b)),
+                "{}: emdash runs {binaries:?}, Orca detects {detect:?}",
+                harness.id
+            );
+            checked += 1;
+        }
+        assert!(checked >= 30, "only {checked} cross-checked");
     }
 
     /// Herdr's aliases are upstream evidence about identity. An alias equal to

@@ -154,7 +154,7 @@ pub fn resolve(root: &Path, path: &str) -> PathBuf {
 }
 
 /// Find `program` on `PATH`.
-fn which(program: &str) -> Option<PathBuf> {
+pub(crate) fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(program))

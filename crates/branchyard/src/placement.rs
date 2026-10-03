@@ -14,6 +14,15 @@
 //! home replaces the private home, then the actor is deleted. See
 //! [`branchyard_substrate::transfer`].
 //!
+//! An environment recipe's machine ([`Provider::Recipe`]) is reached over
+//! ssh or the recipe's exec command, and cannot mount anything either: the
+//! same transfer copies the worktree and home in and back, its files
+//! crossing as `cat` and `tar` streams over execs
+//! ([`transfer::Exec`]), and the machine is destroyed (or suspended)
+//! through the recipe's scripts. Its record is kept in the store's
+//! `recipes` directory, so recovery and removal reach it from another
+//! process.
+//!
 //! Either sandbox is journaled as the turn's `sandbox` step before it is
 //! created. If this engine stops, recovery destroys a Microsandbox sandbox,
 //! and brings a Substrate actor's work back as the turn's end would have
@@ -38,15 +47,18 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use branchyard_harness::{Driver, Open};
+use branchyard_recipe::{Recipe, RecipeProvider};
 use branchyard_runtime::{RuntimeError, Session};
 use branchyard_sandbox::{Mount, Resources, SandboxProvider, SandboxSpec};
-use branchyard_substrate::transfer::{self, Pushed};
+use branchyard_substrate::transfer::{self, Guest, Pushed};
 use branchyard_substrate::SubstrateProvider;
 use serde_json::{json, Value};
 
 use crate::snapshots::{self, SandboxEvent, SandboxOrigin};
 use crate::state::{now_ms, Begun, Fence, Record, SandboxKind};
-use crate::{git, harness, Activity, Error, Provider, SandboxOptions, SubstrateOptions, Yard};
+use crate::{
+    git, harness, Activity, Error, Provider, RecipeOptions, SandboxOptions, SubstrateOptions, Yard,
+};
 
 /// Where the worktree appears in a sandbox.
 pub const WORKSPACE: &str = "/workspace";
@@ -62,7 +74,7 @@ pub(crate) const STEP_SANDBOX: &str = "sandbox";
 pub(crate) fn sandboxed(provider: Option<&Provider>) -> bool {
     matches!(
         provider,
-        Some(Provider::Microsandbox(_) | Provider::Substrate(_))
+        Some(Provider::Microsandbox(_) | Provider::Substrate(_) | Provider::Recipe(_))
     )
 }
 
@@ -90,7 +102,38 @@ pub(crate) fn check(yard: &Yard, provider: Option<&Provider>) -> Result<(), Erro
             Ok(())
         }
         Some(Provider::Substrate(options)) => check_substrate(options),
+        Some(Provider::Recipe(options)) => check_recipe(options),
     }
+}
+
+fn check_recipe(options: &RecipeOptions) -> Result<(), Error> {
+    let refuse = |why: String| {
+        Err(Error::Unsupported(format!(
+            "the recipe provider (recipe {}) {why}",
+            options.name
+        )))
+    };
+    if options.name.trim().is_empty() {
+        return Err(Error::Unsupported(
+            "the recipe provider needs a recipe's name".into(),
+        ));
+    }
+    if options.create.trim().is_empty() {
+        return refuse("has no create command".into());
+    }
+    for (what, path) in [("workdir", &options.workdir), ("home", &options.home)] {
+        if !path.is_empty() && !Path::new(path).is_absolute() {
+            return refuse(format!("needs an absolute {what}, not {path:?}"));
+        }
+    }
+    if options.keep == crate::SandboxKeep::Pause
+        && (options.suspend.is_none() || options.resume.is_none())
+    {
+        return refuse(
+            "cannot keep its machine paused between turns: it needs both suspend and resume".into(),
+        );
+    }
+    Ok(())
 }
 
 fn check_substrate(options: &SubstrateOptions) -> Result<(), Error> {
@@ -128,7 +171,17 @@ pub(crate) fn guest_paths(record: &Record) -> (String, String) {
         Some(Provider::Substrate(options)) => {
             (options.workdir().to_owned(), options.home().to_owned())
         }
+        Some(Provider::Recipe(options)) => recipe_paths(record, options),
     }
+}
+
+/// A recipe branch's worktree and home on its machine.
+fn recipe_paths(record: &Record, options: &RecipeOptions) -> (String, String) {
+    let (branch, worktree) = (&record.info.name, &record.info.worktree);
+    (
+        options.workdir(branch, worktree),
+        options.home(branch, worktree),
+    )
 }
 
 /// The spec of a Microsandbox branch's sandbox, and its harness's
@@ -227,12 +280,26 @@ pub(crate) enum SandboxPlan {
     Fresh(String),
 }
 
+/// The prepared environment a branch whose setup has not run starts its
+/// sandbox from, on provider `key`.
+fn environment(
+    yard: &Yard,
+    record: &Record,
+    key: &str,
+) -> Option<crate::environments::SandboxEnvironment> {
+    let workspace = record.workspace.as_ref().filter(|w| !w.ready)?;
+    crate::environments::for_sandbox(&yard.root, &workspace.spec, &record.info.worktree, key)
+}
+
 /// A turn's harness location. A sandbox is destroyed, or parked, by
 /// [`Placement::release`]; destroyed on drop otherwise.
 pub(crate) struct Placement {
     cwd: String,
     kind: Kind,
     started: Option<SandboxEvent>,
+    /// The turn's egress proxy, kept until the harness is gone; a
+    /// confined local harness is started in its own network namespace.
+    egress: Option<crate::egress::Egress>,
 }
 
 enum Kind {
@@ -246,9 +313,59 @@ enum Kind {
     Substrate(Box<Actor>),
 }
 
-/// A turn's Substrate actor, and what must come back from it.
+/// A sandbox the worktree is copied into and back from: a Substrate actor
+/// (through its bridge) or a recipe's machine (through execs).
+enum Remote {
+    Substrate(Box<SubstrateProvider>),
+    Recipe(Arc<RecipeProvider>),
+}
+
+impl Remote {
+    fn provider(&self) -> &dyn SandboxProvider {
+        match self {
+            Remote::Substrate(provider) => provider.as_ref(),
+            Remote::Recipe(provider) => provider.as_ref(),
+        }
+    }
+
+    /// `actor` or `machine`, for messages.
+    fn noun(&self) -> &'static str {
+        match self {
+            Remote::Substrate(_) => "actor",
+            Remote::Recipe(_) => "machine",
+        }
+    }
+
+    /// How the transfer reaches sandbox `name`.
+    fn guest<'a>(&'a self, name: &'a str) -> Result<Box<dyn Guest + 'a>, String> {
+        match self {
+            Remote::Substrate(provider) => provider
+                .endpoint(name)
+                .map(|endpoint| Box::new(endpoint) as Box<dyn Guest>)
+                .map_err(|e| e.to_string()),
+            Remote::Recipe(provider) => Ok(Box::new(transfer::Exec::new(provider.as_ref(), name))),
+        }
+    }
+}
+
+/// How [`Placement::copied`] makes and reaches its sandbox.
+struct Copied<'a> {
+    remote: Remote,
+    /// The provider's name in events: `substrate` or `recipe`.
+    kind: &'static str,
+    /// A fresh sandbox's spec.
+    spec: SandboxSpec,
+    /// The `sandbox` step's intent for a sandbox's name.
+    intent: Box<dyn Fn(&str) -> Value + 'a>,
+    workdir: String,
+    home: String,
+    pass_env: &'a [String],
+}
+
+/// A turn's Substrate actor or recipe machine, and what must come back
+/// from it.
 struct Actor {
-    provider: SubstrateProvider,
+    provider: Remote,
     name: String,
     env: BTreeMap<OsString, OsString>,
     worktree: PathBuf,
@@ -263,27 +380,28 @@ impl Actor {
     /// anything.
     fn bring_back(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
-        match self.provider.endpoint(&self.name) {
+        let noun = self.provider.noun();
+        match self.provider.guest(&self.name) {
             Ok(endpoint) => {
                 if let Some(pushed) = &self.pushed {
-                    if let Err(error) = transfer::pull(&endpoint, pushed, &self.worktree) {
+                    if let Err(error) = transfer::pull(endpoint.as_ref(), pushed, &self.worktree) {
                         warnings.push(format!(
-                            "could not bring the worktree back from actor {}: {error}",
+                            "could not bring the worktree back from {noun} {}: {error}",
                             self.name
                         ));
                     }
                 }
                 if let Some((host, guest)) = &self.home {
-                    if let Err(error) = transfer::pull_tree(&endpoint, guest, host) {
+                    if let Err(error) = transfer::pull_tree(endpoint.as_ref(), guest, host) {
                         warnings.push(format!(
-                            "could not bring the home directory back from actor {}: {error}",
+                            "could not bring the home directory back from {noun} {}: {error}",
                             self.name
                         ));
                     }
                 }
             }
             Err(error) if self.pushed.is_some() => warnings.push(format!(
-                "could not bring anything back from actor {}: {error}",
+                "could not bring anything back from {noun} {}: {error}",
                 self.name
             )),
             Err(_) => {}
@@ -299,8 +417,11 @@ impl Actor {
             return Vec::new();
         }
         let mut warnings = self.bring_back();
-        if let Err(error) = self.provider.destroy(&self.name) {
-            warnings.push(format!("could not delete actor {}: {error}", self.name));
+        if let Err(error) = self.provider.provider().destroy(&self.name) {
+            warnings.push(match &self.provider {
+                Remote::Substrate(_) => format!("could not delete actor {}: {error}", self.name),
+                Remote::Recipe(_) => format!("could not destroy machine {}: {error}", self.name),
+            });
         }
         warnings
     }
@@ -344,10 +465,14 @@ impl Placement {
                     cwd: record.info.worktree.display().to_string(),
                     kind: Kind::Local(harness::environment(record.home.as_deref())),
                     started: None,
+                    egress: None,
                 })
             }
             Some(Provider::Substrate(options)) => {
                 return Placement::substrate(yard, record, fence, options, plan)
+            }
+            Some(Provider::Recipe(options)) => {
+                return Placement::recipe(yard, record, fence, options, plan)
             }
             Some(Provider::Microsandbox(options)) => options,
         };
@@ -379,6 +504,7 @@ impl Placement {
             }
             SandboxPlan::Default => {
                 let store = yard.store();
+                let environment = environment(yard, record, &key);
                 snapshots::acquire(
                     &store,
                     record,
@@ -386,6 +512,7 @@ impl Placement {
                     provider.as_ref(),
                     &key,
                     &spec,
+                    environment.as_ref(),
                     &journal,
                 )
                 .inspect_err(|_| {
@@ -407,6 +534,7 @@ impl Placement {
                 sandbox: acquired.name.clone(),
                 origin: acquired.origin,
             }),
+            egress: None,
             kind: Kind::Sandbox {
                 provider,
                 name: acquired.name,
@@ -423,23 +551,75 @@ impl Placement {
         options: &SubstrateOptions,
         plan: &SandboxPlan,
     ) -> Result<Placement, String> {
+        let provider = substrate(options)?;
+        let atespace = options.atespace().to_owned();
+        Placement::copied(
+            yard,
+            record,
+            fence,
+            plan,
+            Copied {
+                remote: Remote::Substrate(Box::new(provider)),
+                kind: "substrate",
+                spec: SandboxSpec::new(actor_name(&record.info.name, now_ms())),
+                // Journaled before the actor exists, so recovery can delete it.
+                intent: Box::new(
+                    move |name| json!({ "provider": "substrate", "actor": name, "atespace": atespace }),
+                ),
+                workdir: options.workdir().to_owned(),
+                home: options.home().to_owned(),
+                pass_env: &options.pass_env,
+            },
+        )
+    }
+
+    fn recipe(
+        yard: &Yard,
+        record: &Record,
+        fence: &Fence,
+        options: &RecipeOptions,
+        plan: &SandboxPlan,
+    ) -> Result<Placement, String> {
+        let (workdir, home) = recipe_paths(record, options);
+        let recipe = options.name.clone();
+        Placement::copied(
+            yard,
+            record,
+            fence,
+            plan,
+            Copied {
+                remote: Remote::Recipe(recipe_provider(yard, options)),
+                kind: "recipe",
+                spec: SandboxSpec::new(sandbox_name(&record.info.name, now_ms())),
+                // Journaled before `create` runs, so recovery can destroy it.
+                intent: Box::new(
+                    move |name| json!({ "provider": "recipe", "sandbox": name, "recipe": recipe }),
+                ),
+                workdir,
+                home,
+                pass_env: &options.pass_env,
+            },
+        )
+    }
+
+    /// A sandbox the worktree and home are copied into, and back from when
+    /// the turn ends.
+    fn copied(
+        yard: &Yard,
+        record: &Record,
+        fence: &Fence,
+        plan: &SandboxPlan,
+        how: Copied<'_>,
+    ) -> Result<Placement, String> {
         let home = record
             .home
             .clone()
             .ok_or("a sandboxed branch has no private home")?;
-        let env = sandbox_env(options.home(), &options.pass_env)?;
-        let provider = substrate(options)?;
-        let spec = SandboxSpec::new(actor_name(&record.info.name, now_ms()));
-        let key = snapshots::provider_key(record.provider.as_ref().expect("matched above"));
-        // Journaled before the actor exists, so recovery can delete it.
-        let journal = |name: &str| {
-            journal_sandbox(
-                yard,
-                fence,
-                name,
-                json!({ "provider": "substrate", "actor": name, "atespace": options.atespace() }),
-            )
-        };
+        let env = sandbox_env(&how.home, how.pass_env)?;
+        let (remote, spec) = (how.remote, how.spec);
+        let noun = remote.noun();
+        let key = snapshots::provider_key(record.provider.as_ref().expect("a sandbox provider"));
+        let journal = |name: &str| journal_sandbox(yard, fence, name, (how.intent)(name));
         let store = yard.store();
         let acquired = match plan {
             SandboxPlan::Handed { name, origin } => journal(name).map(|()| snapshots::Acquired {
@@ -447,7 +627,8 @@ impl Placement {
                 origin: origin.clone(),
             }),
             SandboxPlan::Fresh(reason) => journal(&spec.name).and_then(|()| {
-                provider
+                remote
+                    .provider()
                     .ensure(&spec)
                     .map(|_| snapshots::Acquired {
                         name: spec.name.clone(),
@@ -455,28 +636,49 @@ impl Placement {
                             reason: Some(reason.clone()),
                         },
                     })
-                    .map_err(|e| format!("could not create actor {}: {e}", spec.name))
+                    .map_err(|e| match &remote {
+                        Remote::Substrate(_) => {
+                            format!("could not create actor {}: {e}", spec.name)
+                        }
+                        Remote::Recipe(_) => {
+                            format!("could not create machine {}: {e}", spec.name)
+                        }
+                    })
             }),
             SandboxPlan::Default => {
-                snapshots::acquire(&store, record, fence, &provider, &key, &spec, &journal)
+                let environment = environment(yard, record, &key);
+                snapshots::acquire(
+                    &store,
+                    record,
+                    fence,
+                    remote.provider(),
+                    &key,
+                    &spec,
+                    environment.as_ref(),
+                    &journal,
+                )
             }
         };
         let name = acquired
             .as_ref()
             .map(|a| a.name.clone())
             .unwrap_or_else(|_| spec.name.clone());
-        let uid = provider
-            .handle(&name)
-            .ok()
-            .flatten()
-            .map(|h| h.uid)
-            .unwrap_or_default();
-        let _ =
-            store
-                .backend()
-                .finish_step(fence, fence.turn, STEP_SANDBOX, &json!({ "uid": uid }));
+        let finished = match &remote {
+            Remote::Substrate(provider) => json!({
+                "uid": provider
+                    .handle(&name)
+                    .ok()
+                    .flatten()
+                    .map(|h| h.uid)
+                    .unwrap_or_default()
+            }),
+            Remote::Recipe(_) => json!({ "created": acquired.is_ok(), "sandbox": name }),
+        };
+        let _ = store
+            .backend()
+            .finish_step(fence, fence.turn, STEP_SANDBOX, &finished);
         let mut actor = Box::new(Actor {
-            provider,
+            provider: remote,
             name: name.clone(),
             env,
             worktree: record.info.worktree.clone(),
@@ -495,48 +697,58 @@ impl Placement {
             Ok(acquired) => acquired,
             Err(error) => return fail(&mut actor, error),
         };
-        let endpoint = match actor.provider.endpoint(&name) {
-            Ok(endpoint) => endpoint,
-            Err(error) => return fail(&mut actor, error.to_string()),
-        };
-        let workdir = PathBuf::from(options.workdir());
-        let guest_home = PathBuf::from(options.home());
-        // A resumed or branched actor still holds a worktree and a home
-        // from before: the worktree's files go (what git ignores, such as
-        // what setup installed, stays), and so does the home, before this
-        // host's are sent.
-        if !matches!(acquired.origin, SandboxOrigin::Fresh { .. }) {
-            if let Err(error) = transfer::clear_for_push(&endpoint, &workdir, &guest_home) {
-                return fail(
-                    &mut actor,
-                    format!("could not clear actor {name} for this turn: {error}"),
-                );
-            }
-        }
-        let stage = staging(yard, &name);
-        match transfer::push_staged(&endpoint, &record.info.worktree, &workdir, Some(&stage)) {
+        let workdir = PathBuf::from(&how.workdir);
+        let guest_home = PathBuf::from(&how.home);
+        let pushed = (|| -> Result<Pushed, String> {
+            let endpoint = actor.provider.guest(&name)?;
+            // A resumed or branched sandbox still holds a worktree and a
+            // home from before: the worktree's files go (what git ignores,
+            // such as what setup installed, stays), and so does the home,
+            // before this host's are sent.
+            let cleared = match (&acquired.origin, &actor.provider) {
+                (SandboxOrigin::Fresh { .. }, Remote::Substrate(_)) => Ok(()),
+                // A recipe may hand out a machine that outlives its
+                // sandboxes (a lab box): an earlier push there goes too.
+                (SandboxOrigin::Fresh { .. }, Remote::Recipe(_)) => {
+                    transfer::clear_previous_push(endpoint.as_ref(), &workdir)
+                }
+                _ => transfer::clear_for_push(endpoint.as_ref(), &workdir, &guest_home),
+            };
+            cleared.map_err(|e| format!("could not clear {noun} {name} for this turn: {e}"))?;
+            let stage = staging(yard, &name);
+            let pushed = transfer::push_staged(
+                endpoint.as_ref(),
+                &record.info.worktree,
+                &workdir,
+                Some(&stage),
+            )
+            .map_err(|e| format!("could not copy the worktree into {noun} {name}: {e}"))?;
+            Ok(pushed)
+        })();
+        match pushed {
             Ok(pushed) => actor.pushed = Some(pushed),
-            Err(error) => {
-                return fail(
-                    &mut actor,
-                    format!("could not copy the worktree into actor {name}: {error}"),
-                )
-            }
+            Err(error) => return fail(&mut actor, error),
         }
-        if let Err(error) = transfer::push_tree(&endpoint, &home, &guest_home) {
-            return fail(
-                &mut actor,
-                format!("could not copy the home directory into actor {name}: {error}"),
-            );
+        let home_sent = actor
+            .provider
+            .guest(&name)
+            .and_then(|endpoint| {
+                transfer::push_tree(endpoint.as_ref(), &home, &guest_home)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("could not copy the home directory into {noun} {name}: {e}"));
+        if let Err(error) = home_sent {
+            return fail(&mut actor, error);
         }
         actor.home = Some((home, guest_home));
         Ok(Placement {
-            cwd: options.workdir().to_owned(),
+            cwd: how.workdir,
             started: Some(SandboxEvent::Started {
-                provider: "substrate".into(),
+                provider: how.kind.into(),
                 sandbox: name,
                 origin: acquired.origin,
             }),
+            egress: None,
             kind: Kind::Substrate(actor),
         })
     }
@@ -553,7 +765,7 @@ impl Placement {
         match &self.kind {
             Kind::Local(_) => None,
             Kind::Sandbox { provider, name, .. } => Some((provider.as_ref(), name.as_str())),
-            Kind::Substrate(actor) => Some((&actor.provider, actor.name.as_str())),
+            Kind::Substrate(actor) => Some((actor.provider.provider(), actor.name.as_str())),
         }
     }
 
@@ -600,9 +812,35 @@ impl Placement {
         self.cwd.clone()
     }
 
+    /// Apply the turn's egress: its variables now, and, for a confined
+    /// local harness, its network namespace when [`Placement::start`]
+    /// starts it.
+    pub fn egress(&mut self, egress: crate::egress::Egress) {
+        for (name, value) in egress.env() {
+            self.set_env(name, value);
+        }
+        self.egress = Some(egress);
+    }
+
     pub fn start(&self, driver: Box<dyn Driver>, open: Open) -> Result<Session, RuntimeError> {
         match &self.kind {
-            Kind::Local(env) => Session::start(driver, open, env, None),
+            Kind::Local(env) => match self.egress.as_ref().filter(|e| e.confined()) {
+                Some(egress) => {
+                    let (session, listener) = Session::start_confined(
+                        driver,
+                        open,
+                        env,
+                        None,
+                        crate::egress::CONFINED_PORT,
+                    )?;
+                    egress.serve(listener).map_err(|source| RuntimeError::Io {
+                        context: "the egress proxy",
+                        source,
+                    })?;
+                    Ok(session)
+                }
+                None => Session::start(driver, open, env, None),
+            },
             Kind::Sandbox {
                 provider,
                 name,
@@ -612,7 +850,7 @@ impl Placement {
             Kind::Substrate(actor) => Session::start_in(
                 driver,
                 open,
-                &actor.provider,
+                actor.provider.provider(),
                 &actor.name,
                 actor.env.clone(),
                 None,
@@ -648,7 +886,7 @@ impl Placement {
                     yard,
                     record,
                     fence,
-                    &actor.provider,
+                    actor.provider.provider(),
                     &actor.name,
                 ));
                 said
@@ -820,6 +1058,7 @@ pub(crate) fn recover(
     let said = match &record.provider {
         Some(Provider::Substrate(options)) => recover_actor(yard, record, options, &name),
         Some(Provider::Microsandbox(options)) => destroy_orphan(microsandbox(yard, options), &name),
+        Some(Provider::Recipe(options)) => recover_machine(yard, record, options, &name),
         None | Some(Provider::Local) => return None,
     };
     let _ = yard
@@ -880,42 +1119,124 @@ fn bring_back(
     actor: &str,
     stage: Option<&Path>,
 ) -> String {
-    let worktree = &record.info.worktree;
     let pulled = (|| {
         let stage = stage.ok_or("its actor's name cannot name a staging directory")?;
-        if !stage.is_dir() {
-            return Err(
-                "its transfer's staging directory is gone: the worktree was never sent to it, \
-                 or was already brought back"
-                    .to_owned(),
-            );
-        }
         let provider = substrate(options)?;
         provider
             .begin_attempt(actor, "recovery")
             .map_err(|e| e.to_string())?;
         let endpoint = provider.endpoint(actor).map_err(|e| e.to_string())?;
-        let pushed = transfer::reopen_staged(worktree, Path::new(options.workdir()), stage)
-            .map_err(|e| e.to_string())?;
-        let pulled = transfer::pull(&endpoint, &pushed, worktree).map_err(|e| e.to_string())?;
-        let home = match &record.home {
-            Some(home) => transfer::pull_tree(&endpoint, Path::new(options.home()), home)
-                .err()
-                .map(|e| format!("; its home directory was not brought back: {e}")),
-            None => None,
-        };
+        let paths = (Path::new(options.workdir()), Path::new(options.home()));
+        let pulled = pull_staged(&endpoint, record, paths, stage);
         let _ = provider.end_attempt(actor);
-        Ok((pulled.changed, home.unwrap_or_default()))
+        pulled
     })();
+    said_back(pulled, "actor", actor)
+}
+
+/// Pull the worktree and home a stopped engine's push to `workdir` and
+/// `home` left in `stage` back through `endpoint`: whether any file
+/// changed, and what to add about the home.
+fn pull_staged(
+    endpoint: &dyn Guest,
+    record: &Record,
+    (workdir, home): (&Path, &Path),
+    stage: &Path,
+) -> Result<(bool, String), String> {
+    let worktree = &record.info.worktree;
+    if !stage.is_dir() {
+        return Err(
+            "its transfer's staging directory is gone: the worktree was never sent to it, \
+             or was already brought back"
+                .to_owned(),
+        );
+    }
+    let pushed = transfer::reopen_staged(worktree, workdir, stage).map_err(|e| e.to_string())?;
+    let pulled = transfer::pull(endpoint, &pushed, worktree).map_err(|e| e.to_string())?;
+    let said = match &record.home {
+        Some(host) => transfer::pull_tree(endpoint, home, host)
+            .err()
+            .map(|e| format!("; its home directory was not brought back: {e}")),
+        None => None,
+    };
+    Ok((pulled.changed, said.unwrap_or_default()))
+}
+
+/// What recovery says of [`pull_staged`]'s result from `noun` `name`.
+fn said_back(pulled: Result<(bool, String), String>, noun: &str, name: &str) -> String {
     match pulled {
         Ok((true, home)) => {
-            format!("brought the harness's work in actor {actor} back to the worktree{home}")
+            format!("brought the harness's work in {noun} {name} back to the worktree{home}")
         }
         Ok((false, home)) => format!(
-            "the harness had changed no files in actor {actor}; the worktree is as it was{home}"
+            "the harness had changed no files in {noun} {name}; the worktree is as it was{home}"
         ),
-        Err(why) => format!("did not bring the harness's work back from actor {actor}: {why}"),
+        Err(why) => format!("did not bring the harness's work back from {noun} {name}: {why}"),
     }
+}
+
+/// The provider for a recipe branch: its machines' records in the store's
+/// `recipes` directory, shared by every process on this repository, and
+/// `$BRANCHYARD_SSH` (default `ssh`) as the ssh program.
+pub(crate) fn recipe_provider(yard: &Yard, options: &RecipeOptions) -> Arc<RecipeProvider> {
+    let mut recipe = Recipe::new(&options.name, &yard.root, &options.create)
+        .with_destroy(options.destroy.as_deref());
+    recipe.suspend = options.suspend.clone();
+    recipe.resume = options.resume.clone();
+    if let Some(seconds) = options.timeout_seconds {
+        recipe.timeout = Duration::from_secs(seconds);
+    }
+    let ssh = std::env::var("BRANCHYARD_SSH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "ssh".into());
+    Arc::new(RecipeProvider::new(recipe, ssh).with_state_dir(yard.store().dir().join("recipes")))
+}
+
+/// Bring back what the harness left on the recipe machine a stopped
+/// engine's turn journaled, if the machine is still recorded: what still
+/// runs there is stopped first, then the worktree (only if the host's still
+/// holds exactly what was sent) and the home come back, and the machine is
+/// destroyed through the recipe. Returns what recovery should report.
+fn recover_machine(yard: &Yard, record: &Record, options: &RecipeOptions, machine: &str) -> String {
+    // A machine's name is `by-<branch>-<ms>`; a branch name may hold dots.
+    let stage = (!machine.is_empty() && !machine.contains('/') && !machine.starts_with('.'))
+        .then(|| staging(yard, machine));
+    let provider = recipe_provider(yard, options);
+    let mut said = Vec::new();
+    let existed = matches!(provider.inspect(machine), Ok(Some(_)));
+    if existed {
+        let pulled = (|| {
+            let stage = stage
+                .as_deref()
+                .ok_or("its machine's name cannot name a staging directory")?;
+            // The harness outlives a dead engine's ssh connection: stop it,
+            // then make the machine usable for the transfer again.
+            provider.stop(machine).map_err(|e| e.to_string())?;
+            provider
+                .ensure(&SandboxSpec::new(machine))
+                .map_err(|e| e.to_string())?;
+            let (workdir, home) = recipe_paths(record, options);
+            let endpoint = transfer::Exec::new(provider.as_ref(), machine);
+            pull_staged(
+                &endpoint,
+                record,
+                (Path::new(&workdir), Path::new(&home)),
+                stage,
+            )
+        })();
+        said.push(said_back(pulled, "machine", machine));
+    }
+    let destroyed = provider.destroy(machine);
+    if let Some(stage) = &stage {
+        let _ = std::fs::remove_dir_all(stage);
+    }
+    said.push(match (destroyed, existed) {
+        (Ok(()), true) => format!("destroyed its machine {machine} (recipe {})", options.name),
+        (Ok(()), false) => format!("its machine {machine} was already gone"),
+        (Err(error), _) => format!("could not destroy its machine {machine}: {error}"),
+    });
+    said.join("; ")
 }
 
 /// The private home a new branch needs because it runs in a sandbox.

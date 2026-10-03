@@ -35,8 +35,9 @@ use serde_json::Value;
 
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PortBackend,
-    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SteerRow, StepRow,
+    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend,
+    PortBackend, ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow,
+    SlotRow, SlotState, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
@@ -251,7 +252,107 @@ CREATE TABLE IF NOT EXISTS by_sandboxes (
     PRIMARY KEY (repo, branch, kind, name)
 );
 CREATE INDEX IF NOT EXISTS by_sandboxes_provider ON by_sandboxes (repo, kind, provider, used_ms);
+CREATE TABLE IF NOT EXISTS by_outcomes (
+    repo TEXT NOT NULL,
+    id TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    model TEXT,
+    effort TEXT,
+    outcome TEXT NOT NULL,
+    score DOUBLE PRECISION,
+    cost_usd DOUBLE PRECISION,
+    duration_ms BIGINT,
+    turns BIGINT NOT NULL,
+    routed BOOLEAN NOT NULL,
+    recorded_ms BIGINT NOT NULL,
+    PRIMARY KEY (repo, id)
+);
+CREATE INDEX IF NOT EXISTS by_outcomes_kind ON by_outcomes (repo, kind, recorded_ms);
 ";
+
+/// Tables added after [`TABLES`], each made on its own when the catalog
+/// says it is missing: a name (a table or index), and the statement that
+/// makes it. An opener that finds them all reads only the catalog, so it
+/// takes no lock another engine's transaction could wait behind; one that
+/// finds one missing makes it alone, under the schema's advisory lock,
+/// after checking again.
+const STEPS: &[(&str, &str)] = &[
+    (
+        "by_knowledge",
+        "CREATE TABLE IF NOT EXISTS by_knowledge (
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            repo TEXT NOT NULL,
+            scope_path TEXT,
+            scope_kind TEXT,
+            text TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_ms BIGINT NOT NULL,
+            adopted_by TEXT,
+            decided_ms BIGINT,
+            note TEXT
+        )",
+    ),
+    (
+        "by_knowledge_repo",
+        "CREATE INDEX IF NOT EXISTS by_knowledge_repo ON by_knowledge (repo, id)",
+    ),
+    (
+        "by_pool_slots",
+        "CREATE TABLE IF NOT EXISTS by_pool_slots (
+            repo TEXT NOT NULL,
+            id TEXT NOT NULL,
+            place TEXT NOT NULL,
+            recipe TEXT NOT NULL,
+            state TEXT NOT NULL,
+            base TEXT NOT NULL,
+            path TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            host TEXT NOT NULL,
+            pid BIGINT NOT NULL,
+            pid_start TEXT NOT NULL,
+            branch TEXT,
+            created_ms BIGINT NOT NULL,
+            changed_ms BIGINT NOT NULL,
+            PRIMARY KEY (repo, id)
+        )",
+    ),
+    (
+        "by_model_usage",
+        "CREATE TABLE IF NOT EXISTS by_model_usage (
+            repo TEXT NOT NULL,
+            id TEXT NOT NULL,
+            at_ms BIGINT NOT NULL,
+            branch TEXT NOT NULL,
+            turn BIGINT NOT NULL,
+            subject TEXT NOT NULL,
+            model TEXT NOT NULL,
+            api TEXT NOT NULL,
+            backend TEXT NOT NULL,
+            input BIGINT NOT NULL,
+            output BIGINT NOT NULL,
+            cache_read BIGINT NOT NULL,
+            cache_write BIGINT NOT NULL,
+            cache_write_1h BIGINT NOT NULL,
+            cost_usd DOUBLE PRECISION,
+            latency_ms BIGINT NOT NULL,
+            status BIGINT NOT NULL,
+            streamed BOOLEAN NOT NULL,
+            PRIMARY KEY (repo, id)
+        )",
+    ),
+    (
+        "by_pool_slots_place",
+        "CREATE INDEX IF NOT EXISTS by_pool_slots_place ON by_pool_slots (repo, place, created_ms)",
+    ),
+    (
+        "by_model_usage_at",
+        "CREATE INDEX IF NOT EXISTS by_model_usage_at ON by_model_usage (repo, at_ms)",
+    ),
+];
 
 fn steer_row(r: &Row) -> SteerRow {
     SteerRow {
@@ -429,7 +530,43 @@ impl Postgres {
                 )))),
             }
         })?;
+        store.make_missing(STEPS)?;
         Ok(store)
+    }
+
+    /// Make each of `steps` the catalog says is missing, one at a time; see
+    /// [`STEPS`].
+    fn make_missing(&self, steps: &[(&str, &str)]) -> Result<(), Error> {
+        let names: Vec<String> = steps.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let missing: Vec<String> = self
+            .query(|client| {
+                client.query(
+                    "SELECT n FROM unnest($1::text[]) WITH ORDINALITY AS t (n, i) \
+                     WHERE to_regclass(n) IS NULL ORDER BY i",
+                    &[&names],
+                )
+            })?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        for (name, statement) in steps {
+            if !missing.iter().any(|m| m == name) {
+                continue;
+            }
+            self.tx(true, |tx| {
+                tx.execute("SELECT pg_advisory_xact_lock(7390184325)", &[])
+                    .map_err(db("schema"))?;
+                let absent: bool = tx
+                    .query_one("SELECT to_regclass($1::text) IS NULL", &[name])
+                    .map_err(db("schema"))?
+                    .get(0);
+                if absent {
+                    tx.batch_execute(statement).map_err(db("schema"))?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Client>> {
@@ -2544,6 +2681,414 @@ impl StorageBackend for Postgres {
                 holder_branch: r.get(0),
                 acquired_at: uint(r.get::<_, i64>(1)) / 1000,
             })
+        })
+    }
+}
+
+const OUTCOME_COLUMNS: &str = "id, repository, branch, kind, harness, model, effort, outcome, \
+     score, cost_usd, duration_ms, turns, routed, recorded_ms";
+
+fn outcome_row(r: &Row) -> Result<crate::fleet::OutcomeRecord, Error> {
+    Ok(crate::fleet::OutcomeRecord {
+        id: r.get(0),
+        repo: r.get(1),
+        branch: r.get(2),
+        kind: r
+            .get::<_, String>(3)
+            .parse()
+            .map_err(|e| Error::State(format!("outcome kind: {e}")))?,
+        harness: r.get(4),
+        model: r.get(5),
+        effort: r.get(6),
+        outcome: crate::fleet::BranchOutcome::parse(r.get(7))?,
+        score: r.get(8),
+        cost_usd: r.get(9),
+        duration_ms: r.get::<_, Option<i64>>(10).map(uint),
+        turns: u32::try_from(r.get::<_, i64>(11)).unwrap_or(0),
+        routed: r.get(12),
+        recorded_ms: uint(r.get(13)),
+    })
+}
+
+impl crate::fleet::OutcomeBackend for Postgres {
+    fn put_outcome(&self, row: &crate::fleet::OutcomeRecord) -> Result<(), Error> {
+        // Statistics derived from branches, not a branch's state: committed
+        // as event appends are, without a sync of its own.
+        self.tx(false, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO by_outcomes (repo, {OUTCOME_COLUMNS}) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+                     ON CONFLICT (repo, id) DO UPDATE SET \
+                     repository = EXCLUDED.repository, branch = EXCLUDED.branch, \
+                     kind = EXCLUDED.kind, harness = EXCLUDED.harness, model = EXCLUDED.model, \
+                     effort = EXCLUDED.effort, outcome = EXCLUDED.outcome, \
+                     score = EXCLUDED.score, cost_usd = EXCLUDED.cost_usd, \
+                     duration_ms = EXCLUDED.duration_ms, turns = EXCLUDED.turns, \
+                     routed = EXCLUDED.routed, recorded_ms = EXCLUDED.recorded_ms"
+                ),
+                &[
+                    &self.repo,
+                    &row.id,
+                    &row.repo,
+                    &row.branch,
+                    &row.kind.as_str(),
+                    &row.harness,
+                    &row.model,
+                    &row.effort,
+                    &row.outcome.as_str(),
+                    &row.score,
+                    &row.cost_usd,
+                    &row.duration_ms.map(int),
+                    &i64::from(row.turns),
+                    &row.routed,
+                    &int(row.recorded_ms),
+                ],
+            )
+            .map_err(db("outcome"))?;
+            Ok(())
+        })
+    }
+
+    fn outcome(&self, id: &str) -> Result<Option<crate::fleet::OutcomeRecord>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+                &format!("SELECT {OUTCOME_COLUMNS} FROM by_outcomes WHERE repo = $1 AND id = $2"),
+                &[&self.repo, &id],
+            )
+        })?;
+        row.as_ref().map(outcome_row).transpose()
+    }
+
+    fn outcomes(
+        &self,
+        kind: Option<crate::fleet::TaskKind>,
+    ) -> Result<Vec<crate::fleet::OutcomeRecord>, Error> {
+        let kind = kind.map(|k| k.as_str().to_owned());
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {OUTCOME_COLUMNS} FROM by_outcomes \
+                     WHERE repo = $1 AND ($2::TEXT IS NULL OR kind = $2) \
+                     ORDER BY recorded_ms, id"
+                ),
+                &[&self.repo, &kind],
+            )
+        })?;
+        rows.iter().map(outcome_row).collect()
+    }
+}
+
+const USAGE_COLUMNS: &str = "id, at_ms, branch, turn, subject, model, api, backend, input, \
+     output, cache_read, cache_write, cache_write_1h, cost_usd, latency_ms, status, streamed";
+
+fn usage_row(r: &Row) -> crate::models::UsageRecord {
+    let api: String = r.get(6);
+    crate::models::UsageRecord {
+        id: r.get(0),
+        at_ms: uint(r.get(1)),
+        branch: r.get(2),
+        turn: u32::try_from(r.get::<_, i64>(3)).unwrap_or(0),
+        subject: r.get(4),
+        model: r.get(5),
+        api: serde_json::from_value(Value::String(api)).unwrap_or(crate::models::Api::Generic),
+        backend: r.get(7),
+        tokens: crate::models::Tokens {
+            input: uint(r.get(8)),
+            output: uint(r.get(9)),
+            cache_read: uint(r.get(10)),
+            cache_write: uint(r.get(11)),
+            cache_write_1h: uint(r.get(12)),
+        },
+        cost_usd: r.get(13),
+        latency_ms: uint(r.get(14)),
+        status: u16::try_from(r.get::<_, i64>(15)).unwrap_or(0),
+        streamed: r.get(16),
+    }
+}
+
+impl crate::models::UsageBackend for Postgres {
+    fn put_usage(&self, row: &crate::models::UsageRecord) -> Result<(), Error> {
+        // Accounting beside the branches, committed as event appends are.
+        self.tx(false, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO by_model_usage (repo, {USAGE_COLUMNS}) VALUES ($1, $2, $3, $4, \
+                     $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) \
+                     ON CONFLICT (repo, id) DO NOTHING"
+                ),
+                &[
+                    &self.repo,
+                    &row.id,
+                    &int(row.at_ms),
+                    &row.branch,
+                    &i64::from(row.turn),
+                    &row.subject,
+                    &row.model,
+                    &row.api.as_str(),
+                    &row.backend,
+                    &int(row.tokens.input),
+                    &int(row.tokens.output),
+                    &int(row.tokens.cache_read),
+                    &int(row.tokens.cache_write),
+                    &int(row.tokens.cache_write_1h),
+                    &row.cost_usd,
+                    &int(row.latency_ms),
+                    &i64::from(row.status),
+                    &row.streamed,
+                ],
+            )
+            .map_err(db("model usage"))?;
+            Ok(())
+        })
+    }
+
+    fn usage_since(&self, since_ms: u64) -> Result<Vec<crate::models::UsageRecord>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {USAGE_COLUMNS} FROM by_model_usage WHERE repo = $1 AND at_ms >= $2 \
+                     ORDER BY at_ms, id"
+                ),
+                &[&self.repo, &int(since_ms)],
+            )
+        })?;
+        Ok(rows.iter().map(usage_row).collect())
+    }
+}
+
+const KNOWLEDGE_COLUMNS: &str = "id, scope_path, scope_kind, text, source, status, created_ms, \
+     adopted_by, decided_ms, note";
+
+fn knowledge_row(r: &Row) -> Result<crate::KnowledgeEntry, Error> {
+    Ok(crate::KnowledgeEntry {
+        id: uint(r.get(0)),
+        scope: crate::KnowledgeScope {
+            path: r.get(1),
+            kind: r
+                .get::<_, Option<String>>(2)
+                .map(|k| k.parse())
+                .transpose()
+                .map_err(|e| Error::State(format!("knowledge kind: {e}")))?,
+        },
+        text: r.get(3),
+        source: decode("knowledge source", &r.get::<_, String>(4))?,
+        status: r
+            .get::<_, String>(5)
+            .parse()
+            .map_err(|e| Error::State(format!("knowledge status: {e}")))?,
+        created_ms: uint(r.get(6)),
+        adopted_by: r.get(7),
+        decided_ms: r.get::<_, Option<i64>>(8).map(uint),
+        note: r.get(9),
+    })
+}
+
+impl crate::knowledge::KnowledgeBackend for Postgres {
+    fn add_knowledge(&self, entry: &crate::KnowledgeEntry) -> Result<crate::KnowledgeEntry, Error> {
+        let source = encode("knowledge source", &entry.source)?;
+        let created = match entry.created_ms {
+            0 => now_ms(),
+            at => at,
+        };
+        let id: i64 = self.tx(true, |tx| {
+            Ok(tx
+                .query_one(
+                    "INSERT INTO by_knowledge (repo, scope_path, scope_kind, text, source, status, \
+                     created_ms, adopted_by, decided_ms, note) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+                    &[
+                        &self.repo,
+                        &entry.scope.path,
+                        &entry.scope.kind.map(|k| k.as_str()),
+                        &entry.text,
+                        &source,
+                        &entry.status.as_str(),
+                        &int(created),
+                        &entry.adopted_by,
+                        &entry.decided_ms.map(int),
+                        &entry.note,
+                    ],
+                )
+                .map_err(db("knowledge"))?
+                .get(0))
+        })?;
+        Ok(crate::KnowledgeEntry {
+            id: uint(id),
+            created_ms: created,
+            ..entry.clone()
+        })
+    }
+
+    fn knowledge(&self, id: u64) -> Result<Option<crate::KnowledgeEntry>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+                &format!(
+                    "SELECT {KNOWLEDGE_COLUMNS} FROM by_knowledge WHERE repo = $1 AND id = $2"
+                ),
+                &[&self.repo, &int(id)],
+            )
+        })?;
+        row.as_ref().map(knowledge_row).transpose()
+    }
+
+    fn knowledge_entries(&self) -> Result<Vec<crate::KnowledgeEntry>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {KNOWLEDGE_COLUMNS} FROM by_knowledge WHERE repo = $1 ORDER BY id"
+                ),
+                &[&self.repo],
+            )
+        })?;
+        rows.iter().map(knowledge_row).collect()
+    }
+
+    fn put_knowledge(
+        &self,
+        entry: &crate::KnowledgeEntry,
+        expected: crate::KnowledgeStatus,
+    ) -> Result<bool, Error> {
+        let source = encode("knowledge source", &entry.source)?;
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE by_knowledge SET scope_path = $3, scope_kind = $4, text = $5, \
+                     source = $6, status = $7, adopted_by = $8, decided_ms = $9, note = $10 \
+                     WHERE repo = $1 AND id = $2 AND status = $11",
+                    &[
+                        &self.repo,
+                        &int(entry.id),
+                        &entry.scope.path,
+                        &entry.scope.kind.map(|k| k.as_str()),
+                        &entry.text,
+                        &source,
+                        &entry.status.as_str(),
+                        &entry.adopted_by,
+                        &entry.decided_ms.map(int),
+                        &entry.note,
+                        &expected.as_str(),
+                    ],
+                )
+                .map_err(db("knowledge"))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn remove_knowledge(&self, id: u64) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "DELETE FROM by_knowledge WHERE repo = $1 AND id = $2",
+                    &[&self.repo, &int(id)],
+                )
+                .map_err(db("knowledge"))?;
+            Ok(changed == 1)
+        })
+    }
+}
+
+const SLOT_COLUMNS: &str = "id, place, recipe, state, base, path, detail, host, pid, pid_start, \
+     branch, created_ms, changed_ms";
+
+fn slot_row(r: &Row) -> Result<SlotRow, Error> {
+    Ok(SlotRow {
+        id: r.get(0),
+        place: r.get(1),
+        recipe: r.get(2),
+        state: SlotState::parse(r.get(3))?,
+        base: r.get(4),
+        path: r.get(5),
+        detail: r.get(6),
+        host: r.get(7),
+        pid: u32::try_from(r.get::<_, i64>(8)).unwrap_or(0),
+        start: r.get(9),
+        branch: r.get(10),
+        created_ms: uint(r.get(11)),
+        changed_ms: uint(r.get(12)),
+    })
+}
+
+impl PoolBackend for Postgres {
+    fn insert_slot(&self, row: &SlotRow) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO by_pool_slots (repo, {SLOT_COLUMNS}) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"
+                ),
+                &[
+                    &self.repo,
+                    &row.id,
+                    &row.place,
+                    &row.recipe,
+                    &row.state.as_str(),
+                    &row.base,
+                    &row.path,
+                    &row.detail,
+                    &row.host,
+                    &i64::from(row.pid),
+                    &row.start,
+                    &row.branch,
+                    &int(row.created_ms),
+                    &int(row.changed_ms),
+                ],
+            )
+            .map_err(db("pool slot"))?;
+            Ok(())
+        })
+    }
+
+    fn slots(&self, place: Option<&str>) -> Result<Vec<SlotRow>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                &format!(
+                    "SELECT {SLOT_COLUMNS} FROM by_pool_slots \
+                     WHERE repo = $1 AND ($2::text IS NULL OR place = $2) \
+                     ORDER BY created_ms, id"
+                ),
+                &[&self.repo, &place],
+            )
+        })?;
+        rows.iter().map(slot_row).collect()
+    }
+
+    fn update_slot(&self, row: &SlotRow, expected: SlotState) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE by_pool_slots SET state = $3, base = $4, path = $5, detail = $6, \
+                     host = $7, pid = $8, pid_start = $9, branch = $10, changed_ms = $11 \
+                     WHERE repo = $1 AND id = $2 AND state = $12",
+                    &[
+                        &self.repo,
+                        &row.id,
+                        &row.state.as_str(),
+                        &row.base,
+                        &row.path,
+                        &row.detail,
+                        &row.host,
+                        &i64::from(row.pid),
+                        &row.start,
+                        &row.branch,
+                        &int(row.changed_ms),
+                        &expected.as_str(),
+                    ],
+                )
+                .map_err(db("pool slot"))?;
+            Ok(changed == 1)
+        })
+    }
+
+    fn delete_slot(&self, id: &str) -> Result<bool, Error> {
+        self.tx(true, |tx| {
+            let changed = tx
+                .execute(
+                    "DELETE FROM by_pool_slots WHERE repo = $1 AND id = $2",
+                    &[&self.repo, &id],
+                )
+                .map_err(db("pool slot"))?;
+            Ok(changed == 1)
         })
     }
 }

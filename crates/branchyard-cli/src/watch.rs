@@ -78,6 +78,32 @@ impl Doing {
             Activity::Harness(Event::PermissionWithdrawn { .. }) | Activity::Decision { .. } => {
                 self.asking = None;
             }
+            // A gateway call is what the harness is doing, as a tool is.
+            Activity::ConnectorCall(call) => {
+                self.tool = Some(format!(
+                    "{} {} ({})",
+                    call.connector, call.operation, call.decision
+                ));
+            }
+            // So is a call through the model gateway.
+            Activity::Model(activity) => {
+                if let branchyard::models::ModelActivity::Call(call) = activity.as_ref() {
+                    self.tool = Some(format!("model {} ({})", call.model, call.decision));
+                }
+            }
+            // So is a request through the egress proxy.
+            Activity::Egress(egress) => {
+                if let branchyard::EgressActivity::Decision {
+                    host,
+                    port,
+                    allowed,
+                    ..
+                } = egress.as_ref()
+                {
+                    let verdict = if *allowed { "allowed" } else { "denied" };
+                    self.tool = Some(format!("egress {host}:{port} ({verdict})"));
+                }
+            }
             _ => {}
         }
     }
@@ -457,7 +483,11 @@ impl Source {
 
     fn branches(&self) -> Result<Vec<BranchInfo>, Failure> {
         Ok(match self {
-            Source::Local { yard, .. } => yard.branches()?,
+            Source::Local { yard, .. } => {
+                // The gateway's newest calls, as connector_call events.
+                let _ = yard.ingest_connector_audit();
+                yard.branches()?
+            }
             Source::Remote { repo, .. } => repo.branches()?,
         })
     }
@@ -644,6 +674,62 @@ struct Cockpit {
     source: Source,
     runner: Runner,
     notify: notify::Settings,
+    /// `by usage`'s header line and listening ports, refreshed less often
+    /// than the branches (they read files and `/proc`), locally only.
+    extras: Extras,
+}
+
+/// What the dashboard shows beyond the branches, with when each was read.
+#[derive(Default)]
+struct Extras {
+    usage: Option<String>,
+    usage_at: Option<std::time::Instant>,
+    ports: std::collections::BTreeMap<String, Vec<String>>,
+    ports_at: Option<std::time::Instant>,
+    /// The maps running or unfinished, one line (docs/map.md).
+    maps: Option<String>,
+    maps_at: Option<std::time::Instant>,
+}
+
+/// How often the usage meters are read again.
+const USAGE_EVERY: Duration = Duration::from_secs(60);
+/// How often the listening ports are scanned again.
+const PORTS_EVERY: Duration = Duration::from_secs(5);
+/// How often the maps' progress is read again.
+const MAPS_EVERY: Duration = Duration::from_secs(2);
+
+impl Extras {
+    fn refresh(&mut self, source: &Source) {
+        let Source::Local { yard, .. } = source else {
+            return;
+        };
+        let stale = |at: Option<std::time::Instant>, every: Duration| {
+            at.is_none_or(|at| at.elapsed() >= every)
+        };
+        if stale(self.usage_at, USAGE_EVERY) {
+            let cwd = yard.root().to_path_buf();
+            let vars = |name: &str| std::env::var(name).ok();
+            let config = crate::defaults::config_at(&cwd, &vars)
+                .ok()
+                .flatten()
+                .map(|c| c.usage)
+                .unwrap_or_default();
+            let logins = crate::usage::meter(&config, &vars, crate::usage::now_ms());
+            self.usage = crate::usage::header(&logins);
+            self.usage_at = Some(std::time::Instant::now());
+        }
+        if stale(self.maps_at, MAPS_EVERY) {
+            self.maps = crate::map_cmd::watch_line(yard);
+            self.maps_at = Some(std::time::Instant::now());
+        }
+        if stale(self.ports_at, PORTS_EVERY) {
+            self.ports = crate::ports::of_yard(yard)
+                .into_iter()
+                .map(|(branch, listeners)| (branch, crate::ports::lines(&listeners)))
+                .collect();
+            self.ports_at = Some(std::time::Instant::now());
+        }
+    }
 }
 
 /// Runs `by` for the dashboard's actions.
@@ -685,6 +771,7 @@ impl Cockpit {
         Cockpit {
             source,
             notify,
+            extras: Extras::default(),
             runner: Runner {
                 by: std::env::current_exe().ok(),
                 globals,
@@ -728,6 +815,27 @@ impl Runner {
                 return;
             }
         };
+        if invocation.terminal {
+            // The dashboard has left the screen; the command has the
+            // terminal until it exits.
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .env_remove("NO_COLOR");
+            let msg = match command.status() {
+                Ok(status) => finished(
+                    status.success(),
+                    match status.success() {
+                        true => "done".to_owned(),
+                        false => format!("by exited with {status}"),
+                    },
+                ),
+                Err(error) => finished(false, format!("could not start by: {error}")),
+            };
+            let _ = done.send(msg);
+            return;
+        }
         let done = done.clone();
         if !invocation.background {
             std::thread::spawn(move || {
@@ -815,12 +923,16 @@ impl tui::Effects for Cockpit {
     fn refresh(&mut self) -> Result<tui::Snapshot, Failure> {
         let infos = self.source.branches()?;
         let events = self.source.events(&infos);
+        self.extras.refresh(&self.source);
         Ok(tui::Snapshot {
             label: self.source.label(),
             infos,
             events,
             now_ms: now_ms(),
             trying: self.source.trying(),
+            usage: self.extras.usage.clone(),
+            maps: self.extras.maps.clone(),
+            ports: self.extras.ports.clone(),
         })
     }
 
@@ -1095,6 +1207,7 @@ mod tests {
             branch: "a/b".into(),
             argv: argv.iter().map(|a| a.to_string()).collect(),
             background,
+            terminal: false,
         }
     }
 

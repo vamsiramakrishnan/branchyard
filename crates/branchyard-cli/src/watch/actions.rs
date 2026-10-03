@@ -45,6 +45,12 @@ pub enum ActionId {
     Rewind,
     Compare,
     Try,
+    Review,
+    Browse,
+    StopPorts,
+    ApprovePlan,
+    Replan,
+    RejectPlan,
 }
 
 /// What an action asks before it runs.
@@ -116,6 +122,10 @@ pub enum Run {
     /// the dashboard itself; a terminal editor gets the screen until it
     /// exits.
     Open,
+    /// `by ARGV...` in this terminal, waited for: the dashboard leaves its
+    /// screen until it exits, for a command that opens an editor
+    /// (`by review`).
+    Terminal(&'static [&'static str]),
 }
 
 /// Whether an action works in remote mode (`by --remote URL watch`).
@@ -216,6 +226,17 @@ fn ready(info: &BranchInfo) -> Result<(), String> {
     }
 }
 
+fn awaiting_plan(info: &BranchInfo) -> Result<(), String> {
+    match info.status {
+        BranchStatus::AwaitingPlanApproval => Ok(()),
+        _ => Err(format!(
+            "{} has no plan awaiting approval ({})",
+            info.name,
+            status(info)
+        )),
+    }
+}
+
 fn forkable(info: &BranchInfo) -> Result<(), String> {
     match info.status {
         BranchStatus::Waiting | BranchStatus::Blocked { .. } => Err(format!(
@@ -243,6 +264,11 @@ fn pushable(info: &BranchInfo) -> Result<(), String> {
         (_, None) => Err(format!("{} has no candidate commit to push", info.name)),
         _ => Ok(()),
     }
+}
+
+fn reviewable(info: &BranchInfo) -> Result<(), String> {
+    not_running(info)?;
+    has_candidate(info)
 }
 
 fn rewindable(info: &BranchInfo) -> Result<(), String> {
@@ -450,6 +476,76 @@ pub const ACTIONS: &[Action] = &[
         when: has_candidate,
         remote: Remote::No("it changes the checkout on this machine"),
     },
+    Action {
+        key: 'v',
+        id: ActionId::Review,
+        name: "review",
+        help: "comment on the diff in $EDITOR, sent as one prompt (by review)",
+        ask: Ask::Nothing,
+        run: Run::Terminal(&["review", "--detach", "--", "{branch}"]),
+        when: reviewable,
+        remote: Remote::Yes,
+    },
+    Action {
+        key: 'b',
+        id: ActionId::Browse,
+        name: "browse",
+        help: "open a port the branch listens on in a browser (by workspace browse)",
+        ask: Ask::Nothing,
+        run: Run::Wait(&["workspace", "browse", "--", "{branch}"]),
+        when: always,
+        remote: Remote::No("its processes run on the server, not this machine"),
+    },
+    Action {
+        key: 'K',
+        id: ActionId::StopPorts,
+        name: "stop ports",
+        help: "stop the processes listening on the branch's ports (by workspace kill)",
+        ask: Ask::Confirm {
+            question: "Send SIGTERM to every process of {branch} that listens on a TCP port?",
+        },
+        run: Run::Wait(&["workspace", "kill", "--yes", "--", "{branch}"]),
+        when: always,
+        remote: Remote::No("its processes run on the server, not this machine"),
+    },
+    Action {
+        key: 'a',
+        id: ActionId::ApprovePlan,
+        name: "approve plan",
+        help: "approve the plan and run it as the next turn (by plan approve)",
+        ask: Ask::Confirm {
+            question: "Approve {branch}'s plan as proposed and run it? Its next turn carries it                        out with normal permissions (l shows the plan in the log).",
+        },
+        run: Run::Background(&["plan", "approve", "--", "{branch}"]),
+        when: awaiting_plan,
+        remote: Remote::Yes,
+    },
+    Action {
+        key: 'e',
+        id: ActionId::Replan,
+        name: "re-plan",
+        help: "reject the plan with a reason and plan again, read-only (by plan reject --replan)",
+        ask: Ask::Text {
+            title: "what should {branch}'s plan change?",
+        },
+        run: Run::Background(&[
+            "plan", "reject", "--replan", "--reason", "{text}", "--", "{branch}",
+        ]),
+        when: awaiting_plan,
+        remote: Remote::Yes,
+    },
+    Action {
+        key: 'X',
+        id: ActionId::RejectPlan,
+        name: "reject plan",
+        help: "reject the plan and end the branch (by plan reject)",
+        ask: Ask::Text {
+            title: "reject {branch}'s plan because",
+        },
+        run: Run::Wait(&["plan", "reject", "--reason", "{text}", "--", "{branch}"]),
+        when: awaiting_plan,
+        remote: Remote::Yes,
+    },
 ];
 
 /// The action bound to `key`.
@@ -522,7 +618,7 @@ pub fn siblings(infos: &[BranchInfo], branch: &str) -> Vec<String> {
 /// `off`. `None` for actions that run no `by`.
 pub fn command(action: &Action, branch: &str, text: &str, off: bool) -> Option<Vec<String>> {
     let template = match action.run {
-        Run::Background(template) | Run::Wait(template) => template,
+        Run::Background(template) | Run::Wait(template) | Run::Terminal(template) => template,
         Run::Toggle { off: template, .. } if off => template,
         Run::Toggle { on, .. } => on,
         Run::Pane(_) | Run::Copy(_) | Run::Open => return None,
@@ -603,6 +699,7 @@ mod tests {
             ('r', ActionId::Rewind),
             ('c', ActionId::Compare),
             ('t', ActionId::Try),
+            ('v', ActionId::Review),
         ] {
             assert_eq!(by_key(key).unwrap().id, id);
         }
@@ -710,6 +807,86 @@ mod tests {
                     assert_eq!(o, off);
                     assert_eq!(branch.as_deref(), (!off).then_some("impl"));
                 }
+                (
+                    ActionId::Review,
+                    Command::Review {
+                        branch,
+                        print: false,
+                        editor: None,
+                        file: None,
+                        detach: true,
+                        ..
+                    },
+                ) => assert_eq!(branch, "impl"),
+                (
+                    ActionId::Browse,
+                    Command::Workspace {
+                        action:
+                            crate::args::WorkspaceAction::Browse {
+                                branch,
+                                port: None,
+                                print: false,
+                            },
+                        ..
+                    },
+                ) => assert_eq!(branch.as_deref(), Some("impl")),
+                (
+                    ActionId::StopPorts,
+                    Command::Workspace {
+                        action:
+                            crate::args::WorkspaceAction::Kill {
+                                branch,
+                                port: None,
+                                yes: true,
+                            },
+                        ..
+                    },
+                ) => assert_eq!(branch.as_deref(), Some("impl")),
+                (
+                    ActionId::ApprovePlan,
+                    Command::Plan {
+                        action:
+                            crate::args::PlanAction::Approve {
+                                branch,
+                                edit: false,
+                                file: None,
+                                ..
+                            },
+                        ..
+                    },
+                ) => assert_eq!(branch, "impl"),
+                (
+                    ActionId::Replan,
+                    Command::Plan {
+                        action:
+                            crate::args::PlanAction::Reject {
+                                branch,
+                                reason,
+                                replan: true,
+                                ..
+                            },
+                        ..
+                    },
+                ) => {
+                    assert_eq!(branch, "impl");
+                    assert_eq!(reason.as_deref(), Some(text));
+                }
+                (
+                    ActionId::RejectPlan,
+                    Command::Plan {
+                        action:
+                            crate::args::PlanAction::Reject {
+                                branch,
+                                reason,
+                                replan: false,
+                                ..
+                            },
+                        ..
+                    },
+                ) => {
+                    assert_eq!(branch, "impl");
+                    assert_eq!(reason.as_deref(), Some(text));
+                }
                 (id, command) => panic!("{id:?} parsed as {command:?}"),
             }
         }
@@ -763,6 +940,11 @@ mod tests {
                 .unwrap()
                 .contains("local only"));
         }
+        assert_eq!(refused('v', BranchStatus::Ready, true, true), None);
+        assert!(refused('v', BranchStatus::Running, true, false).is_some());
+        assert!(refused('v', BranchStatus::Ready, false, false)
+            .unwrap()
+            .contains("no candidate commit"));
         assert!(refused('t', BranchStatus::Running, false, false)
             .unwrap()
             .contains("no candidate commit"));

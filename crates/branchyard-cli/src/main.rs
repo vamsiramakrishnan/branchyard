@@ -3,22 +3,43 @@
 //! mode, and of a Branchyard server through `branchyard-client` in remote
 //! mode (`--remote URL`).
 
+mod adf;
+mod adopt;
 mod args;
 mod attempts;
+mod catalog_cmd;
 mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod env_cmd;
+mod fleet_cmd;
+mod gateway_cmd;
 mod gh;
+mod harness_cmd;
 mod init;
 mod json;
+mod knowledge_cmd;
+mod map_cmd;
+mod models_cmd;
 mod notify;
 mod open;
+mod plan_cmd;
+mod ports;
 mod pr;
+mod pr_threads;
+mod recipe_cmd;
 mod remote;
 mod render;
+mod review;
+mod review_format;
 mod rig;
 mod setup_io;
+mod ssh_remote;
+mod stats_cmd;
+mod trackers;
+mod trigger_cmd;
+mod usage;
 mod watch;
 mod wizard;
 mod workspace_cmd;
@@ -103,6 +124,11 @@ fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A worker here advertises its harnesses with the usage meters `by
+    // usage` reads (docs/harness-lifecycle.md).
+    branchyard_server::ops::set_inventory_source(branchyard_server::ops::InventorySource(
+        std::sync::Arc::new(harness_cmd::worker_inventory),
+    ));
     branchyard_server::cli::main(&args, call.program)
 }
 
@@ -125,7 +151,22 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
         Command::Config { json, action } => return config_cmd::main(&action, json),
+        // The meters read this machine's session files; no repository needed.
+        Command::Usage { json } => return usage::show(env, json),
+        // The ssh connection itself, not a server's API.
+        Command::Remote { json, action } => return ssh_remote::command(globals, &action, json),
+        // The catalog is built in; no repository or server is involved.
+        Command::Connectors {
+            json,
+            action: args::ConnectorsAction::Catalog,
+        } => return catalog_cmd::connectors(env, json),
         _ => {}
+    }
+    if let (Some(_), Some(recipe)) = (&globals.remote, command.recipe()) {
+        return Err(Failure::Message(format!(
+            "--provider recipe:{recipe} runs on the machine that has the repository: a server \
+             does not run environment recipes (docs/recipes.md). Run it without --remote"
+        )));
     }
     let target = match &globals.remote {
         Some(_) => Target::Remote(Box::new(remote::Remote::connect(globals)?)),
@@ -147,8 +188,71 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Fan {
             prompt,
             harnesses,
+            attempts,
+            judge,
             task,
-        } => commands::fan(env, target, &prompt, &harnesses, &task),
+        } => commands::fan(
+            env,
+            target,
+            &prompt,
+            harnesses.as_ref().map(|h| h.0.as_slice()),
+            &task,
+            &commands::FanRoute { attempts, judge },
+        ),
+        Command::Map { json, action, map } => {
+            map_cmd::main(env, target, action.as_ref(), &map, json)
+        }
+        Command::Judge {
+            targets,
+            harness,
+            deterministic,
+            command,
+            rubric,
+            pick,
+            into,
+            discard_others,
+            yes,
+            json,
+        } => fleet_cmd::judge(
+            env,
+            target,
+            &fleet_cmd::JudgeArgs {
+                targets,
+                harness,
+                deterministic,
+                command: command.map(|c| c.0),
+                rubric,
+                pick,
+                into,
+                discard_others,
+                yes,
+                json,
+            },
+            fleet_table()?.as_ref(),
+        ),
+        Command::Plan { json, action } => plan_cmd::main(env, target, &action, json),
+        Command::Knowledge { json, action } => knowledge_cmd::main(env, target, &action, json),
+        Command::Fleet { json, action } => match action {
+            args::FleetAction::Stats { kind } => fleet_cmd::stats(env, target, kind, json),
+            args::FleetAction::Route {
+                prompt,
+                kind,
+                attempts,
+                seed,
+            } => fleet_cmd::route(
+                target,
+                &prompt,
+                &branchyard::RouteOptions {
+                    kind,
+                    seed,
+                    attempts,
+                    failover: None,
+                    ..Default::default()
+                },
+                fleet_table()?.as_ref(),
+                json,
+            ),
+        },
         Command::Send {
             branch,
             prompt,
@@ -217,8 +321,28 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 json,
             },
         ),
+        Command::Review {
+            branch,
+            print,
+            editor,
+            file,
+            detach,
+            task,
+        } => review::main(
+            env,
+            target,
+            &review::ReviewArgs {
+                branch: &branch,
+                print_only: print,
+                editor: editor.as_deref(),
+                file: file.as_deref(),
+                detach,
+                task: &task,
+            },
+        ),
         Command::Reincarnate { branch, task } => commands::reincarnate(env, target, &branch, &task),
         Command::Ls { json } => commands::ls(env, target, json),
+        Command::Stats { json } => stats_cmd::main(env, target, json),
         Command::Show {
             branch,
             json,
@@ -234,11 +358,30 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             commands::merge(target, &branch, into.as_deref(), rm)
         }
         Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
+        Command::Recipe { json, action } => recipe_cmd::main(env, target, &action, json),
+        Command::Env { json, action } => env_cmd::main(env, target, &action, json),
+        Command::Trigger { json, action } => trigger_cmd::main(env, target, &action, json),
         Command::Rm {
             branch,
             keep_credentials,
         } => commands::rm(target, &branch, keep_credentials),
-        Command::Harnesses { json } => commands::harnesses(env, target, json),
+        Command::Harnesses {
+            json,
+            all,
+            profiles,
+            refresh,
+            on,
+            action,
+        } => harness_cmd::main(
+            env,
+            target,
+            json,
+            all,
+            profiles,
+            refresh,
+            on.as_deref(),
+            action.as_ref(),
+        ),
         Command::Pr { branch, pr } => pr::main(env, target, &branch, &pr),
         Command::Open {
             branch,
@@ -246,6 +389,25 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             print,
         } => open::main(target, &branch, editor.as_deref(), print),
         Command::Watch { interval, once } => watch::run(env, target, interval, once),
+        Command::Adopt {
+            session,
+            list,
+            name,
+            no_diff,
+            harness,
+            json,
+        } => adopt::main(
+            env,
+            target,
+            &adopt::Asked {
+                session: session.as_deref(),
+                name: name.as_deref(),
+                profile: harness.as_deref(),
+                list,
+                with_diff: !no_diff,
+                json,
+            },
+        ),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
         Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),
         Command::Inspect { branch, json } => commands::inspect(env, target, branch, json),
@@ -286,6 +448,14 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             json,
         } => commands::inbox(target, as_branch, unread, json),
         Command::Rig { json, action } => commands::rig(env, target, &action.into_args(json)),
+        Command::Gateway { json, action } => gateway_cmd::main(target, &action, json),
+        Command::Models { period, json } => models_cmd::main(env, target, &period, json),
+        Command::Connect {
+            connector,
+            account,
+            api_key_stdin,
+            open,
+        } => gateway_cmd::connect(target, &connector, account.as_deref(), api_key_stdin, open),
         Command::Artifact {
             branch,
             json,
@@ -302,6 +472,16 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Completions { .. }
         | Command::Man
         | Command::Init { .. }
-        | Command::Config { .. } => unreachable!("handled before choosing a target"),
+        | Command::Config { .. }
+        | Command::Usage { .. }
+        | Command::Remote { .. }
+        | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
     }
+}
+
+/// The `[fleet]` of the configuration under the current directory, for
+/// commands that take no task options.
+fn fleet_table() -> Result<Option<branchyard::Fleet>, Failure> {
+    let cwd = std::env::current_dir()?;
+    defaults::fleet_at(&cwd, &|name| std::env::var(name).ok()).map_err(Failure::Message)
 }

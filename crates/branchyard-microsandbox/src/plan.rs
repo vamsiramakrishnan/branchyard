@@ -59,6 +59,9 @@ pub fn capabilities_with(live_branch: bool) -> Capabilities {
         share: false,
         pause: live_branch,
         live_branch,
+        // The guest gets the runtime's default network; nothing confines it
+        // to an egress proxy (docs/egress.md).
+        egress: false,
     }
 }
 

@@ -185,6 +185,13 @@ pub struct SpawnSpec {
     pub after: After,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    /// The child's connector grant, narrowed to its parent's; unset
+    /// inherits the parent's (or its seat's). See `docs/connectors.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connectors: Option<Vec<crate::connectors::GrantEntry>>,
+    /// Plan first; its plan is escalated to the parent for approval.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan: bool,
 }
 
 impl SpawnSpec {
@@ -204,6 +211,8 @@ impl SpawnSpec {
             depends_on: self.depends_on.clone(),
             after: self.after,
             bindings: self.bindings.clone(),
+            connectors: self.connectors.clone(),
+            plan: self.plan,
         })
     }
 
@@ -224,6 +233,8 @@ impl SpawnSpec {
             depends_on: spawn.depends_on.clone(),
             after: spawn.after,
             bindings: spawn.bindings.clone(),
+            connectors: spawn.connectors.clone(),
+            plan: spawn.plan,
         }
     }
 }
@@ -429,7 +440,10 @@ fn verdict(store: &Store, record: &Record) -> Result<Verdict, Error> {
             | (BranchStatus::NoChanges, After::Integrated) => {}
             (BranchStatus::Merged { target: into, .. }, After::Integrated) if *into == target => {}
             (BranchStatus::Ready | BranchStatus::Merged { .. }, After::Integrated) => wait = true,
-            (BranchStatus::Running | BranchStatus::Waiting, _) => wait = true,
+            (
+                BranchStatus::Running | BranchStatus::Waiting | BranchStatus::AwaitingPlanApproval,
+                _,
+            ) => wait = true,
             (BranchStatus::Failed { reason }, _) => return blocked(format!("failed: {reason}")),
             (BranchStatus::Interrupted, _) => return blocked("was interrupted".into()),
             (BranchStatus::BudgetExceeded { limit }, _) => {
@@ -596,7 +610,23 @@ fn start(yard: &Yard, mut record: Record, options: &TaskOptions) -> Result<Optio
     let lease = Lease::new(store.clone(), fence);
     let (record, lease) = run::materialize(yard, record, lease)?;
     let started = record.clone();
-    let prompt = record.info.prompt.clone();
+    // A child that plans first gets the planning prompt, read-only.
+    let prompt = match crate::plan::planning(&record) {
+        true => {
+            store.append(
+                &record.info.name,
+                &crate::RecordedEvent {
+                    at_ms: crate::state::now_ms(),
+                    activity: crate::Activity::Plan(Box::new(crate::PlanActivity::Planning {
+                        round: 1,
+                    })),
+                },
+                Some(lease.fence()),
+            )?;
+            crate::plan::planning_prompt(&record.info.prompt)
+        }
+        false => record.info.prompt.clone(),
+    };
     delegation::start_turn(
         yard,
         Prepared {

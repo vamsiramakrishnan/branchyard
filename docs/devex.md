@@ -45,10 +45,10 @@ All three solve the same pain, which reviewers of Conductor call its main fricti
 - `copy`: globs of untracked files carried from the repository root into each new worktree, never outside it, never a symbolic link, never tracked files, and never committed from the branch;
 - `setup` (one command or a list), named `[workspace.run.NAME]` scripts for `by workspace run` (a `default`), and `teardown` on `by rm` and `by merge --rm`.
 
-Scripts and the harness get `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and `BRANCHYARD_PORT`, a port reserved per branch in the store (SQLite or PostgreSQL), stable across turns and restarts, and released with the branch. The user file's `[projects."<root>".workspace]` replaces a repository's section, as Superset's mirrored path does. Setup is a journaled step: a crash mid-install kills what it started, ends the branch `interrupted`, and its next turn runs setup again from the start. A repository's scripts never run until you trust them: a per-user record keyed by repository root and the section's digest, asked once on a terminal or given with `by workspace trust`, and asked again when the scripts change; a server runs them only for repositories its operator lists in `allow_workspace_scripts`, never because a request asks. `by init project` suggests the section from lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, a Compose file and `.env` files.
+Scripts and the harness get `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and `BRANCHYARD_PORT`, a port reserved per branch in the store (SQLite or PostgreSQL), stable across turns and restarts, and released with the branch. The user file's `[projects."<root>".workspace]` replaces a repository's section, as Superset's mirrored path does. Setup is a journaled step: a crash mid-install kills what it started, ends the branch `interrupted`, and its next turn runs setup again from the start. A repository's scripts never run until you trust them: a per-user record keyed by repository root and the section's digest, asked once on a terminal or given with `by workspace trust`, and asked again when the scripts change; a server runs them only for repositories its operator lists in `allow_workspace_scripts`, never because a request asks. `by init project` suggests the section from lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, a Compose file and `.env` files, or imports it from a committed `.emdash.json`, `orca.yaml`, `.superset/config.json` or `.conductor/settings.toml` ([setup](setup.md#importing-another-tools-workspace-configuration)).
 
 **Still open:**
-- Conductor's concurrent run mode (several run scripts at once) and `available_in`; `by workspace run` runs one script, in the foreground or `--detach`ed, and `by watch` does not yet show or stop running scripts.
+- Conductor's `available_in`. **Done since** (Wave 2, [workspace](workspace.md#listening-ports)): its concurrent run mode, `by workspace run BRANCH A B --detach` starting several scripts at once, each with its own port; and the ports each branch's processes listen on, attributed by Branchyard's variables, working directory, process tree or command line (ported from Orca), in `by workspace ports`, `by show` and `by watch`'s detail pane, where `b` opens one in a browser and `K` stops them.
 - An emdash-style `shellSetup` (for example `nvm use`) applied to the harness's own shell.
 - Setup inside a sandbox: scripts run on the host, as you, even for isolated or sandboxed branches, and the Substrate provider's bundle does not carry files setup creates that git ignores.
 - Tested hermetically only: no real package manager, Docker stack or harness, and not on macOS.
@@ -98,7 +98,7 @@ emdash autosaves terminal state and resumes agents where they left off ([tasks](
 - `by pr <branch> --watch` follows the pull request with backoff. A failed CI check (with a bounded `gh run view --log-failed` tail), a review, a comment or an unresolved review comment is sent back into the branch once, by steering its running turn or with `by send`'s path, and the next candidate is pushed. Every step is an event in `by log`, and what was delivered is kept there, so a restarted watch repeats nothing.
 - `by show` (and `--json`) has a merge-readiness line: local check, pull-request state, CI summary, unresolved threads, mergeability and review decision, from the last observation; `--refresh` asks GitHub first.
 
-In `by watch`, `p` runs `by pr` after a yes and shows its output, `P` starts `by pr --watch` in the background, and the detail pane has the readiness line. **What remains:** replying to and resolving review threads; GitHub only, local mode only; nothing tested against GitHub itself.
+In `by watch`, `p` runs `by pr` after a yes and shows its output, `P` starts `by pr --watch` in the background, and the detail pane has the readiness line. **Since:** the watch answers "Addressed in <commit>" to, and resolves, the review threads a pushed fix addressed, and `by review` (`v` in `by watch`) sends comments written on the diff in an editor as one prompt ([pull requests](pull-requests.md#by-review)). **What remains:** GitHub only, local mode only; nothing tested against GitHub itself.
 
 ### 6. Undo one step, not the whole branch
 
@@ -134,8 +134,10 @@ All three create a workspace straight from a GitHub issue, a Linear issue or a p
 
 **Branchyard (done, [pull requests](pull-requests.md#starting-from-an-issue)):** `by run --issue <url|#n|n> ["more instructions"]` (and `by fan`, `by spawn`) fetch the issue through `gh`, name the branch `issue-<n>-<slug>`, use the issue under a header as the prompt, and record the link, so the pull request `by pr` opens says `Closes #n`.
 
+**Since** (Wave 2, [other trackers](pull-requests.md#other-trackers)): `--issue linear:KEY`, `jira:KEY`, `gitlab:GROUP/PROJECT#N` or the issue's URL, fetched from Linear's GraphQL API, Jira's REST v3 (its rich text rendered as Markdown, ported from Orca) and GitLab's REST API (mapped as emdash's issue plugins map them), with tokens from the environment or a connector gateway tool, and the pull request naming the issue the way each tracker understands; and `--pr N`, starting a branch from a GitHub pull request's head, which `by pr` then updates ([starting from a pull request](pull-requests.md#starting-from-a-pull-request)). Tested against local mock servers only.
+
 **What remains:**
-- Linear, Jira and other trackers; starting from a pull request.
+- Asana and the other trackers emdash reads.
 - Scheduling belongs to the server (a webhook-triggered or scheduled operation) rather than a desktop app.
 
 ### 10. Notice when an agent needs you
@@ -197,7 +199,7 @@ In order of what a user would feel first:
    - a per-repository trust decision;
    - setup journaled and recovered.
 
-   Left: concurrent run scripts and running scripts in `by watch`, a `shellSetup` for the harness, setup inside a sandbox.
+   Left: a `shellSetup` for the harness, setup inside a sandbox. Concurrent run scripts and listening ports in `by watch` are done (Wave 2).
 3. **From branch to merged PR** (§5, §9), done ([pull requests](pull-requests.md)):
    - `by run --issue`;
    - `by pr` and `by pr --watch`, which routes CI failures and review comments back into the branch;
@@ -210,4 +212,4 @@ In order of what a user would feel first:
 5. **Compare and choose** after a fan-out (§3). Done: `by compare` ([checkpoints](checkpoints.md#compare-attempts)), and `c` in `by watch` compares the selected branch with its siblings.
 6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7). Done in local mode ([checkpoints](checkpoints.md)), with `r` and `t` in `by watch`; remote rewind and `fork --at` remain.
 
-**Where the plan stands** after the checkpoints, pull-request and cockpit branches were integrated: items 3 to 6 are done in local mode, and `by watch` binds every command they added. Item 1 has `by init`, the `setup` skill and `branchyard.toml` with `[mcp]` servers ([setup](setup.md)). Item 2, the workspace lifecycle, is the one left, in its own branch, to be integrated after these. What remains inside the done items is listed under each section above: remote rewind and `fork --at`, picking from the compare pane, replying to review threads, and trackers other than GitHub.
+**Where the plan stands** after the checkpoints, pull-request and cockpit branches were integrated: items 3 to 6 are done in local mode, and `by watch` binds every command they added. Item 1 has `by init`, the `setup` skill and `branchyard.toml` with `[mcp]` servers ([setup](setup.md)). Item 2, the workspace lifecycle, is the one left, in its own branch, to be integrated after these. What remains inside the done items is listed under each section above: remote rewind and `fork --at`, picking from the compare pane, and replying to review threads. Wave 2 added Linear, Jira and GitLab issues and `--pr` (§9), concurrent run scripts and listening ports (§2), and, from Orca, quota meters per login that the router and guard act on, and adopting a Claude Code or Codex session already on the machine as a branch ([usage](usage.md)).

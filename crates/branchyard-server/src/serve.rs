@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,8 @@ const TLS_HANDSHAKE: Duration = Duration::from_secs(10);
 /// A server that is accepting connections.
 pub struct Running {
     addr: SocketAddr,
+    /// `--listen-unix`'s socket, removed when the server stops.
+    unix: Option<PathBuf>,
     tls: bool,
     shutdown: watch::Sender<bool>,
     force: Arc<Notify>,
@@ -47,6 +50,13 @@ pub struct Running {
     /// share.
     _lock: Option<branchyard::DirLock>,
     worker: bool,
+    /// The connector gateway run beside the server, stopped with it.
+    _gateway: Option<branchyard::connectors::gateway::Supervisor>,
+    /// `--metrics-addr`'s listener: its address and its accept loop.
+    metrics: Option<(SocketAddr, tokio::task::JoinHandle<()>)>,
+    /// One keeper per repository whose workspace has a warm pool this
+    /// process's labels keep; stopped when shutdown begins.
+    pools: Vec<branchyard::PoolKeeper>,
 }
 
 /// How a shutdown went.
@@ -69,8 +79,20 @@ impl Running {
         self.worker
     }
 
-    /// `http://` or `https://` and the bound address.
+    /// `http://` and the metrics listener's bound address, when
+    /// `--metrics-addr` gave it one.
+    pub fn metrics_url(&self) -> Option<String> {
+        self.metrics
+            .as_ref()
+            .map(|(addr, _)| format!("http://{addr}/metrics"))
+    }
+
+    /// `http://` or `https://` and the bound address, or `unix:` and the
+    /// socket's path.
     pub fn url(&self) -> String {
+        if let Some(path) = &self.unix {
+            return format!("unix:{}", path.display());
+        }
         let scheme = if self.tls { "https" } else { "http" };
         format!("{scheme}://{}", self.addr)
     }
@@ -102,11 +124,15 @@ impl Running {
     pub async fn wait(self) -> Stopped {
         let mut begun = self.shutdown.subscribe();
         let _ = begun.wait_for(|stop| *stop).await;
+        drop(self.pools);
         for poller in self.pollers {
             poller.abort();
         }
         for webhook in self.webhooks {
             webhook.abort();
+        }
+        if let Some((_, metrics)) = self.metrics {
+            metrics.abort();
         }
         let registry = self.registry.clone();
         let grace = self.grace;
@@ -122,6 +148,9 @@ impl Running {
         let interrupted = tokio::task::spawn_blocking(move || registry.close())
             .await
             .unwrap_or(0);
+        if let Some(path) = &self.unix {
+            let _ = std::fs::remove_file(path);
+        }
         Stopped { interrupted }
     }
 }
@@ -204,20 +233,38 @@ pub async fn start(config: Config) -> Result<Running, String> {
         tokio::task::spawn_blocking(move || open_state(&config))
     };
     let (repos, registry) = setup.await.map_err(|e| e.to_string())??;
-    let worker = config.worker_only;
-    let listener = match worker {
+    let gateway = match worker_or_not(&config) {
         true => None,
-        false => Some(
+        false => crate::connectors::start(&config)?,
+    };
+    let worker = config.worker_only;
+    let listener = match (worker, &config.listen_unix) {
+        (true, _) => None,
+        (false, Some(path)) => Some(Listener::Unix(bind_unix(path)?)),
+        (false, None) => Some(Listener::Tcp(
             TcpListener::bind(config.listen)
                 .await
                 .map_err(|e| format!("cannot listen on {}: {e}", config.listen))?,
-        ),
+        )),
     };
     let addr = match &listener {
-        Some(listener) => listener.local_addr().map_err(|e| e.to_string())?,
-        None => config.listen,
+        Some(Listener::Tcp(listener)) => listener.local_addr().map_err(|e| e.to_string())?,
+        _ => config.listen,
     };
-    let pollers = repos
+    let unix = match listener {
+        Some(Listener::Unix(_)) => config.listen_unix.clone(),
+        _ => None,
+    };
+    // A worker may serve metrics too: it has no other listener.
+    let metrics_listener = match config.metrics.as_ref().and_then(|m| m.listen) {
+        Some(at) => Some(
+            TcpListener::bind(at)
+                .await
+                .map_err(|e| format!("cannot listen for metrics on {at}: {e}"))?,
+        ),
+        None => None,
+    };
+    let mut pollers: Vec<tokio::task::JoinHandle<()>> = repos
         .values()
         .map(|repo| {
             tokio::spawn(poll(
@@ -230,20 +277,93 @@ pub async fn start(config: Config) -> Result<Running, String> {
         .collect();
     let webhooks = match worker {
         true => Vec::new(),
-        false => start_webhooks(&config, &repos, shutdown_rx.clone())?,
+        false => start_webhooks(
+            &config,
+            &repos,
+            registry.observability(),
+            shutdown_rx.clone(),
+        )?,
     };
     let grace = config.shutdown_grace;
+    let triggers = {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = crate::triggers::store::open(&config)?;
+            // A data directory's store is this server's alone: any claim on
+            // a pending run was its predecessor's.
+            if config.database.is_none() {
+                store
+                    .release_claims()
+                    .map_err(|e| format!("triggers: {e}"))?;
+            }
+            Ok::<_, String>(store)
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    };
+    let base_url = format!("{}://{addr}", if tls.is_some() { "https" } else { "http" });
+    let hub = Arc::new(crate::triggers::dispatch::Hub::new(
+        triggers,
+        config.triggers.clone(),
+        base_url,
+    ));
+    let companion = match config.app.enabled && !config.worker_only {
+        true => {
+            let config = config.clone();
+            Some(Arc::new(
+                tokio::task::spawn_blocking(move || crate::companion::Companion::open(&config))
+                    .await
+                    .map_err(|e| e.to_string())??,
+            ))
+        }
+        false => None,
+    };
     let app = Arc::new(App {
+        companion,
         repos,
         registry: registry.clone(),
         credentials: Credentials::new(config.all_credentials()),
         config,
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),
+        triggers: hub,
     });
     registry
         .start(Arc::new(crate::work::AppExecutor(app.clone())))
         .map_err(|e| format!("could not start the operation dispatcher: {e}"))?;
+    let metrics = match metrics_listener {
+        Some(listener) => {
+            let at = listener.local_addr().map_err(|e| e.to_string())?;
+            let router = api::metrics_router(app.clone());
+            Some((
+                at,
+                tokio::spawn(accept_loop(
+                    Listener::Tcp(listener),
+                    None,
+                    router,
+                    shutdown_rx.clone(),
+                )),
+            ))
+        }
+        None => None,
+    };
+    // The companion's push notifications follow every repository's feed.
+    if app.companion.as_ref().is_some_and(|c| c.vapid.is_some()) {
+        let (store, _) = operation_store(&app.config)?;
+        pollers.extend(crate::companion::push::spawn(
+            app.clone(),
+            Arc::from(store),
+            shutdown_rx.clone(),
+        ));
+    }
+    // Triggers fire wherever a dispatcher runs: this server or worker.
+    if app.config.triggers.dispatch {
+        pollers.push(crate::triggers::dispatch::spawn(
+            app.clone(),
+            shutdown_rx.clone(),
+        ));
+    }
+    let pools = keep_pools(&app);
     let accept = match listener {
         Some(listener) => {
             let router = api::router(app);
@@ -259,6 +379,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     };
     Ok(Running {
         addr,
+        unix,
         tls: tls.is_some(),
         shutdown: shutdown_tx,
         force: Arc::new(Notify::new()),
@@ -269,7 +390,54 @@ pub async fn start(config: Config) -> Result<Running, String> {
         webhooks,
         _lock: lock,
         worker,
+        _gateway: gateway,
+        metrics,
+        pools,
     })
+}
+
+/// Keep the warm pool of every served repository whose workspace has one
+/// and whose scripts may run here, when this process carries the pool's
+/// labels: refilled after each claim here, and every
+/// [`branchyard::POOL_KEEP_EVERY`]. The workspace is read again each time,
+/// so a changed `[workspace.pool]` takes effect without a restart. See
+/// docs/pools.md.
+fn keep_pools(app: &Arc<App>) -> Vec<branchyard::PoolKeeper> {
+    app.repos
+        .values()
+        .filter(|repo| app.config.allow_workspace_scripts.allows(&repo.name))
+        .map(|repo| {
+            let spec = {
+                let app = app.clone();
+                let name = repo.name.clone();
+                move || {
+                    let repo = app.repos.get(&name)?;
+                    app.workspace(repo).ok().flatten().filter(|spec| {
+                        spec.pool
+                            .as_ref()
+                            .is_some_and(|pool| pool.kept_by(&app.config.labels))
+                    })
+                }
+            };
+            let on_fill = {
+                let metrics = app.registry.observability().metrics.clone();
+                let name = repo.name.clone();
+                move |filled: &branchyard::PoolFill| {
+                    crate::metrics::record_fill(&metrics, &name, filled);
+                    if let Some(error) = &filled.error {
+                        tracing::warn!(repo = %name, error = %error, "filling the warm pool");
+                    }
+                }
+            };
+            repo.yard
+                .keep_pool(spec, branchyard::POOL_KEEP_EVERY, on_fill)
+        })
+        .collect()
+}
+
+/// A worker runs operations only; the gateway runs beside a server.
+fn worker_or_not(config: &Config) -> bool {
+    config.worker_only
 }
 
 /// One delivery task per (repository, configured webhook), sharing a store
@@ -277,6 +445,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
 fn start_webhooks(
     config: &Config,
     repos: &BTreeMap<String, RepoState>,
+    observability: &crate::observe::Observability,
     shutdown: watch::Receiver<bool>,
 ) -> Result<Vec<tokio::task::JoinHandle<()>>, String> {
     if config.webhooks.is_empty() {
@@ -296,11 +465,12 @@ fn start_webhooks(
                 cursor = %place,
                 "notifying webhook of repo activity"
             );
-            tasks.push(webhook::spawn(
+            tasks.push(webhook::spawn_observed(
                 repo.clone(),
                 webhook.clone(),
                 store.clone(),
                 client.clone(),
+                observability.clone(),
                 shutdown.clone(),
             ));
         }
@@ -320,6 +490,17 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         if !config.allow_workspace_scripts.allows(name) {
             yard.deny_workspace_scripts();
         }
+        if let Some(gateway) = crate::connectors::gateway_for(config, name) {
+            yard.use_connectors(gateway);
+        }
+        // The model gateway its branches' turns may use, and each
+        // principal's ceiling (docs/model-gateway.md).
+        if let Some(gateway) = crate::models::gateway_for(config, name)
+            .map_err(|e| format!("repository {name}: {e}"))?
+        {
+            yard.use_models(gateway);
+        }
+        yard.use_ceilings(config.ceilings.clone());
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(
@@ -339,6 +520,19 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         poll: config.poll_interval,
         repos: config.repos.iter().map(|(name, _)| name.clone()).collect(),
         exclusive: config.database.is_none(),
+        labels: config.labels.clone(),
+        inventory: config.inventory.then(|| {
+            config
+                .inventory_source
+                .clone()
+                .unwrap_or_else(crate::ops::inventory_source)
+        }),
+        unclaimable_after: config.unclaimable_after,
+        scheduling: config.scheduling(),
+        observability: config
+            .observability
+            .clone()
+            .unwrap_or_else(crate::observe::Observability::from_env),
     };
     let registry =
         Registry::open(store, options).map_err(|e| format!("operation registry {place}: {e}"))?;
@@ -438,6 +632,10 @@ async fn poll(
                     Err(e) => tracing::error!(error = %e, "resuming graphs"),
                 }
             }
+            // The gateway's newest calls, as connector_call events.
+            if let Err(e) = yard.ingest_connector_audit() {
+                tracing::warn!(error = %e, "reading the connector gateway's audit log");
+            }
             (feed.sync(), recovered)
         })
         .await;
@@ -464,8 +662,89 @@ async fn poll(
     }
 }
 
+/// What the server accepts connections on.
+enum Listener {
+    Tcp(TcpListener),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixListener),
+    #[cfg(not(unix))]
+    #[allow(dead_code)]
+    Unix(std::convert::Infallible),
+}
+
+/// Bind `--listen-unix`'s socket: its directory must already exist and be
+/// private to its owner (no group or other access), a stale socket left
+/// by a server that is gone is replaced, a live one is refused, and the
+/// socket itself is made mode 0600.
+#[cfg(unix)]
+fn bind_unix(path: &Path) -> Result<tokio::net::UnixListener, String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    let shown = path.display();
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .ok_or_else(|| format!("--listen-unix {shown}: no directory"))?;
+    let meta = std::fs::metadata(dir).map_err(|e| format!("--listen-unix {shown}: {e}"))?;
+    if !meta.is_dir() || meta.mode() & 0o077 != 0 {
+        return Err(format!(
+            "--listen-unix {shown}: {} must be a directory only its owner may enter              (chmod 700)",
+            dir.display()
+        ));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(existing) if existing.file_type().is_socket() => {
+            if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                return Err(format!(
+                    "--listen-unix {shown}: a server already listens there"
+                ));
+            }
+            std::fs::remove_file(path).map_err(|e| format!("--listen-unix {shown}: {e}"))?;
+        }
+        Ok(_) => return Err(format!("--listen-unix {shown}: exists and is not a socket")),
+        Err(_) => {}
+    }
+    let listener = tokio::net::UnixListener::bind(path)
+        .map_err(|e| format!("cannot listen on {shown}: {e}"))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("--listen-unix {shown}: {e}"))?;
+    Ok(listener)
+}
+
+#[cfg(not(unix))]
+fn bind_unix(path: &Path) -> Result<std::convert::Infallible, String> {
+    Err(format!(
+        "--listen-unix {}: this platform has no Unix domain sockets",
+        path.display()
+    ))
+}
+
+/// A connection, over TCP or a Unix domain socket.
+enum Accepted {
+    Tcp(tokio::net::TcpStream),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixStream),
+}
+
+impl Listener {
+    async fn accept(&self) -> std::io::Result<Accepted> {
+        match self {
+            Listener::Tcp(listener) => listener.accept().await.map(|(tcp, _)| {
+                let _ = tcp.set_nodelay(true);
+                Accepted::Tcp(tcp)
+            }),
+            #[cfg(unix)]
+            Listener::Unix(listener) => listener
+                .accept()
+                .await
+                .map(|(unix, _)| Accepted::Unix(unix)),
+            #[cfg(not(unix))]
+            Listener::Unix(never) => match *never {},
+        }
+    }
+}
+
 async fn accept_loop(
-    listener: TcpListener,
+    listener: Listener,
     tls: Option<TlsAcceptor>,
     router: axum::Router,
     mut shutdown: watch::Receiver<bool>,
@@ -474,8 +753,13 @@ async fn accept_loop(
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((tcp, _)) => {
-                    let _ = tcp.set_nodelay(true);
+                #[cfg(unix)]
+                Ok(Accepted::Unix(unix)) => {
+                    // Configuration refuses TLS with --listen-unix.
+                    let service = TowerToHyperService::new(router.clone());
+                    tokio::spawn(serve_connection(unix, service, graceful.watcher()));
+                }
+                Ok(Accepted::Tcp(tcp)) => {
                     let service = TowerToHyperService::new(router.clone());
                     let watcher = graceful.watcher();
                     match tls.clone() {
@@ -519,4 +803,38 @@ where
         .header_read_timeout(Duration::from_secs(30));
     let connection = builder.serve_connection(TokioIo::new(io), service);
     let _ = watcher.watch(connection).await;
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn unix_sockets_need_a_private_directory_and_replace_only_stale_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = dir.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = bind_unix(&open.join("by.sock")).err().unwrap();
+        assert!(refused.contains("chmod 700"), "{refused}");
+
+        let private = dir.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = private.join("by.sock");
+        let listener = bind_unix(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let live = bind_unix(&path).err().unwrap();
+        assert!(live.contains("already listens"), "{live}");
+        drop(listener);
+        // The file a stopped server left is replaced.
+        assert!(bind_unix(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "not a socket").unwrap();
+        assert!(bind_unix(&path).err().unwrap().contains("not a socket"));
+    }
 }

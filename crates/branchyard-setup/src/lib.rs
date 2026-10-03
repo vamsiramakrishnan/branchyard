@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod config;
+pub mod import;
 pub mod interview;
 pub mod plan;
 pub mod probe;

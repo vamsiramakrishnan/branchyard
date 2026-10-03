@@ -103,6 +103,14 @@ pub(crate) struct Hub {
     /// Set by [`crate::Yard::use_sandbox_provider`]: the provider every
     /// Microsandbox-provider branch runs through instead of the SDK.
     pub sandbox_provider: Mutex<Option<Arc<dyn branchyard_sandbox::SandboxProvider>>>,
+    /// Set by [`crate::Yard::use_connectors`].
+    pub connectors: Mutex<Option<Arc<crate::connectors::Gateway>>>,
+    /// Set by [`crate::Yard::use_knowledge`].
+    pub knowledge: Mutex<Option<Arc<crate::KnowledgeSettings>>>,
+    /// Set by [`crate::Yard::use_models`].
+    pub models: Mutex<Option<Arc<crate::models::Gateway>>>,
+    /// Set by [`crate::Yard::use_ceilings`].
+    pub ceilings: Mutex<Arc<std::collections::BTreeMap<String, crate::Ceiling>>>,
 }
 
 impl Default for Hub {
@@ -119,6 +127,10 @@ impl Default for Hub {
             graph_options: Default::default(),
             scripts_denied: Default::default(),
             sandbox_provider: Default::default(),
+            connectors: Default::default(),
+            knowledge: Default::default(),
+            models: Default::default(),
+            ceilings: Default::default(),
         }
     }
 }

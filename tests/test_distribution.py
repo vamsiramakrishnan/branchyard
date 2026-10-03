@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -213,6 +214,189 @@ class SdkArchiveRuntimeTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "demo True")
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    """`.github/workflows/release.yml`: prebuilt binaries, checksums and
+    provenance, only for a v* tag. Never run here; checked as text (and as
+    YAML when PyYAML is installed)."""
+
+    def setUp(self):
+        self.text = (ROOT / ".github/workflows/release.yml").read_text()
+
+    def test_it_runs_only_for_a_v_tag_push(self):
+        head = self.text.split("\npermissions:", 1)[0]
+        self.assertTrue(head.endswith("\non:\n  push:\n    tags: ['v*']"), head)
+        for trigger in ("pull_request", "workflow_dispatch", "schedule", "branches"):
+            self.assertNotIn(trigger, head)
+        try:
+            import yaml  # noqa: PLC0415
+        except ImportError:
+            return
+        parsed = yaml.safe_load(self.text)
+        # PyYAML reads the key `on` as True.
+        self.assertEqual(parsed[True], {"push": {"tags": ["v*"]}})
+        self.assertEqual(set(parsed["jobs"]), {"build", "release", "image"})
+
+    def test_every_action_is_pinned_to_a_commit(self):
+        uses = re.findall(r"uses:\s*(\S+)", self.text)
+        self.assertTrue(uses)
+        for use in uses:
+            self.assertRegex(use, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
+
+    def test_it_builds_four_targets_with_checksums_and_attestations(self):
+        for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl",
+                       "aarch64-apple-darwin", "x86_64-apple-darwin"):
+            self.assertIn(f"target: {target}", self.text)
+        self.assertIn("-p branchyard-cli -p branchyard-server", self.text)
+        self.assertIn("statically linked", self.text)
+        self.assertIn("shasum -a 256", self.text)
+        self.assertIn("SHA256SUMS", self.text)
+        self.assertEqual(self.text.count("actions/attest-build-provenance@"), 2)
+        self.assertIn("id-token: write", self.text)
+        self.assertIn("attestations: write", self.text)
+        self.assertIn("--draft --verify-tag", self.text)
+        self.assertIn("docker build -f deploy/Dockerfile.harnesses", self.text)
+        self.assertIn("if: vars.PUBLISH_IMAGES == 'true'", self.text)
+
+
+def _fake_release(directory, version, target, by_text="#!/bin/sh\necho 'by 9.9.9'\n"):
+    name = f"branchyard-{version}-{target}"
+    stage = directory / "stage" / name
+    (stage / "licenses").mkdir(parents=True)
+    for binary, text in (("by", by_text), ("branchyard-server", "#!/bin/sh\nexit 0\n")):
+        (stage / binary).write_text(text)
+        (stage / binary).chmod(0o755)
+    for extra in ("LICENSE", "THIRD_PARTY.md", "README.md"):
+        (stage / extra).write_text(extra)
+    (stage / "licenses" / "orca-LICENSE").write_text("MIT")
+    release = directory / "release"
+    release.mkdir(exist_ok=True)
+    archive = release / f"{name}.tar.gz"
+    subprocess.run(["tar", "-C", str(stage.parent), "-czf", str(archive), name], check=True)
+    import hashlib
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (release / "SHA256SUMS").write_text(f"{digest}  {archive.name}\n")
+    return release
+
+
+class InstallScriptTests(unittest.TestCase):
+    """`install.sh` against a local file:// "release", in a temporary prefix."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.target = "x86_64-unknown-linux-musl"
+        self.release = _fake_release(self.root, "1.2.3", self.target)
+        self.prefix = self.root / "prefix"
+
+    def run_install(self, *args):
+        return subprocess.run(
+            ["sh", str(ROOT / "install.sh"), "--target", self.target, *args],
+            capture_output=True, text=True, env={"PATH": os.environ["PATH"], "HOME": str(self.root)},
+        )
+
+    def test_it_is_posix_sh(self):
+        self.assertEqual(subprocess.run(["sh", "-n", str(ROOT / "install.sh")]).returncode, 0)
+        text = (ROOT / "install.sh").read_text()
+        self.assertTrue(text.startswith("#!/bin/sh\n"))
+        self.assertNotIn("sudo ", text.replace("never calls sudo", ""))
+        self.assertNotIn("[[", text)
+
+    def test_installs_after_verifying_the_checksum(self):
+        out = self.run_install("--version", "v1.2.3", "--prefix", str(self.prefix),
+                               "--base-url", f"file://{self.release}")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("installed by 9.9.9 into", out.stdout)
+        for binary in ("by", "branchyard-server"):
+            path = self.prefix / "bin" / binary
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+        self.assertTrue((self.prefix / "share/branchyard/licenses/orca-LICENSE").is_file())
+        # A plain directory works too, and installing again replaces.
+        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix),
+                               "--base-url", str(self.release))
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_a_tampered_archive_installs_nothing(self):
+        sums = self.release / "SHA256SUMS"
+        sums.write_text("0" * 64 + sums.read_text()[64:])
+        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix),
+                               "--base-url", f"file://{self.release}")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("checksum mismatch", out.stderr)
+        self.assertFalse((self.prefix / "bin" / "by").exists())
+
+    def test_it_refuses_what_it_cannot_do_safely(self):
+        out = self.run_install("--prefix", str(self.prefix))
+        self.assertIn("--version", out.stderr)
+        out = self.run_install("--version", "1.2.3", "--base-url", "http://example.invalid/r")
+        self.assertIn("refusing plain http", out.stderr)
+        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix),
+                               "--base-url", f"file://{self.root}/nowhere")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(self.prefix.exists())
+        out = self.run_install("--version", "1.2.3", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("would install branchyard-1.2.3-x86_64-unknown-linux-musl.tar.gz", out.stdout)
+
+
+class HomebrewFormulaTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("homebrew_formula", ROOT / "tools/homebrew_formula.py")
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def test_the_template_fills_from_sha256sums(self):
+        sums = "".join(f"{str(i) * 64}  branchyard-1.2.3-{t}.tar.gz\n"
+                       for i, t in enumerate(self.module.TARGETS))
+        formula = self.module.render("1.2.3", sums)
+        self.assertNotRegex(formula, r"@[A-Z0-9_]+@")
+        self.assertIn('version "1.2.3"', formula)
+        self.assertIn("releases/download/v1.2.3", formula)
+        self.assertIn('sha256 "' + "0" * 64 + '"', formula)
+        with self.assertRaisesRegex(ValueError, "lists no"):
+            self.module.render("1.2.3", sums.splitlines()[0])
+
+
+class HarnessImageTests(unittest.TestCase):
+    """`deploy/Dockerfile.harnesses`, statically: no container runtime here."""
+
+    def setUp(self):
+        self.text = (ROOT / "deploy/Dockerfile.harnesses").read_text()
+
+    def test_the_build_stage_is_deploy_dockerfiles(self):
+        def stage(text):
+            start = text.index("FROM rust:")
+            return text[start:text.index("\nFROM ", start + 1)]
+        self.assertEqual(stage(self.text), stage((ROOT / "deploy/Dockerfile").read_text()))
+
+    def test_runtime_images_are_pinned_by_digest_and_run_as_a_user(self):
+        froms = re.findall(r"^FROM (\S+)", self.text, re.M)
+        self.assertEqual(len(froms), 3)
+        for image in froms[1:]:
+            self.assertRegex(image, r"^node:22[\w.-]*@sha256:[0-9a-f]{64}$")
+        self.assertRegex(self.text, r"\nUSER branchyard\n")
+        self.assertIn("openssh-client", self.text)
+        self.assertIn(" git ", self.text)
+        self.assertIn("npm ci --omit=dev", self.text)
+        self.assertNotIn("npm install", self.text)
+        self.assertNotRegex(self.text, r"(?i)ENV [^\n]*(KEY|TOKEN|SECRET)")
+
+    def test_harnesses_are_the_qualified_pins_with_integrity(self):
+        manifest = json.loads((ROOT / "deploy/harnesses/package.json").read_text())
+        lock = json.loads((ROOT / "deploy/harnesses/package-lock.json").read_text())
+        qualify = (ROOT / ".github/workflows/qualify.yml").read_text()
+        for package, version in manifest["dependencies"].items():
+            self.assertRegex(version, r"^\d+\.\d+\.\d+$", "exact pins only")
+            self.assertIn(f"{package}@{version}", qualify)
+            self.assertEqual(lock["packages"][f"node_modules/{package}"]["version"], version)
+        self.assertEqual(lock["packages"][""]["dependencies"], manifest["dependencies"])
+        for path, entry in lock["packages"].items():
+            if not path:
+                continue
+            self.assertRegex(entry.get("integrity", ""), r"^sha512-", path)
+            self.assertTrue(entry["resolved"].startswith("https://registry.npmjs.org/"), path)
 
 
 if __name__ == "__main__":

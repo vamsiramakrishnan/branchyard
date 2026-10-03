@@ -148,6 +148,29 @@
         "null"
       ]
     },
+    "labels": {
+      "description": "The labels this server's worker carries; it claims only operations\nwhose `require_labels` are all among them. See\ndocs/server.md#worker-labels.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "inventory": {
+      "description": "Detect the harnesses installed on this machine and advertise them,\nwith a `harness:<id>` label for each that can run. Default true. See\ndocs/harness-lifecycle.md.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "unclaimable_after_seconds": {
+      "description": "How long an operation may wait queued before it says why no live\nworker can claim it. Default 60.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
     "webhooks": {
       "type": "array",
       "items": {
@@ -157,6 +180,91 @@
     "webhook_insecure": {
       "type": "boolean",
       "default": false
+    },
+    "connectors": {
+      "description": "The connector gateway (docs/connectors.md): where it is, which\nbundles it serves, and whether this server runs it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileConnectors"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "models": {
+      "description": "The model gateway (docs/model-gateway.md): backends, routes,\nbudgets and prices, as `[models]` in branchyard.toml. A backend's\n`key` names an entry of `secrets`, else a variable of this server.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ModelsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ceilings": {
+      "description": "Each principal's ceiling, by its name: the connectors, models and\nhosts any branch acting for it may have at most, whatever a request\nasks for (docs/model-gateway.md#one-scope).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/FileCeiling"
+      }
+    },
+    "aging_seconds": {
+      "description": "Seconds an operation waits queued before its effective priority\nrises by one, so low-priority work cannot starve; 0 turns aging\noff. Default 60. See docs/server.md#scheduling.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "fair_share_window_seconds": {
+      "description": "Seconds a claim keeps counting toward its tenant's fair share (the\ntime constant of its exponential decay); 0 counts only running\noperations. Default 300.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "metrics": {
+      "description": "Serve Prometheus metrics at /metrics (docs/observability.md). Off\nwithout this.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileMetrics"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "public_url": {
+      "description": "This server's URL as webhook senders reach it (behind a proxy, its\npublic address): the base of each event trigger's webhook URL.\nDefault: http(s)://<listen>. See docs/triggers.md.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "allow_trigger_prechecks": {
+      "description": "Let triggers of served repositories run a precheck command before\nfiring: `true` for every repository, or a list of repository names.\nOff by default; see docs/triggers.md.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileWorkspaceScripts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "app": {
+      "description": "The web companion at /app/ (docs/companion.md): `true`, or its\nsettings. Off by default.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileApp"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -292,6 +400,22 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "weight": {
+          "description": "The tenant's share of the queue against other tenants at the same\npriority. Default 1.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_priority": {
+          "description": "The highest priority its operations may carry (-10 to 10); higher\nrequests are admitted at this. Default 10.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
         }
       },
       "additionalProperties": false
@@ -363,6 +487,427 @@
       "required": [
         "url"
       ]
+    },
+    "FileConnectors": {
+      "description": "`connectors`: the connector gateway; see `docs/connectors.md`.",
+      "type": "object",
+      "properties": {
+        "gateway": {
+          "description": "The gateway's canonical `/mcp` URL, such as\n`http://127.0.0.1:8931/mcp`: every token's audience.",
+          "type": "string"
+        },
+        "sandbox_gateway": {
+          "description": "The gateway as a sandboxed harness reaches it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issuer": {
+          "description": "Every token's issuer. Default: this server's URL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signing_key": {
+          "description": "The signing key, a private JSON Web Key Set made if missing.\nDefault: `<data_dir>/gateway/key`. Its public keys are served at\n`GET /.well-known/jwks.json`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "audit_file": {
+          "description": "The gateway's audit log. Default: `<data_dir>/gateway/audit.jsonl`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bundles": {
+          "description": "The bundle root the gateway serves.",
+          "type": "string"
+        },
+        "anvil": {
+          "description": "Anvil's command and leading arguments. Default `[\"anvil\"]`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "run_gateway": {
+          "description": "Run the gateway beside the server, supervised. Default false.",
+          "type": "boolean",
+          "default": false
+        },
+        "listen": {
+          "description": "The address the gateway listens on when run here, when not\nloopback.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vault_key": {
+          "description": "The gateway's vault key (a 0600 file of 64 hex characters).\nDefault: `<data_dir>/gateway/vault.key`, made if missing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gateway",
+        "bundles"
+      ]
+    },
+    "ModelsConfig": {
+      "description": "`[models]`.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Models a new branch may call through the gateway when\n`--model-gateway` gives none, as globs (`\"claude-*\"`, `\"*\"`); set,\nit puts new branches on the gateway.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "backends": {
+          "description": "Backends by name: `[models.backends.anthropic] api = \"anthropic\"`,\n`key = \"ANTHROPIC_API_KEY\"`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelBackendConfig"
+          }
+        },
+        "routes": {
+          "description": "Routes by requested model, first match wins: `[[models.routes]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelRouteConfig"
+          }
+        },
+        "budget": {
+          "description": "Daily and monthly limits (UTC) over every branch of the repository.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelBudgetConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prices": {
+          "description": "Prices for models the catalog does not price, dollars per million\ntokens, by model id or glob.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelPriceConfig"
+          }
+        },
+        "listen": {
+          "description": "The address a turn's gateway listens on (default `127.0.0.1`);\n`0.0.0.0` for sandboxes to reach it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sandbox_host": {
+          "description": "The host a sandboxed harness reaches the gateway at. Without it, a\nsandboxed branch on the gateway fails its turn.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seed": {
+          "description": "Seeds the weighted choice of backends.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelBackendConfig": {
+      "description": "`[models.backends.NAME]`.",
+      "type": "object",
+      "properties": {
+        "api": {
+          "description": "`anthropic`, `openai` or `generic`.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Its base URL (default: the provider's public API; a generic\nbackend needs one).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "The secret holding its key, by name: an entry of `[secrets]`, else\na variable of that name. Never the key itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "header": {
+          "description": "A generic backend's key header (default `authorization`, as\n`Bearer <key>`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "api"
+      ]
+    },
+    "ModelRouteConfig": {
+      "description": "`[[models.routes]]`.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "A glob over the requested model, such as `claude-*`.",
+          "type": "string"
+        },
+        "backends": {
+          "description": "Backends chosen among by weight.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "weights": {
+          "description": "One weight per backend (default: all 1).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "fallbacks": {
+          "description": "Tried in order after the weighted backends, on a refused\nconnection, a 5xx or a 429.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requests_per_minute": {
+          "description": "At most this many requests a minute through this route, per\nprocess.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "backends"
+      ]
+    },
+    "ModelBudgetConfig": {
+      "description": "`[models.budget]`.",
+      "type": "object",
+      "properties": {
+        "daily_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "monthly_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "daily_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "monthly_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "alert_at": {
+          "description": "The share of a limit at which an alert is recorded (default 0.8).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelPriceConfig": {
+      "description": "`[models.prices.MODEL]`, dollars per million tokens.",
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "number",
+          "format": "double"
+        },
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_read": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_write": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "output"
+      ]
+    },
+    "FileCeiling": {
+      "description": "One principal's ceiling. Unset parts leave that scope as requested.",
+      "type": "object",
+      "properties": {
+        "connectors": {
+          "description": "The widest connector grant, in `--connector` form (`github:read`).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "models": {
+          "description": "The models its branches may call through the model gateway, as\nglobs (`claude-*`).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "network": {
+          "description": "The hosts its branches may reach, as `--network` rules; `[]` is\nnone.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FileMetrics": {
+      "description": "`metrics`: Prometheus metrics at `/metrics`; see docs/observability.md.",
+      "type": "object",
+      "properties": {
+        "listen": {
+          "description": "A separate plain-HTTP listener (`IP:port`) serving only /metrics,\nas `--metrics-addr` sets it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "description": "A token that reads /metrics and nothing else, at least 16\ncharacters. Exactly one of `token` and `token_file`, or neither.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FileApp": {
+      "description": "`app`: `true`/`false`, or the companion's settings (which turn it on\nunless `enabled` is false).",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/FileAppSettings"
+        }
+      ]
+    },
+    "FileAppSettings": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Default true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "push": {
+          "description": "Send Web Push notifications to subscribed browsers. Default true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "vapid_key": {
+          "description": "The VAPID private key, made if missing. Default:\n`<data_dir>/companion/vapid.pk8`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "push_subject": {
+          "description": "The VAPID contact, `mailto:` or `https:`. Default: `public_url` when\nhttps, else mailto:branchyard@localhost.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "push_services": {
+          "description": "Push service hosts subscriptions may name (`host` or `*.suffix`).\nDefault: FCM, Mozilla, Windows and Apple push services.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

@@ -177,6 +177,73 @@ impl Repository {
         })
     }
 
+    /// Creates branch `by/<name>` at `base` in an existing detached worktree
+    /// at `from` (a warm pool's ready slot), moved to `dir` first, and
+    /// records `base` as [`Repository::create_branch`] does. `from` must be
+    /// a worktree of this repository with no changes to tracked files; when
+    /// its `HEAD` is not `base`, the checkout moves it there (a fast
+    /// forward of what the slot holds), keeping untracked files that do not
+    /// collide. An existing branch is refused before `from` is touched;
+    /// a later failure removes the worktree wherever it is, and leaves
+    /// neither the branch nor its base record behind.
+    pub fn adopt_worktree(
+        &self,
+        name: &BranchName,
+        base: &Commit,
+        from: &Path,
+        dir: &Path,
+    ) -> Result<Workspace, GitError> {
+        let base = self.resolve(base.as_str())?;
+        let dir = canonical_new_dir(dir)?;
+        if Git::new(&self.root)
+            .args(["show-ref", "--verify", "--quiet", &name.ref_name()])
+            .test()?
+        {
+            return Err(GitError::BranchExists(name.clone()));
+        }
+        let key = base_key(name);
+        Git::new(&self.root)
+            .args(["config", &key, base.as_str()])
+            .run()?;
+        let undo = |at: &Path| {
+            let _ = Git::new(&self.root)
+                .args(["worktree", "remove", "--force"])
+                .arg(at)
+                .run();
+            let _ = fs::remove_dir_all(at);
+            let _ = Git::new(&self.root).args(["config", "--unset", &key]).run();
+        };
+        let moved = Git::new(&self.root)
+            .no_hooks()
+            .args(["worktree", "move"])
+            .arg(from)
+            .arg(&dir)
+            .run();
+        if let Err(e) = moved {
+            undo(from);
+            return Err(e);
+        }
+        let switched = Git::new(&dir)
+            .no_hooks()
+            .args(["switch", "--quiet", "--no-track", "-c", &name.branch()])
+            .arg(base.as_str())
+            .run();
+        if let Err(e) = switched {
+            undo(&dir);
+            let _ = Git::new(&self.root)
+                .args(["branch", "-D", &name.branch()])
+                .run();
+            return Err(e);
+        }
+        Ok(Workspace {
+            name: name.clone(),
+            path: dir,
+            base,
+            root: self.root.clone(),
+            exclude: Vec::new(),
+        })
+    }
+
     /// Pushes exactly `commit` to `remote` (a remote name or URL) as
     /// `refs/heads/<remote_branch>`, without a shell, without the
     /// repository's hooks and without a terminal prompt, so credentials come
@@ -491,7 +558,15 @@ impl Workspace {
         let scratch = index.with_file_name(format!("branchyard-index-{}", unique_suffix()));
         let _cleanup = RemoveOnDrop(&scratch);
         match fs::copy(&index, &scratch) {
-            Ok(_) => {}
+            // The copy keeps the index's modification time. Git compares
+            // file times in whole seconds and trusts a stat-identical entry
+            // only when the index is newer than the file ("racy git"); a
+            // copy stamped now would make a same-size edit written in the
+            // checkout's second look clean, and the diff would miss it.
+            Ok(_) => fs::File::options()
+                .write(true)
+                .open(&scratch)?
+                .set_modified(fs::metadata(&index)?.modified()?)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }

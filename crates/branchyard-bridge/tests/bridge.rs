@@ -651,6 +651,51 @@ fn sigterm_is_forwarded_to_the_execs_and_the_bridge_exits_cleanly() {
     drop(process);
 }
 
+/// What an exec writes as SIGTERM ends it reaches its client before the
+/// bridge exits, with its exit status, even when the connection is backed
+/// up: here a client slow to read the exec's stderr holds the bridge's
+/// writer, so the trap's last line waits behind it. A bridge that exited as
+/// soon as the group was gone cut that line and the status off.
+#[test]
+fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
+    let mut bridge = Bridge::start();
+    let endpoint = bridge.endpoint(&bridge.claims(1));
+    // Only `head` writes stderr: the shell's own stderr goes to /dev/null,
+    // so nothing the shell writes there can keep it from exiting.
+    let mut process = endpoint
+        .exec(&sh(
+            &bridge.work(),
+            "trap 'echo terminated; exit 7' TERM; echo ready; read go; \
+             exec 3>&2 2>/dev/null; head -c 100000000 /dev/zero >&3 3>&- & \
+             exec 3>&-; while :; do sleep 0.05; done",
+        ))
+        .unwrap();
+    let mut stdout = BufReader::new(process.take_stdout().unwrap());
+    let mut stderr = process.take_stderr().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    // Stderr starts only now, so it never queues ahead of `ready`.
+    let mut stdin = process.take_stdin().unwrap();
+    stdin.write_all(b"go\n").unwrap();
+    // Nothing reads stderr yet: the client's pipe, both sockets and the
+    // bridge's pipe fill, and the bridge's stderr pump blocks holding the
+    // connection's writer.
+    thread::sleep(Duration::from_millis(500));
+    // SAFETY: plain syscall.
+    assert_eq!(unsafe { libc::kill(bridge.pid() as i32, libc::SIGTERM) }, 0);
+    // The trap has run and the shell has exited well before stderr is read.
+    thread::sleep(Duration::from_millis(300));
+    let drained = thread::spawn(move || io::copy(&mut stderr, &mut io::sink()).unwrap());
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    assert_eq!(line, "terminated\n");
+    assert_eq!(process.wait().unwrap().code, Some(7));
+    assert!(drained.join().unwrap() > 0);
+    let status = bridge.child.take().unwrap().wait().unwrap();
+    assert!(status.success(), "{status}");
+}
+
 #[test]
 fn as_process_1_it_reaps_orphans_and_only_the_runtime_can_stop_it() {
     let usable = root()

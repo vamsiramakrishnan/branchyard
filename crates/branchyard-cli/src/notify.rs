@@ -152,6 +152,10 @@ impl Tracker {
                         Kind::Failed,
                         short(&format!("{branch} is blocked: {reason}")),
                     ),
+                    BranchStatus::AwaitingPlanApproval => (
+                        Kind::Question,
+                        format!("{branch}'s plan awaits your approval (by plan show {branch})"),
+                    ),
                 };
                 if self.status.insert(branch.to_owned(), kind) == Some(kind) {
                     return None;
