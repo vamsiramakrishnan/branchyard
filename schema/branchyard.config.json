@@ -111,6 +111,10 @@
     "harnesses": {
       "$ref": "#/$defs/HarnessesConfig",
       "description": "Installing and updating harness CLIs (docs/harness-lifecycle.md):\nwhether `by harnesses install`, `update` and the router may run a\nharness's install command, and for which harnesses. A repository's\nfile may only say `install = \"never\"`; the rest belongs in your user\nfile, since it runs software on your machine."
+    },
+    "sync": {
+      "$ref": "#/$defs/SyncSection",
+      "description": "Syncing tasks to durable storage (docs/sync.md): the remote, its\nencryption, how often and how fast. User file only: a repository\nmust not choose where your tasks are sent."
     }
   },
   "title": "Branchyard configuration",
@@ -1457,6 +1461,93 @@
         }
       ],
       "description": "`install` in `[harnesses]`."
+    },
+    "SyncSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "remote": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where tasks sync to: `gs://bucket/prefix`, `s3://bucket/prefix`\n(`?endpoint=` for R2 or MinIO), `az://account/container/prefix`,\n`file:///path`, or `git+https://`, `git+ssh://`, `git+file://`."
+        },
+        "encrypt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`none` (the default), `passphrase` (from BRANCHYARD_SYNC_PASSPHRASE\nor `passphrase_file`), or a `kms://gcp/...`, `kms://aws/...` or\n`kms://azure/...` key."
+        },
+        "passphrase_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A file holding the passphrase for `encrypt = \"passphrase\"`."
+        },
+        "algorithm": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The data cipher of a new encrypted remote.",
+          "pattern": "^(aes-256-gcm|chacha20-poly1305)$"
+        },
+        "interval": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "How often `by serve` and `by worker` look for changes to push, such\nas `30s` or `5m`. Default `1m`."
+        },
+        "bandwidth": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Bytes a second, up and down together, such as `10MB/s`. Unlimited\nwhen unset."
+        },
+        "concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Objects in flight at once. Default 8."
+        },
+        "retention": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Delete a task from the remote this long after its last change,\nsuch as `90d`, unless it is on legal hold. Kept when unset."
+        },
+        "grace": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "How long an unreferenced object waits before `by sync gc` deletes\nit. Default `24h`; at least 15 minutes."
+        },
+        "quota": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The stored bytes the remote may hold, such as `50GB`."
+        },
+        "device": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "This machine's name in conflict branches and leases. Default: the\nhost name and a random suffix, kept in .branchyard/sync.db."
+        }
+      },
+      "description": "`[sync]`; see docs/sync.md."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

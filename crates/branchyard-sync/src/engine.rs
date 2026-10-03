@@ -751,7 +751,8 @@ impl Remote {
         Ok(())
     }
 
-    /// Apply a plan's local side; refs checked out in a worktree are left.
+    /// Apply a plan's local side. A ref checked out in a worktree moves
+    /// only by a fast-forward of a clean worktree.
     fn apply(
         &self,
         source: &dyn SyncSource,
@@ -764,8 +765,14 @@ impl Remote {
             let Some(local) = source.local_ref(&update.task_ref) else {
                 continue;
             };
-            if checked_out.contains(&local) {
-                if !report.behind.contains(&update.task_ref) {
+            if let Some(worktree) = checked_out.get(&local) {
+                // A clean worktree follows a fast-forward; one with
+                // changes is left, and reported behind.
+                let moved = match (&update.old, &update.new) {
+                    (Some(_), Some(new)) => git.fast_forward_worktree(worktree, new)?,
+                    _ => false,
+                };
+                if !moved && !report.behind.contains(&update.task_ref) {
                     report.behind.push(update.task_ref.clone());
                 }
                 continue;

@@ -840,6 +840,7 @@ dependencies = [
  "branchyard",
  "branchyard-client",
  "branchyard-setup",
+ "branchyard-sync",
  "clap",
  "futures-util",
  "hex",

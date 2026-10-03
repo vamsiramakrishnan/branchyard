@@ -4,7 +4,7 @@
 //! importing a pack (`git index-pack --stdin --fix-thin`, which checks
 //! every object as it indexes it).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -137,16 +137,49 @@ impl Git {
         self.run(&["update-ref", "-d", name, old], None).map(|_| ())
     }
 
-    /// Refs checked out in a worktree of this repository.
-    pub fn checked_out(&self) -> Result<BTreeSet<String>> {
+    /// Refs checked out in a worktree of this repository, with the
+    /// worktree's path.
+    pub fn checked_out(&self) -> Result<BTreeMap<String, PathBuf>> {
         let out = match self.output(&["worktree", "list", "--porcelain"], None) {
             Ok(o) if o.status.success() => o.stdout,
-            _ => return Ok(BTreeSet::new()),
+            _ => return Ok(BTreeMap::new()),
         };
-        Ok(String::from_utf8_lossy(&out)
-            .lines()
-            .filter_map(|l| l.strip_prefix("branch ").map(str::to_owned))
-            .collect())
+        let mut found = BTreeMap::new();
+        let mut path = None;
+        for line in String::from_utf8_lossy(&out).lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            } else if let Some(branch) = line.strip_prefix("branch ") {
+                if let Some(p) = path.clone() {
+                    found.insert(branch.to_owned(), p);
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Fast-forward the branch checked out in `worktree` to `commit`, when
+    /// the worktree has no changes; false when it has some (or the move is
+    /// not a fast-forward), leaving it as it was.
+    pub fn fast_forward_worktree(&self, worktree: &Path, commit: &str) -> Result<bool> {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|e| Error::local(format!("git: {e}")))?;
+        if !status.status.success() || !status.stdout.is_empty() {
+            return Ok(false);
+        }
+        let merged = Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(["merge", "--ff-only", "--quiet", commit])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|e| Error::local(format!("git: {e}")))?;
+        Ok(merged.status.success())
     }
 
     /// A pack of every object reachable from `tips` and not from

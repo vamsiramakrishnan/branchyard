@@ -318,6 +318,28 @@ impl Executor for AppExecutor {
                 observability.tracer.note_branch(&repo.name, name, trace);
             }
         }
+        // With sync: each branch's task pulled and its lease held for the
+        // operation (docs/sync.md).
+        let leases = match app
+            .sync
+            .as_ref()
+            .map(|s| s.begin(&repo.name, &operation.branches))
+        {
+            Some(Err(refusal)) => {
+                let (status, code, message) = match refusal {
+                    crate::sync::Refusal::Held(m) => (StatusCode::CONFLICT, "sync_lease_held", m),
+                    crate::sync::Refusal::Unavailable(m) => {
+                        (StatusCode::SERVICE_UNAVAILABLE, "sync_unavailable", m)
+                    }
+                };
+                return Finished {
+                    result: Err(*ApiError::new(status, code, message).body),
+                    end_cursor: None,
+                };
+            }
+            Some(Ok(leases)) => leases,
+            None => Vec::new(),
+        };
         let result = serde_json::from_value::<Work>(work.clone())
             .map_err(|e| *ApiError::internal(format!("unreadable operation description: {e}")).body)
             .and_then(|work| {
@@ -328,6 +350,18 @@ impl Executor for AppExecutor {
                     stored.trace.as_deref(),
                 )
             });
+        if let Some(sync) = &app.sync {
+            let mut branches = operation.branches.clone();
+            if let Ok(done) = &result {
+                for b in &done.branches {
+                    if !branches.contains(&b.name) {
+                        branches.push(b.name.clone());
+                    }
+                }
+            }
+            sync.end(&repo.name, &branches);
+        }
+        drop(leases);
         // Read the feed's head so the end cursor covers all the activity.
         let end_cursor = match repo.feed.sync() {
             Ok(head) => Some(head),

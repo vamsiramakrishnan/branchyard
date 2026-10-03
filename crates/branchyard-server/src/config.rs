@@ -443,6 +443,18 @@ pub struct Config {
     /// The web companion at `/app/`, pairing links and Web Push; off by
     /// default. See `docs/companion.md`.
     pub app: AppConfig,
+    /// Sync served repositories' branches to durable storage: pull a task
+    /// before running it, under its lease, and push as it goes. `None`
+    /// (the default): no sync. See `docs/sync.md`.
+    pub sync: Option<SyncSettings>,
+}
+
+/// `sync` in the configuration file; see `docs/sync.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncSettings {
+    pub config: branchyard_sync::SyncConfig,
+    /// How long a task's lease lasts between renewals.
+    pub lease: Duration,
 }
 
 /// Push services a subscription may name by default: Chrome's (FCM),
@@ -603,6 +615,7 @@ impl Config {
             observability: None,
             triggers: crate::triggers::Settings::default(),
             app: AppConfig::default(),
+            sync: None,
         }
     }
 
@@ -1060,6 +1073,46 @@ pub(crate) struct FileConfig {
     /// The web companion at /app/ (docs/companion.md): `true`, or its
     /// settings. Off by default.
     app: Option<FileApp>,
+    /// Sync served repositories' branches to durable storage
+    /// (docs/sync.md): the remote, its encryption, how often and how fast.
+    sync: Option<FileSync>,
+}
+
+/// `sync`: the same keys as `[sync]` in branchyard.toml, and the lease.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileSync {
+    /// `gs://bucket/prefix`, `s3://bucket/prefix` (`?endpoint=` for R2 or
+    /// MinIO), `az://account/container/prefix`, `file:///path`, or
+    /// `git+https://`, `git+ssh://`, `git+file://`.
+    remote: String,
+    /// `none` (the default), `passphrase` (from
+    /// BRANCHYARD_SYNC_PASSPHRASE or `passphrase_file`), or a `kms://` URL.
+    encrypt: Option<String>,
+    passphrase_file: Option<PathBuf>,
+    /// `aes-256-gcm` (the default) or `chacha20-poly1305`, for a new
+    /// encrypted remote.
+    algorithm: Option<String>,
+    /// How often to look for changes to push, such as `30s`. Default `1m`.
+    interval: Option<String>,
+    /// Bytes a second, up and down together, such as `10MB/s`.
+    bandwidth: Option<String>,
+    /// Objects in flight at once. Default 8.
+    concurrency: Option<usize>,
+    /// Delete a task this long after its last change, such as `90d`,
+    /// unless held.
+    retention: Option<String>,
+    /// How long an unreferenced object waits before collection. Default
+    /// `24h`.
+    grace: Option<String>,
+    /// The stored bytes the remote may hold, such as `50GB`.
+    quota: Option<String>,
+    /// This server's name in conflict branches and leases. Default: the
+    /// host name and a random suffix.
+    device: Option<String>,
+    /// Seconds a task's lease lasts between renewals. Default 60.
+    lease_seconds: Option<f64>,
 }
 
 /// `app`: `true`/`false`, or the companion's settings (which turn it on
@@ -1314,6 +1367,8 @@ pub struct Partial {
     pub allow_trigger_prechecks: WorkspaceScripts,
     /// `app`, when the file sets it.
     pub app: Option<AppConfig>,
+    /// `sync`, when the file sets it.
+    pub sync: Option<SyncSettings>,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -1459,6 +1514,38 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
     };
     let aging = seconds("aging_seconds", file.aging_seconds)?.map(|d| (!d.is_zero()).then_some(d));
     let fair_share_window = seconds("fair_share_window_seconds", file.fair_share_window_seconds)?;
+    let sync = match file.sync {
+        None => None,
+        Some(s) => {
+            let lease = match s.lease_seconds {
+                Some(v) if (1.0..86_400.0).contains(&v) => Duration::from_secs_f64(v),
+                Some(v) => {
+                    return Err(format!(
+                        "config {}: sync.lease_seconds {v} is not between 1 and 86400",
+                        path.display()
+                    ))
+                }
+                None => Duration::from_secs(60),
+            };
+            let config = branchyard_sync::SyncConfig {
+                remote: s.remote,
+                encrypt: s.encrypt,
+                passphrase_file: s.passphrase_file.map(&resolve),
+                algorithm: s.algorithm,
+                interval: s.interval,
+                bandwidth: s.bandwidth,
+                concurrency: s.concurrency,
+                retention: s.retention,
+                grace: s.grace,
+                quota: s.quota,
+                device: s.device,
+            };
+            config
+                .check()
+                .map_err(|e| format!("config {}: sync: {e}", path.display()))?;
+            Some(SyncSettings { config, lease })
+        }
+    };
     let metrics = match file.metrics {
         None => None,
         Some(m) => {
@@ -1494,6 +1581,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         aging,
         fair_share_window,
         metrics,
+        sync,
         listen,
         data_dir: file.data_dir.map(resolve),
         repos: file

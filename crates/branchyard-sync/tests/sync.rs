@@ -983,7 +983,7 @@ fn packs_are_incremental() {
 }
 
 #[test]
-fn a_checked_out_ref_is_reported_behind_not_moved() {
+fn a_checked_out_ref_moves_only_when_its_worktree_is_clean() {
     let w = world();
     let store = w.file_store();
     let a = w.machine("a");
@@ -996,12 +996,23 @@ fn a_checked_out_ref_is_reported_behind_not_moved() {
     rb.pull(&source(&b, "feature"), &mut TaskState::default())
         .unwrap();
     git(&a, &["checkout", "--quiet", "feature"]);
-    commit_on(&b, "feature", "two", &[("f", "2\n")]);
+    std::fs::write(a.join("f"), "local edit\n").unwrap();
+    let c2 = commit_on(&b, "feature", "two", &[("f", "2\n")]);
     rb.sync(&source(&b, "feature"), &mut TaskState::default())
         .unwrap();
     let report = ra.sync(&source(&a, "feature"), &mut sa).unwrap();
     assert_eq!(report.behind, vec!["refs/heads/main"]);
     assert_eq!(head(&a, "refs/heads/feature").as_deref(), Some(c1.as_str()));
+    assert_eq!(
+        std::fs::read_to_string(a.join("f")).unwrap(),
+        "local edit\n"
+    );
+    // A clean worktree follows the fast-forward.
+    git(&a, &["checkout", "--quiet", "--", "f"]);
+    let report = ra.sync(&source(&a, "feature"), &mut sa).unwrap();
+    assert!(report.behind.is_empty(), "{report:?}");
+    assert_eq!(head(&a, "refs/heads/feature").as_deref(), Some(c2.as_str()));
+    assert_eq!(std::fs::read_to_string(a.join("f")).unwrap(), "2\n");
 }
 
 #[test]
