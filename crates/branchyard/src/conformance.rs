@@ -1701,11 +1701,14 @@ pub(crate) fn effects_backend(
         subject: "local:me".into(),
         connector: "slack".into(),
         operation: "chat_post".into(),
+        operation_id: None,
         account: Some("work".into()),
         class: EffectClass::Irreversible,
         state: EffectState::Begun,
         request_digest: "blake3:00".into(),
         undo: None,
+        compensate: None,
+        undo_unavailable: None,
         approval: Some(ApprovalRecord {
             by: "policy".into(),
             at_ms: at,
@@ -1719,7 +1722,6 @@ pub(crate) fn effects_backend(
         staged: None,
         lookup: None,
         declared: false,
-        summary: None,
         detail: None,
         upstream_key: None,
         created_ms: at,
@@ -1743,15 +1745,22 @@ pub(crate) fn effects_backend(
     // Moves only from the named states, from either handle.
     let confirm = EffectMove {
         class: Some(EffectClass::Reversible),
+        operation_id: Some("chat.postMessage".into()),
         undo: Some(Undo {
-            operation: "chat_delete".into(),
+            operation: "chat.delete".into(),
+            tool: "slack__chat_delete".into(),
             arguments: serde_json::json!({"ts": "1.2"}),
             kind: UndoKind::Inverse,
             deadline_ms: Some(9_000),
-            summary: None,
+        }),
+        compensate: Some(Undo {
+            operation: "chat.update".into(),
+            tool: "slack__chat_update".into(),
+            arguments: serde_json::json!({"ts": "1.2", "text": "(retracted)"}),
+            kind: UndoKind::Compensate,
+            deadline_ms: None,
         }),
         declared: Some(true),
-        summary: Some("message in #board".into()),
         ..EffectMove::to(EffectState::Confirmed)
     };
     assert_eq!(
@@ -1772,6 +1781,11 @@ pub(crate) fn effects_backend(
     assert_eq!(confirmed.class, EffectClass::Reversible);
     assert_eq!(confirmed.updated_ms, 3_000);
     assert_eq!(confirmed.approval, a.approval, "kept when not changed");
+    assert_eq!(confirmed.operation_id.as_deref(), Some("chat.postMessage"));
+    assert_eq!(
+        confirmed.compensation_at(3_000).map(|c| c.tool.as_str()),
+        Some("slack__chat_update")
+    );
     // A second finish loses.
     let failed = EffectMove::to(EffectState::Failed);
     assert_eq!(

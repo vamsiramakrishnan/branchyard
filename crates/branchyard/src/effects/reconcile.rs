@@ -4,22 +4,25 @@
 //! - A `begun` entry whose turn is no longer running (its engine stopped
 //!   between writing the entry and recording the answer) becomes
 //!   `unknown`. This needs no network, so recovery does it.
-//! - An `unknown` entry whose operation declared a lookup is looked up
-//!   through the gateway, under the branch's grant, by its id (the
-//!   idempotency key): found is `confirmed` (with the undo the gateway
-//!   gives), not found is `failed`. Without a lookup, or when the lookup
-//!   cannot answer, it stays `unknown` and is shown to the person.
-//! - A `confirmed` entry whose inverse's deadline passed is `expired`.
+//! - An `unknown` entry with a lookup is looked up through the gateway,
+//!   under the branch's grant: the call the gateway's report named (a
+//!   failed call still reports one), or, for an answer lost entirely, the
+//!   lookup the tool's contract declares, resolved when the call was made
+//!   from its arguments and its id (the idempotency key). An answer is
+//!   `confirmed`; `not_found`, or nothing, is `failed`. Without a lookup,
+//!   or when the lookup cannot answer, it stays `unknown` and is shown to
+//!   the person; the gateway's audit log can settle it too
+//!   (`by effects reconcile --audit`).
+//! - A `confirmed` entry whose inverse's deadline passed, with no
+//!   compensation left, is `expired`.
 //!
 //! Run on recovery (the first step), by `by effects reconcile`, by the
 //! gateway's supervisor and the server on a timer.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 
 use super::ask::note;
 use super::mcp::{CallError, Client};
-use super::proxy::described;
 use super::{EffectActivity, EffectEntry, EffectMove, EffectState};
 use crate::state::now_ms;
 use crate::{Error, Yard};
@@ -98,7 +101,9 @@ pub(crate) fn run(yard: &Yard, now: u64) -> Result<Reconciled, Error> {
                 )),
                 Err(why) => report.unknown.push((entry.id.clone(), why)),
             },
-            EffectState::Confirmed if entry.expired_at(now) => {
+            EffectState::Confirmed
+                if entry.expired_at(now) && entry.compensation_at(now).is_none() =>
+            {
                 let change =
                     EffectMove::to(EffectState::Expired).detail("its undo's deadline passed");
                 if let Some(done) = ledger.effects().move_effect(
@@ -117,8 +122,8 @@ pub(crate) fn run(yard: &Yard, now: u64) -> Result<Reconciled, Error> {
     Ok(report)
 }
 
-/// Ask the upstream whether `entry`'s call happened: `None` when it
-/// declares no lookup.
+/// Ask the upstream whether `entry`'s call happened: `None` when there is
+/// no lookup to ask.
 fn lookup(yard: &Yard, entry: &EffectEntry) -> Result<Option<EffectMove>, String> {
     let Some(lookup) = &entry.lookup else {
         return Ok(None);
@@ -128,39 +133,19 @@ fn lookup(yard: &Yard, entry: &EffectEntry) -> Result<Option<EffectMove>, String
         .read(&entry.branch)
         .map_err(|e| format!("its branch is gone ({e}); check upstream and decide"))?;
     let (gateway, token) = crate::connectors::branch_token(yard, &record, entry.turn)?;
-    let mut arguments = match &lookup.arguments {
-        Value::Object(map) => Value::Object(map.clone()),
-        _ => json!({}),
-    };
-    arguments["idempotency_key"] = json!(entry.id);
-    let tool = format!("{}__{}", entry.connector, lookup.operation);
     let called = Client::new(&gateway.url, token)
-        .call(&tool, &arguments, &json!({}), None)
+        .follow_up(&lookup.tool, &lookup.arguments, None)
         .map_err(|e: CallError| format!("the lookup: {e}"))?;
-    if !called.ok() {
-        return Err(format!("the lookup failed: {}", called.answer()));
-    }
-    let found = called.meta.as_ref().and_then(|m| m.found).or_else(|| {
-        called
-            .result
-            .as_ref()
-            .and_then(|r| r.get("structuredContent"))
-            .and_then(|s| s.get("found"))
-            .and_then(Value::as_bool)
-    });
-    Ok(Some(match found {
-        Some(true) => {
-            let found = called.meta.as_ref().and_then(|m| m.found_effect.as_deref());
-            let mut change = match found {
-                Some(meta) => described(meta, EffectState::Confirmed),
-                None => EffectMove::to(EffectState::Confirmed),
-            };
-            change.detail = Some("the lookup found it: the call happened".into());
-            change
-        }
-        Some(false) => EffectMove::to(EffectState::Failed)
-            .detail("the lookup did not find it: the call did not happen"),
-        None => return Err("the lookup did not say whether it found the call".into()),
+    Ok(Some(match called.found() {
+        Some(true) => EffectMove::to(EffectState::Confirmed).detail(format!(
+            "the lookup ({}) found it: the call happened",
+            lookup.operation
+        )),
+        Some(false) => EffectMove::to(EffectState::Failed).detail(format!(
+            "the lookup ({}) did not find it: the call did not happen",
+            lookup.operation
+        )),
+        None => return Err(format!("the lookup failed: {}", called.answer())),
     }))
 }
 

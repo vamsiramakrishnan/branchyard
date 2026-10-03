@@ -1,11 +1,14 @@
-//! A mock connector gateway on loopback for the effect ledger's tests: MCP
-//! Streamable HTTP (JSON, and one tool answered as an event stream), the
-//! effect metadata of `docs/effects.md#the-wire` (`_meta.effect` with
-//! class, undo, deadline and summary), idempotency keys honoured (a key
-//! seen before replays its answer without doing anything again), drafts
-//! (`_meta.stage`) and promotion (`_meta.promote`), lookups, and every
-//! call recorded. Shared by the SDK, CLI and server tests through
-//! `#[path]`.
+//! A mock connector gateway on loopback for the effect ledger's tests,
+//! speaking Anvil's wire (ADR-0030, Anvil's `docs/branchyard.md`, "Effects
+//! and undo"): MCP Streamable HTTP (JSON, and one tool answered as an event
+//! stream) and the REST route `POST /call/<tool>`; `tools/list` publishing
+//! `anvil/operation_id`, `anvil/effect_class` and `anvil/effect_contract`;
+//! each call's effect report (`_meta.effect`, or `X-Anvil-Effect` over
+//! REST) with follow-ups named by `tool`; idempotency keys honoured (a key
+//! seen before replays its answer without doing anything again); drafts
+//! (`_meta.stage` / `"stage": true`) with promote and discard calls; lookups
+//! answering `not_found`; and every call recorded. Shared by the SDK, CLI
+//! and server tests through `#[path]`.
 
 #![allow(dead_code)]
 
@@ -21,9 +24,12 @@ use serde_json::{json, Value};
 pub struct Call {
     pub tool: String,
     pub arguments: Value,
+    /// `_meta` over MCP; `{"stage": ...}` from the body over REST.
     pub meta: Value,
     /// The `Idempotency-Key` header.
     pub key: Option<String>,
+    /// Whether it came over the REST route.
+    pub rest: bool,
     /// Whether it replayed an earlier answer for the same key.
     pub replayed: bool,
     pub token: String,
@@ -31,18 +37,26 @@ pub struct Call {
     pub seen: Option<String>,
 }
 
+impl Call {
+    /// Whether it asked for the draft form.
+    pub fn staged(&self) -> bool {
+        self.meta["stage"] == json!(true)
+    }
+}
+
 type Hook = Box<dyn Fn(&Call) -> Option<String> + Send>;
 
 #[derive(Default)]
 struct State {
     calls: Vec<Call>,
-    /// Answers by idempotency key.
-    performed: HashMap<String, (u16, Value)>,
+    /// Answers by tool and idempotency key.
+    performed: HashMap<String, Outcome>,
     /// Keys whose effect happened, for lookups.
     happened: HashSet<String>,
     next: u64,
     deadline_ms: u64,
     fail_inverse: bool,
+    no_compensation: bool,
     /// Tools held until released, and whether they are held now.
     hold: HashSet<String>,
     holding: usize,
@@ -56,22 +70,67 @@ pub struct MockGateway {
     state: Arc<(Mutex<State>, Condvar)>,
 }
 
-/// The tools it lists, as Anvil would declare them.
+fn tool(name: &str, operation: &str, contract: Value) -> Value {
+    let mut meta = json!({"anvil/operation_id": operation});
+    if let Some(class) = contract.get("class") {
+        meta["anvil/effect_class"] = class.clone();
+        meta["anvil/effect_contract"] = contract.clone();
+    }
+    let mut tool = json!({"name": name, "_meta": meta,
+        "inputSchema": {"type": "object", "properties": {}}});
+    if contract.get("class") == Some(&json!("read")) {
+        tool["annotations"] = json!({"readOnlyHint": true});
+    }
+    tool
+}
+
+/// The tools it lists, as Anvil declares them.
 pub fn tools() -> Value {
     json!([
-        {"name": "slack__chat_post", "_meta": {"effect": {"class": "reversible", "operation": "slack.chat.post"}}},
-        {"name": "slack__chat_delete", "_meta": {"effect": {"class": "reversible", "deletion": true}}},
-        {"name": "github__issues_create", "_meta": {"effect": {"class": "compensable"}}},
-        {"name": "github__issues_close", "_meta": {"effect": {"class": "compensable"}}},
-        {"name": "github__issues_list", "annotations": {"readOnlyHint": true}},
-        {"name": "gmail__send", "_meta": {"effect": {"class": "irreversible", "draft": true,
-            "lookup": {"operation": "sent_lookup"}}}},
-        {"name": "gmail__sent_lookup", "annotations": {"readOnlyHint": true}},
-        {"name": "webhook__fire", "_meta": {"effect": {"class": "irreversible"}}},
+        tool("slack__chat_post", "slack.chat.post", json!({"class": "reversible",
+            "inverse": {"operation": "slack.chat.delete", "arguments": {"ts": "response.ts"},
+                        "deadline": {"within_ms": 86_400_000}},
+            "compensate": {"operation": "slack.chat.update",
+                           "arguments": {"ts": "response.ts", "text": {"const": "(retracted)"}}}})),
+        tool("slack__chat_delete", "slack.chat.delete", json!({"class": "irreversible"})),
+        tool("slack__chat_update", "slack.chat.update", json!({})),
+        tool("github__issues_create", "github.issues.create", json!({"class": "compensable",
+            "compensate": {"operation": "github.issues.update",
+                           "arguments": {"number": "response.number", "state": {"const": "closed"}}}})),
+        {
+            // The compensation needs confirmation, as Anvil's schema says.
+            "name": "github__issues_close",
+            "_meta": {"anvil/operation_id": "github.issues.update"},
+            "inputSchema": {"type": "object", "properties": {
+                "number": {"type": "integer"}, "state": {"type": "string"},
+                "confirm": {"type": "boolean", "const": true}},
+                "required": ["number", "confirm"]},
+        },
+        tool("github__issues_list", "github.issues.list", json!({"class": "read"})),
+        tool("gmail__send", "gmail.send", json!({"class": "irreversible",
+            "lookup": {"operation": "gmail.sent.lookup", "by": "key",
+                       "arguments": {"key": "idempotency_key"}},
+            "draft": {"operation": "gmail.drafts.create", "arguments": {"to": "request.to"},
+                      "handle": "response.id",
+                      "promote": {"operation": "gmail.drafts.send", "arguments": {"id": "response.id"}},
+                      "discard": {"operation": "gmail.drafts.delete", "arguments": {"id": "response.id"}}}})),
+        tool("gmail__drafts_send", "gmail.drafts.send", json!({"class": "irreversible"})),
+        tool("gmail__drafts_delete", "gmail.drafts.delete", json!({"class": "irreversible"})),
+        tool("gmail__sent_lookup", "gmail.sent.lookup", json!({"class": "read"})),
+        tool("blog__publish", "blog.posts.publish", json!({"class": "irreversible",
+            "draft": {"operation": "blog.posts.create", "arguments": {"draft": {"const": true}},
+                      "handle": "response.id",
+                      "promote": {"operation": "blog.posts.update",
+                                  "arguments": {"id": "response.id", "draft": {"const": false}}}}})),
+        tool("blog__posts_update", "blog.posts.update", json!({"class": "irreversible"})),
+        tool("webhook__fire", "webhook.fire", json!({"class": "irreversible"})),
         {"name": "legacy__do"},
-        {"name": "flaky__charge", "_meta": {"effect": {"class": "compensable",
-            "lookup": {"operation": "charge_lookup", "arguments": {"kind": "charge"}}}}},
-        {"name": "flaky__charge_lookup", "annotations": {"readOnlyHint": true}},
+        tool("flaky__charge", "flaky.charges.create", json!({"class": "compensable",
+            "compensate": {"operation": "flaky.refunds.create", "arguments": {"charge": "response.id"}},
+            "lookup": {"operation": "flaky.charges.lookup", "by": "key",
+                       "arguments": {"key": "idempotency_key", "kind": {"const": "charge"}}}})),
+        tool("flaky__charge_lookup", "flaky.charges.lookup", json!({"class": "read"})),
+        tool("flaky__refund", "flaky.refunds.create", json!({"class": "irreversible"})),
     ])
 }
 
@@ -112,12 +171,18 @@ impl MockGateway {
             .collect()
     }
 
-    /// The deadline every undo it describes carries.
+    /// The deadline every inverse it reports carries.
     pub fn set_deadline(&self, ms: u64) {
         self.lock().deadline_ms = ms;
     }
 
-    /// Make every inverse (`chat_delete`, `issues_close`) fail.
+    /// Report no compensation beside an inverse.
+    pub fn without_compensation(&self) {
+        self.lock().no_compensation = true;
+    }
+
+    /// Make every inverse and compensation (`chat_delete`, `issues_close`)
+    /// fail.
     pub fn fail_inverses(&self) {
         self.lock().fail_inverse = true;
     }
@@ -153,6 +218,7 @@ impl MockGateway {
 
 struct Request {
     method: String,
+    target: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
@@ -170,7 +236,9 @@ fn read(stream: &TcpStream) -> Option<Request> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
-    let method = line.split_whitespace().next()?.to_owned();
+    let mut words = line.split_whitespace();
+    let method = words.next()?.to_owned();
+    let target = words.next()?.to_owned();
     let mut headers = Vec::new();
     loop {
         line.clear();
@@ -191,6 +259,7 @@ fn read(stream: &TcpStream) -> Option<Request> {
     reader.read_exact(&mut body).ok()?;
     Some(Request {
         method,
+        target,
         headers,
         body,
     })
@@ -210,12 +279,71 @@ fn write(mut stream: &TcpStream, status: u16, headers: &[(&str, String)], body: 
     let _ = stream.flush();
 }
 
-fn tool_result(text: &str, error: bool, effect: Option<Value>) -> Value {
-    let mut result = json!({"content": [{"type": "text", "text": text}], "isError": error});
-    if let Some(effect) = effect {
-        result["_meta"] = json!({"effect": effect});
+/// What one call did: its data or its error, and its effect report.
+#[derive(Clone, Debug)]
+struct Outcome {
+    data: Value,
+    /// `(code, message)` for a refusal or a failure.
+    error: Option<(String, String)>,
+    effect: Option<Value>,
+}
+
+impl Outcome {
+    fn ok(data: Value, effect: Value) -> Outcome {
+        Outcome {
+            data,
+            error: None,
+            effect: Some(effect),
+        }
     }
-    result
+
+    fn error(code: &str, message: &str, effect: Option<Value>) -> Outcome {
+        Outcome {
+            data: Value::Null,
+            error: Some((code.to_owned(), message.to_owned())),
+            effect,
+        }
+    }
+
+    fn text(&self) -> String {
+        match (&self.error, &self.data) {
+            (Some((code, message)), _) => {
+                json!({"error": {"code": code, "message": message}}).to_string()
+            }
+            (None, Value::String(text)) => text.clone(),
+            (None, data) => data.to_string(),
+        }
+    }
+
+    /// As an MCP `tools/call` result.
+    fn mcp(&self) -> Value {
+        let mut result = json!({"content": [{"type": "text", "text": self.text()}],
+                                "isError": self.error.is_some()});
+        if let Some(effect) = &self.effect {
+            result["_meta"] = json!({"effect": effect});
+        }
+        result
+    }
+
+    /// As a REST answer: status, headers, body.
+    fn rest(&self) -> (u16, Vec<(&'static str, String)>, Vec<u8>) {
+        let mut headers = vec![("Content-Type", "application/json".to_owned())];
+        if let Some(effect) = &self.effect {
+            headers.push(("X-Anvil-Effect", effect.to_string()));
+        }
+        match &self.error {
+            Some((code, message)) => {
+                let status = match code.as_str() {
+                    "not_found" => 404,
+                    "unsupported_operation" => 422,
+                    _ => 502,
+                };
+                let body = json!({"error": {"code": code, "message": message}});
+                (status, headers, body.to_string().into_bytes())
+            }
+            None => (200, headers, self.data.to_string().into_bytes()),
+        }
+    }
 }
 
 fn serve(stream: TcpStream, shared: &Arc<(Mutex<State>, Condvar)>) {
@@ -236,6 +364,11 @@ fn serve(stream: TcpStream, shared: &Arc<(Mutex<State>, Condvar)>) {
         .to_owned();
     if token.is_empty() {
         return write(&stream, 401, &[], b"no token");
+    }
+    if let Some(tool) = request.target.strip_prefix("/call/") {
+        let meta = json!({"stage": body.get("stage").cloned().unwrap_or(Value::Null)});
+        let arguments = body.get("arguments").cloned().unwrap_or(json!({}));
+        return call(stream, shared, &request, tool, arguments, meta, token, None);
     }
     let answer = |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
     let json_type = ("Content-Type", "application/json".to_owned());
@@ -258,7 +391,22 @@ fn serve(stream: TcpStream, shared: &Arc<(Mutex<State>, Condvar)>) {
             &[json_type],
             answer(json!({"tools": tools()})).to_string().as_bytes(),
         ),
-        "tools/call" => call(stream, shared, &request, &body, token),
+        "tools/call" => {
+            let params = &body["params"];
+            let tool = params["name"].as_str().unwrap_or("").to_owned();
+            let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+            let meta = params.get("_meta").cloned().unwrap_or(json!({}));
+            call(
+                stream,
+                shared,
+                &request,
+                &tool,
+                arguments,
+                meta,
+                token,
+                Some(id),
+            )
+        }
         other => write(
             &stream,
             200,
@@ -270,18 +418,186 @@ fn serve(stream: TcpStream, shared: &Arc<(Mutex<State>, Condvar)>) {
     }
 }
 
+fn follow(kind: Option<&str>, operation: &str, tool: &str, arguments: Value) -> Value {
+    let mut call = json!({"operation": operation, "tool": tool, "arguments": arguments});
+    if let Some(kind) = kind {
+        call["kind"] = json!(kind);
+    }
+    call
+}
+
+/// What `tool` does with `arguments`, its effect report carrying `key`.
+fn perform(
+    state: &State,
+    tool: &str,
+    arguments: &Value,
+    staged: bool,
+    key: &str,
+    n: u64,
+) -> Outcome {
+    let key_or_null = match key {
+        "" => Value::Null,
+        key => json!(key),
+    };
+    let report = |class: &str, operation: &str| {
+        json!({"class": class, "operation": operation, "idempotency_key": key_or_null,
+               "undo": null, "deadline_ms": null, "lookup": null})
+    };
+    let lookup = |operation: &str, tool: &str, extra: Value| {
+        let mut arguments = json!({"key": key});
+        if let (Some(a), Some(b)) = (arguments.as_object_mut(), extra.as_object()) {
+            a.extend(b.clone());
+        }
+        json!({"by": "key", "operation": operation, "tool": tool, "arguments": arguments})
+    };
+    match tool {
+        "slack__chat_post" => {
+            let ts = n.to_string();
+            let mut effect = report("reversible", "slack.chat.post");
+            effect["undo"] = follow(
+                Some("inverse"),
+                "slack.chat.delete",
+                "slack__chat_delete",
+                json!({"ts": ts}),
+            );
+            effect["deadline_ms"] = json!(state.deadline_ms);
+            if !state.no_compensation {
+                effect["compensate"] = follow(
+                    Some("compensate"),
+                    "slack.chat.update",
+                    "slack__chat_update",
+                    json!({"ts": ts, "text": "(retracted)"}),
+                );
+                effect["compensate"]["deadline_ms"] = Value::Null;
+            }
+            Outcome::ok(json!(format!("posted ts={n}")), effect)
+        }
+        "slack__chat_delete" | "slack__chat_update" | "github__issues_close"
+            if state.fail_inverse =>
+        {
+            Outcome::error("not_found", "it is already gone", None)
+        }
+        "slack__chat_delete" => Outcome::ok(
+            json!("deleted"),
+            report("irreversible", "slack.chat.delete"),
+        ),
+        "slack__chat_update" => Outcome::ok(
+            json!("retracted"),
+            report("irreversible", "slack.chat.update"),
+        ),
+        "github__issues_create" => {
+            let mut effect = report("compensable", "github.issues.create");
+            effect["undo"] = follow(
+                Some("compensate"),
+                "github.issues.update",
+                "github__issues_close",
+                json!({"number": n, "state": "closed"}),
+            );
+            Outcome::ok(json!(format!("issue #{n}")), effect)
+        }
+        "github__issues_close" if arguments["confirm"] != json!(true) => Outcome::error(
+            "confirmation_required",
+            "github.issues.update needs confirm: true",
+            None,
+        ),
+        "github__issues_close" => Outcome::ok(
+            json!("closed"),
+            report("irreversible", "github.issues.update"),
+        ),
+        "github__issues_list" => Outcome::ok(json!([]), report("read", "github.issues.list")),
+        "gmail__send" if staged => {
+            let handle = format!("d-{n}");
+            let mut effect = report("irreversible", "gmail.send");
+            effect["staged"] = json!({"draft_operation": "gmail.drafts.create", "handle": handle,
+                "promote": follow(None, "gmail.drafts.send", "gmail__drafts_send", json!({"id": handle})),
+                "discard": follow(None, "gmail.drafts.delete", "gmail__drafts_delete", json!({"id": handle}))});
+            Outcome::ok(json!(format!("draft {handle}")), effect)
+        }
+        "gmail__send" => {
+            let mut effect = report("irreversible", "gmail.send");
+            effect["lookup"] = lookup("gmail.sent.lookup", "gmail__sent_lookup", json!({}));
+            Outcome::ok(json!("sent"), effect)
+        }
+        "gmail__drafts_send" => Outcome::ok(
+            json!(format!("sent {}", arguments["id"].as_str().unwrap_or(""))),
+            report("irreversible", "gmail.drafts.send"),
+        ),
+        "gmail__drafts_delete" => Outcome::ok(
+            json!(format!(
+                "deleted {}",
+                arguments["id"].as_str().unwrap_or("")
+            )),
+            report("irreversible", "gmail.drafts.delete"),
+        ),
+        "blog__publish" if staged => {
+            let handle = n;
+            let mut effect = report("irreversible", "blog.posts.publish");
+            effect["staged"] = json!({"draft_operation": "blog.posts.create", "handle": handle,
+                "promote": follow(None, "blog.posts.update", "blog__posts_update",
+                                  json!({"id": handle, "draft": false})),
+                "discard": null});
+            Outcome::ok(json!({"id": handle, "draft": true}), effect)
+        }
+        "blog__publish" => Outcome::ok(
+            json!({"id": n}),
+            report("irreversible", "blog.posts.publish"),
+        ),
+        "blog__posts_update" => Outcome::ok(
+            json!({"id": arguments["id"], "draft": false}),
+            report("irreversible", "blog.posts.update"),
+        ),
+        "webhook__fire" if staged => Outcome::error(
+            "unsupported_operation",
+            "webhook.fire has no draft form (effect/no_draft_form)",
+            None,
+        ),
+        "webhook__fire" => Outcome::ok(json!("fired"), report("irreversible", "webhook.fire")),
+        "legacy__do" => Outcome {
+            data: json!("done"),
+            error: None,
+            effect: None,
+        },
+        "flaky__charge" => {
+            let mut effect = report("compensable", "flaky.charges.create");
+            effect["undo"] = follow(
+                Some("compensate"),
+                "flaky.refunds.create",
+                "flaky__refund",
+                json!({"charge": n}),
+            );
+            effect["lookup"] = lookup(
+                "flaky.charges.lookup",
+                "flaky__charge_lookup",
+                json!({"kind": "charge"}),
+            );
+            Outcome::ok(json!("charged"), effect)
+        }
+        "gmail__sent_lookup" | "flaky__charge_lookup" => {
+            let asked = arguments["key"].as_str().unwrap_or("");
+            match state.happened.contains(asked) {
+                true => Outcome::ok(json!({"key": asked}), report("read", "lookup")),
+                false => {
+                    Outcome::error("not_found", "no such call", Some(report("read", "lookup")))
+                }
+            }
+        }
+        _ => Outcome::error("not_found", "no such tool", None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn call(
     stream: TcpStream,
     shared: &Arc<(Mutex<State>, Condvar)>,
     request: &Request,
-    body: &Value,
+    tool: &str,
+    arguments: Value,
+    meta: Value,
     token: String,
+    // The JSON-RPC id over MCP; `None` over REST.
+    rpc: Option<Value>,
 ) {
-    let id = body.get("id").cloned().unwrap_or(Value::Null);
-    let params = &body["params"];
-    let tool = params["name"].as_str().unwrap_or("").to_owned();
-    let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-    let meta = params.get("_meta").cloned().unwrap_or(json!({}));
+    let tool = tool.to_owned();
     let key = request.header("idempotency-key").map(str::to_owned);
     let meta_key = meta["idempotency_key"].as_str().map(str::to_owned);
     let (lock, changed) = &**shared;
@@ -291,6 +607,7 @@ fn call(
         arguments: arguments.clone(),
         meta: meta.clone(),
         key: key.clone(),
+        rest: rpc.is_none(),
         replayed: false,
         token,
         seen: None,
@@ -298,122 +615,38 @@ fn call(
     if let Some(hook) = &state.hook {
         record.seen = hook(&record);
     }
+    let staged = record.staged();
     let dedupe = key
         .clone()
         .or(meta_key.clone())
         .map(|k| format!("{tool}:{k}"));
-    if let Some(previous) = dedupe
+    let replay = dedupe
         .as_ref()
         .and_then(|k| state.performed.get(k))
-        .cloned()
-    {
-        record.replayed = true;
-        state.calls.push(record);
-        drop(state);
-        return write(
-            &stream,
-            previous.0,
-            &[("Content-Type", "application/json".into())],
-            json!({"jsonrpc": "2.0", "id": id, "result": previous.1})
-                .to_string()
-                .as_bytes(),
-        );
-    }
-    state.next += 1;
-    let n = state.next;
-    let deadline = state.deadline_ms;
-    let effect_key = key.clone().or(meta_key.clone()).unwrap_or_default();
-    let lookup = |state: &State| {
-        let asked = arguments["idempotency_key"].as_str().unwrap_or("");
-        let found = state.happened.contains(asked);
-        tool_result(
-            if found { "found" } else { "not found" },
-            false,
-            Some(
-                json!({"class": "read", "lookup": match (found, tool.as_str()) {
-                    (true, "flaky__charge_lookup") => json!({"found": true, "class": "compensable",
-                        "undo": {"operation": "refund", "arguments": {"key": asked}}}),
-                    _ => json!({"found": found}),
-                }}),
-            ),
-        )
-    };
-    let result = match tool.as_str() {
-        "slack__chat_post" => tool_result(
-            &format!("posted ts={n}"),
-            false,
-            Some(
-                json!({"class": "reversible", "deadline_ms": deadline, "idempotency_key": effect_key,
-                "summary": format!("message in #{}", arguments["channel"].as_str().unwrap_or("general")),
-                "undo": {"operation": "chat_delete", "arguments": {"ts": n.to_string()},
-                         "summary": format!("deletable until the deadline")}}),
-            ),
-        ),
-        "slack__chat_delete" | "github__issues_close" if state.fail_inverse => tool_result(
-            "{\"error\": {\"code\": \"not_found\", \"message\": \"it is already gone\"}}",
-            true,
-            None,
-        ),
-        "slack__chat_delete" => tool_result(
-            "deleted",
-            false,
-            Some(json!({"class": "reversible", "undo": null})),
-        ),
-        "github__issues_create" => tool_result(
-            &format!("issue #{n}"),
-            false,
-            Some(
-                json!({"class": "compensable", "summary": format!("issue #{n}"),
-                "undo": {"operation": "issues_close", "arguments": {"number": n}, "kind": "compensate",
-                         "summary": format!("issue #{n} will be closed, not deleted")}}),
-            ),
-        ),
-        "github__issues_close" => tool_result(
-            "closed",
-            false,
-            Some(json!({"class": "compensable", "undo": null})),
-        ),
-        "github__issues_list" => tool_result("[]", false, None),
-        "gmail__send" if meta["stage"] == json!(true) => tool_result(
-            &format!("draft d-{n}"),
-            false,
-            Some(
-                json!({"class": "irreversible", "staged": {"handle": format!("d-{n}")}, "undo": null}),
-            ),
-        ),
-        "gmail__send" => tool_result(
-            "sent",
-            false,
-            Some(
-                json!({"class": "irreversible", "undo": null, "summary": "email to finance@",
-                        "idempotency_key": effect_key}),
-            ),
-        ),
-        "gmail__sent_lookup" | "flaky__charge_lookup" => lookup(&state),
-        "webhook__fire" => tool_result(
-            "fired",
-            false,
-            Some(json!({"class": "irreversible", "undo": null})),
-        ),
-        "legacy__do" => tool_result("done", false, None),
-        "flaky__charge" => tool_result(
-            "charged",
-            false,
-            Some(json!({"class": "compensable",
-            "undo": {"operation": "refund", "arguments": {"charge": n}}})),
-        ),
-        _ => tool_result("no such tool", true, None),
-    };
-    let ok = result["isError"] != json!(true);
-    let lookup_tool = tool.ends_with("_lookup");
-    if ok && !lookup_tool && !effect_key.is_empty() && meta["stage"] != json!(true) {
-        state.happened.insert(effect_key.clone());
-    }
-    if let Some(k) = dedupe {
-        if ok && !lookup_tool {
-            state.performed.insert(k, (200, result.clone()));
+        .cloned();
+    let outcome = match replay {
+        Some(previous) => {
+            record.replayed = true;
+            state.calls.push(record);
+            drop(state);
+            return answer(&stream, rpc, &tool, &previous);
         }
-    }
+        None => {
+            state.next += 1;
+            let effect_key = key.clone().or(meta_key.clone()).unwrap_or_default();
+            let outcome = perform(&state, &tool, &arguments, staged, &effect_key, state.next);
+            let lookup_tool = tool.ends_with("_lookup");
+            if outcome.error.is_none() && !lookup_tool {
+                if !effect_key.is_empty() && !staged {
+                    state.happened.insert(effect_key);
+                }
+                if let Some(k) = dedupe {
+                    state.performed.insert(k, outcome.clone());
+                }
+            }
+            outcome
+        }
+    };
     let held = state.hold.contains(&tool);
     state.calls.push(record);
     changed.notify_all();
@@ -433,7 +666,15 @@ fn call(
         let _ = stream.shutdown(std::net::Shutdown::Both);
         return;
     }
-    let message = json!({"jsonrpc": "2.0", "id": id, "result": result});
+    answer(&stream, rpc, &tool, &outcome)
+}
+
+fn answer(stream: &TcpStream, rpc: Option<Value>, tool: &str, outcome: &Outcome) {
+    let Some(id) = rpc else {
+        let (status, headers, body) = outcome.rest();
+        return write(stream, status, &headers, &body);
+    };
+    let message = json!({"jsonrpc": "2.0", "id": id, "result": outcome.mcp()});
     if tool == "slack__chat_post" {
         let sse = format!(
             "event: message\ndata: {}\n\nevent: message\ndata: {}\n\n",
@@ -441,14 +682,14 @@ fn call(
             message
         );
         return write(
-            &stream,
+            stream,
             200,
             &[("Content-Type", "text/event-stream".into())],
             sse.as_bytes(),
         );
     }
     write(
-        &stream,
+        stream,
         200,
         &[("Content-Type", "application/json".into())],
         message.to_string().as_bytes(),
@@ -456,13 +697,31 @@ fn call(
 }
 
 /// What a harness runs to call the gateway through Anvil's wire, as the
-/// packaged SDKs do: `python3 call.py TOOL 'JSON ARGUMENTS'`. Prints
-/// `call TOOL: TEXT` or `call TOOL error: TEXT`.
-pub const CALL_PY: &str = r#"import json, os, sys, urllib.request
+/// packaged SDKs do: `python3 call.py TOOL 'JSON ARGUMENTS'` over MCP, or
+/// `python3 call.py --rest TOOL 'JSON ARGUMENTS'` over the REST route.
+/// Prints `call TOOL: TEXT` or `call TOOL error: TEXT`.
+pub const CALL_PY: &str = r#"import json, os, sys, urllib.error, urllib.request
 url = os.environ["ANVIL_GATEWAY_URL"]
 token = open(os.environ["ANVIL_GATEWAY_TOKEN_FILE"]).read().strip()
 headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json",
            "Accept": "application/json, text/event-stream"}
+args = sys.argv[1:]
+rest = args[:1] == ["--rest"]
+if rest:
+    args = args[1:]
+tool, arguments = args[0], json.loads(args[1] if len(args) > 1 else "{}")
+if rest:
+    base = url[:-len("/mcp")] if url.endswith("/mcp") else url
+    request = urllib.request.Request(base + "/call/" + tool, method="POST",
+                                     data=json.dumps({"arguments": arguments}).encode(), headers=headers)
+    try:
+        response = urllib.request.urlopen(request, timeout=600)
+        print("call %s: %s" % (tool, response.read().decode()))
+    except urllib.error.HTTPError as e:
+        print("call %s error %d: %s" % (tool, e.code, e.read().decode()))
+    except Exception as e:
+        print("call %s failed: %s" % (tool, e))
+    sys.exit(0)
 def rpc(body, session=None):
     h = dict(headers)
     if session:
@@ -483,7 +742,6 @@ def rpc(body, session=None):
 init, session = rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
     "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}})
 rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}, session)
-tool, arguments = sys.argv[1], json.loads(sys.argv[2] if len(sys.argv) > 2 else "{}")
 try:
     answer, _ = rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                      "params": {"name": tool, "arguments": arguments}}, session)

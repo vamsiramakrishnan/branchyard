@@ -127,32 +127,48 @@ pub enum UndoKind {
     Compensate,
 }
 
-/// How an effect can be undone: the operation the gateway resolved, its
-/// concrete arguments, and until when.
+/// A follow-up call the gateway resolved (Anvil's `EffectCall`): the AIR
+/// operation, the tool to call on this gateway (already prefixed with its
+/// connector), and its concrete arguments.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FollowUp {
+    /// The AIR operation id, such as `github.comments.delete`.
+    pub operation: String,
+    /// The gateway's tool name, such as `github__github_delete_comment`.
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+/// How an effect can be undone: the call the gateway resolved, and until
+/// when.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Undo {
-    /// The inverse's operation (the gateway's tool name, without the
-    /// connector).
+    /// The AIR operation id of the inverse or compensation.
     pub operation: String,
+    /// The tool to call on the gateway.
+    pub tool: String,
     #[serde(default)]
     pub arguments: Value,
     pub kind: UndoKind,
-    /// Milliseconds since the Unix epoch after which the inverse no longer
-    /// works.
+    /// Milliseconds since the Unix epoch after which it may no longer work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
-    /// One line for people, such as `the message will be deleted`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
 }
 
-/// How reconciliation asks the upstream whether a call happened.
+/// How reconciliation asks the upstream whether a call happened: a read
+/// called by the idempotency key or by an id, with concrete arguments.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Lookup {
+    /// The AIR operation id.
     pub operation: String,
-    /// Fixed arguments; the entry's id is added as `idempotency_key`.
+    /// The tool to call on the gateway.
+    pub tool: String,
+    /// `idempotency_key` or `id`.
+    pub by: String,
     #[serde(default)]
     pub arguments: Value,
 }
@@ -171,14 +187,34 @@ pub struct ApprovalRecord {
     pub reason: Option<String>,
 }
 
+/// A draft the gateway made for a staged call (Anvil's `staged`): its
+/// handle, and the calls that promote and discard it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Draft {
+    /// The AIR operation the draft was made with.
+    pub draft_operation: String,
+    #[serde(default)]
+    pub handle: Value,
+    /// The call that performs the real effect; `None` when it could not be
+    /// resolved (`unavailable` says why).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promote: Option<FollowUp>,
+    /// The call that throws the draft away, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discard: Option<FollowUp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
 /// How a staged entry is held.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Staged {
-    /// The draft's handle upstream, when the operation declares a draft
-    /// form; `None` when the call is held in the outbox.
+    /// The draft upstream, when the operation declares a draft form;
+    /// `None` when the call is held in the outbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft: Option<String>,
+    pub draft: Option<Draft>,
     /// The ask that holds the call and its arguments.
     pub ask: String,
 }
@@ -196,7 +232,11 @@ pub struct EffectEntry {
     /// Who the branch acts for.
     pub subject: String,
     pub connector: String,
+    /// The tool called, without its connector prefix.
     pub operation: String,
+    /// The AIR operation id, when the gateway names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     pub class: EffectClass,
@@ -206,6 +246,14 @@ pub struct EffectEntry {
     pub request_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<Undo>,
+    /// A reversible effect's compensation, for after its inverse's
+    /// deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensate: Option<Undo>,
+    /// Why there is no undo although the class has one (the gateway's
+    /// `undo_unavailable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_unavailable: Option<String>,
     /// Who approved it, when policy asked; or the policy, when it allowed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalRecord>,
@@ -225,13 +273,10 @@ pub struct EffectEntry {
     /// it, the entry is irreversible with no undo.
     #[serde(default)]
     pub declared: bool,
-    /// One line for people, from the gateway, such as `message in #board`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
     /// The upstream's last answer, or why the state is what it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// The idempotency key the gateway used upstream, when it says.
+    /// The idempotency key the gateway sent upstream, when it sent one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_key: Option<String>,
     pub created_ms: u64,
@@ -239,20 +284,25 @@ pub struct EffectEntry {
 }
 
 impl EffectEntry {
-    /// `slack chat.post` and its summary, for people.
+    /// `slack: chat_post`, for people.
     pub fn title(&self) -> String {
-        match &self.summary {
-            Some(summary) => format!("{}: {summary}", self.connector),
-            None => format!("{}: {}", self.connector, self.operation),
-        }
+        format!("{}: {}", self.connector, self.operation)
     }
 
-    /// Whether its inverse's deadline passed at `now_ms`.
+    /// Whether its undo's deadline passed at `now_ms`.
     pub fn expired_at(&self, now_ms: u64) -> bool {
         self.undo
             .as_ref()
             .and_then(|u| u.deadline_ms)
             .is_some_and(|deadline| now_ms > deadline)
+    }
+
+    /// The compensation that still works at `now_ms` after the inverse
+    /// expired, if the gateway gave one.
+    pub fn compensation_at(&self, now_ms: u64) -> Option<&Undo> {
+        self.compensate
+            .as_ref()
+            .filter(|c| c.deadline_ms.is_none_or(|d| now_ms <= d))
     }
 }
 
@@ -265,10 +315,18 @@ pub struct EffectMove {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<EffectClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<Undo>,
     /// Drop the undo: the gateway said there is none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_undo: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensate: Option<Undo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_unavailable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup: Option<Lookup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,14 +334,12 @@ pub struct EffectMove {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_key: Option<String>,
-    /// The draft's handle, when staging made one.
+    /// The draft, when staging made one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft: Option<String>,
+    pub draft: Option<Draft>,
 }
 
 impl EffectMove {
@@ -307,11 +363,23 @@ impl EffectMove {
         if let Some(class) = self.class {
             entry.class = class;
         }
+        if let Some(id) = &self.operation_id {
+            entry.operation_id = Some(id.clone());
+        }
         if self.no_undo {
             entry.undo = None;
         }
         if let Some(undo) = &self.undo {
             entry.undo = Some(undo.clone());
+        }
+        if let Some(compensate) = &self.compensate {
+            entry.compensate = Some(compensate.clone());
+        }
+        if let Some(why) = &self.undo_unavailable {
+            entry.undo_unavailable = Some(why.clone());
+        }
+        if let Some(lookup) = &self.lookup {
+            entry.lookup = Some(lookup.clone());
         }
         if let Some(approval) = &self.approval {
             entry.approval = Some(approval.clone());
@@ -321,9 +389,6 @@ impl EffectMove {
         }
         if let Some(declared) = self.declared {
             entry.declared = declared;
-        }
-        if let Some(summary) = &self.summary {
-            entry.summary = Some(summary.clone());
         }
         if let Some(detail) = &self.detail {
             entry.detail = Some(detail.clone());

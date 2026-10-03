@@ -1,6 +1,0 @@
-# Test threads get 2 MiB of stack by default. `by`'s argument parser, which
-# clap derives over every subcommand, needs a little more in a debug build
-# than that; `by` itself parses on its main thread, with 8 MiB. Give test
-# threads the same.
-[env]
-RUST_MIN_STACK = "8388608"

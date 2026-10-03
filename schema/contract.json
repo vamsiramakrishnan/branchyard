@@ -6602,7 +6602,15 @@
               "type": "string"
             },
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The tool called, without its connector prefix."
+            },
+            "operation_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The AIR operation id, when the gateway names it."
             },
             "account": {
               "type": [
@@ -6629,6 +6637,24 @@
                   "type": "null"
                 }
               ]
+            },
+            "compensate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A reversible effect's compensation, for after its inverse's\ndeadline."
+            },
+            "undo_unavailable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why there is no undo although the class has one (the gateway's\n`undo_unavailable`)."
             },
             "approval": {
               "anyOf": [
@@ -6692,13 +6718,6 @@
               "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
               "default": false
             },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, from the gateway, such as `message in #board`."
-            },
             "detail": {
               "type": [
                 "string",
@@ -6711,7 +6730,7 @@
                 "string",
                 "null"
               ],
-              "description": "The idempotency key the gateway used upstream, when it says."
+              "description": "The idempotency key the gateway sent upstream, when it sent one."
             },
             "created_ms": {
               "type": "integer",
@@ -6817,7 +6836,11 @@
           "properties": {
             "operation": {
               "type": "string",
-              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+              "description": "The AIR operation id of the inverse or compensation."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
             },
             "arguments": {
               "default": null
@@ -6832,21 +6855,15 @@
               ],
               "format": "uint64",
               "minimum": 0,
-              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
-            },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, such as `the message will be deleted`."
+              "description": "Milliseconds since the Unix epoch after which it may no longer work."
             }
           },
           "required": [
             "operation",
+            "tool",
             "kind"
           ],
-          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+          "description": "How an effect can be undone: the call the gateway resolved, and until\nwhen."
         },
         "UndoKind": {
           "type": "string",
@@ -6976,11 +6993,15 @@
           "type": "object",
           "properties": {
             "draft": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Draft"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+              "description": "The draft upstream, when the operation declares a draft form;\n`None` when the call is held in the outbox."
             },
             "ask": {
               "type": "string",
@@ -6992,21 +7013,96 @@
           ],
           "description": "How a staged entry is held."
         },
-        "Lookup": {
+        "Draft": {
+          "type": "object",
+          "properties": {
+            "draft_operation": {
+              "type": "string",
+              "description": "The AIR operation the draft was made with."
+            },
+            "handle": {
+              "default": null
+            },
+            "promote": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that performs the real effect; `None` when it could not be\nresolved (`unavailable` says why)."
+            },
+            "discard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that throws the draft away, when there is one."
+            },
+            "unavailable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "draft_operation"
+          ],
+          "description": "A draft the gateway made for a staged call (Anvil's `staged`): its\nhandle, and the calls that promote and discard it."
+        },
+        "FollowUp": {
           "type": "object",
           "properties": {
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The AIR operation id, such as `github.comments.delete`."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The gateway's tool name, such as `github__github_delete_comment`."
             },
             "arguments": {
-              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
               "default": null
             }
           },
           "required": [
-            "operation"
+            "operation",
+            "tool"
           ],
-          "description": "How reconciliation asks the upstream whether a call happened."
+          "description": "A follow-up call the gateway resolved (Anvil's `EffectCall`): the AIR\noperation, the tool to call on this gateway (already prefixed with its\nconnector), and its concrete arguments."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The AIR operation id."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
+            },
+            "by": {
+              "type": "string",
+              "description": "`idempotency_key` or `id`."
+            },
+            "arguments": {
+              "default": null
+            }
+          },
+          "required": [
+            "operation",
+            "tool",
+            "by"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened: a read\ncalled by the idempotency key or by an id, with concrete arguments."
         }
       }
     },
@@ -7058,7 +7154,15 @@
               "type": "string"
             },
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The tool called, without its connector prefix."
+            },
+            "operation_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The AIR operation id, when the gateway names it."
             },
             "account": {
               "type": [
@@ -7085,6 +7189,24 @@
                   "type": "null"
                 }
               ]
+            },
+            "compensate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A reversible effect's compensation, for after its inverse's\ndeadline."
+            },
+            "undo_unavailable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why there is no undo although the class has one (the gateway's\n`undo_unavailable`)."
             },
             "approval": {
               "anyOf": [
@@ -7148,13 +7270,6 @@
               "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
               "default": false
             },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, from the gateway, such as `message in #board`."
-            },
             "detail": {
               "type": [
                 "string",
@@ -7167,7 +7282,7 @@
                 "string",
                 "null"
               ],
-              "description": "The idempotency key the gateway used upstream, when it says."
+              "description": "The idempotency key the gateway sent upstream, when it sent one."
             },
             "created_ms": {
               "type": "integer",
@@ -7273,7 +7388,11 @@
           "properties": {
             "operation": {
               "type": "string",
-              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+              "description": "The AIR operation id of the inverse or compensation."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
             },
             "arguments": {
               "default": null
@@ -7288,21 +7407,15 @@
               ],
               "format": "uint64",
               "minimum": 0,
-              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
-            },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, such as `the message will be deleted`."
+              "description": "Milliseconds since the Unix epoch after which it may no longer work."
             }
           },
           "required": [
             "operation",
+            "tool",
             "kind"
           ],
-          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+          "description": "How an effect can be undone: the call the gateway resolved, and until\nwhen."
         },
         "UndoKind": {
           "type": "string",
@@ -7432,11 +7545,15 @@
           "type": "object",
           "properties": {
             "draft": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Draft"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+              "description": "The draft upstream, when the operation declares a draft form;\n`None` when the call is held in the outbox."
             },
             "ask": {
               "type": "string",
@@ -7448,21 +7565,96 @@
           ],
           "description": "How a staged entry is held."
         },
-        "Lookup": {
+        "Draft": {
+          "type": "object",
+          "properties": {
+            "draft_operation": {
+              "type": "string",
+              "description": "The AIR operation the draft was made with."
+            },
+            "handle": {
+              "default": null
+            },
+            "promote": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that performs the real effect; `None` when it could not be\nresolved (`unavailable` says why)."
+            },
+            "discard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that throws the draft away, when there is one."
+            },
+            "unavailable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "draft_operation"
+          ],
+          "description": "A draft the gateway made for a staged call (Anvil's `staged`): its\nhandle, and the calls that promote and discard it."
+        },
+        "FollowUp": {
           "type": "object",
           "properties": {
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The AIR operation id, such as `github.comments.delete`."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The gateway's tool name, such as `github__github_delete_comment`."
             },
             "arguments": {
-              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
               "default": null
             }
           },
           "required": [
-            "operation"
+            "operation",
+            "tool"
           ],
-          "description": "How reconciliation asks the upstream whether a call happened."
+          "description": "A follow-up call the gateway resolved (Anvil's `EffectCall`): the AIR\noperation, the tool to call on this gateway (already prefixed with its\nconnector), and its concrete arguments."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The AIR operation id."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
+            },
+            "by": {
+              "type": "string",
+              "description": "`idempotency_key` or `id`."
+            },
+            "arguments": {
+              "default": null
+            }
+          },
+          "required": [
+            "operation",
+            "tool",
+            "by"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened: a read\ncalled by the idempotency key or by an id, with concrete arguments."
         },
         "EffectEvent": {
           "type": "object",
@@ -7552,6 +7744,12 @@
                 }
               ]
             },
+            "operation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "undo": {
               "anyOf": [
                 {
@@ -7565,6 +7763,32 @@
             "no_undo": {
               "type": "boolean",
               "description": "Drop the undo: the gateway said there is none."
+            },
+            "compensate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "undo_unavailable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lookup": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lookup"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "approval": {
               "anyOf": [
@@ -7592,12 +7816,6 @@
                 "null"
               ]
             },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "detail": {
               "type": [
                 "string",
@@ -7611,11 +7829,15 @@
               ]
             },
             "draft": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Draft"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "description": "The draft's handle, when staging made one."
+              "description": "The draft, when staging made one."
             }
           },
           "description": "A change to an entry after it was opened. Fields left out are kept."
@@ -7781,7 +8003,15 @@
               "type": "string"
             },
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The tool called, without its connector prefix."
+            },
+            "operation_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The AIR operation id, when the gateway names it."
             },
             "account": {
               "type": [
@@ -7808,6 +8038,24 @@
                   "type": "null"
                 }
               ]
+            },
+            "compensate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A reversible effect's compensation, for after its inverse's\ndeadline."
+            },
+            "undo_unavailable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why there is no undo although the class has one (the gateway's\n`undo_unavailable`)."
             },
             "approval": {
               "anyOf": [
@@ -7871,13 +8119,6 @@
               "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
               "default": false
             },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, from the gateway, such as `message in #board`."
-            },
             "detail": {
               "type": [
                 "string",
@@ -7890,7 +8131,7 @@
                 "string",
                 "null"
               ],
-              "description": "The idempotency key the gateway used upstream, when it says."
+              "description": "The idempotency key the gateway sent upstream, when it sent one."
             },
             "created_ms": {
               "type": "integer",
@@ -7996,7 +8237,11 @@
           "properties": {
             "operation": {
               "type": "string",
-              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+              "description": "The AIR operation id of the inverse or compensation."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
             },
             "arguments": {
               "default": null
@@ -8011,21 +8256,15 @@
               ],
               "format": "uint64",
               "minimum": 0,
-              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
-            },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, such as `the message will be deleted`."
+              "description": "Milliseconds since the Unix epoch after which it may no longer work."
             }
           },
           "required": [
             "operation",
+            "tool",
             "kind"
           ],
-          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+          "description": "How an effect can be undone: the call the gateway resolved, and until\nwhen."
         },
         "UndoKind": {
           "type": "string",
@@ -8155,11 +8394,15 @@
           "type": "object",
           "properties": {
             "draft": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Draft"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+              "description": "The draft upstream, when the operation declares a draft form;\n`None` when the call is held in the outbox."
             },
             "ask": {
               "type": "string",
@@ -8171,21 +8414,96 @@
           ],
           "description": "How a staged entry is held."
         },
-        "Lookup": {
+        "Draft": {
+          "type": "object",
+          "properties": {
+            "draft_operation": {
+              "type": "string",
+              "description": "The AIR operation the draft was made with."
+            },
+            "handle": {
+              "default": null
+            },
+            "promote": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that performs the real effect; `None` when it could not be\nresolved (`unavailable` says why)."
+            },
+            "discard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that throws the draft away, when there is one."
+            },
+            "unavailable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "draft_operation"
+          ],
+          "description": "A draft the gateway made for a staged call (Anvil's `staged`): its\nhandle, and the calls that promote and discard it."
+        },
+        "FollowUp": {
           "type": "object",
           "properties": {
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The AIR operation id, such as `github.comments.delete`."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The gateway's tool name, such as `github__github_delete_comment`."
             },
             "arguments": {
-              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
               "default": null
             }
           },
           "required": [
-            "operation"
+            "operation",
+            "tool"
           ],
-          "description": "How reconciliation asks the upstream whether a call happened."
+          "description": "A follow-up call the gateway resolved (Anvil's `EffectCall`): the AIR\noperation, the tool to call on this gateway (already prefixed with its\nconnector), and its concrete arguments."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The AIR operation id."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
+            },
+            "by": {
+              "type": "string",
+              "description": "`idempotency_key` or `id`."
+            },
+            "arguments": {
+              "default": null
+            }
+          },
+          "required": [
+            "operation",
+            "tool",
+            "by"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened: a read\ncalled by the idempotency key or by an id, with concrete arguments."
         },
         "UndoOutcome": {
           "type": "object",
@@ -8535,7 +8853,15 @@
           "type": "string"
         },
         "operation": {
-          "type": "string"
+          "type": "string",
+          "description": "The tool called, without its connector prefix."
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The AIR operation id, when the gateway names it."
         },
         "account": {
           "type": [
@@ -8562,6 +8888,24 @@
               "type": "null"
             }
           ]
+        },
+        "compensate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Undo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A reversible effect's compensation, for after its inverse's\ndeadline."
+        },
+        "undo_unavailable": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why there is no undo although the class has one (the gateway's\n`undo_unavailable`)."
         },
         "approval": {
           "anyOf": [
@@ -8625,13 +8969,6 @@
           "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
           "default": false
         },
-        "summary": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "One line for people, from the gateway, such as `message in #board`."
-        },
         "detail": {
           "type": [
             "string",
@@ -8644,7 +8981,7 @@
             "string",
             "null"
           ],
-          "description": "The idempotency key the gateway used upstream, when it says."
+          "description": "The idempotency key the gateway sent upstream, when it sent one."
         },
         "created_ms": {
           "type": "integer",
@@ -8752,7 +9089,11 @@
           "properties": {
             "operation": {
               "type": "string",
-              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+              "description": "The AIR operation id of the inverse or compensation."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
             },
             "arguments": {
               "default": null
@@ -8767,21 +9108,15 @@
               ],
               "format": "uint64",
               "minimum": 0,
-              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
-            },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, such as `the message will be deleted`."
+              "description": "Milliseconds since the Unix epoch after which it may no longer work."
             }
           },
           "required": [
             "operation",
+            "tool",
             "kind"
           ],
-          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+          "description": "How an effect can be undone: the call the gateway resolved, and until\nwhen."
         },
         "UndoKind": {
           "type": "string",
@@ -8911,11 +9246,15 @@
           "type": "object",
           "properties": {
             "draft": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Draft"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+              "description": "The draft upstream, when the operation declares a draft form;\n`None` when the call is held in the outbox."
             },
             "ask": {
               "type": "string",
@@ -8927,21 +9266,96 @@
           ],
           "description": "How a staged entry is held."
         },
-        "Lookup": {
+        "Draft": {
+          "type": "object",
+          "properties": {
+            "draft_operation": {
+              "type": "string",
+              "description": "The AIR operation the draft was made with."
+            },
+            "handle": {
+              "default": null
+            },
+            "promote": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that performs the real effect; `None` when it could not be\nresolved (`unavailable` says why)."
+            },
+            "discard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that throws the draft away, when there is one."
+            },
+            "unavailable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "draft_operation"
+          ],
+          "description": "A draft the gateway made for a staged call (Anvil's `staged`): its\nhandle, and the calls that promote and discard it."
+        },
+        "FollowUp": {
           "type": "object",
           "properties": {
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The AIR operation id, such as `github.comments.delete`."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The gateway's tool name, such as `github__github_delete_comment`."
             },
             "arguments": {
-              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
               "default": null
             }
           },
           "required": [
-            "operation"
+            "operation",
+            "tool"
           ],
-          "description": "How reconciliation asks the upstream whether a call happened."
+          "description": "A follow-up call the gateway resolved (Anvil's `EffectCall`): the AIR\noperation, the tool to call on this gateway (already prefixed with its\nconnector), and its concrete arguments."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The AIR operation id."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
+            },
+            "by": {
+              "type": "string",
+              "description": "`idempotency_key` or `id`."
+            },
+            "arguments": {
+              "default": null
+            }
+          },
+          "required": [
+            "operation",
+            "tool",
+            "by"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened: a read\ncalled by the idempotency key or by an id, with concrete arguments."
         }
       }
     },
@@ -9057,7 +9471,15 @@
               "type": "string"
             },
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The tool called, without its connector prefix."
+            },
+            "operation_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The AIR operation id, when the gateway names it."
             },
             "account": {
               "type": [
@@ -9084,6 +9506,24 @@
                   "type": "null"
                 }
               ]
+            },
+            "compensate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A reversible effect's compensation, for after its inverse's\ndeadline."
+            },
+            "undo_unavailable": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why there is no undo although the class has one (the gateway's\n`undo_unavailable`)."
             },
             "approval": {
               "anyOf": [
@@ -9147,13 +9587,6 @@
               "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
               "default": false
             },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, from the gateway, such as `message in #board`."
-            },
             "detail": {
               "type": [
                 "string",
@@ -9166,7 +9599,7 @@
                 "string",
                 "null"
               ],
-              "description": "The idempotency key the gateway used upstream, when it says."
+              "description": "The idempotency key the gateway sent upstream, when it sent one."
             },
             "created_ms": {
               "type": "integer",
@@ -9272,7 +9705,11 @@
           "properties": {
             "operation": {
               "type": "string",
-              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+              "description": "The AIR operation id of the inverse or compensation."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
             },
             "arguments": {
               "default": null
@@ -9287,21 +9724,15 @@
               ],
               "format": "uint64",
               "minimum": 0,
-              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
-            },
-            "summary": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "One line for people, such as `the message will be deleted`."
+              "description": "Milliseconds since the Unix epoch after which it may no longer work."
             }
           },
           "required": [
             "operation",
+            "tool",
             "kind"
           ],
-          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+          "description": "How an effect can be undone: the call the gateway resolved, and until\nwhen."
         },
         "UndoKind": {
           "type": "string",
@@ -9431,11 +9862,15 @@
           "type": "object",
           "properties": {
             "draft": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Draft"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+              "description": "The draft upstream, when the operation declares a draft form;\n`None` when the call is held in the outbox."
             },
             "ask": {
               "type": "string",
@@ -9447,21 +9882,96 @@
           ],
           "description": "How a staged entry is held."
         },
-        "Lookup": {
+        "Draft": {
+          "type": "object",
+          "properties": {
+            "draft_operation": {
+              "type": "string",
+              "description": "The AIR operation the draft was made with."
+            },
+            "handle": {
+              "default": null
+            },
+            "promote": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that performs the real effect; `None` when it could not be\nresolved (`unavailable` says why)."
+            },
+            "discard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FollowUp"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The call that throws the draft away, when there is one."
+            },
+            "unavailable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "draft_operation"
+          ],
+          "description": "A draft the gateway made for a staged call (Anvil's `staged`): its\nhandle, and the calls that promote and discard it."
+        },
+        "FollowUp": {
           "type": "object",
           "properties": {
             "operation": {
-              "type": "string"
+              "type": "string",
+              "description": "The AIR operation id, such as `github.comments.delete`."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The gateway's tool name, such as `github__github_delete_comment`."
             },
             "arguments": {
-              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
               "default": null
             }
           },
           "required": [
-            "operation"
+            "operation",
+            "tool"
           ],
-          "description": "How reconciliation asks the upstream whether a call happened."
+          "description": "A follow-up call the gateway resolved (Anvil's `EffectCall`): the AIR\noperation, the tool to call on this gateway (already prefixed with its\nconnector), and its concrete arguments."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The AIR operation id."
+            },
+            "tool": {
+              "type": "string",
+              "description": "The tool to call on the gateway."
+            },
+            "by": {
+              "type": "string",
+              "description": "`idempotency_key` or `id`."
+            },
+            "arguments": {
+              "default": null
+            }
+          },
+          "required": [
+            "operation",
+            "tool",
+            "by"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened: a read\ncalled by the idempotency key or by an id, with concrete arguments."
         }
       }
     },

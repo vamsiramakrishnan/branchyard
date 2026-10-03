@@ -222,17 +222,46 @@ fn entry_text(entry: &EffectEntry) -> String {
         entry.class,
         entry.state
     );
-    if let Some(summary) = &entry.summary {
-        out.push_str(&format!("  {summary}\n"));
+    if let Some(operation) = &entry.operation_id {
+        out.push_str(&format!("  operation {operation}\n"));
     }
     if let Some(undo) = &entry.undo {
         out.push_str(&format!(
             "  undo: {} {}{}\n",
-            undo.operation,
+            undo.tool,
             undo.arguments,
             undo.deadline_ms
                 .map(|d| format!(" until {}", plan_text::clock(d)))
                 .unwrap_or_default()
+        ));
+    }
+    if let Some(compensate) = &entry.compensate {
+        out.push_str(&format!(
+            "  compensate: {} {}{}\n",
+            compensate.tool,
+            compensate.arguments,
+            compensate
+                .deadline_ms
+                .map(|d| format!(" until {}", plan_text::clock(d)))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(why) = &entry.undo_unavailable {
+        out.push_str(&format!("  no undo: {why}\n"));
+    }
+    if let Some(draft) = entry.staged.as_ref().and_then(|s| s.draft.as_ref()) {
+        out.push_str(&format!(
+            "  draft {} ({}): promote {}, discard {}\n",
+            draft.handle,
+            draft.draft_operation,
+            draft
+                .promote
+                .as_ref()
+                .map_or("unavailable", |p| p.tool.as_str()),
+            draft
+                .discard
+                .as_ref()
+                .map_or("unavailable", |d| d.tool.as_str())
         ));
     }
     if let Some(approval) = &entry.approval {

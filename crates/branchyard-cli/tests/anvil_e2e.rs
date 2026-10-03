@@ -8,6 +8,13 @@
 //! succeeds, creating one is refused `policy_denied`, and `by log --json`
 //! shows both as `connector_call` events.
 //!
+//! A second test runs the effect ledger against the same gateway: a branch
+//! granted `github:write+confirm` comments on an issue over MCP and over
+//! REST and creates a release, through the turn's ledger proxy; the
+//! comments are ledgered `confirmed` with the inverse Anvil reports
+//! (`undo.tool`), the release is staged as Anvil's draft, and `by undo`
+//! deletes both comments and discards the draft upstream.
+//!
 //! Needs `node`, `python3` and a built Anvil: `ANVIL_BIN` (its
 //! `bin-anvil.js`), or `/home/user/anvil/packages/cli/dist/bin-anvil.js`,
 //! with `examples/github-mini` beside it. Ignored by default (CI has no
@@ -137,41 +144,26 @@ impl Drop for Cleanup {
     }
 }
 
-fn by(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_by"));
-    command
-        .current_dir(root)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("NO_COLOR", "1")
-        .env(
-            "BRANCHYARD_USER_CONFIG",
-            "/nonexistent/branchyard-config.toml",
-        )
-        // The mock upstream is on loopback; Anvil refuses other hosts
-        // unless allowed.
-        .env("ANVIL_ALLOWED_HOSTS", "127.0.0.1");
-    for var in [
-        "BRANCHYARD_DELEGATION",
-        "BRANCHYARD_BRANCH",
-        "BRANCHYARD_ROOT",
-        "BRANCHYARD_BY",
-        "GITHUB_TOKEN",
-    ] {
-        command.env_remove(var);
-    }
-    command
+/// Where a test's Anvil runs: the mock upstream, the compiled bundle, a
+/// repository pointed at them, the gateway started and the person's account
+/// connected.
+struct Anvil {
+    cleanup: Cleanup,
+    dir: PathBuf,
+    root: PathBuf,
+    anvil: PathBuf,
+    upstream: String,
+    log: PathBuf,
 }
 
-#[test]
-#[ignore = "needs node, python3 and a built Anvil (ANVIL_BIN); run with --ignored"]
-fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvils_gateway() {
+/// Set up Anvil for test `name`, or say why not and return `None`.
+fn start(name: &str) -> Option<Anvil> {
     let Some(anvil) = anvil_bin() else {
         eprintln!(
             "skipped: no built Anvil (set ANVIL_BIN to its packages/cli/dist/bin-anvil.js; \
              {DEFAULT_ANVIL} does not exist)"
         );
-        return;
+        return None;
     };
     let fixture = anvil_root(&anvil).join("examples/github-mini");
     for (what, ok) in [
@@ -184,10 +176,10 @@ fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvi
     ] {
         if !ok {
             eprintln!("skipped: {what} is not available");
-            return;
+            return None;
         }
     }
-    let dir = std::env::temp_dir().join(format!("branchyard-anvil-e2e-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("branchyard-anvil-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("repo")).unwrap();
     let dir = fs::canonicalize(dir).unwrap();
@@ -220,7 +212,10 @@ fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvi
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(dir.join("src/openapi.yaml"), spec).unwrap();
     let bundles = dir.join("workspace");
+    // Anvil keeps a source cache in its working directory: the scratch
+    // directory, not this crate.
     let out = Command::new("node")
+        .current_dir(&dir)
         .arg(&anvil)
         .arg("compile")
         .arg(dir.join("src/openapi.yaml"))
@@ -285,6 +280,84 @@ fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvi
         .unwrap();
     let out = connect.wait_with_output().unwrap();
     assert!(out.status.success(), "by connect: {}", text(&out));
+    Some(Anvil {
+        cleanup,
+        dir,
+        root,
+        anvil,
+        upstream,
+        log,
+    })
+}
+
+/// What a branch's turns said, from `by log --json`.
+fn said(root: &Path, branch: &str) -> (Vec<Value>, String) {
+    let out = by(root).args(["log", branch, "--json"]).output().unwrap();
+    assert!(out.status.success(), "by log: {}", text(&out));
+    let events: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+    let said: String = events
+        .iter()
+        .filter_map(|e| e["event"]["text"].as_str())
+        .collect();
+    (events, said)
+}
+
+/// The `RESULT {...}` line a harness printed.
+fn result(said: &str, log: &Path) -> Value {
+    serde_json::from_str(
+        said.split("RESULT ")
+            .nth(1)
+            .and_then(|r| r.lines().next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "no result in {said}\n{}",
+                    fs::read_to_string(log).unwrap_or_default()
+                )
+            }),
+    )
+    .unwrap()
+}
+
+fn by(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_by"));
+    command
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("NO_COLOR", "1")
+        .env(
+            "BRANCHYARD_USER_CONFIG",
+            "/nonexistent/branchyard-config.toml",
+        )
+        // The mock upstream is on loopback; Anvil refuses other hosts
+        // unless allowed.
+        .env("ANVIL_ALLOWED_HOSTS", "127.0.0.1");
+    for var in [
+        "BRANCHYARD_DELEGATION",
+        "BRANCHYARD_BRANCH",
+        "BRANCHYARD_ROOT",
+        "BRANCHYARD_BY",
+        "GITHUB_TOKEN",
+    ] {
+        command.env_remove(var);
+    }
+    command
+}
+
+#[test]
+#[ignore = "needs node, python3 and a built Anvil (ANVIL_BIN); run with --ignored"]
+fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvils_gateway() {
+    let Some(Anvil {
+        cleanup,
+        dir,
+        root,
+        anvil,
+        log,
+        ..
+    }) = start("e2e")
+    else {
+        return;
+    };
 
     // The turn: the fake agent runs the harness's Python script.
     fs::write(dir.join("harness.py"), HARNESS).unwrap();
@@ -312,28 +385,8 @@ fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvi
         .unwrap();
     assert!(out.status.success(), "by run: {}", text(&out));
 
-    let out = by(&root)
-        .args(["log", "reader", "--json"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "by log: {}", text(&out));
-    let events: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
-    let said: String = events
-        .iter()
-        .filter_map(|e| e["event"]["text"].as_str())
-        .collect();
-    let result: Value = serde_json::from_str(
-        said.split("RESULT ")
-            .nth(1)
-            .and_then(|r| r.lines().next())
-            .unwrap_or_else(|| {
-                panic!(
-                    "no result in {said}\n{}",
-                    fs::read_to_string(&log).unwrap_or_default()
-                )
-            }),
-    )
-    .unwrap();
+    let (events, said) = said(&root, "reader");
+    let result = result(&said, &log);
     // The turn's token cannot touch the person's connections ...
     assert_eq!(result["connect"]["status"], 403, "{said}");
     assert_eq!(
@@ -368,6 +421,201 @@ fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvi
         "end to end against Anvil at {}: {} connector_call events",
         anvil.display(),
         calls.len()
+    );
+    drop(cleanup);
+}
+
+/// The effects harness: raw MCP and REST, as a harness without the SDK
+/// would, through the turn's ledger proxy (`ANVIL_GATEWAY_URL`). It finds
+/// each tool by its AIR operation id in `tools/list`.
+const EFFECTS_HARNESS: &str = r#"import json, os, urllib.request, urllib.error
+url = os.environ["ANVIL_GATEWAY_URL"]
+token = open(os.environ["ANVIL_GATEWAY_TOKEN_FILE"]).read().strip()
+headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json",
+           "Accept": "application/json, text/event-stream"}
+def rpc(body, session=None):
+    h = dict(headers)
+    if session:
+        h["Mcp-Session-Id"] = session
+    request = urllib.request.Request(url, method="POST", data=json.dumps(body).encode(), headers=h)
+    response = urllib.request.urlopen(request, timeout=120)
+    text = response.read().decode()
+    session = response.headers.get("Mcp-Session-Id") or session
+    if response.headers.get("Content-Type", "").startswith("text/event-stream"):
+        for block in text.split("\n\n"):
+            data = "\n".join(l[5:].lstrip() for l in block.splitlines() if l.startswith("data:"))
+            if data:
+                message = json.loads(data)
+                if message.get("id") == body.get("id"):
+                    return message, session
+        return None, session
+    return (json.loads(text) if text else None), session
+_, session = rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "1"}}})
+rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}, session)
+listed, _ = rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, session)
+tools = {t.get("_meta", {}).get("anvil/operation_id"): t["name"] for t in listed["result"]["tools"]}
+def call(n, operation, arguments):
+    answer, _ = rpc({"jsonrpc": "2.0", "id": n, "method": "tools/call",
+                     "params": {"name": tools[operation], "arguments": arguments}}, session)
+    result = answer["result"]
+    return {"error": bool(result.get("isError")),
+            "text": "".join(c.get("text", "") for c in result.get("content", []))[:300]}
+comment = call(3, "github.comments.create",
+               {"owner": "octo", "repo": "hello", "issue_number": 1, "body": "Looks good."})
+rest = urllib.request.Request(
+    url.rsplit("/mcp", 1)[0] + "/call/" + tools["github.comments.create"], method="POST",
+    data=json.dumps({"arguments": {"owner": "octo", "repo": "hello", "issue_number": 1,
+                                   "body": "Over REST."}}).encode(), headers=headers)
+try:
+    response = urllib.request.urlopen(rest, timeout=120)
+    rest = {"status": response.status, "effect": response.headers.get("X-Anvil-Effect")}
+except urllib.error.HTTPError as e:
+    rest = {"status": e.code, "body": e.read().decode()[:300]}
+release = call(4, "github.releases.create",
+               {"owner": "octo", "repo": "hello", "tag_name": "v1.0.0", "name": "One", "confirm": True})
+print("RESULT " + json.dumps({"tools": tools, "comment": comment, "rest": rest, "release": release}))
+"#;
+
+/// The mock upstream's record of the requests it served.
+fn upstream_requests(upstream: &str) -> Vec<Value> {
+    let out = Command::new("node")
+        .arg("-e")
+        .arg(
+            "fetch(process.argv[1] + '/__requests').then(r => r.text()).then(t => process.stdout.write(t))",
+        )
+        .arg(upstream)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+#[ignore = "needs node, python3 and a built Anvil (ANVIL_BIN); run with --ignored"]
+fn the_effect_ledger_records_anvils_reports_and_undoes_through_its_gateway() {
+    let Some(Anvil {
+        cleanup,
+        dir,
+        root,
+        upstream,
+        log,
+        ..
+    }) = start("effects")
+    else {
+        return;
+    };
+    fs::write(dir.join("effects.py"), EFFECTS_HARNESS).unwrap();
+    let agent = fake_agent();
+    let out = by(&root)
+        .args([
+            "run",
+            &format!("SH python3 {}", dir.join("effects.py").display()),
+            "--name",
+            "writer",
+            "--isolated",
+            "--connector",
+            "github:write+confirm",
+            "--harness",
+            "gemini-cli",
+            "--command",
+        ])
+        .arg(&agent)
+        .arg("--yes")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "by run: {}", text(&out));
+    let (_, said) = said(&root, "writer");
+    let result = result(&said, &log);
+    assert_eq!(result["comment"]["error"], false, "{said}");
+    assert_eq!(result["rest"]["status"], 200, "{said}");
+    // The proxy passes Anvil's report on to the harness.
+    assert!(
+        result["rest"]["effect"]
+            .as_str()
+            .is_some_and(|e| e.contains("github.comments.delete")),
+        "{said}"
+    );
+    // Staged: Anvil made the draft, not the release.
+    assert_eq!(result["release"]["error"], false, "{said}");
+
+    let out = by(&root)
+        .args(["effects", "--branch", "writer", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "by effects: {}", text(&out));
+    let ledger: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(ledger.len(), 3, "{ledger:#?}");
+    let delete_tool = result["tools"]["github.comments.delete"].as_str().unwrap();
+    for comment in &ledger[..2] {
+        assert_eq!(comment["state"], "confirmed", "{comment:#}");
+        assert_eq!(comment["class"], "reversible", "{comment:#}");
+        assert_eq!(comment["declared"], true);
+        assert_eq!(comment["operation_id"], "github.comments.create");
+        let undo = &comment["undo"];
+        assert_eq!(undo["kind"], "inverse", "{comment:#}");
+        assert_eq!(undo["operation"], "github.comments.delete");
+        assert_eq!(undo["tool"], delete_tool);
+        assert!(undo["arguments"]["comment_id"].is_u64(), "{comment:#}");
+        // The comment carries its key upstream: the entry's id.
+        assert_eq!(comment["upstream_key"], comment["id"], "{comment:#}");
+    }
+    let release = &ledger[2];
+    assert_eq!(release["state"], "staged", "{release:#}");
+    let draft = &release["staged"]["draft"];
+    assert_eq!(
+        draft["promote"]["tool"], result["tools"]["github.releases.update"],
+        "{release:#}"
+    );
+    assert_eq!(
+        draft["discard"]["tool"], result["tools"]["github.releases.delete"],
+        "{release:#}"
+    );
+    let requests = upstream_requests(&upstream);
+    let posted: Vec<&Value> = requests
+        .iter()
+        .filter(|r| r["method"] == "POST" && r["path"].as_str().unwrap().ends_with("/comments"))
+        .collect();
+    assert_eq!(posted.len(), 2, "{requests:#?}");
+    assert_eq!(posted[0]["idempotency_key"], ledger[0]["id"]);
+    assert_eq!(posted[1]["idempotency_key"], ledger[1]["id"]);
+
+    // Undo: both comments deleted with the tool Anvil named, the draft
+    // discarded with its discard call.
+    let out = by(&root)
+        .args(["undo", "writer", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "by undo: {}", text(&out));
+    let done: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let states: Vec<&str> = done["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        states.iter().filter(|s| **s == "undone").count(),
+        2,
+        "{done:#}"
+    );
+    assert_eq!(
+        states.iter().filter(|s| **s == "failed").count(),
+        1,
+        "the draft, discarded: {done:#}"
+    );
+    let requests = upstream_requests(&upstream);
+    let deleted = |kind: &str| {
+        requests
+            .iter()
+            .filter(|r| r["method"] == "DELETE" && r["path"].as_str().unwrap().contains(kind))
+            .count()
+    };
+    assert_eq!(deleted("/issues/comments/"), 2, "{requests:#?}");
+    assert_eq!(deleted("/releases/"), 1, "{requests:#?}");
+    eprintln!(
+        "effects end to end against Anvil: {} upstream requests",
+        requests.len()
     );
     drop(cleanup);
 }

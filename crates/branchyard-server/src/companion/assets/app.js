@@ -1148,7 +1148,7 @@
       ledger.length
         ? h('ul', { class: 'events' }, ledger.map((e) => h('li', {}, h('time', { text: clock(e.updated_ms) }),
           h('a', { href: `#/b/${enc(state.repo)}/${enc(e.branch)}`, text: e.branch }),
-          ` ${e.connector} ${e.operation}: ${e.state} (${e.class})${e.summary ? ` · ${e.summary}` : ''}`)))
+          ` ${e.connector} ${e.operation}: ${e.state} (${e.class})${e.undo ? ` · undo ${e.undo.operation}` : (e.undo_unavailable ? ` · no undo: ${e.undo_unavailable}` : '')}`)))
         : h('p', { class: 'muted', text: 'No effects recorded.' }),
     );
   }

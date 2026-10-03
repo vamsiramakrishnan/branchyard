@@ -1,8 +1,10 @@
 //! The gateway's audit log as a second source for the ledger.
 //!
 //! A call that went through a turn's proxy carries its entry's id as its
-//! idempotency key; when its answer was lost (`unknown`), an audit line
-//! with that key settles it. A call that did not go through the proxy (a
+//! idempotency key, which Anvil's audit line records as `ledger_id`; when
+//! its answer was lost (`unknown`), the line with that id settles it. A
+//! line with `staged_for` performed a draft, not the effect, and settles
+//! nothing. A call that did not go through the proxy (a
 //! sandboxed turn without a proxy address, a harness that found the
 //! gateway another way) is recorded from its audit line when the line
 //! says the operation's effect class: after the fact, never approved,
@@ -44,8 +46,15 @@ pub(crate) fn observe(yard: &Yard, branch: &str, at_ms: u64, line: &Value) {
         .get("upstream_status")
         .or_else(|| line.get("status"))
         .and_then(Value::as_i64);
-    let succeeded = decision == "allowed" && status.is_none_or(|s| (200..300).contains(&s));
-    let key = text(line, &["idempotency_key"]).or_else(|| {
+    if line.get("dry_run") == Some(&Value::Bool(true))
+        || line.get("staged_for").is_some_and(|s| !s.is_null())
+    {
+        return;
+    }
+    let errored = line.get("error_code").is_some_and(|c| !c.is_null());
+    let succeeded =
+        decision == "allowed" && !errored && status.is_none_or(|s| (200..300).contains(&s));
+    let key = text(line, &["ledger_id", "idempotency_key"]).or_else(|| {
         line.get("_meta")
             .and_then(|m| m.get("idempotency_key"))
             .and_then(Value::as_str)
@@ -60,7 +69,10 @@ pub(crate) fn observe(yard: &Yard, branch: &str, at_ms: u64, line: &Value) {
                 status.map_or("allowed".to_owned(), |s| s.to_string())
             )),
             false => EffectMove::to(EffectState::Failed).detail(format!(
-                "the gateway's audit log shows it did not happen ({decision}{})",
+                "the gateway's audit log shows it did not happen ({decision}{}{})",
+                text(line, &["error_code"])
+                    .map(|c| format!(", {c}"))
+                    .unwrap_or_default(),
                 status.map(|s| format!(", {s}")).unwrap_or_default()
             )),
         };
@@ -112,6 +124,7 @@ pub(crate) fn observe(yard: &Yard, branch: &str, at_ms: u64, line: &Value) {
         subject: text(line, &["sub"]).unwrap_or("").to_owned(),
         connector: connector.clone(),
         operation: operation.clone(),
+        operation_id: text(line, &["operation"]).map(str::to_owned),
         account: text(line, &["account"]).map(str::to_owned),
         class,
         state: EffectState::Begun,
@@ -119,6 +132,8 @@ pub(crate) fn observe(yard: &Yard, branch: &str, at_ms: u64, line: &Value) {
             .map(str::to_owned)
             .unwrap_or_else(|| request_digest(&connector, &operation, &Value::Null)),
         undo: None,
+        compensate: None,
+        undo_unavailable: None,
         approval: None,
         decided: None,
         undo_approval: None,
@@ -126,7 +141,6 @@ pub(crate) fn observe(yard: &Yard, branch: &str, at_ms: u64, line: &Value) {
         staged: None,
         lookup: None,
         declared: false,
-        summary: None,
         detail: None,
         upstream_key: None,
         created_ms: at_ms,

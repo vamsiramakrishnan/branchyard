@@ -2,8 +2,9 @@
 //! connector gateway, on `std` threads like the model gateway, for as long
 //! as the turn runs. The harness is given it as `ANVIL_GATEWAY_URL`.
 //!
-//! Everything but a `tools/call` passes through as it is (initialize,
-//! `tools/list`, session deletes, Anvil's REST shapes). A `tools/call`:
+//! Everything but a call passes through as it is (initialize, `tools/list`,
+//! session deletes). A call, MCP's `tools/call` or Anvil's REST route
+//! `POST /call/<tool>` alike:
 //!
 //! 1. is classified from what `tools/list` declares (the proxy lists the
 //!    gateway's tools once, with the turn's token): a read passes through;
@@ -15,10 +16,12 @@
 //!    outbox and answers that it is staged;
 //! 3. when it goes ahead, is written to the ledger `begun`, committed,
 //!    **before** it is forwarded, with the entry's id as `Idempotency-Key`
-//!    and `_meta.idempotency_key`; a ledger that cannot be written refuses
-//!    the call;
-//! 4. is finished from the answer: `confirmed` with the gateway's
-//!    `_meta.effect` (class, undo, deadline), or irreversible with no undo
+//!    (and `_meta.idempotency_key` over MCP), and the lookup the tool's
+//!    contract declares resolved from the request and that key; a ledger
+//!    that cannot be written refuses the call;
+//! 4. is finished from the answer: `confirmed` with the gateway's effect
+//!    report (`_meta.effect`, or the `X-Anvil-Effect` header over REST:
+//!    class, undo, deadline, compensation, lookup), or irreversible with no undo
 //!    when the gateway described nothing; `failed` on a refusal or a tool
 //!    error; `unknown` when the answer was lost after the call was sent.
 
@@ -66,8 +69,8 @@ pub(crate) struct ProxyState {
     pub preset: Option<ApprovalPolicy>,
     /// The turn's deadline: how long an ask may wait.
     pub deadline_ms: Option<u64>,
-    /// What `tools/list` declared, by wire name; listed once.
-    tools: Mutex<Option<HashMap<String, ToolDecl>>>,
+    /// What `tools/list` declared; listed once.
+    tools: Mutex<Option<Listed>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -81,23 +84,25 @@ impl ProxyState {
         }
     }
 
-    fn decl(&self, tool: &str) -> ToolDecl {
+    fn listed<T>(&self, read: impl FnOnce(&Listed) -> T) -> T {
         let mut tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
-        if tools.is_none() {
-            let listed = mcp::Client::new(&self.upstream, &self.token)
-                .list_tools()
-                .unwrap_or_default();
-            *tools = Some(
-                listed
-                    .iter()
-                    .filter_map(|t| Some((t.get("name")?.as_str()?.to_owned(), ToolDecl::read(t))))
-                    .collect(),
-            );
-        }
-        tools
-            .as_ref()
-            .and_then(|t| t.get(tool).cloned())
-            .unwrap_or_default()
+        let listed = tools.get_or_insert_with(|| {
+            Listed::of(
+                &mcp::Client::new(&self.upstream, &self.token)
+                    .list_tools()
+                    .unwrap_or_default(),
+            )
+        });
+        read(listed)
+    }
+
+    fn decl(&self, tool: &str) -> ToolDecl {
+        self.listed(|l| l.decls.get(tool).cloned().unwrap_or_default())
+    }
+
+    /// The served tools by AIR operation id.
+    fn operations(&self) -> HashMap<String, String> {
+        self.listed(|l| l.operations.clone())
     }
 
     /// Whether the grant lets this connector change anything.
@@ -105,6 +110,34 @@ impl ProxyState {
         self.grant
             .iter()
             .any(|g| g.connector == connector && g.mode == GrantMode::Write)
+    }
+}
+
+/// What `tools/list` declared: each tool's contract by wire name, and the
+/// wire name of each AIR operation (`anvil/operation_id`).
+#[derive(Default)]
+struct Listed {
+    decls: HashMap<String, ToolDecl>,
+    operations: HashMap<String, String>,
+}
+
+impl Listed {
+    fn of(tools: &[Value]) -> Listed {
+        let mut listed = Listed::default();
+        for tool in tools {
+            let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let decl = ToolDecl::read(tool);
+            if let Some(operation) = &decl.operation {
+                listed
+                    .operations
+                    .entry(operation.clone())
+                    .or_insert_with(|| name.to_owned());
+            }
+            listed.decls.insert(name.to_owned(), decl);
+        }
+        listed
     }
 }
 
@@ -291,8 +324,10 @@ fn upstream_path(upstream: &Target, target: &str) -> (Target, String) {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         415 => "Unsupported Media Type",
         502 => "Bad Gateway",
@@ -410,6 +445,122 @@ fn pass(state: &ProxyState, request: &Request, out: &mut TcpStream) {
     }
 }
 
+/// How a call arrived: MCP's `tools/call`, or Anvil's REST route.
+#[derive(Clone, Debug, PartialEq)]
+enum Wire {
+    Mcp { id: Value },
+    Rest,
+}
+
+impl Wire {
+    /// A refusal from the proxy itself.
+    fn error(&self, out: &mut TcpStream, status: u16, code: &str, message: &str) {
+        match self {
+            Wire::Mcp { id } => rpc_error(out, status, id, message),
+            Wire::Rest => rest_answer(
+                out,
+                status,
+                &json!({"error": {"code": code, "message": message}}),
+            ),
+        }
+    }
+
+    /// The approval policy's refusal, with what Branchyard decided.
+    fn refused(&self, out: &mut TcpStream, code: &str, message: &str, meta: Value) {
+        match self {
+            Wire::Mcp { id } => tool_answer(
+                out,
+                id,
+                true,
+                &json!({"error": {"code": code, "message": message}}).to_string(),
+                meta,
+            ),
+            Wire::Rest => rest_answer(
+                out,
+                403,
+                &json!({"error": {"code": code, "message": message, "branchyard": meta}}),
+            ),
+        }
+    }
+
+    /// A call held in the outbox: not an error, and not done.
+    fn held(&self, out: &mut TcpStream, text: &str, meta: Value) {
+        match self {
+            Wire::Mcp { id } => tool_answer(out, id, false, text, meta),
+            Wire::Rest => rest_answer(
+                out,
+                202,
+                &json!({"staged": true, "message": text, "branchyard": meta}),
+            ),
+        }
+    }
+
+    /// The forwarded body: the key (and the draft flag) where this wire
+    /// carries them. The `Idempotency-Key` header is sent on both.
+    fn body(&self, request: &Request, key: &str, stage: bool) -> Vec<u8> {
+        match self {
+            Wire::Mcp { .. } => {
+                let mut meta = json!({"idempotency_key": key});
+                if stage {
+                    meta["stage"] = json!(true);
+                }
+                with_meta(request, &meta)
+            }
+            Wire::Rest => {
+                let mut body: Value = serde_json::from_slice(&request.body).unwrap_or(json!({}));
+                if stage {
+                    body["stage"] = json!(true);
+                }
+                serde_json::to_vec(&body).unwrap_or_default()
+            }
+        }
+    }
+
+    /// The gateway's answer, as the ledger reads it.
+    fn called(&self, answer: &Answer) -> mcp::Called {
+        match self {
+            Wire::Mcp { id } => mcp::called(&answer.response_headers, &answer.body, id),
+            Wire::Rest => mcp::rest_called(&answer.response_headers, &answer.body),
+        }
+    }
+}
+
+fn rest_answer(out: &mut TcpStream, status: u16, body: &Value) {
+    respond(
+        out,
+        status,
+        &[("Content-Type".into(), "application/json".into())],
+        &serde_json::to_vec(body).unwrap_or_default(),
+    );
+}
+
+/// The tool a REST call names: `POST /call/<tool>`.
+fn rest_tool(request: &Request) -> Option<String> {
+    if request.method != "POST" {
+        return None;
+    }
+    let path = request.target.split(['?', '#']).next().unwrap_or("");
+    let tool = path.strip_prefix("/call/")?;
+    let bytes = tool.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                decoded.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b'%' => return None,
+            b => {
+                decoded.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
 fn handle(stream: TcpStream, state: &ProxyState) {
     let Ok(mut out) = stream.try_clone() else {
         return;
@@ -442,39 +593,62 @@ fn handle(stream: TcpStream, state: &ProxyState) {
         true => serde_json::from_slice(&request.body).ok(),
         false => None,
     };
-    let is_call = |j: &Value| j.get("method").and_then(Value::as_str) == Some("tools/call");
-    // A batch holding a call is refused: each call is ledgered on its own.
-    if let Some(Value::Array(items)) = &json {
-        if items.iter().any(is_call) {
-            rpc_error(
-                &mut out,
-                400,
-                &Value::Null,
-                "Branchyard's effect proxy takes one tools/call per request, not a batch",
-            );
-            return;
+    let (wire, name, arguments, staging) = match rest_tool(&request) {
+        // Anvil's REST route: `{"arguments": {...}, "stage": true?}`.
+        Some(name) => {
+            let Some(body) = json.as_ref().filter(|j| j.is_object()) else {
+                return Wire::Rest.error(
+                    &mut out,
+                    400,
+                    "validation_error",
+                    "Branchyard's effect proxy: a REST call takes a JSON object body",
+                );
+            };
+            (
+                Wire::Rest,
+                name,
+                body.get("arguments").cloned().unwrap_or(json!({})),
+                body.get("stage") == Some(&Value::Bool(true)),
+            )
         }
-    }
-    let call = json.as_ref().filter(|j| is_call(j));
-    let Some(call) = call else {
-        return pass(state, &request, &mut out);
+        None => {
+            let is_call = |j: &Value| j.get("method").and_then(Value::as_str) == Some("tools/call");
+            // A batch holding a call is refused: each call is ledgered on
+            // its own.
+            if let Some(Value::Array(items)) = &json {
+                if items.iter().any(is_call) {
+                    rpc_error(
+                        &mut out,
+                        400,
+                        &Value::Null,
+                        "Branchyard's effect proxy takes one tools/call per request, not a batch",
+                    );
+                    return;
+                }
+            }
+            let Some(call) = json.as_ref().filter(|j| is_call(j)) else {
+                return pass(state, &request, &mut out);
+            };
+            let params = &call["params"];
+            (
+                Wire::Mcp {
+                    id: call.get("id").cloned().unwrap_or(Value::Null),
+                },
+                params["name"].as_str().unwrap_or("").to_owned(),
+                params.get("arguments").cloned().unwrap_or(json!({})),
+                params["_meta"]["stage"] == Value::Bool(true),
+            )
+        }
     };
-    let id = call.get("id").cloned().unwrap_or(Value::Null);
     // Only this turn's token: what is ledgered is this turn's.
     if !presented_is(state, &request) {
-        rpc_error(
+        return wire.error(
             &mut out,
             401,
-            &id,
+            "auth_required",
             "Branchyard's effect proxy: the token is not this turn's",
         );
-        return;
     }
-    let name = call["params"]["name"].as_str().unwrap_or("").to_owned();
-    let arguments = call["params"]
-        .get("arguments")
-        .cloned()
-        .unwrap_or(json!({}));
     let (connector, operation) = match name.split_once("__") {
         Some((c, o)) => (c.to_owned(), o.to_owned()),
         None => (String::new(), name.clone()),
@@ -490,9 +664,8 @@ fn handle(stream: TcpStream, state: &ProxyState) {
     if class == EffectClass::Read {
         return pass(state, &request, &mut out);
     }
-    let deletion = decl.deletion
-        || is_deletion_name(&operation)
-        || decl.operation.as_deref().is_some_and(is_deletion_name);
+    let deletion =
+        is_deletion_name(&operation) || decl.operation.as_deref().is_some_and(is_deletion_name);
     let subject = Subject::Operation {
         connector: &connector,
         operation: &operation,
@@ -506,11 +679,12 @@ fn handle(stream: TcpStream, state: &ProxyState) {
         rule: None,
     });
     let call = Call {
-        id,
+        wire,
         name,
         connector,
         operation,
         arguments,
+        staging,
         class,
         deletion,
         decl,
@@ -527,14 +701,15 @@ fn handle(stream: TcpStream, state: &ProxyState) {
                     resolved: resolved.clone(),
                 },
             );
-            tool_answer(
+            call.wire.refused(
                 &mut out,
-                &call.id,
-                true,
-                &json!({"error": {"code": "approval_blocked", "message": format!(
+                "approval_blocked",
+                &format!(
                     "Branchyard's approval policy blocks {} {} ({})",
-                    call.connector, call.operation, resolved.describe())}})
-                .to_string(),
+                    call.connector,
+                    call.operation,
+                    resolved.describe()
+                ),
                 json!({"approval": "block"}),
             );
         }
@@ -575,21 +750,23 @@ fn handle(stream: TcpStream, state: &ProxyState) {
                 Ok(answer) if answer.allow => {
                     perform(state, &request, &call, answer.record(), &mut out)
                 }
-                Ok(answer) => tool_answer(
+                Ok(answer) => call.wire.refused(
                     &mut out,
-                    &call.id,
-                    true,
-                    &json!({"error": {"code": "approval_denied", "message": format!(
+                    "approval_denied",
+                    &format!(
                         "{} {} was not approved: denied by {} ({}){}",
-                        call.connector, call.operation, answer.by, answer.surface,
-                        answer.reason.map(|r| format!(": {r}")).unwrap_or_default())}})
-                    .to_string(),
+                        call.connector,
+                        call.operation,
+                        answer.by,
+                        answer.surface,
+                        answer.reason.map(|r| format!(": {r}")).unwrap_or_default()
+                    ),
                     json!({"approval": "denied"}),
                 ),
-                Err(why) => rpc_error(
+                Err(why) => call.wire.error(
                     &mut out,
                     502,
-                    &call.id,
+                    "approval_unavailable",
                     &format!("Branchyard's effect proxy could not ask: {why}"),
                 ),
             }
@@ -602,13 +779,15 @@ fn presented_is(state: &ProxyState, request: &Request) -> bool {
     presented(request).is_some_and(|token| same(token, &state.token))
 }
 
-/// One `tools/call`, as the proxy sees it.
+/// One call, as the proxy sees it.
 struct Call {
-    id: Value,
+    wire: Wire,
     name: String,
     connector: String,
     operation: String,
     arguments: Value,
+    /// The harness asked for the draft form itself.
+    staging: bool,
     class: EffectClass,
     deletion: bool,
     decl: ToolDecl,
@@ -626,6 +805,7 @@ impl Call {
             subject: state.subject.clone(),
             connector: self.connector.clone(),
             operation: self.operation.clone(),
+            operation_id: self.decl.operation.clone(),
             account: state
                 .grant
                 .iter()
@@ -635,14 +815,19 @@ impl Call {
             state: entry_state,
             request_digest: request_digest(&self.connector, &self.operation, &self.arguments),
             undo: None,
+            compensate: None,
+            undo_unavailable: None,
             approval: None,
             decided: Some(self.resolved.clone()),
             undo_approval: None,
             deletion: self.deletion,
             staged: None,
-            lookup: self.decl.lookup.clone(),
+            // The declared lookup, resolved from the request and the key
+            // before the call: what settles an answer lost entirely.
+            lookup: self.decl.lookup.as_ref().and_then(|declared| {
+                mcp::resolve_lookup(declared, &self.arguments, id, &state.operations())
+            }),
             declared: false,
-            summary: None,
             detail: None,
             upstream_key: None,
             created_ms: now,
@@ -676,7 +861,14 @@ fn with_meta(request: &Request, meta: &Value) -> Vec<u8> {
 /// What a finished call moves its entry to.
 pub(crate) fn finish_move(called: &mcp::Called) -> EffectMove {
     if !called.ok() {
-        return EffectMove::to(EffectState::Failed).detail(called.answer());
+        // A failed call still reports its class, key and lookup.
+        let mut change = EffectMove::to(EffectState::Failed).detail(called.answer());
+        if let Some(meta) = &called.meta {
+            change.lookup = meta.lookup.clone();
+            change.upstream_key = meta.idempotency_key.clone();
+            change.operation_id = meta.operation.clone();
+        }
+        return change;
     }
     match &called.meta {
         Some(meta) => described(meta, EffectState::Confirmed).detail(called.answer()),
@@ -699,13 +891,17 @@ pub(crate) fn described(meta: &EffectMeta, state: EffectState) -> EffectMove {
     let mut change = EffectMove::to(state);
     change.declared = Some(true);
     change.class = meta.class;
+    change.operation_id = meta.operation.clone();
     match &meta.undo {
         Some(Some(undo)) => change.undo = Some(undo.clone()),
         Some(None) => change.no_undo = true,
         None => {}
     }
-    change.summary = meta.summary.clone();
+    change.compensate = meta.compensate.clone();
+    change.undo_unavailable = meta.undo_unavailable.clone();
+    change.lookup = meta.lookup.clone();
     change.upstream_key = meta.idempotency_key.clone();
+    change.draft = meta.staged.clone();
     change
 }
 
@@ -722,23 +918,27 @@ fn perform(
     let ledger = state.yard.store();
     let id = match ulid(now_ms()) {
         Ok(id) => id,
-        Err(why) => return rpc_error(out, 502, &call.id, &why.to_string()),
+        Err(why) => {
+            return call
+                .wire
+                .error(out, 502, "ledger_unavailable", &why.to_string())
+        }
     };
     let mut entry = call.entry(state, &id, EffectState::Begun);
     entry.approval = Some(approval);
     // Begun before the call: a ledger that cannot be written refuses it.
     if let Err(why) = ledger.effects().open_effect(&entry) {
-        return rpc_error(
+        return call.wire.error(
             out,
             502,
-            &call.id,
+            "ledger_unavailable",
             &format!(
                 "Branchyard's effect ledger could not record the call, so it was not made: {why}"
             ),
         );
     }
     ask::note(&state.yard, &state.branch, EffectActivity::of(&entry));
-    let body = with_meta(request, &json!({"idempotency_key": id}));
+    let body = call.wire.body(request, &id, call.staging);
     let extra = [("Idempotency-Key".to_owned(), id.clone())];
     let (change, reply) = match forward(state, request, &body, &extra) {
         Err(Failure::Connect(why)) => (
@@ -751,10 +951,10 @@ fn perform(
             Err(format!("the gateway's answer was lost: {why}")),
         ),
         Ok(answer) => {
-            let called = mcp::called(&answer.response_headers, &answer.body, &call.id);
+            let called = call.wire.called(&answer);
             let change = match (called.answered, answer.status) {
-                // No JSON-RPC answer from a failing gateway: the upstream
-                // may have been called.
+                // No answer from a failing gateway: the upstream may have
+                // been called.
                 (false, status) if status >= 500 => {
                     EffectMove::to(EffectState::Unknown).detail(called.answer())
                 }
@@ -772,10 +972,10 @@ fn perform(
     }
     match reply {
         Ok(answer) => respond(out, answer.status, &answer.headers, &answer.body),
-        Err(why) => rpc_error(
+        Err(why) => call.wire.error(
             out,
             502,
-            &call.id,
+            "gateway_unreachable",
             &format!("Branchyard's effect proxy: {why}"),
         ),
     }
@@ -786,7 +986,11 @@ fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream
     let ledger = state.yard.store();
     let id = match ulid(now_ms()) {
         Ok(id) => id,
-        Err(why) => return rpc_error(out, 502, &call.id, &why.to_string()),
+        Err(why) => {
+            return call
+                .wire
+                .error(out, 502, "ledger_unavailable", &why.to_string())
+        }
     };
     // The ask that holds it, with what is performed when it is approved.
     let asked = ask::open(
@@ -809,10 +1013,10 @@ fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream
     let asked = match asked {
         Ok(asked) => asked,
         Err(why) => {
-            return rpc_error(
+            return call.wire.error(
                 out,
                 502,
-                &call.id,
+                "ledger_unavailable",
                 &format!("Branchyard could not stage the call, so it was not made: {why}"),
             )
         }
@@ -823,10 +1027,10 @@ fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream
         ask: asked.id.clone(),
     });
     if let Err(why) = ledger.effects().open_effect(&entry) {
-        return rpc_error(
+        return call.wire.error(
             out,
             502,
-            &call.id,
+            "ledger_unavailable",
             &format!(
                 "Branchyard's effect ledger could not record the call, so it was not made: {why}"
             ),
@@ -839,31 +1043,38 @@ fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream
              approval {}). It has not happened.",
             call.connector, call.operation, id, asked.id
         );
-        return tool_answer(
+        return call.wire.held(
             out,
-            &call.id,
-            false,
             &text,
             json!({"effect": id, "state": "staged", "approval": asked.id}),
         );
     }
     // The draft form: the call with `stage: true`, under the same key.
-    let body = with_meta(request, &json!({"idempotency_key": id, "stage": true}));
+    let body = call.wire.body(request, &id, true);
     let extra = [("Idempotency-Key".to_owned(), id.clone())];
     match forward(state, request, &body, &extra) {
         Ok(answer) => {
-            let called = mcp::called(&answer.response_headers, &answer.body, &call.id);
+            let called = call.wire.called(&answer);
             let change = match (
                 called.ok(),
-                called.meta.as_ref().and_then(|m| m.draft.clone()),
+                called.meta.as_ref().and_then(|m| m.staged.clone()),
             ) {
                 (true, Some(draft)) => EffectMove {
+                    detail: Some(match (&draft.promote, &draft.unavailable) {
+                        (Some(_), _) => {
+                            "a draft was made; the real effect waits for approval".to_owned()
+                        }
+                        (None, Some(why)) => {
+                            format!("a draft was made, but cannot be promoted: {why}")
+                        }
+                        (None, None) => "a draft was made, but cannot be promoted".to_owned(),
+                    }),
+                    lookup: called.meta.as_ref().and_then(|m| m.lookup.clone()),
                     draft: Some(draft),
-                    detail: Some("a draft was made; the real effect waits for approval".into()),
                     ..EffectMove::default()
                 },
                 (true, None) => {
-                    EffectMove::default().detail("the gateway staged it but named no draft handle")
+                    EffectMove::default().detail("the gateway staged it but described no draft")
                 }
                 (false, _) => EffectMove::to(EffectState::Failed)
                     .detail(format!("the draft failed: {}", called.answer())),
@@ -887,10 +1098,10 @@ fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream
             let _ = ledger
                 .effects()
                 .move_effect(&id, &[EffectState::Staged], &change, now_ms());
-            rpc_error(
+            call.wire.error(
                 out,
                 502,
-                &call.id,
+                "gateway_unreachable",
                 &format!("Branchyard's effect proxy: {why}"),
             )
         }
@@ -912,16 +1123,25 @@ mod tests {
             "/connect/start"
         );
         assert_eq!(upstream_path(&upstream, "/mcpx").1, "/mcpx");
+        assert_eq!(upstream_path(&upstream, "/call/g__x").1, "/call/g__x");
+    }
+
+    fn request(method: &str, target: &str, body: &[u8]) -> Request {
+        Request {
+            method: method.into(),
+            target: target.into(),
+            headers: Vec::new(),
+            body: body.to_vec(),
+        }
     }
 
     #[test]
     fn meta_is_merged_into_the_call() {
-        let request = Request {
-            method: "POST".into(),
-            target: "/mcp".into(),
-            headers: Vec::new(),
-            body: br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"g__x","_meta":{"progressToken":3}}}"#.to_vec(),
-        };
+        let request = request(
+            "POST",
+            "/mcp",
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"g__x","_meta":{"progressToken":3}}}"#,
+        );
         let body: Value =
             serde_json::from_slice(&with_meta(&request, &json!({"idempotency_key": "K"}))).unwrap();
         assert_eq!(
@@ -929,5 +1149,23 @@ mod tests {
             json!({"progressToken": 3, "idempotency_key": "K"})
         );
         assert_eq!(body["params"]["name"], "g__x");
+        let staged: Value =
+            serde_json::from_slice(&Wire::Mcp { id: json!(1) }.body(&request, "K", true)).unwrap();
+        assert_eq!(staged["params"]["_meta"]["stage"], true);
+    }
+
+    #[test]
+    fn rest_calls_name_their_tool_and_stage_in_the_body() {
+        let rest = request(
+            "POST",
+            "/call/github__create%5Fcomment?x=1",
+            br#"{"arguments":{}}"#,
+        );
+        assert_eq!(rest_tool(&rest).as_deref(), Some("github__create_comment"));
+        assert_eq!(rest_tool(&request("GET", "/call/g__x", b"")), None);
+        assert_eq!(rest_tool(&request("POST", "/calls/g__x", b"")), None);
+        assert_eq!(rest_tool(&request("POST", "/call/g__%4", b"")), None);
+        let body: Value = serde_json::from_slice(&Wire::Rest.body(&rest, "K", true)).unwrap();
+        assert_eq!(body, json!({"arguments": {}, "stage": true}));
     }
 }

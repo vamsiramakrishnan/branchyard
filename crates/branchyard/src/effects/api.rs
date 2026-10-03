@@ -104,9 +104,12 @@ impl Yard {
                     self.promote_effect(effect, by, surface)?;
                 }
                 false => {
+                    // A draft is discarded upstream when the gateway says how.
+                    let discarded = self.discard_draft(effect);
                     let mut change = EffectMove::to(EffectState::Failed).detail(format!(
-                        "not approved: denied by {by} ({surface}){}; it never happened",
-                        reason.map(|r| format!(": {r}")).unwrap_or_default()
+                        "not approved: denied by {by} ({surface}){}; it never happened{}",
+                        reason.map(|r| format!(": {r}")).unwrap_or_default(),
+                        discarded.map(|d| format!("; {d}")).unwrap_or_default()
                     ));
                     change.approval = Some(answer.record());
                     if let Some(done) = self.store().effects().move_effect(
@@ -123,9 +126,50 @@ impl Yard {
         self.approval(&ask.id)
     }
 
+    /// Discard a staged effect's draft upstream with the gateway's discard
+    /// call: what happened, for the entry's detail; `None` when it has no
+    /// draft.
+    fn discard_draft(&self, id: &str) -> Option<String> {
+        let entry = self.effect(id).ok()?;
+        let draft = entry.staged.as_ref()?.draft.clone()?;
+        let Some(discard) = &draft.discard else {
+            return Some(format!(
+                "its draft cannot be discarded ({}) and is still upstream",
+                draft
+                    .unavailable
+                    .as_deref()
+                    .unwrap_or("the gateway named no discard")
+            ));
+        };
+        let discarded = self
+            .store()
+            .read(&entry.branch)
+            .map_err(|e| e.to_string())
+            .and_then(|record| crate::connectors::branch_token(self, &record, entry.turn))
+            .and_then(|(gateway, token)| {
+                Client::new(&gateway.url, token)
+                    .follow_up(
+                        &discard.tool,
+                        &discard.arguments,
+                        Some(&format!("{}-discard", entry.id)),
+                    )
+                    .map_err(|e| e.to_string())
+            });
+        Some(match discarded {
+            Ok(called) if called.ok() => format!("its draft was discarded ({})", discard.operation),
+            Ok(called) => format!(
+                "discarding its draft failed ({}): {}",
+                discard.operation,
+                called.answer()
+            ),
+            Err(why) => format!("discarding its draft failed ({}): {why}", discard.operation),
+        })
+    }
+
     /// Perform a staged effect for real, approved by `by` through
-    /// `surface`: promote its draft, or make the call held in the outbox.
-    /// The entry is `begun` before the call, as any effect is.
+    /// `surface`: promote its draft with the gateway's promote call, or make
+    /// the call held in the outbox. The entry is `begun` before the call,
+    /// as any effect is, and the call carries the entry's id as its key.
     pub fn promote_effect(&self, id: &str, by: &str, surface: &str) -> Result<EffectEntry, Error> {
         let entry = self.effect(id)?;
         if entry.state != EffectState::Staged {
@@ -138,6 +182,18 @@ impl Yard {
             .staged
             .clone()
             .ok_or_else(|| Error::State(format!("staged effect {} names no approval", entry.id)))?;
+        if let Some(draft) = &staged.draft {
+            if draft.promote.is_none() {
+                return Err(Error::Denied(format!(
+                    "effect {}'s draft cannot be promoted: {}",
+                    entry.id,
+                    draft
+                        .unavailable
+                        .as_deref()
+                        .unwrap_or("the gateway named no promote call")
+                )));
+            }
+        }
         let held = self.store().effects().ask(&staged.ask)?;
         let request: Value = held
             .as_ref()
@@ -181,21 +237,26 @@ impl Yard {
             )));
         };
         note(self, &begun.branch, EffectActivity::of(&begun));
-        let tool = request["name"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("{}__{}", entry.connector, entry.operation));
-        let arguments = request.get("arguments").cloned().unwrap_or(json!({}));
-        let mut meta = json!({"idempotency_key": entry.id});
-        if let Some(draft) = &staged.draft {
-            meta["promote"] = json!(draft);
-        }
-        let change = match Client::new(&gateway.url, token).call(
-            &tool,
-            &arguments,
-            &meta,
-            Some(&entry.id),
-        ) {
+        let client = Client::new(&gateway.url, token);
+        let called = match staged.draft.as_ref().and_then(|d| d.promote.as_ref()) {
+            // The draft's promotion is the real effect, with its own report.
+            Some(promote) => client.follow_up(&promote.tool, &promote.arguments, Some(&entry.id)),
+            // The outbox: the call as the harness made it.
+            None => {
+                let tool = request["name"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{}__{}", entry.connector, entry.operation));
+                let arguments = request.get("arguments").cloned().unwrap_or(json!({}));
+                client.call(
+                    &tool,
+                    &arguments,
+                    &json!({"idempotency_key": entry.id}),
+                    Some(&entry.id),
+                )
+            }
+        };
+        let change = match called {
             Ok(called) => finish_move(&called),
             Err(CallError::NotSent(why)) => {
                 EffectMove::to(EffectState::Failed).detail(format!("not sent: {why}"))

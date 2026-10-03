@@ -78,21 +78,21 @@ Undo of an upstream effect is a new effectful call (the inverse), made through t
 
 Anvil owns what an operation means; Branchyard owns the ledger, approvals and undo plans.
 
-**Anvil (AIR and gateway):**
+**Anvil (AIR and gateway)**, as built (Anvil's ADR-0030 and its `docs/branchyard.md`, "Effects and undo", as of Anvil `60a2cba`):
 
-1. Each effectful operation declares `effect.class` and, where one exists, `effect.inverse`: the inverse operation's name and an argument mapping from the original request and response (JSONPath-like), and an optional `deadline` rule; `effect.compensate` likewise for compensable ones; `effect.lookup` for reconciliation by idempotency key or ID; `effect.draft` for an operation's draft form.
-2. The gateway, for every effectful call, returns `_meta.effect` (MCP) or `X-Anvil-Effect` (REST) with: the class, the resolved `undo` (inverse operation and concrete arguments), `deadline_ms`, and the upstream idempotency key it used.
-3. The gateway accepts `Idempotency-Key` (or `_meta.idempotency_key`) and passes it upstream where the operation supports one.
-4. The gateway accepts a call to the inverse like any other call, under the same grant; it does not undo on its own.
-5. `stage: true` on a call with a draft form performs the draft and returns its handle; `promote` on that handle performs the real effect.
+1. Each effectful operation declares `effect.class` and, where one exists, `effect.inverse` (the inverse operation and an argument mapping from the original request and response, with an optional `deadline`); `effect.compensate` likewise; `effect.lookup` for reconciliation by key or id; `effect.draft` for a draft form with its `promote` and `discard` calls. An operation that declares nothing is `read` if it is a read and `irreversible` otherwise.
+2. `tools/list` publishes each tool's AIR operation id (`_meta["anvil/operation_id"]`) and, for an operation that declares one, the declaration (`_meta["anvil/effect_class"]`, `_meta["anvil/effect_contract"]`).
+3. Every call reports its effect, `_meta.effect` (MCP) or the `X-Anvil-Effect` header (REST): the class, the AIR operation, the key that went upstream, the resolved `undo` with the gateway's `tool` to call, `deadline_ms`, a `compensate` for after the deadline, a concrete `lookup`, and `staged` for a draft. A failed call still reports its class, key and lookup.
+4. The gateway takes `_meta.idempotency_key` (MCP) or `Idempotency-Key` (REST) and sends it upstream where the operation declares a carrier; its audit line records it as `ledger_id`.
+5. An undo, a promotion or a discard is an ordinary call the caller makes, under the same grant; Anvil never undoes anything itself.
 
 **Branchyard:**
 
-1. Writes the ledger entry (`begun`) before the call, with the ID as the idempotency key; finishes it from `_meta.effect`.
+1. Writes the ledger entry (`begun`) before the call, with the ID as the idempotency key; finishes it from the effect report.
 2. Decides allow, ask, block or stage before the call; answers come from any surface.
-3. Plans and performs undo from the ledger; reconciles `unknown` through `effect.lookup`.
+3. Plans and performs undo from the ledger; reconciles `unknown` through the lookup.
 
-Connectors compiled before these declarations exist have `class: irreversible` and no undo: unknown is treated as the worst case.
+An operation that declares nothing is `irreversible` with no undo: unknown is treated as the worst case.
 
 ## Branchyard side
 
@@ -102,12 +102,12 @@ Built in [`branchyard::effects`](../crates/branchyard/src/effects/mod.rs), with 
 
 Harnesses call the gateway themselves, with Anvil's packaged SDKs and CLIs. So that every effectful call is written to the ledger before it is made, each turn of a branch with connectors gets a **ledger proxy** of its own: an HTTP reverse proxy in the engine's process, like the [model gateway](model-gateway.md), on loopback, for as long as the turn runs. The harness is given the proxy as `ANVIL_GATEWAY_URL`; the token is unchanged, and its audience is still the gateway's own URL, which the proxy forwards to. A turn's network policy allows the proxy, not the gateway, so a confined harness cannot reach the gateway around it.
 
-The proxy passes everything through as it is (`initialize`, `tools/list`, session deletes, Anvil's other shapes), except a `tools/call`:
+The proxy passes everything through as it is (`initialize`, `tools/list`, session deletes, Anvil's other routes), except a call: MCP's `tools/call`, or Anvil's REST route `POST /call/<tool>` (`{"arguments", "stage"?}`), which the proxy ledgers the same way, so REST is no way around it.
 
-1. It must carry this turn's token. The operation is classified before the call from what `tools/list` declares (the proxy lists the gateway's tools once per turn, with the turn's token): `_meta.effect.class`, else `read` for a tool annotated `readOnlyHint`, else `irreversible`. A read passes through. So does any call on a connector the grant only lets read: the gateway refuses its writes itself.
+1. It must carry this turn's token. The operation is classified before the call from what `tools/list` declares (the proxy lists the gateway's tools once per turn, with the turn's token): `_meta["anvil/effect_class"]`, else `_meta.effect.class`, else `read` for a tool annotated `readOnlyHint`, else `irreversible`. A deletion is told by its tool's name or AIR operation id (`delete`, `remove`, `trash` …). A read passes through. So does any call on a connector the grant only lets read: the gateway refuses its writes itself.
 2. The approval policy decides (below). `block` answers a tool error, `approval_blocked`, and records `blocked` on the branch. `ask` stores an ask and waits. `stage` stages the call.
-3. A call that goes ahead is opened in the ledger as `begun`, committed (SQLite `synchronous=FULL`; PostgreSQL a durable commit), **before** it is forwarded. A ledger that cannot be written refuses the call; it is never made unrecorded. The entry's id is sent as `Idempotency-Key` and `_meta.idempotency_key`.
-4. The answer finishes the entry: `confirmed` with the gateway's `_meta.effect` (or `X-Anvil-Effect`); `confirmed`, `irreversible` and without undo when the gateway described nothing; `failed` on a JSON-RPC error or a tool error; `unknown` when the answer was lost after the call was sent, or a 5xx came without one. The harness gets the gateway's answer as it was.
+3. A call that goes ahead is opened in the ledger as `begun`, committed (SQLite `synchronous=FULL`; PostgreSQL a durable commit), **before** it is forwarded. A ledger that cannot be written refuses the call; it is never made unrecorded. The entry's id is sent as `Idempotency-Key` (and `_meta.idempotency_key` over MCP). The entry keeps the lookup the tool's contract declares, resolved from the call's arguments and that key, for an answer lost entirely.
+4. The answer finishes the entry: `confirmed` with the gateway's effect report (`_meta.effect`, or `X-Anvil-Effect` over REST); `confirmed`, `irreversible` and without undo when the gateway described nothing; `failed` on a JSON-RPC error, a tool error or a REST error envelope (keeping the report's lookup); `unknown` when the answer was lost after the call was sent, or a 5xx came without one. The harness gets the gateway's answer as it was. The proxy's own refusals are tool errors over MCP and `{"error"}` envelopes over REST (`403` for a block or a denial); a call held in the outbox is answered `202` over REST.
 
 An engine that stops between steps 3 and 4 leaves the entry `begun`. Recovery (every `Yard::open`, a server's recovery interval) moves a `begun` entry whose turn is no longer running to `unknown`, without network. Reconciliation then asks the upstream; it never calls the operation again.
 
@@ -115,64 +115,29 @@ A sandboxed turn reaches the proxy at `[connectors] effects_sandbox_host` (a ser
 
 ### The audit log as a second source
 
-When the gateway's audit log is read (`connector_call` events), a line whose `idempotency_key` names an `unknown` entry settles it: `confirmed` when it was allowed with a 2xx (or no status), else `failed`. A line without a ledger entry that says its effect (`effect.class`, or `effect_class`) is recorded as an entry of its own, `confirmed` (or `unknown` without a 2xx), never approved, with a detail saying it did not go through the proxy; the line's own text makes its id, so a line read twice is recorded once. A line that says neither is only a `connector_call` event.
+When the gateway's audit log is read (`connector_call` events), a line whose `ledger_id` names an `unknown` entry settles it: `confirmed` when it was allowed with no `error_code` and a 2xx (or no status), else `failed`. A line with `staged_for` performed a draft, not the effect, and settles nothing; a `dry_run` line neither. A line without a ledger entry that names its `effect_class` (other than `read`) is recorded as an entry of its own, `confirmed` (or `unknown` without a 2xx), never approved, with a detail saying it did not go through the proxy; the line's own text makes its id, so a line read twice is recorded once. A line that says neither is only a `connector_call` event.
 
 ### The wire, as Branchyard reads it
 
-What Branchyard sends and reads, for Anvil to match:
+It matches what Anvil ships (ADR-0030; Anvil's `docs/branchyard.md`, "Effects and undo"). The mock gateway the tests use speaks it, and `crates/branchyard-cli/tests/anvil_e2e.rs` runs it against Anvil's own `examples/github-mini` gateway.
 
 | Where | What |
 |---|---|
-| `tools/list`, each tool | `annotations.readOnlyHint`; `_meta.effect`: `class`, `deletion` (bool), `draft` (bool or an object), `lookup` (`{"operation", "arguments"}`), `operation` (the AIR id, also matched by policy patterns) |
-| `tools/call` request | `params._meta.idempotency_key` and the `Idempotency-Key` header (the entry's id); `params._meta.stage: true` for the draft form; `params._meta.promote: "<handle>"` to perform a draft |
-| `tools/call` result | `result._meta.effect` (or the `X-Anvil-Effect` header, JSON): `class`; `undo` (`null` for none, or `{"operation", "arguments", "kind": "inverse"\|"compensate", "deadline_ms"?, "summary"?}`); `deadline_ms` (milliseconds since the epoch); `idempotency_key` (the key used upstream); `summary` (one line for people, such as `message in #board`); `staged.handle` for a draft |
-| A lookup's result | `result._meta.effect.lookup`: `found` (bool), and when found, the call's own `class` and `undo` |
-| Audit lines | `idempotency_key`; `effect.class` (and `effect.undo`) for a call that did not go through the proxy |
+| `tools/list`, each tool | `annotations.readOnlyHint`; `_meta["anvil/operation_id"]` (the AIR id, also matched by policy patterns); `_meta["anvil/effect_class"]`; `_meta["anvil/effect_contract"]`: `{class, inverse?, compensate?, lookup?, draft?}`, whose mappings name operations by AIR id and take values from `request.<path>`, `response.<path>`, `idempotency_key` or `{const}`. A `draft` means the operation has a draft form. `_meta.effect.class` is read when there is no `anvil/effect_class` |
+| A call | MCP: `params._meta.idempotency_key` and the `Idempotency-Key` header (the entry's id); `params._meta.stage: true` for the draft form. REST: `POST /call/<tool>` with `{"arguments", "stage"?}` and the `Idempotency-Key` header |
+| Its effect report | `result._meta.effect`, or the `X-Anvil-Effect` header: `class`; `operation`; `idempotency_key` (the key that went upstream, or `null`); `undo` (`null`, or `{kind: "inverse"\|"compensate", operation, tool, arguments}`); `deadline_ms`; `compensate` (the same, with its own `deadline_ms`); `lookup` (`{by, operation, tool, arguments}` or `null`); `undo_unavailable` (why `undo` is `null`); `staged` (`{draft_operation, handle, promote, discard, unavailable?}`, each follow-up a `{operation, tool, arguments}` or `null`) |
+| A lookup's answer | an answer is found; a `not_found` tool error, or an empty answer, is not found; anything else cannot tell |
+| Audit lines | `ledger_id`, `effect_class`, `staged_for`, `error_code`, `decision`, `upstream_status` |
 
-A lookup is the declared operation called with its fixed `arguments` and `idempotency_key` set to the entry's id. An inverse is its `undo.operation` called with `undo.arguments` and the key `<entry id>-undo`, so a retried undo is done once.
-
-### Approvals
-
-Each tool and each connector operation resolves to `allow`, `ask`, `block` or `stage`. The layers, in order:
-
-| Layer | Locally | On a server |
-|---|---|---|
-| An administrator's locked policy | `Yard::use_approvals` (`ApprovalSettings::admin`) | `approvals.admin` in the configuration file |
-| The seat's or rig's | `Provisioning::approvals`: a rig seat's `approvals`, `provision.approvals` | the same, over HTTP |
-| The person's | `[approvals]` in `branchyard.toml` or your user file | `approvals.people.<principal>` |
-| The preset's | `--permissions`: `read-only` and `edit-worktree` block every effectful class; `full` keeps the defaults | `policy.preset` |
-
-The first of the seat, person and preset layers with a matching rule or class setting decides; without one, the class's default does (the table above). A deletion (declared, or an operation whose last word is delete, remove, destroy, purge, erase, trash or unlink) is then asked at least. Last, the administrator's policy is a floor: the result is the stricter of the two, and only an administrator's `deletion` changes how deletions are treated. Strictness, loosest first: `allow`, `stage`, `ask`, `block`.
-
-```toml
-[approvals]
-rules = { "github:issues.*" = "allow", "gmail:*" = "stage", "Bash" = "ask" }
-classes = { compensable = "allow" }
-```
-
-A pattern names a tool (`Bash`, `mcp__*`) or `connector:operation`; both sides are globs (`*`, `?`), an operation glob may leave out the service prefix, and the most specific pattern wins (the most literal characters), the stricter between equals. A delegated child's approvals are its own (or its seat's) held within its parent's: they may only be stricter.
-
-For **tools**, approvals only tighten: a tool the turn's permission policy denies stays denied, whatever an approval says (a planning turn stays read-only); an `ask` or `stage` on a tool the policy allowed asks a person (`DecisionSource::Approval`). A tool no layer names is left to the policy.
-
-**Asks.** An ask is an `ApprovalAsk` in the store (`approval_asks`, `by_approval_asks`): what it is about, the call's arguments or the tool's input, the policy's decision and layer, and a deadline (the turn's budget). It is recorded on the branch (`Activity::Effect`, `asked`), escalated to a delegating parent's inbox, shown as a notice (`approval`) on the companion page and by push. Any surface answers it once:
-
-| Surface | How |
-|---|---|
-| `by approvals [ls [--all]]`, `allow ID`, `deny ID [--reason TEXT]`, or `--branch B` for the oldest waiting on B | `Yard::answer_approval`; locally, with `--remote`, or in a delegating parent's shell |
-| `by watch` | `A` allows the selected branch's oldest waiting approval, `D` denies it with a reason |
-| The companion page | the Approvals view: Allow or Deny, as the token's principal, surface `companion` |
-| HTTP | `GET /v1/repos/{repo}/approvals[?all=true]`, `POST …/approvals/{id}/allow` and `…/deny` (`ApprovalAnswerRequest`: `reason`, `surface`), as the caller |
-| A delegating parent | `Delegate::answer_approval`, the MCP `answer_approval` tool, `by approvals allow` in its shell; only an ancestor |
-
-The waiting turn sees the answer at once in the same process, and within 100 ms from another. A denied call answers a tool error, `approval_denied`. When the turn's budget runs out, or the turn ends, the ask is answered `expired` (denied).
+Every follow-up calls the `tool` the report named, with its `arguments`, and `confirm: true` (under the key its input schema names) when that tool requires confirmation: Branchyard's own approval decided it. An undo carries the key `<entry id>-undo` and a discard `<entry id>-discard`, so a retried one is done once; a promotion carries the entry's id. A lookup from the tools/list contract is resolved only when every value it needs comes from the request or the key and its operation's tool is listed; otherwise only the audit log can settle a lost answer.
 
 ### Staged effects
 
-A `stage` decision opens the entry `staged` with an ask to promote it. An operation that declares a draft form is called with `_meta.stage: true` and its draft's handle kept; one without is held in the outbox (the ask keeps the call's arguments) and the harness is told it is staged and has not happened. Allowing the ask, `by effects promote ID` or `POST …/effects/{id}/promote` performs it (`begun` first, as any effect, under the same key), with `_meta.promote` for a draft; denying it fails the entry, which never happened. `by merge --promote-effects` performs a branch's staged effects before merging it.
+A `stage` decision opens the entry `staged` with an ask to promote it. An operation whose contract declares a draft form is called with `stage: true` (`_meta.stage` over MCP, the body's `stage` over REST), and the report's `staged` (the draft's handle, its promote and discard calls) is kept; one without is held in the outbox (the ask keeps the call's arguments) and the harness is told it is staged and has not happened. Allowing the ask, `by effects promote ID` or `POST …/effects/{id}/promote` performs it (`begun` first, as any effect, under the entry's id as key): a draft by calling `staged.promote.tool` with its arguments, refused when the gateway gave no promote call; an outbox call by making it. Denying it fails the entry, which never happened, and discards a draft with `staged.discard.tool`; a draft without a discard call is said to be still upstream. `by merge --promote-effects` performs a branch's staged effects before merging it.
 
 ### Reconciliation
 
-`by effects reconcile` (`Yard::reconcile_effects`, `POST …/effects/reconcile`), the gateway's supervisor every 30 seconds, and a server on its recovery interval: `begun` entries whose turn ended become `unknown`; `unknown` ones with a declared lookup are looked up through the gateway with a token for the branch's grant (five minutes, `by_turn` the entry's turn), `found` is `confirmed` and not found `failed`; those without a lookup, or whose lookup cannot answer, stay `unknown` and are listed with why. A `confirmed` entry whose undo's deadline passed becomes `expired`.
+`by effects reconcile` (`Yard::reconcile_effects`, `POST …/effects/reconcile`), the gateway's supervisor every 30 seconds, and a server on its recovery interval: `begun` entries whose turn ended become `unknown`; `unknown` ones with a lookup (the report's, or the contract's resolved when the call was made) are looked up by calling its `tool` with its `arguments` through the gateway with a token for the branch's grant (five minutes, `by_turn` the entry's turn): an answer is `confirmed`, `not_found` or nothing is `failed`; those without a lookup, or whose lookup cannot answer, stay `unknown` and are listed with why. A `confirmed` entry whose undo's deadline passed, with no compensation that still works, becomes `expired`.
 
 ### Undo
 
@@ -180,7 +145,7 @@ A `stage` decision opens the entry `staged` with an ask to promote it. An operat
 by undo BRANCH [--to TURN] [--plan] [--only ID...] [--yes] [--json]
 ```
 
-`--to` is the checkpoint (default 0, the branch's base); effects of later turns are planned. The plan is printed as in [Undo](#undo) above, each line with the entry's short id, and asks which upstream effects to undo (empty for every reversible one and every staged call, `all` adds the compensable ones, `none`, or ids); `--yes` takes the default and `--only` names them; without a terminal one of the two is needed. Then the branch is rewound to the checkpoint (files and conversation, exactly), and each chosen inverse is performed through the gateway under the branch's grant, approved by you (`undo_approval` on the entry) and allowed by the policy (a `block` refuses it). Its outcome is recorded on the original entry: `undone`, `compensated`, `undo_failed` with the upstream's answer (a lost answer too: it may have happened), or `expired`, without a call, when its deadline passed. A staged call is discarded (`failed`). `--plan` changes nothing. On a server, `GET …/branches/{b}/undo?to=N` is the plan and `POST …/branches/{b}/undo` (`UndoRequest`: `to`, `only`) performs the upstream part; files are rewound where the branch runs.
+`--to` is the checkpoint (default 0, the branch's base); effects of later turns are planned. The plan is printed as in [Undo](#undo) above, each line with the entry's short id, and asks which upstream effects to undo (empty for every reversible one and every staged call, `all` adds the compensable ones, `none`, or ids); `--yes` takes the default and `--only` names them; without a terminal one of the two is needed. Then the branch is rewound to the checkpoint (files and conversation, exactly), and each chosen inverse is performed through the gateway under the branch's grant, approved by you (`undo_approval` on the entry) and allowed by the policy (a `block` refuses it). The call is the report's `undo.tool`; past the inverse's deadline the report's `compensate` is offered instead (in the compensable group). Its outcome is recorded on the original entry: `undone`, `compensated`, `undo_failed` with the upstream's answer (a lost answer too: it may have happened), or `expired`, without a call, when its deadline passed and there is no compensation. A staged call is discarded (`failed`): an outbox call by dropping it, a draft by calling its `discard.tool`; a draft without a discard call is reported as not discardable and stays staged. An effect without an undo says why when the gateway did (`undo_unavailable`). `--plan` changes nothing. On a server, `GET …/branches/{b}/undo?to=N` is the plan and `POST …/branches/{b}/undo` (`UndoRequest`: `to`, `only`) performs the upstream part; files are rewound where the branch runs.
 
 `by rewind` says what a rewind leaves upstream when later turns had effects, with the `by undo` that would plan them.
 
@@ -196,18 +161,21 @@ SQLite: `effects` (the projection), `effect_events` (append-only) and `approval_
 
 - Policy: resolution order, the administrator's floor, specificity, deletions, children only stricter (`branchyard-provision`, 6); presets' approvals.
 - Store: the conformance check on SQLite, PostgreSQL and memory: opened once, moves only from the named states, one winner among four racing handles, events in order projecting to the stored entry, asks answered once.
-- Engine (`crates/branchyard/tests/effects.rs`, 12, a mock gateway on loopback and the fake ACP agent calling it as the SDKs do): an effect begun before its call (the mock reads the ledger when the call arrives) and finished from `_meta.effect` over an event stream, a read not ledgered; missing metadata is irreversible; an administrator's block holds over a person's allow; a deletion asks and is answered through the SDK as from the API, once; a denied ask never calls; a tool approval asks and never loosens a deny; a child's ask escalated to its parent and answered by it, an outsider refused; a lost answer unknown, never retried, settled by its lookup; a draft staged then promoted under the same key, and an outbox call made when its ask is allowed; an undo plan grouped by class with partial undo, a compensation and a discarded draft; an expired deadline and an inverse that fails; the audit log settling an unknown entry and recording a call around the proxy once.
+- Wire (unit, `effects::mcp`, `effects::proxy`): effect reports from `_meta` and the header; `tools/list` contracts and the fallback; Anvil's mapping grammar and lookups resolved from it; found and `not_found`; confirmation filled from a schema; REST tool names and staging.
+- Engine (`crates/branchyard/tests/effects.rs`, 17, a mock gateway on loopback speaking Anvil's wire and the fake ACP agent calling it as the SDKs do): an effect begun before its call (the mock reads the ledger when the call arrives) and finished from `_meta.effect` over an event stream, its undo and compensation named by tool, a read not ledgered; a REST call ledgered and staged like an MCP one, a blocked one refused `403`; missing metadata is irreversible; an administrator's block holds over a person's allow; a deletion asks and is answered through the SDK as from the API, once; a denied ask never calls; a tool approval asks and never loosens a deny; a child's ask escalated to its parent and answered by it, an outsider refused; a lost answer unknown, never retried, settled by the lookup resolved from the tool's contract; a draft staged then promoted with its promote call under the same key, and an outbox call made when its ask is allowed; a denied draft discarded with its discard call, and one without a discard call reported as not discardable; an undo plan grouped by class with partial undo, a confirmed compensation and a discarded outbox call; an expired deadline and an inverse that fails; past the deadline, the compensation instead; the audit log settling an unknown entry by `ledger_id`, skipping a draft's line, and recording a call around the proxy once.
+- Against Anvil (`crates/branchyard-cli/tests/anvil_e2e.rs`, ignored; needs `node`, `python3` and a built Anvil at `ANVIL_BIN`, and skips saying why otherwise): Anvil's `github-mini` gateway behind the proxy, comments made over MCP and REST ledgered with Anvil's reported inverse, a release staged as Anvil's draft, then `by undo` deleting both comments and discarding the draft upstream.
 - CLI (`crates/branchyard-cli/tests/effects.rs`, 2, the built `by`): `by effects`, `by show`, `by undo --plan` (text and JSON), `by rewind`'s note, `by undo --yes` rewinding and undoing; an ask answered by another `by`, once; a `by run` killed after the gateway did the effect leaving the entry unknown, then `by effects reconcile` confirming it through the lookup.
 - Server (`crates/branchyard-server/tests/effects.rs`, 1): the administrator's lock over a principal's policy, an ask answered through the API as the caller from the companion surface, the ledger and an undo through the API, `/metrics`; the configuration file's `approvals` and `connectors.effects_*` (unit).
 
 ### What is not done
 
-- Anvil's side is not built yet: the tests use a mock gateway that speaks [the wire](#the-wire-as-branchyard-reads-it) as described here. Until Anvil declares `_meta.effect`, every write is `irreversible` with no undo, and is staged by default; allow it with a rule to make it.
+- A connector compiled without effect declarations has every write `irreversible` with no undo, staged by default; allow it with a rule to make it.
+- An `ask` on a REST call waits as on MCP; an outbox call held for a REST harness is answered `202`, which Anvil's REST route itself never answers.
 - The proxy reads each answer whole before giving it to the harness (up to 16 MB): a streamed tool result arrives at once.
 - A harness's own HTTP client may time out while an ask waits; the turn's budget bounds the wait, not the client's.
 - Approvals for tools resolve on the engine's thread, which waits for the answer; a cancel is noticed between polls.
 - Effects of a delegated child are its own branch's: undoing a parent does not plan its children's.
-- An audit line without `idempotency_key` that says its effect class is recorded as a call around the proxy even when it went through it; Anvil's lines must name the key they were given.
+- An audit line without `ledger_id` that names its effect class is recorded as a call around the proxy; a line for a call that went through it always carries its `ledger_id`.
 - No local administrator: a lock exists on a server, or through the SDK.
 - Sandboxed turns: the proxy's address for a guest (`effects_sandbox_host`) was not tried on a KVM host or a Substrate cluster.
 

@@ -23,7 +23,9 @@ use branchyard::{
 use common::{fake_agent, text, Fixture};
 use mock_gateway::MockGateway;
 
-const BUNDLES: [&str; 6] = ["slack", "github", "gmail", "webhook", "legacy", "flaky"];
+const BUNDLES: [&str; 7] = [
+    "slack", "github", "gmail", "webhook", "legacy", "flaky", "blog",
+];
 
 #[derive(Debug)]
 struct FakePackager;
@@ -160,13 +162,21 @@ fn an_effect_is_begun_before_its_call_and_finished_from_the_gateways_metadata() 
     assert_eq!(entry.operation, "chat_post");
     assert_eq!(entry.turn, 1);
     assert_eq!(entry.task, "post");
-    assert_eq!(entry.summary.as_deref(), Some("message in #board"));
+    assert_eq!(entry.operation_id.as_deref(), Some("slack.chat.post"));
+    assert_eq!(entry.title(), "slack: chat_post");
     assert!(entry.request_digest.starts_with("blake3:"));
     assert!(!serde_json::to_string(entry).unwrap().contains("\"hi\""));
+    // The undo is the call the gateway named, by its tool.
     let undo = entry.undo.as_ref().unwrap();
-    assert_eq!(undo.operation, "chat_delete");
+    assert_eq!(undo.operation, "slack.chat.delete");
+    assert_eq!(undo.tool, "slack__chat_delete");
+    assert_eq!(undo.arguments, serde_json::json!({"ts": "1"}));
     assert_eq!(undo.kind, UndoKind::Inverse);
     assert_eq!(undo.deadline_ms, Some(4_102_444_800_000));
+    let compensate = entry.compensate.as_ref().unwrap();
+    assert_eq!(compensate.tool, "slack__chat_update");
+    assert_eq!(compensate.kind, UndoKind::Compensate);
+    assert_eq!(entry.upstream_key.as_deref(), Some(entry.id.as_str()));
     assert_eq!(entry.approval.as_ref().unwrap().surface, "policy");
     // The gateway got the entry's id as the key, in the header and in
     // `_meta`, while the entry was begun.
@@ -557,6 +567,15 @@ fn a_lost_answer_is_unknown_until_the_lookup_settles_it() {
     );
     let entry = f.yard.effects(Some("flaky")).unwrap().remove(0);
     assert_eq!(entry.state, EffectState::Unknown);
+    // No report came back: the lookup is the contract's, resolved from the
+    // request and the key when the call was made.
+    let lookup = entry.lookup.as_ref().unwrap();
+    assert_eq!(lookup.tool, "flaky__charge_lookup");
+    assert_eq!(lookup.operation, "flaky.charges.lookup");
+    assert_eq!(
+        lookup.arguments,
+        serde_json::json!({"key": entry.id, "kind": "charge"})
+    );
     assert!(
         entry.detail.as_deref().unwrap().contains("lost"),
         "{entry:?}"
@@ -566,11 +585,18 @@ fn a_lost_answer_is_unknown_until_the_lookup_settles_it() {
     let report = f.yard.reconcile_effects().unwrap();
     assert_eq!(report.settled, [(entry.id.clone(), EffectState::Confirmed)]);
     let lookup = &mock.calls_to("flaky__charge_lookup")[0];
-    assert_eq!(lookup.arguments["idempotency_key"], entry.id);
+    assert_eq!(lookup.arguments["key"], entry.id);
     assert_eq!(lookup.arguments["kind"], "charge");
     let settled = f.yard.effect(&entry.id).unwrap();
     assert_eq!(settled.state, EffectState::Confirmed);
-    assert_eq!(settled.undo.as_ref().unwrap().operation, "refund");
+    assert!(
+        settled
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("flaky.charges.lookup"),
+        "{settled:?}"
+    );
     assert_eq!(mock.calls_to("flaky__charge").len(), 1);
 }
 
@@ -599,7 +625,11 @@ fn an_irreversible_call_is_staged_as_a_draft_or_held_then_promoted() {
     let ledger = f.yard.effects(Some("stager")).unwrap();
     let (mail, hook) = (&ledger[0], &ledger[1]);
     assert_eq!(mail.state, EffectState::Staged);
-    assert_eq!(mail.staged.as_ref().unwrap().draft.as_deref(), Some("d-1"));
+    let draft = mail.staged.as_ref().unwrap().draft.as_ref().unwrap();
+    assert_eq!(draft.handle, "d-1");
+    assert_eq!(draft.draft_operation, "gmail.drafts.create");
+    assert_eq!(draft.promote.as_ref().unwrap().tool, "gmail__drafts_send");
+    assert_eq!(draft.discard.as_ref().unwrap().tool, "gmail__drafts_delete");
     assert_eq!(hook.state, EffectState::Staged);
     assert_eq!(hook.staged.as_ref().unwrap().draft, None);
     // The draft was made with stage: true; the outbox call was not made.
@@ -613,13 +643,16 @@ fn an_irreversible_call_is_staged_as_a_draft_or_held_then_promoted() {
         .iter()
         .all(|a| matches!(a.about, AskAbout::Promote { .. })));
 
-    // Promoting the draft performs it, under the same key.
+    // Promoting the draft makes the gateway's promote call, under the
+    // entry's key; the original tool is not called again.
     let sent = f.yard.promote_effect(&mail.id, "ana", "cli").unwrap();
     assert_eq!(sent.state, EffectState::Confirmed);
     assert_eq!(sent.approval.as_ref().unwrap().by, "ana");
-    let promote = &mock.calls_to("gmail__send")[1];
-    assert_eq!(promote.meta["promote"], "d-1");
+    assert_eq!(mock.calls_to("gmail__send").len(), 1);
+    let promote = &mock.calls_to("gmail__drafts_send")[0];
+    assert_eq!(promote.arguments, serde_json::json!({"id": "d-1"}));
     assert_eq!(promote.key.as_deref(), Some(mail.id.as_str()));
+    assert_eq!(promote.meta["idempotency_key"], mail.id);
     // Approving the outbox's ask makes the held call.
     let held = waiting
         .iter()
@@ -692,15 +725,15 @@ fn undo_plans_by_what_the_upstream_supports_and_undoes_what_was_chosen() {
         "{rendered}"
     );
     assert!(
-        rendered.contains("  upstream, can be undone       slack: message in #board"),
+        rendered.contains(
+            "  upstream, can be undone       slack: chat_post (undone by slack.chat.delete, until "
+        ),
         "{rendered}"
     );
     assert!(
-        rendered.contains("  upstream, can be compensated  github: issue #"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("will be closed, not deleted"),
+        rendered.contains(
+            "  upstream, can be compensated  github: issues_create (compensated by github.issues.update)"
+        ),
         "{rendered}"
     );
     assert!(
@@ -755,7 +788,12 @@ fn undo_plans_by_what_the_upstream_supports_and_undoes_what_was_chosen() {
         )
         .unwrap();
     assert_eq!(outcomes[0].state, EffectState::Compensated);
-    assert!(mock.calls_to("github__issues_close")[0].arguments["number"].is_u64());
+    // The compensation's tool, with its arguments, confirmed as its schema
+    // requires.
+    let close = &mock.calls_to("github__issues_close")[0];
+    assert!(close.arguments["number"].is_u64());
+    assert_eq!(close.arguments["state"], "closed");
+    assert_eq!(close.arguments["confirm"], true);
     // Undoing the staged call discards it; it never happened.
     let staged = plan.staged[0].entry.clone();
     let outcomes = f
@@ -782,6 +820,7 @@ fn an_expired_undo_is_not_called_and_a_failed_one_says_why() {
     let f = Fixture::new();
     let (mock, script) = setup(&f, ApprovalSettings::default());
     mock.set_deadline(5_000_000);
+    mock.without_compensation();
     f.task(&calls(
         &script,
         &[
@@ -847,6 +886,172 @@ fn an_expired_undo_is_not_called_and_a_failed_one_says_why() {
 }
 
 #[test]
+fn past_its_deadline_an_inverse_gives_way_to_the_compensation() {
+    let f = Fixture::new();
+    let (mock, script) = setup(&f, ApprovalSettings::default());
+    mock.set_deadline(5_000_000);
+    f.task(&calls(
+        &script,
+        &[("slack__chat_post", r#"{"channel": "a"}"#)],
+    ))
+    .options(granted(&f))
+    .name("late")
+    .run()
+    .unwrap();
+    let after = f.yard.undo_plan_at("late", 0, 6_000_000).unwrap();
+    assert_eq!(after.compensable.len(), 1, "{after:?}");
+    assert!(after.reversible.is_empty());
+    let note = &after.compensable[0].note;
+    assert!(
+        note.contains("expired") && note.contains("compensated by slack.chat.update"),
+        "{note}"
+    );
+    // Not expired by reconciliation while the compensation works.
+    let report = f.yard.reconcile_effects_at(6_000_000).unwrap();
+    assert!(report.settled.is_empty(), "{report:?}");
+    let id = after.compensable[0].entry.id.clone();
+    let outcomes = f
+        .yard
+        .undo_effects_at(&after, std::slice::from_ref(&id), "ana", "cli", 6_000_000)
+        .unwrap();
+    assert_eq!(outcomes[0].state, EffectState::Compensated, "{outcomes:?}");
+    assert!(mock.calls_to("slack__chat_delete").is_empty());
+    let update = &mock.calls_to("slack__chat_update")[0];
+    assert_eq!(
+        update.arguments,
+        serde_json::json!({"ts": "1", "text": "(retracted)"})
+    );
+}
+
+#[test]
+fn a_draft_is_discarded_upstream_and_one_without_a_discard_says_so() {
+    let f = Fixture::new();
+    let (mock, script) = setup(&f, ApprovalSettings::default());
+    f.task(&calls(
+        &script,
+        &[
+            ("gmail__send", r#"{"to": "finance@"}"#),
+            ("blog__publish", r#"{"title": "launch"}"#),
+        ],
+    ))
+    .options(granted(&f))
+    .name("drafts")
+    .run()
+    .unwrap();
+    let ledger = f.yard.effects(Some("drafts")).unwrap();
+    let (mail, post) = (&ledger[0], &ledger[1]);
+    assert_eq!(mail.state, EffectState::Staged);
+    assert_eq!(post.state, EffectState::Staged);
+    assert!(mock.calls_to("blog__publish")[0].staged());
+    // Denying the mail's approval discards its draft with the gateway's
+    // discard call.
+    let ask = mail.staged.as_ref().unwrap().ask.clone();
+    f.yard
+        .answer_approval(&ask, false, "ana", "cli", Some("not yet"))
+        .unwrap();
+    let discard = &mock.calls_to("gmail__drafts_delete")[0];
+    assert_eq!(discard.arguments, serde_json::json!({"id": "d-1"}));
+    assert_eq!(
+        discard.key.as_deref(),
+        Some(format!("{}-discard", mail.id).as_str())
+    );
+    let denied = f.yard.effect(&mail.id).unwrap();
+    assert_eq!(denied.state, EffectState::Failed);
+    assert!(
+        denied
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("its draft was discarded"),
+        "{denied:?}"
+    );
+    // The post's draft has no discard: undo says so, and leaves it staged.
+    let plan = f.yard.undo_plan("drafts", 0).unwrap();
+    assert_eq!(plan.staged.len(), 1);
+    assert!(
+        plan.staged[0].note.contains("cannot be discarded"),
+        "{:?}",
+        plan.staged[0]
+    );
+    let outcomes = f
+        .yard
+        .undo_effects(&plan, std::slice::from_ref(&post.id), "ana", "cli")
+        .unwrap();
+    assert_eq!(outcomes[0].state, EffectState::Staged);
+    assert!(
+        outcomes[0].detail.contains("cannot be discarded"),
+        "{outcomes:?}"
+    );
+    // Promoting it calls the promote tool with the draft's handle.
+    let handle = post
+        .staged
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap()
+        .handle
+        .clone();
+    let published = f.yard.promote_effect(&post.id, "ana", "cli").unwrap();
+    assert_eq!(published.state, EffectState::Confirmed);
+    let update = &mock.calls_to("blog__posts_update")[0];
+    assert_eq!(
+        update.arguments,
+        serde_json::json!({"id": handle, "draft": false})
+    );
+    assert_eq!(mock.calls_to("blog__publish").len(), 1);
+}
+
+#[test]
+fn a_rest_call_is_ledgered_like_an_mcp_call() {
+    let f = Fixture::new();
+    let (mock, script) = setup(&f, person(&[("legacy:*", Approval::Block)]));
+    let rest =
+        |tool: &str, arguments: &str| format!("SH python3 {script} --rest {tool} '{arguments}'");
+    let branch = f
+        .task(
+            &[
+                rest("slack__chat_post", r#"{"channel": "board"}"#),
+                rest("github__issues_list", "{}"),
+                rest("webhook__fire", r#"{"url": "https://x"}"#),
+                rest("legacy__do", "{}"),
+            ]
+            .join("\n"),
+        )
+        .options(granted(&f))
+        .name("rest")
+        .run()
+        .unwrap();
+    let said = text(&branch.events().unwrap());
+    assert!(
+        said.contains("call slack__chat_post: \"posted ts=1\""),
+        "{said}"
+    );
+    assert!(said.contains("call github__issues_list: []"), "{said}");
+    assert!(
+        said.contains("call webhook__fire: {\"staged\":true"),
+        "{said}"
+    );
+    assert!(said.contains("call legacy__do error 403"), "{said}");
+    assert!(said.contains("approval_blocked"), "{said}");
+    let ledger = f.yard.effects(Some("rest")).unwrap();
+    assert_eq!(ledger.len(), 2, "{ledger:?}");
+    // Begun before the call, with the entry's id as the key; finished from
+    // the X-Anvil-Effect header.
+    let post = &ledger[0];
+    assert_eq!(post.state, EffectState::Confirmed);
+    assert_eq!(post.class, EffectClass::Reversible);
+    assert_eq!(post.undo.as_ref().unwrap().tool, "slack__chat_delete");
+    let call = &mock.calls_to("slack__chat_post")[0];
+    assert!(call.rest);
+    assert_eq!(call.key.as_deref(), Some(post.id.as_str()));
+    // Held in the outbox: never sent.
+    assert_eq!(ledger[1].state, EffectState::Staged);
+    assert!(mock.calls_to("webhook__fire").is_empty());
+    assert!(mock.calls_to("legacy__do").is_empty());
+}
+
+#[test]
 fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     let f = Fixture::new();
     let (mock, script) = setup(&f, person(&[("flaky:*", Approval::Allow)]));
@@ -865,12 +1070,21 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     let lines = format!(
         "{}\n{}\n",
         serde_json::json!({"time": "2026-10-03T10:00:00Z", "by_branch": "audited", "by_turn": "1",
-            "sub": "local:me", "connector": "flaky", "operation": "charge", "decision": "allowed",
-            "upstream_status": 200, "idempotency_key": lost.id}),
+            "sub": "local:me", "connector": "flaky", "operation": "flaky.charges.create",
+            "decision": "allowed", "upstream_status": 200, "error_code": null,
+            "effect_class": "compensable", "ledger_id": lost.id, "staged_for": null}),
         serde_json::json!({"time": "2026-10-03T10:00:01Z", "by_branch": "audited", "by_turn": "1",
-            "sub": "local:me", "connector": "slack", "operation": "chat_post", "decision": "allowed",
-            "upstream_status": 200, "effect": {"class": "reversible",
-                "undo": {"operation": "chat_delete", "arguments": {"ts": "7"}}}}),
+            "sub": "local:me", "connector": "slack", "operation": "slack.chat.post",
+            "decision": "allowed", "upstream_status": 200, "error_code": null,
+            "effect_class": "reversible", "ledger_id": null, "staged_for": null}),
+    );
+    // A draft's line settles nothing and records nothing.
+    let lines = format!(
+        "{lines}{}\n",
+        serde_json::json!({"time": "2026-10-03T10:00:02Z", "by_branch": "audited", "by_turn": "1",
+            "sub": "local:me", "connector": "gmail", "operation": "gmail.drafts.create",
+            "decision": "allowed", "upstream_status": 200, "error_code": null,
+            "effect_class": "irreversible", "ledger_id": null, "staged_for": "gmail.send"})
     );
     fs::write(&audit, &lines).unwrap();
     f.yard.ingest_connector_audit().unwrap();
@@ -886,7 +1100,8 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     assert_eq!(around.connector, "slack");
     assert_eq!(around.state, EffectState::Confirmed);
     assert_eq!(around.class, EffectClass::Reversible);
-    assert_eq!(around.undo.as_ref().unwrap().operation, "chat_delete");
+    assert_eq!(around.operation_id.as_deref(), Some("slack.chat.post"));
+    assert_eq!(around.undo, None, "an audit line names no undo");
     assert_eq!(around.approval, None, "never approved");
     assert!(around
         .detail

@@ -6,18 +6,22 @@
 //! true inverse, before its deadline), that can be compensated, and that
 //! cannot; plus calls whose outcome is unknown and staged calls that never
 //! happened. Each inverse is a new effectful call through the same
-//! gateway, under the branch's grant, approved by the person who chose it
-//! and allowed by the approval policy; its outcome is recorded on the
-//! original entry (`undone`, `compensated`, `undo_failed`, `expired`).
+//! gateway (the `tool` the gateway's effect report named, with its
+//! arguments), under the branch's grant, approved by the person who chose
+//! it and allowed by the approval policy; its outcome is recorded on the
+//! original entry (`undone`, `compensated`, `undo_failed`, `expired`). An
+//! inverse past its deadline gives way to the compensation the gateway
+//! reported, if any. A staged draft is discarded with the gateway's discard
+//! call; one held in Branchyard's outbox is simply dropped.
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::ask::note;
-use super::mcp::{CallError, Client, ToolDecl};
+use super::mcp::{self, CallError, Client, ToolDecl};
 use super::{
     resolve, Approval, ApprovalRecord, EffectActivity, EffectClass, EffectEntry, EffectMove,
-    EffectState, Layers, Subject, UndoKind,
+    EffectState, Layers, Subject, Undo, UndoKind,
 };
 use crate::{Error, Yard};
 
@@ -89,6 +93,30 @@ pub fn clock(ms: u64) -> String {
     format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
 }
 
+/// What undoes `entry` at `now_ms`: its undo before the deadline, else the
+/// compensation the gateway reported, while that still works.
+pub fn remedy(entry: &EffectEntry, now_ms: u64) -> Option<&Undo> {
+    match &entry.undo {
+        Some(undo) if !entry.expired_at(now_ms) => Some(undo),
+        _ => entry.compensation_at(now_ms),
+    }
+}
+
+/// What undoing a staged entry does, for people.
+fn staged_note(entry: &EffectEntry) -> String {
+    let Some(draft) = entry.staged.as_ref().and_then(|s| s.draft.as_ref()) else {
+        return "staged, never performed: it is discarded".into();
+    };
+    match (&draft.discard, &draft.unavailable) {
+        (Some(discard), _) => format!(
+            "a draft, never performed: it is discarded with {}",
+            discard.operation
+        ),
+        (None, Some(why)) => format!("a draft that cannot be discarded: {why}"),
+        (None, None) => "a draft that cannot be discarded: the gateway named no discard".into(),
+    }
+}
+
 /// The plan for `branch`'s effects after turn `to` (every turn for 0), at
 /// `now_ms`.
 pub(crate) fn plan(yard: &Yard, branch: &str, to: u32, now_ms: u64) -> Result<UndoPlan, Error> {
@@ -108,7 +136,7 @@ pub(crate) fn plan(yard: &Yard, branch: &str, to: u32, now_ms: u64) -> Result<Un
         }
         match entry.state {
             EffectState::Staged => plan.staged.push(UndoItem {
-                note: "staged, never performed: it is discarded".into(),
+                note: staged_note(&entry),
                 entry,
             }),
             EffectState::Unknown | EffectState::Begun => plan.unknown.push(UndoItem {
@@ -116,40 +144,42 @@ pub(crate) fn plan(yard: &Yard, branch: &str, to: u32, now_ms: u64) -> Result<Un
                 entry,
             }),
             EffectState::Confirmed | EffectState::UndoFailed => {
-                let undo = entry.undo.clone();
-                match (entry.class, undo) {
-                    (EffectClass::Read, _) => {}
-                    (_, Some(undo)) if entry.expired_at(now_ms) => {
-                        let deadline = undo.deadline_ms.unwrap_or(0);
-                        plan.irreversible.push(UndoItem {
-                            note: format!("its undo expired at {}", clock(deadline)),
-                            entry,
-                        })
-                    }
-                    (_, Some(undo)) if undo.kind == UndoKind::Inverse => {
+                if entry.class == EffectClass::Read {
+                    continue;
+                }
+                let expired = entry
+                    .expired_at(now_ms)
+                    .then(|| entry.undo.as_ref().and_then(|u| u.deadline_ms))
+                    .flatten();
+                match remedy(&entry, now_ms).cloned() {
+                    Some(undo) if undo.kind == UndoKind::Inverse => {
                         let note = match undo.deadline_ms {
-                            Some(d) => format!("undoable until {}", clock(d)),
-                            None => "undoable".into(),
+                            Some(d) => format!("undone by {}, until {}", undo.operation, clock(d)),
+                            None => format!("undone by {}", undo.operation),
                         };
-                        plan.reversible.push(UndoItem {
-                            note: undo
-                                .summary
-                                .clone()
-                                .map_or(note.clone(), |s| format!("{s} ({note})")),
-                            entry,
-                        })
+                        plan.reversible.push(UndoItem { note, entry })
                     }
-                    (_, Some(undo)) => plan.compensable.push(UndoItem {
-                        note: undo
-                            .summary
-                            .clone()
-                            .unwrap_or_else(|| format!("compensated by {}", undo.operation)),
+                    Some(undo) => plan.compensable.push(UndoItem {
+                        note: match expired {
+                            Some(d) => format!(
+                                "its undo expired at {}; compensated by {}",
+                                clock(d),
+                                undo.operation
+                            ),
+                            None => format!("compensated by {}", undo.operation),
+                        },
                         entry,
                     }),
-                    (_, None) => plan.irreversible.push(UndoItem {
-                        note: match entry.declared {
-                            true => format!("happened at {}", clock(entry.updated_ms)),
-                            false => format!(
+                    None => plan.irreversible.push(UndoItem {
+                        note: match (expired, &entry.undo_unavailable, entry.declared) {
+                            (Some(d), _, _) => format!("its undo expired at {}", clock(d)),
+                            (None, Some(why), _) => {
+                                format!("happened at {}; no undo: {why}", clock(entry.updated_ms))
+                            }
+                            (None, None, true) => {
+                                format!("happened at {}", clock(entry.updated_ms))
+                            }
+                            (None, None, false) => format!(
                                 "happened at {}; the gateway described no undo",
                                 clock(entry.updated_ms)
                             ),
@@ -198,13 +228,6 @@ pub fn render(plan: &UndoPlan, title: &str, files: bool) -> String {
                     super::short_id(&item.entry.id)
                 ),
             );
-            if let (EffectState::Confirmed, EffectClass::Irreversible) =
-                (item.entry.state, item.entry.class)
-            {
-                if let Some(detail) = item.entry.detail.as_deref().filter(|d| d.contains("draft")) {
-                    row(&mut out, "", &format!("  -> {detail}"));
-                }
-            }
         }
     }
     if plan.is_empty() {
@@ -272,11 +295,12 @@ pub(crate) fn execute(
                 detail,
             })
         };
-        if entry.state == EffectState::Staged {
-            let mut change = EffectMove::to(EffectState::Failed).detail(format!(
-                "discarded by {by} in an undo before it was performed"
-            ));
-            change.undo_approval = Some(approval.clone());
+        let draft = entry
+            .staged
+            .as_ref()
+            .and_then(|s| s.draft.clone())
+            .filter(|_| entry.state == EffectState::Staged);
+        let deny_ask = || {
             if let Some(staged) = &entry.staged {
                 let _ = super::ask::answer(
                     yard,
@@ -290,27 +314,69 @@ pub(crate) fn execute(
                     },
                 );
             }
+        };
+        // Held in the outbox: it never reached the gateway, so dropping it
+        // is all there is to do.
+        if entry.state == EffectState::Staged && draft.is_none() {
+            let mut change = EffectMove::to(EffectState::Failed).detail(format!(
+                "discarded by {by} in an undo before it was performed"
+            ));
+            change.undo_approval = Some(approval.clone());
+            deny_ask();
             outcomes.push(settle(&[EffectState::Staged], change)?);
             continue;
         }
-        let Some(undo) = entry.undo.clone() else {
-            outcomes.push(UndoOutcome {
-                id: entry.id.clone(),
-                state: entry.state,
-                detail: "it has no undo".into(),
-            });
-            continue;
+        // The follow-up: a draft's discard, else the undo or compensation.
+        let (call, kind) = match &draft {
+            Some(draft) => match &draft.discard {
+                Some(discard) => (discard.clone(), None),
+                None => {
+                    outcomes.push(UndoOutcome {
+                        id: entry.id.clone(),
+                        state: entry.state,
+                        detail: format!(
+                            "the draft cannot be discarded: {}",
+                            draft
+                                .unavailable
+                                .as_deref()
+                                .unwrap_or("the gateway named no discard")
+                        ),
+                    });
+                    continue;
+                }
+            },
+            None => match remedy(entry, now_ms) {
+                Some(undo) => (
+                    super::FollowUp {
+                        operation: undo.operation.clone(),
+                        tool: undo.tool.clone(),
+                        arguments: undo.arguments.clone(),
+                    },
+                    Some(undo.kind),
+                ),
+                None if entry.expired_at(now_ms) => {
+                    outcomes.push(settle(
+                        &[EffectState::Confirmed, EffectState::UndoFailed],
+                        EffectMove::to(EffectState::Expired).detail(format!(
+                            "its undo expired at {}",
+                            clock(entry.undo.as_ref().and_then(|u| u.deadline_ms).unwrap_or(0))
+                        )),
+                    )?);
+                    continue;
+                }
+                None => {
+                    outcomes.push(UndoOutcome {
+                        id: entry.id.clone(),
+                        state: entry.state,
+                        detail: match &entry.undo_unavailable {
+                            Some(why) => format!("it has no undo: {why}"),
+                            None => "it has no undo".into(),
+                        },
+                    });
+                    continue;
+                }
+            },
         };
-        if entry.expired_at(now_ms) {
-            outcomes.push(settle(
-                &[EffectState::Confirmed, EffectState::UndoFailed],
-                EffectMove::to(EffectState::Expired).detail(format!(
-                    "its undo expired at {}",
-                    clock(undo.deadline_ms.unwrap_or(0))
-                )),
-            )?);
-            continue;
-        }
         let Some(record) = record.as_ref() else {
             outcomes.push(UndoOutcome {
                 id: entry.id.clone(),
@@ -331,14 +397,13 @@ pub(crate) fn execute(
             }
         };
         let client = Client::new(&gateway.url, token);
-        // The inverse is an effect like any other: the policy may block it.
-        let tool = format!("{}__{}", entry.connector, undo.operation);
+        // The follow-up is an effect like any other: the policy may block it.
+        let tool = call.tool.clone();
         let tools = declared.get_or_insert_with(|| client.list_tools().unwrap_or_default());
-        let decl = tools
+        let listed: Option<&Value> = tools
             .iter()
-            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(tool.as_str()))
-            .map(ToolDecl::read)
-            .unwrap_or_default();
+            .find(|t| t.get("name").and_then(Value::as_str) == Some(tool.as_str()));
+        let decl = listed.map(ToolDecl::read).unwrap_or_default();
         let person = settings.person_for(&entry.subject);
         let seat = record.provision.as_ref().and_then(|p| p.approvals.as_ref());
         let layers = Layers {
@@ -347,11 +412,15 @@ pub(crate) fn execute(
             person,
             preset: None,
         };
+        let short = tool.split_once("__").map_or(tool.as_str(), |(_, t)| t);
         let subject = Subject::Operation {
             connector: &entry.connector,
-            operation: &undo.operation,
-            alias: decl.operation.as_deref(),
-            class: decl.class.unwrap_or(EffectClass::Reversible),
+            operation: short,
+            alias: Some(call.operation.as_str()),
+            class: decl.class.unwrap_or(match kind {
+                Some(UndoKind::Compensate) => EffectClass::Compensable,
+                _ => EffectClass::Reversible,
+            }),
             deletion: false,
         };
         if let Some(resolved) = resolve(&layers, &subject) {
@@ -368,29 +437,54 @@ pub(crate) fn execute(
             }
         }
         // A retried undo reuses its key, so the upstream does it once.
-        let key = format!("{}-undo", entry.id);
+        let key = match kind {
+            Some(_) => format!("{}-undo", entry.id),
+            None => format!("{}-discard", entry.id),
+        };
         let result = client.call(
             &tool,
-            &undo.arguments,
+            &mcp::confirmed(listed, &call.arguments),
             &json!({"idempotency_key": key}),
             Some(&key),
         );
+        let operation = &call.operation;
+        if kind.is_none() {
+            // A draft's discard: done means it never happened.
+            let outcome = match result {
+                Ok(called) if called.ok() => {
+                    let mut change = EffectMove::to(EffectState::Failed).detail(format!(
+                        "the draft was discarded by {by} in an undo ({operation}); it never happened"
+                    ));
+                    change.undo_approval = Some(approval);
+                    deny_ask();
+                    settle(&[EffectState::Staged], change)?
+                }
+                Ok(called) => UndoOutcome {
+                    id: entry.id.clone(),
+                    state: entry.state,
+                    detail: format!("{operation} failed: {}", called.answer()),
+                },
+                Err(why) => UndoOutcome {
+                    id: entry.id.clone(),
+                    state: entry.state,
+                    detail: format!("{operation}: {why}"),
+                },
+            };
+            outcomes.push(outcome);
+            continue;
+        }
         let mut change = match result {
-            Ok(called) if called.ok() => EffectMove::to(match undo.kind {
-                UndoKind::Inverse => EffectState::Undone,
-                UndoKind::Compensate => EffectState::Compensated,
+            Ok(called) if called.ok() => EffectMove::to(match kind {
+                Some(UndoKind::Compensate) => EffectState::Compensated,
+                _ => EffectState::Undone,
             })
-            .detail(format!("{}: {}", undo.operation, called.answer())),
-            Ok(called) => EffectMove::to(EffectState::UndoFailed).detail(format!(
-                "{} failed: {}",
-                undo.operation,
-                called.answer()
-            )),
+            .detail(format!("{operation}: {}", called.answer())),
+            Ok(called) => EffectMove::to(EffectState::UndoFailed)
+                .detail(format!("{operation} failed: {}", called.answer())),
             Err(CallError::NotSent(why)) => EffectMove::to(EffectState::UndoFailed)
-                .detail(format!("{} was not sent: {why}", undo.operation)),
+                .detail(format!("{operation} was not sent: {why}")),
             Err(CallError::Lost(why)) => EffectMove::to(EffectState::UndoFailed).detail(format!(
-                "{}'s answer was lost ({why}); it may have happened, check upstream",
-                undo.operation
+                "{operation}'s answer was lost ({why}); it may have happened, check upstream"
             )),
         };
         change.undo_approval = Some(approval);

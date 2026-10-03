@@ -294,7 +294,7 @@ fn effects_are_listed_and_undo_plans_then_rewinds_and_undoes() {
     let table = repo.ok(&["effects", "--branch", "board"]);
     assert!(table.starts_with("ID "), "{table}");
     assert!(table.contains("slack      chat_post"), "{table}");
-    assert!(table.contains("chat_delete until"), "{table}");
+    assert!(table.contains("slack.chat.delete until"), "{table}");
     let show = repo.ok(&["show", "board"]);
     assert!(show.contains("effects"), "{show}");
     assert!(
@@ -313,16 +313,22 @@ fn effects_are_listed_and_undo_plans_then_rewinds_and_undoes() {
         "{plan}"
     );
     assert!(
-        plan.contains("  upstream, can be undone       slack: message in #board"),
+        plan.contains(
+            "  upstream, can be undone       slack: chat_post (undone by slack.chat.delete"
+        ),
         "{plan}"
     );
-    assert!(!plan.contains("#general"), "turn 1's post is kept: {plan}");
+    assert_eq!(
+        plan.matches("slack: chat_post").count(),
+        1,
+        "turn 1's post is kept: {plan}"
+    );
     assert!(
         plan.contains("  upstream, cannot be undone    legacy: do"),
         "{plan}"
     );
     assert!(
-        plan.contains("  upstream, staged              gmail: send"),
+        plan.contains("  upstream, staged              gmail: send (a draft, never performed: it is discarded with gmail.drafts.delete)"),
         "{plan}"
     );
     let json = repo.json(&["undo", "board", "--to", "1", "--plan", "--json"]);
@@ -355,6 +361,7 @@ fn effects_are_listed_and_undo_plans_then_rewinds_and_undoes() {
     assert!(outcomes.iter().any(|o| o["state"] == "undone"), "{done}");
     assert!(outcomes.iter().any(|o| o["state"] == "failed"), "{done}");
     assert_eq!(repo.mock.calls_to("slack__chat_delete").len(), 1);
+    assert_eq!(repo.mock.calls_to("gmail__drafts_delete").len(), 1);
     let worktree = PathBuf::from(
         repo.json(&["show", "board", "--json"])["worktree"]
             .as_str()
@@ -449,5 +456,8 @@ fn an_ask_is_answered_from_another_by_and_a_killed_engine_is_reconciled() {
     // Never called again.
     assert_eq!(repo.mock.calls_to("gmail__send").len(), 1);
     let shown = repo.ok(&["effects", "show", &entry["id"].as_str().unwrap()[18..]]);
-    assert!(shown.contains("the lookup found it"), "{shown}");
+    assert!(
+        shown.contains("the lookup (gmail.sent.lookup) found it"),
+        "{shown}"
+    );
 }
