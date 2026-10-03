@@ -148,6 +148,10 @@ pub(crate) struct Egress {
     confined: bool,
     env: Vec<(String, String)>,
     applied: EgressActivity,
+    /// The proxy's record in the repository's service registry, while the
+    /// turn runs. The proxy lives in this process, so there is nothing to
+    /// reclaim: the record only says it is there, and for whom.
+    _service: Option<crate::services::Registration>,
 }
 
 impl Egress {
@@ -290,6 +294,7 @@ pub(crate) fn prepare(
             confined: false,
             env: Vec::new(),
             applied: applied(Enforcement::NotApplied, Some(why)),
+            _service: None,
         }));
     }
     let confinement = LocalProvider::confinement();
@@ -300,12 +305,16 @@ pub(crate) fn prepare(
         ));
     }
     let proxy = proxy(yard, &record.info.name, network.clone());
-    let (confined, env, enforcement, reason) = match confinement {
+    let branch = &record.info.name;
+    let (confined, env, enforcement, reason, endpoint) = match confinement {
         Ok(()) => (
             true,
             proxy_env(&format!("http://127.0.0.1:{CONFINED_PORT}")),
             Enforcement::Enforced,
             None,
+            crate::services::Endpoint::InProcess {
+                name: format!("netns:{branch}:{CONFINED_PORT}"),
+            },
         ),
         Err(why) => {
             let address = proxy
@@ -318,14 +327,29 @@ pub(crate) fn prepare(
                 Some(format!(
                     "only tools that honor the proxy variables are held to it: {why}"
                 )),
+                crate::services::Endpoint::url(format!("http://{address}")),
             )
         }
     };
+    let service = yard
+        .register_service(
+            crate::services::Service::new(
+                crate::services::KIND_EGRESS_PROXY,
+                crate::services::ServiceOwner::this_process().for_branch(branch),
+            )
+            .with("branch", branch.as_str())
+            .with("enforcement", enforcement.as_str())
+            .with("allow", network.rules())
+            .with_endpoint(endpoint),
+            crate::services::DEFAULT_TTL,
+        )
+        .ok();
     Ok(Some(Egress {
         proxy: Some(proxy),
         confined,
         env,
         applied: applied(enforcement, reason),
+        _service: service,
     }))
 }
 

@@ -135,6 +135,7 @@ mod record;
 mod recover;
 mod run;
 mod seats;
+pub mod services;
 mod snapshots;
 mod spotlight;
 mod sqlite;
@@ -464,6 +465,73 @@ impl Yard {
     /// The feed position of the last recorded event; 0 when there is none.
     pub fn events_head(&self) -> Result<u64, Error> {
         self.store().backend().head()
+    }
+
+    /// This repository's service registry ([`services::LocalRegistry`]):
+    /// `.branchyard/registry.db`, or the file `BRANCHYARD_REGISTRY` names,
+    /// shared by every process on this machine; opened once per yard and
+    /// its clones. See `docs/registry.md`.
+    pub fn services(&self) -> Result<Arc<services::LocalRegistry>, Error> {
+        let mut held = self.hub.services.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(registry) = &*held {
+            return Ok(registry.clone());
+        }
+        let registry = Arc::new(services::LocalRegistry::open(services::local_path(
+            &self.root,
+        ))?);
+        *held = Some(registry.clone());
+        Ok(registry)
+    }
+
+    /// Whether this repository has a registry file yet: what lets a
+    /// reader skip opening one that would be empty.
+    pub fn has_services(&self) -> bool {
+        self.hub
+            .services
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+            || services::local_path(&self.root).is_file()
+    }
+
+    /// Register `service` in this repository's registry for `ttl`, renewed
+    /// from a thread of its own until the returned handle is dropped,
+    /// which deregisters it.
+    pub fn register_service(
+        &self,
+        service: services::Service,
+        ttl: Duration,
+    ) -> Result<services::Registration, Error> {
+        Ok(services::Registration::start(
+            self.services()?,
+            service,
+            ttl,
+            services::Clock::system(),
+        )?)
+    }
+
+    /// The live service [`services::resolve`] picks for `query` in this
+    /// repository's registry, if any; none without a registry file.
+    pub fn resolve_service(
+        &self,
+        query: &services::Query,
+    ) -> Result<Option<services::Service>, Error> {
+        if !self.has_services() {
+            return Ok(None);
+        }
+        Ok(services::resolve(
+            &*self.services()?,
+            query,
+            state::now_ms(),
+        )?)
+    }
+
+    /// Expire every service in this repository's registry whose lease ran
+    /// out or whose owner is gone, and reclaim what Branchyard started for
+    /// it: a leaked process, a sandbox or recipe machine (through the
+    /// branch's recovery), pool slots. [`Yard::recover`] does this too.
+    pub fn reclaim_services(&self) -> Result<Vec<services::Reaped>, Error> {
+        services::reclaim::sweep(self, state::now_ms())
     }
 
     /// Repository root.

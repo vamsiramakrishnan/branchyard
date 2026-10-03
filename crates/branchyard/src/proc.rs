@@ -85,6 +85,16 @@ pub(crate) fn alive(pid: u32, start: &str) -> bool {
     !start.is_empty() && start_time(pid).as_deref() == Some(start)
 }
 
+/// SIGKILL `pid` if it is still the process that started at `start`;
+/// whether it was signalled. A reused pid is never signalled.
+pub(crate) fn kill(pid: u32, start: &str) -> bool {
+    if pid <= 1 || pid == std::process::id() || !alive(pid, start) {
+        return false;
+    }
+    signal(pid);
+    true
+}
+
 /// SIGKILL what is left of the process group led by `pgid`, which started
 /// at `start`, and return the pids signalled.
 ///

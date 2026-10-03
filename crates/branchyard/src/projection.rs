@@ -107,6 +107,8 @@ pub(crate) struct Hub {
     pub connectors: Mutex<Option<Arc<crate::connectors::Gateway>>>,
     /// Set by [`crate::Yard::use_knowledge`].
     pub knowledge: Mutex<Option<Arc<crate::KnowledgeSettings>>>,
+    /// Opened by [`crate::Yard::services`].
+    pub services: Mutex<Option<Arc<crate::services::LocalRegistry>>>,
 }
 
 impl Default for Hub {
@@ -125,6 +127,7 @@ impl Default for Hub {
             sandbox_provider: Default::default(),
             connectors: Default::default(),
             knowledge: Default::default(),
+            services: Default::default(),
         }
     }
 }

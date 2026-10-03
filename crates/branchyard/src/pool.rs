@@ -1052,6 +1052,9 @@ pub struct PoolKeeper {
     stop: Arc<AtomicBool>,
     root: PathBuf,
     thread: Option<JoinHandle<()>>,
+    /// The keeper's record in the repository's service registry: what a
+    /// reaper reclaims the pool's slots for once this process is gone.
+    _service: Option<crate::services::Registration>,
 }
 
 impl PoolKeeper {
@@ -1063,6 +1066,21 @@ impl PoolKeeper {
     ) -> PoolKeeper {
         let stop = Arc::new(AtomicBool::new(false));
         let root = yard.root.clone();
+        let service = yard
+            .register_service(
+                crate::services::Service::new(
+                    crate::services::KIND_POOL_KEEPER,
+                    crate::services::ServiceOwner::this_process(),
+                )
+                .with("root", root.display().to_string())
+                .with("every_seconds", every.as_secs() as i64)
+                .with_endpoint(crate::services::Endpoint::InProcess {
+                    name: "pool-keeper".into(),
+                })
+                .with_reclaim(crate::services::Reclaim::PoolSlots { root: root.clone() }),
+                crate::services::DEFAULT_TTL,
+            )
+            .ok();
         let thread = {
             let stop = stop.clone();
             std::thread::Builder::new()
@@ -1098,7 +1116,12 @@ impl PoolKeeper {
                 })
                 .ok()
         };
-        PoolKeeper { stop, root, thread }
+        PoolKeeper {
+            stop,
+            root,
+            thread,
+            _service: service,
+        }
     }
 }
 
