@@ -3958,8 +3958,14 @@ impl Flags for PrFlags {
     }
 }
 
-/// `by`'s command, with the grouped command list in its help.
+/// `by`'s command, with the grouped command list in its help. Built on a
+/// thread with [`PARSE_STACK`], like parsing, so help, completions and the
+/// man page never depend on the caller's stack either.
 pub fn command() -> clap::Command {
+    on_parse_stack(build_command)
+}
+
+fn build_command() -> clap::Command {
     let cmd = Cli::command();
     let header = *cmd.get_styles().get_header();
     let listing = command_listing(&cmd);
@@ -4028,17 +4034,22 @@ where
     T: Into<OsString> + Clone,
 {
     let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
+    on_parse_stack(move || parse_argv(argv))
+}
+
+/// Run `f` on a thread with [`PARSE_STACK`], passing on its panic.
+fn on_parse_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     std::thread::Builder::new()
         .name("by-args".into())
         .stack_size(PARSE_STACK)
-        .spawn(move || parse_argv(argv))
+        .spawn(f)
         .expect("could not start the argument parser's thread")
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 fn parse_argv(argv: Vec<OsString>) -> Result<Cli, clap::Error> {
-    let mut cmd = command();
+    let mut cmd = build_command();
     let matches = cmd
         .try_get_matches_from_mut(argv.iter().cloned())
         .map_err(|error| with_step_tip(with_prompt_tip(error, &cmd, &argv)))?;
