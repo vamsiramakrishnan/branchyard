@@ -94,6 +94,7 @@
 //! surfaces, the envelope and the authority model, which in local mode
 //! stops honest mistakes, not a hostile harness.
 
+mod access;
 mod adopt;
 mod broker;
 mod bundle;
@@ -119,6 +120,7 @@ mod knowledge;
 mod lock;
 mod map;
 mod map_input;
+pub mod models;
 mod names;
 mod ops;
 #[cfg(feature = "postgres")]
@@ -153,6 +155,7 @@ pub use git::current_branch;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
+pub use access::{AccessActivity, Ceiling, DelegationScope, NetworkScope};
 pub use adopt::{AdoptSpec, Adoption};
 pub use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
@@ -395,6 +398,48 @@ impl Yard {
             .connectors
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+    }
+
+    /// Give this yard's branches the model gateway `gateway`: a branch on
+    /// it (`Provisioning::models`) gets a gateway of its own for each turn;
+    /// see `docs/model-gateway.md`. Replaces any set before. Shared by
+    /// every clone of this `Yard`.
+    pub fn use_models(&self, gateway: models::Gateway) {
+        *self.hub.models.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+    }
+
+    /// The model gateway set with [`Yard::use_models`], if any.
+    pub fn models(&self) -> Option<Arc<models::Gateway>> {
+        self.hub
+            .models
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Calls through the model gateway at or after `since_ms` (since the
+    /// Unix epoch), oldest first, from every branch, removed ones too.
+    pub fn model_usage(&self, since_ms: u64) -> Result<Vec<models::UsageRecord>, Error> {
+        self.store().usage().usage_since(since_ms)
+    }
+
+    /// Cap what every branch acting for each person may reach: the
+    /// connectors, models and network of a turn are its request's within
+    /// its person's [`Ceiling`] (by subject: `local:<user>` locally, a
+    /// server's principal). Replaces any set before. See
+    /// `docs/model-gateway.md#one-scope`.
+    pub fn use_ceilings(&self, ceilings: std::collections::BTreeMap<String, Ceiling>) {
+        *self.hub.ceilings.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(ceilings);
+    }
+
+    /// The ceiling of `subject`, if one is set.
+    pub fn ceiling(&self, subject: &str) -> Option<Ceiling> {
+        self.hub
+            .ceilings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(subject)
+            .cloned()
     }
 
     /// The connector gateway set with [`Yard::use_connectors`], if any.
@@ -2245,6 +2290,13 @@ pub enum Activity {
     Plan(Box<PlanActivity>),
     /// A goal and its judge's verdicts. See [`GoalActivity`].
     Goal(Box<GoalActivity>),
+    /// The model gateway: how the turn's harness reaches its models, each
+    /// call it made through the gateway, and budget alerts. See
+    /// [`models::ModelActivity`] and `docs/model-gateway.md`.
+    Model(Box<models::ModelActivity>),
+    /// The person's ceiling narrowed what the turn may reach. See
+    /// [`AccessActivity`].
+    Access(Box<AccessActivity>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

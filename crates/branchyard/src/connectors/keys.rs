@@ -47,6 +47,18 @@ pub struct Claims {
     /// [`CONNECT_PURPOSE`] on a connect token; absent on a turn's token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by_purpose: Option<String>,
+    /// The models the turn may call through the model gateway, as globs
+    /// over model ids; absent when its branch is not on the gateway. See
+    /// `docs/model-gateway.md#one-scope`. Anvil ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_models: Option<Vec<String>>,
+    /// The turn's effective network policy and its digest. Anvil ignores
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_network: Option<crate::access::NetworkScope>,
+    /// What the turn's branch may delegate. Anvil ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_delegation: Option<crate::access::DelegationScope>,
 }
 
 /// One Ed25519 key: its id and 32-byte seed.
@@ -356,7 +368,70 @@ mod tests {
             by_turn: "1".into(),
             by_grants: vec![GrantEntry::read("github")],
             by_purpose: None,
+            by_models: None,
+            by_network: None,
+            by_delegation: None,
         }
+    }
+
+    #[test]
+    fn the_new_scopes_leave_the_contract_claims_as_they_were() {
+        // Without the new scopes, a token's claims are exactly the
+        // contract's (what Anvil parses), field for field.
+        let wire = serde_json::to_value(claims()).unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "aud",
+                "by_branch",
+                "by_grants",
+                "by_tenant",
+                "by_turn",
+                "exp",
+                "iat",
+                "iss",
+                "jti",
+                "sub"
+            ]
+        );
+        // Claims written before them still parse.
+        let old = r#"{"iss":"i","aud":"a","sub":"s","iat":1,"exp":2,"jti":"j","by_tenant":"t",
+            "by_branch":"b","by_turn":"1","by_grants":[]}"#;
+        let parsed: Claims = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.by_models, None);
+        // With them, the contract's claims are unchanged and the new ones
+        // are extra keys of plain JSON types, which Anvil's verifier
+        // ignores (it reads only the contract's claims, and refuses only a
+        // malformed `scope`, `scp`, `aud`, `exp` or `nbf`).
+        let mut scoped = claims();
+        scoped.by_models = Some(vec!["claude-*".into()]);
+        scoped.by_network = Some(crate::access::NetworkScope::of(None));
+        scoped.by_delegation = Some(crate::access::DelegationScope {
+            depth: 0,
+            max_depth: 1,
+            max_children: 4,
+            harnesses: Vec::new(),
+        });
+        let with = serde_json::to_value(&scoped).unwrap();
+        for key in keys {
+            assert_eq!(with[key], wire[key], "{key}");
+        }
+        assert_eq!(with["by_models"], json!(["claude-*"]));
+        assert_eq!(with["by_network"]["policy"], "open");
+        assert_eq!(with["by_delegation"]["max_depth"], 1);
+        for key in ["scope", "scp", "nbf"] {
+            assert!(with.get(key).is_none(), "{key}");
+        }
+        let ring = KeyRing::generate().unwrap();
+        let verified = verify(&ring.jwks().unwrap(), &ring.sign(&scoped).unwrap()).unwrap();
+        assert_eq!(serde_json::from_value::<Claims>(verified).unwrap(), scoped);
     }
 
     #[test]

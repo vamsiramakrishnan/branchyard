@@ -192,6 +192,24 @@ Removing a branch (`DELETE .../branches/{b}`, needing `admin`) frees its `max_br
 
 A branch's token names the principal that created it (`sub` its name, `by_tenant` its tenant; forks and delegated children keep their parent's) and the branch as `<repo>/<branch>`, so one gateway and one audit log can serve every repository; each repository's poller records only its own lines. A request naming connectors on a server without `connectors` is `403 connectors_not_configured`. Requests choose grants freely within what they ask for: the gateway enforces each grant against the person's own connected accounts, and a delegated child's is narrowed to its parent's. `by connect` and `by gateway` act locally only.
 
+## Model gateway and ceilings
+
+`"models"` in the configuration file is `[models]` of `branchyard.toml` as JSON ([model gateway](model-gateway.md#configuration)): a branch on the gateway gets one for each turn, in the process that runs the turn. A backend's `key` names an entry of `"secrets"`, else a variable of the server's own environment. Its turns' tokens are signed with the connector gateway's key and issuer when `"connectors"` is set, else with `<data_dir>/gateway/key` and `http(s)://<listen>`; usage records name the branch `<repo>/<branch>`. A request on the gateway to a server without `"models"` backends fails its turn naming it.
+
+`"ceilings"` caps what each principal's branches may reach, whatever a request asks for: the connectors (in `--connector` form), the models (globs) and the hosts (`--network` rules). Each turn's access is its request within its principal's ceiling, and an `access` event says what the ceiling narrowed ([one scope](model-gateway.md#one-scope)).
+
+```json
+"models": {
+  "backends": {"anthropic": {"api": "anthropic", "key": "anthropic"}},
+  "routes": [{"model": "claude-*", "backends": ["anthropic"], "requests_per_minute": 600}],
+  "budget": {"monthly_usd": 1000, "alert_at": 0.8}
+},
+"secrets": {"anthropic": "ANTHROPIC_API_KEY"},
+"ceilings": {"ci": {"models": ["claude-haiku-*"], "network": ["api.github.com:443"]}}
+```
+
+Model calls are counted on `/metrics` as `branchyard_model_calls_total`, `branchyard_model_tokens_total` and `branchyard_model_cost_usd_total`.
+
 ## API reference
 
 All bodies are JSON (`Content-Type: application/json` is required on `POST`, else `415`). Branches, statuses and recorded events use the SDK's own serde forms, the same values `Yard::branches` and `Branch::events` return. Every response carries `x-request-id` (the caller's, when it sends a usable one).

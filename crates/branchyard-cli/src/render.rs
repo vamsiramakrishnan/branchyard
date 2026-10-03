@@ -493,6 +493,17 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             },
             &activity.describe(),
         ),
+        Activity::Model(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::models::ModelActivity::Call(call) if call.decision == "allowed" => {
+                    Tone::Cyan
+                }
+                branchyard::models::ModelActivity::Gateway { .. } => Tone::Cyan,
+                _ => Tone::Yellow,
+            },
+            &activity.describe(),
+        ),
+        Activity::Access(activity) => style.paint(Tone::Yellow, &activity.describe()),
         Activity::Goal(activity) => style.paint(
             match activity.as_ref() {
                 branchyard::GoalActivity::Verdict { met: true, .. } => Tone::Green,

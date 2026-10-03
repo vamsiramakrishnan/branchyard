@@ -118,6 +118,10 @@ pub(crate) struct Driven {
     pub session: Option<NativeSession>,
     /// The harness's latest cumulative cost estimate.
     pub cost: Option<f64>,
+    /// What this turn's calls through the model gateway cost, metered;
+    /// when set, the branch's cost is this added to what it had, and the
+    /// harness's estimate is not used.
+    pub metered: Option<f64>,
 }
 
 enum Phase {
@@ -334,6 +338,7 @@ fn run(
         submitted: false,
         session: None,
         cost: None,
+        metered: None,
     };
     let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     // Revoked when this function returns, after the harness and its
@@ -375,13 +380,61 @@ fn run(
     let deadline_ms = deadline.map(|at| {
         now_ms().saturating_add(at.saturating_duration_since(Instant::now()).as_millis() as u64)
     });
-    let connectors = match crate::connectors::prepare(turn.yard, record, deadline_ms) {
+    // One scope: the person's ceiling over what the branch asked for,
+    // which its connectors, models, network and token all follow.
+    let (scoped, narrowed) = crate::access::scoped(turn.yard, record);
+    if let Some(narrowed) = narrowed {
+        recorder.record(Activity::Access(Box::new(narrowed)))?;
+    }
+    let scopes = crate::access::TokenScopes::of(&scoped);
+    let connectors = match crate::connectors::prepare(turn.yard, &scoped, deadline_ms, &scopes) {
         Ok(connectors) => connectors,
         Err(reason) => {
             driven.end = End::failed(format!("could not provide connectors: {reason}"));
             return Ok(driven);
         }
     };
+    // The model gateway, on the same token when the turn has one; it
+    // stops when this function returns, after the harness is gone.
+    let models = match crate::models::prepare(
+        turn.yard,
+        &scoped,
+        connectors.as_ref().map(|c| c.token.as_str()),
+        deadline_ms,
+        &scopes,
+        bounds.budget.clone(),
+        delegation::reserved(&store, record),
+    ) {
+        Ok(models) => models,
+        Err(reason) => {
+            driven.end = End::failed(format!("could not provide the model gateway: {reason}"));
+            return Ok(driven);
+        }
+    };
+    let mut model_gateway = None;
+    let mut egress_extra = Vec::new();
+    let mut model_env = Vec::new();
+    let mut model_scrub = Vec::new();
+    match models {
+        None => {}
+        Some(crate::models::Prepared::Direct { hosts, activity }) => {
+            recorder.record(Activity::Model(Box::new(activity)))?;
+            egress_extra.extend(hosts);
+        }
+        Some(crate::models::Prepared::Gateway {
+            gateway,
+            env,
+            scrub,
+            url,
+            activity,
+        }) => {
+            recorder.record(Activity::Model(Box::new(activity)))?;
+            egress_extra.extend(crate::egress::gateway_rule(&url));
+            model_env = env;
+            model_scrub = scrub;
+            model_gateway = Some(gateway);
+        }
+    }
     let _audit = connectors
         .as_ref()
         .map(|_| crate::connectors::AuditTail::start(turn.yard));
@@ -487,14 +540,27 @@ fn run(
     for var in &provisioned.env {
         placement.set_env(&var.name, &var.value);
     }
+    // The model gateway's variables replace the provider's own, and the
+    // credentials that would reach the provider around it are taken out.
+    for name in &model_scrub {
+        placement.remove_env(name);
+    }
+    for (name, value) in &model_env {
+        placement.set_env(name, value);
+    }
     if let Some(parent) = &turn.options.trace_parent {
         placement.set_env(crate::ENV_TRACEPARENT, parent);
     }
     // The branch's network policy: its proxy's variables last, so nothing
     // above replaces them, and its namespace when the harness starts. The
     // proxy lives with the placement, after the harness is gone.
-    let gateway = connectors.as_ref().map(|c| c.gateway_url.as_str());
-    match crate::egress::prepare(turn.yard, record, gateway) {
+    if let Some(gateway) = connectors
+        .as_ref()
+        .and_then(|c| crate::egress::gateway_rule(&c.gateway_url))
+    {
+        egress_extra.push(gateway);
+    }
+    match crate::egress::prepare(turn.yard, &scoped, egress_extra) {
         Ok(None) => {}
         Ok(Some(egress)) => {
             recorder.record(egress.applied())?;
@@ -661,6 +727,35 @@ fn run(
             _ => {}
         }
         steering.poll(recorder, &mut session, &store, fence, &phase)?;
+        // A turn on the model gateway is metered exactly; its limit is
+        // held here as a harness's own estimate is below.
+        if let Some(gateway) = &model_gateway {
+            let metered = gateway.metered();
+            if driven.metered != Some(metered) && metered > 0.0 {
+                driven.metered = Some(metered);
+                let own = record.info.cost_usd.unwrap_or(0.0) + metered;
+                if let Some(projection) = &projection {
+                    projection.observe_cost(own);
+                }
+                let over = bounds
+                    .budget
+                    .max_usd
+                    .is_some_and(|max| own + delegation::reserved(&store, record) > max);
+                if let (true, Phase::Running(n)) = (over, &phase) {
+                    let n = *n;
+                    if let Err(error) = session.interrupt() {
+                        recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                        kill = true;
+                        break End::budget("max_usd");
+                    }
+                    phase = Phase::Stopping {
+                        turn: n,
+                        why: Stop::Limit("max_usd"),
+                        since: Instant::now(),
+                    };
+                }
+            }
+        }
         if let (Phase::Running(n), Some(window)) = (&phase, bounds.budget.stall_after) {
             let n = *n;
             let idle = now.duration_since(last_activity);
@@ -840,6 +935,10 @@ fn run(
                 }
             }
             Event::UsageObserved { usage, .. } if usage.cumulative => {
+                // On the model gateway, the metered cost is the branch's.
+                if model_gateway.is_some() {
+                    continue;
+                }
                 let Some(cost) = usage.cost_usd else { continue };
                 driven.cost = Some(driven.cost.map_or(cost, |c: f64| c.max(cost)));
                 if let Some(projection) = &projection {
@@ -921,6 +1020,9 @@ fn run(
         for activity in placement.release(turn.yard, record, fence) {
             recorder.record(activity)?;
         }
+        if let Some(gateway) = model_gateway {
+            driven.metered = Some(gateway.finish());
+        }
         return Ok(driven);
     }
     match session.close(CLOSE_GRACE) {
@@ -948,6 +1050,11 @@ fn run(
     }
     for activity in placement.release(turn.yard, record, fence) {
         recorder.record(activity)?;
+    }
+    // Calls still in flight are given a moment; what the turn's calls
+    // cost is the branch's.
+    if let Some(gateway) = model_gateway {
+        driven.metered = Some(gateway.finish());
     }
     Ok(driven)
 }
@@ -1259,8 +1366,10 @@ pub(crate) fn conclude(
     if let Some(session) = &driven.session {
         info.session = Some(session.to_string());
     }
-    if let Some(cost) = driven.cost {
-        info.cost_usd = Some(spent(cost, record.cost_baseline));
+    match (driven.metered, driven.cost) {
+        (Some(metered), _) => info.cost_usd = Some(info.cost_usd.unwrap_or(0.0) + metered),
+        (None, Some(cost)) => info.cost_usd = Some(spent(cost, record.cost_baseline)),
+        (None, None) => {}
     }
     let message = format!("{}: turn {}\n\n{}\n", info.git_branch, info.turns, prompt);
     let previous = info.candidate.as_ref().map(|c| c.commit.clone());

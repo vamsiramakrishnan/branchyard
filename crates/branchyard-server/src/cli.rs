@@ -819,6 +819,8 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     }
     config.webhook_insecure = partial.webhook_insecure || flags.webhook_insecure;
     config.connectors = partial.connectors;
+    config.models = partial.models;
+    config.ceilings = partial.ceilings;
     config.triggers.public_url = flags.public_url.or(partial.public_url);
     config.app = partial.app.unwrap_or_default();
     config.app.enabled |= flags.app;

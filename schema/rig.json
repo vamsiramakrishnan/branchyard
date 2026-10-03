@@ -207,6 +207,13 @@
             }
           ]
         },
+        "models": {
+          "description": "Models the seat's harness may call through the model gateway\n(docs/model-gateway.md), as globs (\"claude-*\"); its model calls then\ngo through the gateway. Unset: its parent seat's. Within its parent\nseat's.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "telemetry": {
           "description": "`off`, or an http:// or https:// OTLP collector endpoint.",
           "type": "string"

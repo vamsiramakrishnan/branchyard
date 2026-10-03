@@ -3,7 +3,9 @@
 //!
 //! A branch whose [`Provisioning::network`](crate::Provisioning) is
 //! restricted gets, for each turn, a [`Proxy`] that allows only its rules
-//! (plus the connector gateway's host when the turn has a grant), and the
+//! (plus the connector gateway's host when the turn has a grant, the model
+//! gateway's when it is on it, and its provider's hosts when its harness
+//! calls the provider directly), and the
 //! proxy's address in `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` (and
 //! their lower-case forms), with `NO_PROXY` empty so loopback goes through
 //! it too. Every destination the proxy decides is recorded on the branch as
@@ -249,7 +251,7 @@ pub(crate) fn check(
 pub(crate) fn prepare(
     yard: &Yard,
     record: &Record,
-    gateway_url: Option<&str>,
+    extra: Vec<HostRule>,
 ) -> Result<Option<Egress>, String> {
     let Some(network) = record
         .provision
@@ -259,10 +261,11 @@ pub(crate) fn prepare(
     else {
         return Ok(None);
     };
-    let network = match gateway_url.and_then(gateway_rule) {
-        Some(rule) => network.with_rule(rule),
-        None => network,
-    };
+    // The gateways the turn is given (connectors, models), and the hosts
+    // a harness calling its provider directly needs, for this turn only.
+    let network = extra
+        .into_iter()
+        .fold(network, |network, rule| network.with_rule(rule));
     let policy = network.to_string();
     let required = network.enforce == Enforce::Required;
     let applied = |enforcement: Enforcement, reason: Option<String>| EgressActivity::Applied {

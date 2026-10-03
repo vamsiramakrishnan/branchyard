@@ -104,6 +104,10 @@
       "$ref": "#/$defs/KnowledgeConfig",
       "description": "Repository knowledge (docs/knowledge.md): whether adopted entries\nare given to harnesses and within what budget, when branches are\ndistilled into proposals, and by which distiller."
     },
+    "models": {
+      "$ref": "#/$defs/ModelsConfig",
+      "description": "The model gateway (docs/model-gateway.md): its backends, routes,\nbudgets and prices, and the models a new branch may call through it\nwhen `--model-gateway` gives none."
+    },
     "harnesses": {
       "$ref": "#/$defs/HarnessesConfig",
       "description": "Installing and updating harness CLIs (docs/harness-lifecycle.md):\nwhether `by harnesses install`, `update` and the router may run a\nharness's install command, and for which harnesses. A repository's\nfile may only say `install = \"never\"`; the rest belongs in your user\nfile, since it runs software on your machine."
@@ -1182,6 +1186,232 @@
         "harness"
       ],
       "description": "`distiller = { harness = \"claude-code\", model = \"small\" }`."
+    },
+    "ModelsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Models a new branch may call through the gateway when\n`--model-gateway` gives none, as globs (`\"claude-*\"`, `\"*\"`); set,\nit puts new branches on the gateway."
+        },
+        "backends": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelBackendConfig"
+          },
+          "description": "Backends by name: `[models.backends.anthropic] api = \"anthropic\"`,\n`key = \"ANTHROPIC_API_KEY\"`."
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelRouteConfig"
+          },
+          "description": "Routes by requested model, first match wins: `[[models.routes]]`."
+        },
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelBudgetConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Daily and monthly limits (UTC) over every branch of the repository."
+        },
+        "prices": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelPriceConfig"
+          },
+          "description": "Prices for models the catalog does not price, dollars per million\ntokens, by model id or glob."
+        },
+        "listen": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The address a turn's gateway listens on (default `127.0.0.1`);\n`0.0.0.0` for sandboxes to reach it."
+        },
+        "sandbox_host": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The host a sandboxed harness reaches the gateway at. Without it, a\nsandboxed branch on the gateway fails its turn."
+        },
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Seeds the weighted choice of backends."
+        }
+      },
+      "description": "`[models]`."
+    },
+    "ModelBackendConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "api": {
+          "type": "string",
+          "description": "`anthropic`, `openai` or `generic`."
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Its base URL (default: the provider's public API; a generic\nbackend needs one)."
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The secret holding its key, by name: an entry of `[secrets]`, else\na variable of that name. Never the key itself."
+        },
+        "header": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A generic backend's key header (default `authorization`, as\n`Bearer <key>`)."
+        }
+      },
+      "required": [
+        "api"
+      ],
+      "description": "`[models.backends.NAME]`."
+    },
+    "ModelRouteConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "A glob over the requested model, such as `claude-*`."
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Backends chosen among by weight."
+        },
+        "weights": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "description": "One weight per backend (default: all 1)."
+        },
+        "fallbacks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tried in order after the weighted backends, on a refused\nconnection, a 5xx or a 429."
+        },
+        "requests_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "At most this many requests a minute through this route, per\nprocess."
+        }
+      },
+      "required": [
+        "model",
+        "backends"
+      ],
+      "description": "`[[models.routes]]`."
+    },
+    "ModelBudgetConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "daily_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "monthly_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "daily_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "monthly_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "alert_at": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The share of a limit at which an alert is recorded (default 0.8)."
+        }
+      },
+      "description": "`[models.budget]`."
+    },
+    "ModelPriceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "type": "number",
+          "format": "double"
+        },
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_read": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_write": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "input",
+        "output"
+      ],
+      "description": "`[models.prices.MODEL]`, dollars per million tokens."
     },
     "HarnessesConfig": {
       "type": "object",

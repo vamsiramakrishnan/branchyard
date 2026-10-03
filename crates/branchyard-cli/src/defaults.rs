@@ -271,9 +271,31 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         || task.sandbox.is_some()
         || task.substrate.is_some()
         || task.recipe.is_some();
+    // The model gateway's default access, when `--model-gateway` gave
+    // none.
+    let models = config.models.access().map_err(|e| e.to_string())?;
+    let flag_models = task.provision.as_ref().is_some_and(|p| p.models.is_some());
+    let on_gateway = flag_models || models.is_some();
     let secrets = match private_home {
         true => config.secret_sources().map_err(|e| e.to_string())?,
         false => Vec::new(),
+    };
+    // A branch on the model gateway is never given a provider's key: the
+    // gateway holds the backends' keys, and a harness with one could reach
+    // the provider around it.
+    let secrets: Vec<branchyard::SecretSource> = match on_gateway {
+        false => secrets,
+        true => secrets
+            .into_iter()
+            .filter(|s| {
+                !branchyard::models::PROVIDER_KEYS.contains(&s.name.as_str())
+                    && !config
+                        .models
+                        .backends
+                        .values()
+                        .any(|b| b.key.as_deref() == Some(s.name.as_str()))
+            })
+            .collect(),
     };
     let mcp: Vec<branchyard::McpServerSpec> = config
         .mcp
@@ -309,7 +331,8 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         || d.auth.is_some()
         || !secrets.is_empty()
         || !mcp.is_empty()
-        || (!grants.is_empty() && !flag_grants);
+        || (!grants.is_empty() && !flag_grants)
+        || (models.is_some() && !flag_models);
     if wanted {
         let spec = task.provision.get_or_insert_with(Default::default);
         if spec.model.is_none() {
@@ -336,6 +359,9 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         }
         if spec.network.is_none() {
             spec.network = network;
+        }
+        if spec.models.is_none() {
+            spec.models = models;
         }
     }
     Ok(())
@@ -574,6 +600,48 @@ connectors = ["github"]
         };
         apply_task(&config, &mut send, Scope::Continue).unwrap();
         assert!(grants(&send).is_empty());
+    }
+
+    #[test]
+    fn the_model_gateway_default_keeps_provider_keys_from_the_harness() {
+        let on = config(
+            "[secrets]\nOPENAI_API_KEY = \"MY_OPENAI\"\nanthropic = \"MY_ANTHROPIC\"\n\
+             GH_TOKEN = \"GH_TOKEN\"\n\n[models]\nallow = [\"claude-*\"]\n\n\
+             [models.backends.a]\napi = \"anthropic\"\nkey = \"anthropic\"\n",
+        );
+        let mut task = TaskArgs {
+            isolated: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&on, &mut task, Scope::NewBranch).unwrap();
+        let spec = task.provision.unwrap();
+        assert_eq!(spec.models.unwrap().allow, ["claude-*"]);
+        // Neither a provider's key nor a backend's secret reaches it.
+        let names: Vec<&str> = spec.secrets.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["GH_TOKEN"]);
+        // The flag wins.
+        let mut flagged = TaskArgs {
+            provision: Some(branchyard::Provisioning {
+                models: Some(branchyard::models::ModelAccess {
+                    allow: vec!["gpt-5".into()],
+                }),
+                ..Default::default()
+            }),
+            ..TaskArgs::default()
+        };
+        apply_task(&on, &mut flagged, Scope::NewBranch).unwrap();
+        assert_eq!(flagged.provision.unwrap().models.unwrap().allow, ["gpt-5"]);
+        // Without [models] allow, a branch stays off the gateway, keys and
+        // all.
+        let off = config("[secrets]\nOPENAI_API_KEY = \"MY_OPENAI\"\n");
+        let mut task = TaskArgs {
+            isolated: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&off, &mut task, Scope::NewBranch).unwrap();
+        let spec = task.provision.unwrap();
+        assert_eq!(spec.models, None);
+        assert_eq!(spec.secrets[0].name, "OPENAI_API_KEY");
     }
 
     #[test]

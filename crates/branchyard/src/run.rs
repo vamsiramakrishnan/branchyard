@@ -1075,6 +1075,16 @@ pub(crate) fn prepare_send_with(
                 parent_spec.as_ref().and_then(|p| p.network.as_ref()),
             )
             .map_err(|why| Error::Denied(format!("{name}: {why}")))?;
+            // And its models.
+            let asked = spec
+                .models
+                .clone()
+                .or_else(|| record.provision.as_ref().and_then(|p| p.models.clone()));
+            spec.models = branchyard_provision::models::narrow(
+                asked.as_ref(),
+                parent_spec.as_ref().and_then(|p| p.models.as_ref()),
+            )
+            .map_err(|why| Error::Denied(format!("{name}: {why}")))?;
         }
         record.provision = Some(spec);
     }
@@ -1141,6 +1151,11 @@ fn same_model(name: &str, record: &Record, mut asked: Provisioning) -> Result<Pr
     }
     if asked.effort.is_none() {
         asked.effort = had.and_then(|p| p.effort);
+    }
+    // A branch on the model gateway stays on it: its key never enters the
+    // harness's reach, and its cost stays metered.
+    if asked.models.is_none() {
+        asked.models = had.and_then(|p| p.models.clone());
     }
     Ok(asked)
 }

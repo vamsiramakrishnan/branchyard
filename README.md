@@ -168,6 +168,8 @@ Queue and observability ([observability](docs/observability.md)): `--priority N`
 
 Connectors ([connectors](docs/connectors.md)): `--connector CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]]` (repeatable) on `run`, `fan`, `send`, `fork` and `spawn`; `by gateway start [--foreground]|stop|status|rotate-key [--keep N]|jwks [--json]`; `by connect CONNECTOR [--account NAME] [--api-key-stdin] [--open]`.
 
+Model gateway ([model gateway](docs/model-gateway.md)): `--model-gateway[=MODELS]` on `run`, `fan`, `send`, `fork` and `reincarnate`, and `[models]` in `branchyard.toml` (backends, routes, budgets, prices; `allow` for new branches): the harness's base URL is a gateway for its turn and its key the turn's token; `by models [--period day|month|all]` shows routes, backends, budgets and usage, and `by show`, `by log`, `by stats` and `/metrics` the calls and their exact cost.
+
 Egress and permissions ([egress](docs/egress.md)): `--network open|none|HOST[:PORT],...` and `--network-enforce best-effort|required` on `run`, `fan`, `send`, `fork` and `reincarnate`, and `[network]` in `branchyard.toml`: the harness reaches only those hosts through an allowlisting proxy, confined to it in a network namespace on Linux where unprivileged namespaces are allowed and advisory elsewhere, which `by show` says. `--permissions read-only|edit-worktree|full` answers tool requests by a named preset, as do `[defaults] permissions` and a rig seat's `permission_policy`.
 
 Setup is two commands in the *Shell and setup* group: `by init [TOPIC] [--json] [--next | --dry-run | --apply [--force]] [--answers FILE|-] [--defaults]`, where clap refuses two steps at once, `--force` without `--apply`, `--answers` without a step and a step without a topic (all exit 2), and `by config show|path|validate [FILE]|schema [--json]`.
@@ -438,6 +440,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Repository knowledge](docs/knowledge.md): entries proposed from branches, adopted after review, given to matching harnesses.
 - [Plans and goals](docs/plans-and-goals.md): read-only plans approved before execution, and goals a judge verifies.
 - [Egress policy](docs/egress.md): the hosts a branch may reach, through an allowlisting proxy, enforced in a network namespace on Linux; and permission presets.
+- [Model gateway](docs/model-gateway.md): a harness's model calls through Branchyard on the turn's token, with the key held back, weighted backends, fallbacks, rate limits, budgets and exact cost; and one scope for connectors, models, network and delegation.
 - [Wide map](docs/map.md): one prompt over every item of a list, a branch each, answers checked against a JSON schema and collected into a table.
 - [Warm pools](docs/pools.md): ready worktrees with the prepared environment in place, taken by new branches and refilled by the server.
 - [Deploying `by serve`](docs/deploy.md): the container image, a PostgreSQL compose recipe, and a host preflight report.

@@ -50,6 +50,7 @@ pub mod auth;
 pub mod connectors;
 pub mod edit;
 pub mod instructions;
+pub mod models;
 pub mod network;
 pub mod toml;
 
@@ -120,6 +121,13 @@ pub struct Provisioning {
     /// host. A delegated child's is narrowed to its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<network::Network>,
+    /// Whether the harness calls its model provider through Branchyard's
+    /// model gateway (`--model-gateway`), and which models it may call
+    /// there; see `docs/model-gateway.md`. Unset: the harness calls its
+    /// provider itself. A delegated child of a branch on the gateway stays
+    /// on it, within its parent's models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<models::ModelAccess>,
 }
 
 impl Provisioning {

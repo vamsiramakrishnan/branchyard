@@ -699,15 +699,16 @@ pub(crate) trait PoolBackend: Send + Sync + fmt::Debug {
 
 /// [`PortBackend`], [`SandboxBackend`], the outcome store
 /// ([`crate::fleet::OutcomeBackend`]), the knowledge store
-/// ([`crate::knowledge::KnowledgeBackend`]) and pool slots
-/// ([`PoolBackend`]) together, so a [`Store`] holds one trait object for
-/// them.
+/// ([`crate::knowledge::KnowledgeBackend`]), pool slots ([`PoolBackend`])
+/// and the model usage store ([`crate::models::UsageBackend`]) together,
+/// so a [`Store`] holds one trait object for them.
 pub(crate) trait Extras:
     PortBackend
     + SandboxBackend
     + crate::fleet::OutcomeBackend
     + crate::knowledge::KnowledgeBackend
     + PoolBackend
+    + crate::models::UsageBackend
 {
 }
 
@@ -716,7 +717,8 @@ impl<
             + SandboxBackend
             + crate::fleet::OutcomeBackend
             + crate::knowledge::KnowledgeBackend
-            + PoolBackend,
+            + PoolBackend
+            + crate::models::UsageBackend,
     > Extras for T
 {
 }
@@ -876,6 +878,11 @@ impl Store {
 
     /// Warm pool slots; see [`PoolBackend`].
     pub fn pool(&self) -> &dyn PoolBackend {
+        self.extras.as_ref()
+    }
+
+    /// Calls through the model gateway; see [`crate::models::UsageBackend`].
+    pub fn usage(&self) -> &dyn crate::models::UsageBackend {
         self.extras.as_ref()
     }
 

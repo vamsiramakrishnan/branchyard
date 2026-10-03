@@ -406,6 +406,36 @@ pub fn narrow(
     }))
 }
 
+/// A policy held within a person's `ceiling`, by intersection rather than
+/// refusal: an open ceiling leaves `requested` as it is; an open or
+/// missing request becomes the ceiling; otherwise each rule of one side
+/// that the other covers is kept, so the result is never wider than
+/// either. The stricter enforcement applies.
+pub fn intersect(requested: Option<&Network>, ceiling: &Network) -> Option<Network> {
+    let Some(held) = ceiling.allow.as_ref() else {
+        return requested.cloned();
+    };
+    let Some(asked) = requested.and_then(|r| r.allow.as_ref()) else {
+        let enforce = requested.map_or(ceiling.enforce, |r| r.enforce.max(ceiling.enforce));
+        return Some(ceiling.clone().with_enforce(enforce));
+    };
+    let mut allow: Vec<HostRule> = Vec::new();
+    for rule in asked
+        .iter()
+        .filter(|r| held.iter().any(|c| c.covers(r)))
+        .chain(held.iter().filter(|c| asked.iter().any(|r| r.covers(c))))
+    {
+        if !allow.contains(rule) {
+            allow.push(rule.clone());
+        }
+    }
+    let enforce = requested.map_or(ceiling.enforce, |r| r.enforce.max(ceiling.enforce));
+    Some(Network {
+        allow: Some(allow),
+        enforce,
+    })
+}
+
 impl Serialize for Network {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -685,5 +715,30 @@ mod tests {
                 .enforce,
             Enforce::Required
         );
+    }
+
+    #[test]
+    fn a_ceiling_intersects_rather_than_refuses() {
+        let ceiling = Network::parse_flag("*.example.com,github.com:443").unwrap();
+        // Open or missing: the ceiling.
+        assert_eq!(intersect(None, &ceiling), Some(ceiling.clone()));
+        assert_eq!(
+            intersect(Some(&Network::open()), &ceiling),
+            Some(ceiling.clone())
+        );
+        // An open ceiling changes nothing.
+        let asked = Network::parse_flag("pypi.org").unwrap();
+        assert_eq!(
+            intersect(Some(&asked), &Network::open()),
+            Some(asked.clone())
+        );
+        assert_eq!(intersect(None, &Network::open()), None);
+        // Rules: what one side covers of the other.
+        let asked = Network::parse_flag("api.example.com,github.com,pypi.org").unwrap();
+        let both = intersect(Some(&asked), &ceiling).unwrap();
+        assert_eq!(both.rules(), ["api.example.com", "github.com:443"]);
+        let required = Network::none().with_enforce(Enforce::Required);
+        let both = intersect(Some(&required), &ceiling).unwrap();
+        assert_eq!(both, Network::none().with_enforce(Enforce::Required));
     }
 }

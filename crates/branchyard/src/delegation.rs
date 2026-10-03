@@ -1748,6 +1748,23 @@ impl Local {
                 })
             }
         }
+        // Its models: its seat's (or what it inherited), within the
+        // parent's; a child of a branch on the model gateway stays on it.
+        let models = branchyard_provision::models::narrow(
+            provision.as_ref().and_then(|p| p.models.as_ref()),
+            caller.provision.as_ref().and_then(|p| p.models.as_ref()),
+        )
+        .map_err(|why| Error::Denied(format!("{} may not grant that: {why}", self.branch)))?;
+        match (&mut provision, models) {
+            (Some(spec), models) => spec.models = models,
+            (None, None) => {}
+            (None, Some(models)) => {
+                provision = Some(crate::Provisioning {
+                    models: Some(models),
+                    ..Default::default()
+                })
+            }
+        }
         crate::provisioning::check(
             provision.as_ref(),
             isolated || crate::placement::sandboxed(caller.provider.as_ref()),

@@ -18,7 +18,7 @@ Branchyard's direction, set 1 October 2026: the capabilities of Claude Cowork, f
 | Browser use (Claude in Chrome) | None | A browser a harness can drive inside the sandbox, under egress policy | 6 |
 | Live artifacts: dashboards that refresh when reopened | Diffs, logs and the companion page | Results a branch publishes as a page that reads live data | 6 |
 | OpenTelemetry to a SIEM for audit | Prometheus metrics, OTLP traces, connector audit | None in kind | — |
-| One model, chosen by the app | Any harness and model, routed per task kind, with failover and a judge | Branchyard is ahead; a model gateway (Wave 5) makes cost exact and keys stay out of sandboxes | 5 |
+| One model, chosen by the app | Any harness and model, routed per task kind, with failover and a judge; on the [model gateway](model-gateway.md), model calls go through Branchyard on the turn's token, with weighted backends, fallbacks, rate limits, budgets and exact cost, and keys stay out of sandboxes | Branchyard is ahead. Built in Wave 5 and tested against mocks only; subscription logins still call their provider directly | 5 |
 
 ## What Branchyard adds that Cowork does not
 

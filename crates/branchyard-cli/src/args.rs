@@ -824,6 +824,18 @@ Examples:
   by config validate ~/.config/branchyard/config.toml
   by config schema > branchyard.config.json";
 
+const MODELS_EXAMPLES: &str = "\
+Examples:
+  by models                        # routes, backends, budgets, and this month's usage
+  by models --period day --json
+  by run --model-gateway 'fix the bug'              # this branch's model calls go through the gateway
+  by run --model-gateway='claude-sonnet-*' 'fix it' # and only to these models
+
+[models] in branchyard.toml names the backends (their API, URL and the secret
+holding each key), the routes by model, and daily and monthly budgets. A
+branch on the gateway gets its own gateway each turn, on the turn's token; the
+key never reaches the harness. See docs/model-gateway.md.";
+
 const GATEWAY_EXAMPLES: &str = "\
 Examples:
   by gateway start                 # in the background; its log in .branchyard/gateway/
@@ -1540,6 +1552,16 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: GatewayAction,
+    },
+    /// The model gateway: its routes, backends and budgets, and what its calls cost
+    #[command(display_order = 405, after_help = MODELS_EXAMPLES)]
+    Models {
+        /// Usage over this period (UTC): day, month, or all
+        #[arg(long, value_name = "PERIOD", default_value = "month", value_parser = ["day", "month", "all"])]
+        period: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Connect your account for a connector through the gateway (anvil connect)
     #[command(display_order = 404, after_help = CONNECT_EXAMPLES)]
@@ -2331,7 +2353,8 @@ pub struct Limits {
     /// Check to pass before merging, such as "cargo test"; split like a shell, run without one
     #[arg(long, value_name = "CMD", value_parser = check_argv)]
     check: Option<Argv>,
-    /// Stop once the harness's own cost estimate exceeds X dollars
+    /// Stop once the harness's own cost estimate, or on the model gateway its metered cost,
+    /// exceeds X dollars
     #[arg(long, value_name = "X", value_parser = usd, allow_negative_numbers = true)]
     budget_usd: Option<f64>,
     /// Stop after N turns
@@ -2766,6 +2789,18 @@ pub struct Provision {
     /// proxy's variables only and say so (best-effort, the default)
     #[arg(long, value_name = "MODE", value_parser = branchyard::NetworkEnforce::parse, requires = "network")]
     network_enforce: Option<branchyard::NetworkEnforce>,
+    /// Call the harness's models through Branchyard's model gateway (docs/model-gateway.md),
+    /// which holds the provider's key, meters every call and holds the budgets; =MODELS limits
+    /// it to these models, globs separated by commas, such as 'claude-sonnet-*'
+    #[arg(
+        long,
+        value_name = "MODELS",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "*",
+        value_parser = branchyard::models::ModelAccess::parse_flag
+    )]
+    model_gateway: Option<branchyard::models::ModelAccess>,
 }
 
 impl Provision {
@@ -2781,6 +2816,7 @@ impl Provision {
             network: self
                 .network
                 .map(|n| n.with_enforce(self.network_enforce.unwrap_or_default())),
+            models: self.model_gateway,
             ..branchyard::Provisioning::default()
         };
         task.provision = (!spec.is_empty() || self.instructions.is_some()).then_some(spec);
@@ -4017,6 +4053,37 @@ mod tests {
             ErrorKind::ArgumentConflict
         );
         assert!(err("run go --model a --model b").contains("cannot be used multiple times"));
+    }
+
+    #[test]
+    fn the_model_gateway_flag_parses() {
+        for line in [
+            "run go --model-gateway",
+            "fan go --harness a,b --model-gateway",
+            "fork b go --model-gateway",
+            "send b go --model-gateway",
+        ] {
+            let spec = task(line).provision.unwrap();
+            assert_eq!(
+                spec.models,
+                Some(branchyard::models::ModelAccess::all()),
+                "{line}"
+            );
+        }
+        let spec = task("run go --model-gateway='claude-*,gpt-5'")
+            .provision
+            .unwrap();
+        assert_eq!(spec.models.unwrap().allow, ["claude-*", "gpt-5"]);
+        assert_eq!(task("run go").provision, None);
+        assert!(err("run go --model-gateway='a b'").contains("' '"));
+        assert_eq!(
+            parse_str("models --period day --json").unwrap(),
+            Command::Models {
+                period: "day".into(),
+                json: true
+            }
+        );
+        assert!(err("models --period week").contains("week"));
     }
 
     #[test]

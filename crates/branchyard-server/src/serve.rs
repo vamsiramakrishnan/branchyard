@@ -493,6 +493,14 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         if let Some(gateway) = crate::connectors::gateway_for(config, name) {
             yard.use_connectors(gateway);
         }
+        // The model gateway its branches' turns may use, and each
+        // principal's ceiling (docs/model-gateway.md).
+        if let Some(gateway) = crate::models::gateway_for(config, name)
+            .map_err(|e| format!("repository {name}: {e}"))?
+        {
+            yard.use_models(gateway);
+        }
+        yard.use_ceilings(config.ceilings.clone());
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(

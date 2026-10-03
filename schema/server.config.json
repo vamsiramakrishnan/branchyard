@@ -192,6 +192,24 @@
         }
       ]
     },
+    "models": {
+      "description": "The model gateway (docs/model-gateway.md): backends, routes,\nbudgets and prices, as `[models]` in branchyard.toml. A backend's\n`key` names an entry of `secrets`, else a variable of this server.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ModelsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ceilings": {
+      "description": "Each principal's ceiling, by its name: the connectors, models and\nhosts any branch acting for it may have at most, whatever a request\nasks for (docs/model-gateway.md#one-scope).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/FileCeiling"
+      }
+    },
     "aging_seconds": {
       "description": "Seconds an operation waits queued before its effective priority\nrises by one, so low-priority work cannot starve; 0 turns aging\noff. Default 60. See docs/server.md#scheduling.",
       "type": [
@@ -545,6 +563,269 @@
         "gateway",
         "bundles"
       ]
+    },
+    "ModelsConfig": {
+      "description": "`[models]`.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Models a new branch may call through the gateway when\n`--model-gateway` gives none, as globs (`\"claude-*\"`, `\"*\"`); set,\nit puts new branches on the gateway.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "backends": {
+          "description": "Backends by name: `[models.backends.anthropic] api = \"anthropic\"`,\n`key = \"ANTHROPIC_API_KEY\"`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelBackendConfig"
+          }
+        },
+        "routes": {
+          "description": "Routes by requested model, first match wins: `[[models.routes]]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelRouteConfig"
+          }
+        },
+        "budget": {
+          "description": "Daily and monthly limits (UTC) over every branch of the repository.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelBudgetConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prices": {
+          "description": "Prices for models the catalog does not price, dollars per million\ntokens, by model id or glob.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelPriceConfig"
+          }
+        },
+        "listen": {
+          "description": "The address a turn's gateway listens on (default `127.0.0.1`);\n`0.0.0.0` for sandboxes to reach it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sandbox_host": {
+          "description": "The host a sandboxed harness reaches the gateway at. Without it, a\nsandboxed branch on the gateway fails its turn.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seed": {
+          "description": "Seeds the weighted choice of backends.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelBackendConfig": {
+      "description": "`[models.backends.NAME]`.",
+      "type": "object",
+      "properties": {
+        "api": {
+          "description": "`anthropic`, `openai` or `generic`.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Its base URL (default: the provider's public API; a generic\nbackend needs one).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "The secret holding its key, by name: an entry of `[secrets]`, else\na variable of that name. Never the key itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "header": {
+          "description": "A generic backend's key header (default `authorization`, as\n`Bearer <key>`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "api"
+      ]
+    },
+    "ModelRouteConfig": {
+      "description": "`[[models.routes]]`.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "A glob over the requested model, such as `claude-*`.",
+          "type": "string"
+        },
+        "backends": {
+          "description": "Backends chosen among by weight.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "weights": {
+          "description": "One weight per backend (default: all 1).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "fallbacks": {
+          "description": "Tried in order after the weighted backends, on a refused\nconnection, a 5xx or a 429.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requests_per_minute": {
+          "description": "At most this many requests a minute through this route, per\nprocess.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "backends"
+      ]
+    },
+    "ModelBudgetConfig": {
+      "description": "`[models.budget]`.",
+      "type": "object",
+      "properties": {
+        "daily_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "monthly_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "daily_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "monthly_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "alert_at": {
+          "description": "The share of a limit at which an alert is recorded (default 0.8).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelPriceConfig": {
+      "description": "`[models.prices.MODEL]`, dollars per million tokens.",
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "number",
+          "format": "double"
+        },
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_read": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_write": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "output"
+      ]
+    },
+    "FileCeiling": {
+      "description": "One principal's ceiling. Unset parts leave that scope as requested.",
+      "type": "object",
+      "properties": {
+        "connectors": {
+          "description": "The widest connector grant, in `--connector` form (`github:read`).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "models": {
+          "description": "The models its branches may call through the model gateway, as\nglobs (`claude-*`).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "network": {
+          "description": "The hosts its branches may reach, as `--network` rules; `[]` is\nnone.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "FileMetrics": {
       "description": "`metrics`: Prometheus metrics at `/metrics`; see docs/observability.md.",
