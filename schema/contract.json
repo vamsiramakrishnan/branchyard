@@ -2850,6 +2850,729 @@
         }
       }
     },
+    "TaskList": {
+      "type": "object",
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskView"
+          }
+        }
+      },
+      "required": [
+        "tasks"
+      ],
+      "description": "`GET /v1/repos/{repo}/task-records`: the repository's tasks and their\nattempts (docs/task-repos.md). `GET .../task-records/{task}`\nreturns one [`branchyard::tasks::TaskView`].",
+      "title": "TaskList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "TaskView": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "A ULID: sortable by creation, unique without coordination."
+            },
+            "title": {
+              "type": "string",
+              "description": "The first line of what was asked, shortened."
+            },
+            "asked": {
+              "type": "string",
+              "description": "What was asked, in full."
+            },
+            "by": {
+              "type": "string",
+              "description": "Who asked: the gateway actor, else git's `user.name <user.email>`,\nelse the login name."
+            },
+            "policy": {
+              "type": "string",
+              "description": "The policy and grants the first attempt ran under, in one line."
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "files": {
+              "$ref": "#/$defs/TaskFiles"
+            },
+            "origin": {
+              "type": "string",
+              "description": "What started it: `run`, `fan`, `map`, `fork` or `task`."
+            },
+            "attempts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AttemptView"
+              }
+            },
+            "repository": {
+              "type": "string",
+              "description": "The git directory holding the task's history."
+            },
+            "accepted": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For a task with a repository of its own: what `main` holds, the\naccepted state."
+            },
+            "folder_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For a folder: the commit the folder is known to be at."
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "asked",
+            "by",
+            "policy",
+            "created_ms",
+            "files",
+            "origin",
+            "attempts",
+            "repository"
+          ],
+          "description": "A task with its attempts and where its repository is."
+        },
+        "TaskFiles": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "repository"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A repository you already have: each attempt is a branch of it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "folder": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "folder"
+                }
+              },
+              "required": [
+                "kind",
+                "folder"
+              ],
+              "description": "A folder you granted, with a git directory of its own outside it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "no_files"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "No files: the conversation and its results are the repository."
+            }
+          ],
+          "description": "What a task's files are."
+        },
+        "AttemptView": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BranchStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`None` once the branch has been removed."
+            },
+            "harness": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "checkpoint": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint the branch is at."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "worktree": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forked_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The attempt this one was forked from, and at which checkpoint."
+            },
+            "record": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The record commit of the checkpoint it is at: its files and\n`.task/` as of then."
+            },
+            "conversation": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The conversation files that record holds, in turn order."
+            }
+          },
+          "required": [
+            "name",
+            "turns",
+            "conversation"
+          ],
+          "description": "One attempt of a task, as [`list`] and [`view`] show it."
+        },
+        "BranchStatus": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "ready"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "no_changes"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed without changing any file."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "interrupted"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "budget_exceeded"
+                }
+              },
+              "required": [
+                "state",
+                "limit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "merged"
+                }
+              },
+              "required": [
+                "state",
+                "target",
+                "commit"
+              ]
+            }
+          ],
+          "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        }
+      }
+    },
+    "TaskView": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "A ULID: sortable by creation, unique without coordination."
+        },
+        "title": {
+          "type": "string",
+          "description": "The first line of what was asked, shortened."
+        },
+        "asked": {
+          "type": "string",
+          "description": "What was asked, in full."
+        },
+        "by": {
+          "type": "string",
+          "description": "Who asked: the gateway actor, else git's `user.name <user.email>`,\nelse the login name."
+        },
+        "policy": {
+          "type": "string",
+          "description": "The policy and grants the first attempt ran under, in one line."
+        },
+        "created_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "files": {
+          "$ref": "#/$defs/TaskFiles"
+        },
+        "origin": {
+          "type": "string",
+          "description": "What started it: `run`, `fan`, `map`, `fork` or `task`."
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AttemptView"
+          }
+        },
+        "repository": {
+          "type": "string",
+          "description": "The git directory holding the task's history."
+        },
+        "accepted": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a task with a repository of its own: what `main` holds, the\naccepted state."
+        },
+        "folder_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a folder: the commit the folder is known to be at."
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "asked",
+        "by",
+        "policy",
+        "created_ms",
+        "files",
+        "origin",
+        "attempts",
+        "repository"
+      ],
+      "description": "A task with its attempts and where its repository is.",
+      "title": "TaskView",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "TaskFiles": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "repository"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A repository you already have: each attempt is a branch of it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "folder": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "folder"
+                }
+              },
+              "required": [
+                "kind",
+                "folder"
+              ],
+              "description": "A folder you granted, with a git directory of its own outside it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "no_files"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "No files: the conversation and its results are the repository."
+            }
+          ],
+          "description": "What a task's files are."
+        },
+        "AttemptView": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BranchStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`None` once the branch has been removed."
+            },
+            "harness": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "checkpoint": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint the branch is at."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "worktree": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forked_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The attempt this one was forked from, and at which checkpoint."
+            },
+            "record": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The record commit of the checkpoint it is at: its files and\n`.task/` as of then."
+            },
+            "conversation": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The conversation files that record holds, in turn order."
+            }
+          },
+          "required": [
+            "name",
+            "turns",
+            "conversation"
+          ],
+          "description": "One attempt of a task, as [`list`] and [`view`] show it."
+        },
+        "BranchStatus": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "ready"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "no_changes"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed without changing any file."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "interrupted"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "budget_exceeded"
+                }
+              },
+              "required": [
+                "state",
+                "limit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "merged"
+                }
+              },
+              "required": [
+                "state",
+                "target",
+                "commit"
+              ]
+            }
+          ],
+          "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        }
+      }
+    },
     "RegisterServiceRequest": {
       "type": "object",
       "properties": {

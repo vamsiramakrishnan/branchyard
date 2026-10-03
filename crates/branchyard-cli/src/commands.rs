@@ -131,6 +131,12 @@ fn open_yard() -> Result<Yard, branchyard::Error> {
         Some(root) => Yard::open(root),
         None => Yard::open("."),
     }?;
+    configure(yard)
+}
+
+/// `yard` with the gateways and knowledge settings the configuration
+/// gives it, as [`open`] returns it.
+pub(crate) fn configure(yard: Yard) -> Result<Yard, branchyard::Error> {
     // `[connectors]`: the gateway its branches' turns are given.
     crate::gateway_cmd::configure(&yard)
         .map_err(|e| branchyard::Error::Unsupported(format!("[connectors]: {e}")))?;
@@ -267,6 +273,7 @@ impl Live {
             trace_parent: None,
             plan: task.plan,
             goal: crate::plan_cmd::goal(task),
+            join_task: None,
         })
     }
 
@@ -350,7 +357,20 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome
         let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
         return remote::run(env, remote, &prompt, &task);
     }
-    let yard = open()?;
+    run_in(env, &open()?, prompt, task, None)
+}
+
+/// `by run`'s local half, in `yard`. `join` makes the branch another
+/// attempt of that task, from its `main` (a task with a repository of its
+/// own; docs/task-repos.md).
+pub(crate) fn run_in(
+    env: &Env,
+    yard: &Yard,
+    prompt: &str,
+    task: &TaskArgs,
+    join: Option<&str>,
+) -> Outcome {
+    let yard = yard.clone();
     if !crate::fleet_cmd::is_routed(task) {
         // A login near its 5-hour or weekly limit (docs/usage.md).
         let harness = task.harness.clone().unwrap_or_else(|| "claude-code".into());
@@ -360,10 +380,14 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs) -> Outcome
     let task = &task;
     let workspace = workspace(env, &yard)?;
     let live = Live::start(env, task, task.delegate.is_some(), None);
-    let options = TaskOptions {
+    let mut options = TaskOptions {
         workspace,
         ..live.options(task)?
     };
+    if let Some(id) = join {
+        options.join_task = Some(id.to_owned());
+        options.base = Some("main".into());
+    }
     // `[fleet.<kind>] plan` and `goal_judge` (docs/plans-and-goals.md).
     let options = crate::plan_cmd::with_fleet(options, task, &prompt);
     // Routed (docs/fleet.md): the router picks the harness and fails over;
@@ -840,8 +864,21 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
     };
     let checkpoints = crate::attempts::checkpoints(target, &info)?;
     let (readiness, line) = crate::pr::show_readiness(&info, &events, env.style());
+    // The task it is an attempt of (docs/task-repos.md); a server too old
+    // to say has none.
+    let task = match target {
+        Target::Local => open()
+            .ok()
+            .and_then(|yard| branchyard::tasks::view(&yard, &info.name).ok()),
+        Target::Remote(remote) => remote.repo.task(&info.name).ok(),
+    }
+    .filter(|view| view.attempts.iter().any(|a| a.name == info.name))
+    .map(|view| crate::task_cmd::show_line(&view, &info.name));
     if as_json {
         let mut value = json::branch(&info);
+        if let Some((_, task)) = &task {
+            value["task"] = task.clone();
+        }
         value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
         value["merge_readiness"] = readiness;
         // Only when something listens, so local and remote `show --json`
@@ -865,6 +902,9 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         .map(|line| ("merge readiness", line))
         .into_iter()
         .collect();
+    if let Some((text, _)) = task {
+        extra.push(("task", text));
+    }
     if let Some((_, text)) = egress_summary(&events) {
         extra.push(("egress", text));
     }

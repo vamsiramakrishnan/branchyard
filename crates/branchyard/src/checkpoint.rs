@@ -223,6 +223,13 @@ pub(crate) fn record_turn(
             for activity in said {
                 recorder.record(activity)?;
             }
+            // The task's record beside it: the files and the conversation
+            // as of this checkpoint (`crate::tasks`).
+            if let Err(error) = crate::tasks::record_checkpoint(yard, record, &checkpoint) {
+                recorder.record(Activity::Warning(format!(
+                    "the task's record of turn {turn} was not written: {error}"
+                )))?;
+            }
             store.backend().finish_step(
                 fence,
                 fence.turn,
@@ -247,8 +254,9 @@ pub(crate) fn record_turn(
     Ok(())
 }
 
-/// Delete every checkpoint ref of `name`, of any incarnation. Refs of a
-/// branch whose name continues `name/...` are not touched.
+/// Delete every checkpoint ref of `name`, and the task record beside each,
+/// of any incarnation. Refs of a branch whose name continues `name/...` are
+/// not touched.
 pub(crate) fn remove_refs(root: &Path, name: &str) -> Result<(), Error> {
     let prefix = format!("{ROOT}{name}/");
     for (full, _) in git::refs(root, &prefix)? {
@@ -257,6 +265,7 @@ pub(crate) fn remove_refs(root: &Path, name: &str) -> Result<(), Error> {
             incarnation.parse::<i64>().is_ok()
                 && leaf
                     .strip_prefix("turn-")
+                    .or_else(|| leaf.strip_prefix("record-"))
                     .is_some_and(|n| n.parse::<u32>().is_ok())
         });
         if ours {
@@ -507,7 +516,11 @@ pub(crate) fn rewind(yard: &Yard, name: &str, to: u32) -> Result<Rewound, Error>
             record.info.git_branch
         )));
     }
-    let dirty = git::status(&worktree)?;
+    let mut dirty = git::status(&worktree)?;
+    // Large files in a task's own repository, which `git status` cannot see.
+    for path in crate::tasks::before_reset(yard, &worktree)? {
+        dirty.push_str(&format!(" M {path}\n"));
+    }
     if !dirty.trim().is_empty() {
         return Err(Error::Denied(format!(
             "{name}'s worktree has changes that are in no checkpoint, which a rewind would \
@@ -553,7 +566,12 @@ fn finish(
 ) -> Result<Rewound, Error> {
     let store = yard.store();
     let fence = lease.fence().clone();
-    reset(&record.info.worktree, &intent.commit, recovered.is_some())?;
+    reset(
+        yard,
+        &record.info.worktree,
+        &intent.commit,
+        recovered.is_some(),
+    )?;
     fault("rewind-after-reset");
     let candidate = match git::same_tree(&yard.root, &record.info.base, &intent.commit)? {
         true => None,
@@ -627,7 +645,7 @@ fn finish(
 /// Reset the worktree, its index and its branch to `commit`, and remove
 /// untracked files (ignored ones stay). Recovering, a lock a killed git left
 /// is removed first: no other git runs there while the lease is held.
-fn reset(worktree: &Path, commit: &str, recovering: bool) -> Result<(), Error> {
+fn reset(yard: &Yard, worktree: &Path, commit: &str, recovering: bool) -> Result<(), Error> {
     if recovering {
         if let Ok(lock) = git::run(
             worktree,
@@ -641,8 +659,13 @@ fn reset(worktree: &Path, commit: &str, recovering: bool) -> Result<(), Error> {
             let _ = std::fs::remove_file(lock.trim_end_matches('\n'));
         }
     }
+    // In a task's own repository, large files are pointers in the index,
+    // marked so git leaves them alone; the reset may write them now, and
+    // they are restored from the chunk store after it.
+    crate::tasks::release(yard, worktree)?;
     git::run(worktree, &["reset", "--hard", "--quiet", commit])?;
     git::run(worktree, &["clean", "-f", "-d", "--quiet"])?;
+    crate::tasks::after_checkout(yard, worktree)?;
     Ok(())
 }
 

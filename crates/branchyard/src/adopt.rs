@@ -87,6 +87,7 @@ pub(crate) fn adopt(yard: &Yard, spec: AdoptSpec) -> Result<Branch, Error> {
             workspace: None,
             seed: None,
             actor: None,
+            task: None,
         },
     )
     .inspect_err(|_| store.release(&name))?;

@@ -153,7 +153,19 @@ pub fn rewind(
     as_json: bool,
 ) -> Outcome {
     local_only(target, "by rewind")?;
-    let yard = open()?;
+    rewind_in(env, &open()?, branch, to, yes, as_json)
+}
+
+/// `by rewind` in `yard`, as `by task rewind` runs it in a task's own
+/// repository.
+pub(crate) fn rewind_in(
+    env: &Env,
+    yard: &branchyard::Yard,
+    branch: &str,
+    to: u32,
+    yes: bool,
+    as_json: bool,
+) -> Outcome {
     let handle = yard.branch(branch)?;
     if !yes {
         let list = handle.checkpoints()?;

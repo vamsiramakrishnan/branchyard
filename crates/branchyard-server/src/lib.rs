@@ -83,6 +83,7 @@ mod services_routes;
 pub mod storage_routes;
 pub mod store;
 pub mod sync;
+mod task_routes;
 pub mod telemetry;
 pub mod triggers;
 pub mod webhook;

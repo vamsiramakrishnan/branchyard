@@ -665,6 +665,23 @@ const FORK_EXAMPLES: &str = "\
 Examples:
   by fork fix-the-flaky-test \"try a lock instead\" -n with-lock";
 
+const TASK_EXAMPLES: &str = "\
+Every run is a task: `by run` starts one with one attempt, `by fan` one with an
+attempt per harness, `by map` one whose items are its attempts. Beside each
+checkpoint, the task's record is committed: the files with .task/ (what was
+asked, each turn's conversation), never merged or diffed. A folder task keeps its git
+directory in ~/.branchyard/tasks/<id>/ and writes the folder only on accept,
+refusing to overwrite a file changed outside the task.
+
+Examples:
+  by task new --folder ~/Documents/board \"Update the Q3 deck from the new numbers\"
+  by task new --no-files \"Draft a reply to the vendor\"
+  by task ls
+  by task show 01JA2B3C
+  by task rewind 01JA2B3C --to 1 --yes
+  by task fork 01JA2B3C --at 1 \"Try a shorter version\"
+  by task accept 01JA2B3C --attempt update-the-q3-deck-2";
+
 const REWIND_EXAMPLES: &str = "\
 Each turn ends with a checkpoint, refs/branchyard/<branch>/<incarnation>/turn-<N>;
 `by show` lists them. Later checkpoints are kept until the branch is removed, so
@@ -1090,6 +1107,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Tasks: what was asked and its attempts, in this repository, a folder you grant, or none
+    #[command(display_order = 107, subcommand_required = true, after_help = TASK_EXAMPLES)]
+    Task(Box<TaskCommand>),
     /// Apply a branch's changes to this checkout to try them; --off restores it
     #[command(display_order = 108, after_help = TRY_EXAMPLES)]
     Try {
@@ -2344,6 +2364,11 @@ impl Command {
             Command::Send { task, .. } => task,
             Command::Review { task, .. } => task,
             Command::Spawn { spawn, .. } => &spawn.task,
+            Command::Task(task) => match &task.action {
+                TaskAction::New(new) => &new.task,
+                TaskAction::Fork(fork) => &fork.flags,
+                _ => return None,
+            },
             _ => return None,
         };
         task.recipe.as_ref().map(|r| r.name.as_str())
@@ -3181,6 +3206,135 @@ impl Flags for FanFlags {
         }
         .check()
     }
+}
+
+/// `by task`, as its own struct and boxed: [`Command`]'s parser builds every
+/// command's arguments in one function, whose debug-build stack frame is
+/// near a test thread's limit, so this one adds only a call.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskCommand {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    #[command(subcommand)]
+    pub action: TaskAction,
+}
+
+/// `by task`'s actions (docs/task-repos.md), each with its own flags.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum TaskAction {
+    /// Start a task and run its first attempt: in this repository, in a folder you grant
+    /// (--folder), or with no files (--no-files)
+    New(Box<TaskNew>),
+    /// List tasks: this repository's, then those with a repository of their own
+    Ls,
+    /// Show a task: what was asked, its attempts and their conversations
+    Show(TaskShow),
+    /// Open an attempt's worktree in your editor (or print its path)
+    Open(TaskOpen),
+    /// Reset an attempt, its files and its conversation, to one of its checkpoints
+    Rewind(TaskRewind),
+    /// Start another attempt from an attempt's candidate, or from its checkpoint N
+    Fork(Box<TaskFork>),
+    /// Accept an attempt: merge it here, or apply it to the task's folder
+    Accept(TaskAccept),
+    /// Remove a task and its attempts (never the folder you granted)
+    Rm(TaskRm),
+}
+
+/// `by task new`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskNew {
+    /// What to do; quote it
+    pub prompt: String,
+    /// A folder to work on (not a git repository): attempts run in their own worktrees and
+    /// the folder changes only when you accept one
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath, conflicts_with = "no_files")]
+    pub folder: Option<std::path::PathBuf>,
+    /// A task with no files: its conversation and results are its repository
+    #[arg(long)]
+    pub no_files: bool,
+    /// With --folder or --no-files: files of at least this many bytes are stored as chunks
+    /// (default 1048576)
+    #[arg(long, value_name = "BYTES")]
+    pub large_threshold: Option<u64>,
+    #[command(flatten)]
+    pub task: Checked<RunFlags>,
+}
+
+/// `by task show`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskShow {
+    /// The task's ID (or a prefix of at least 4 characters) or one of its attempts
+    pub task: String,
+}
+
+/// `by task open`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskOpen {
+    pub task: String,
+    /// The attempt (default: the only one)
+    #[arg(long, value_name = "BRANCH")]
+    pub attempt: Option<String>,
+    /// The editor: code, cursor, zed, nvim, ... or a command line (default: $VISUAL, then
+    /// $EDITOR)
+    #[arg(long, value_name = "EDITOR", conflicts_with = "print")]
+    pub editor: Option<String>,
+    /// Print the worktree's path instead of opening it
+    #[arg(long)]
+    pub print: bool,
+}
+
+/// `by task rewind`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskRewind {
+    pub task: String,
+    /// The attempt (default: the only one)
+    #[arg(long, value_name = "BRANCH")]
+    pub attempt: Option<String>,
+    /// The checkpoint: a turn number, or 0 for the attempt's base
+    #[arg(long, value_name = "N")]
+    pub to: u32,
+    /// Do not ask for confirmation
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+/// `by task fork`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskFork {
+    pub task: String,
+    /// The new attempt's prompt; quote it
+    pub prompt: String,
+    /// The attempt to fork (default: the only one)
+    #[arg(long, value_name = "BRANCH")]
+    pub attempt: Option<String>,
+    /// Fork from checkpoint N (0 is its base) instead of its candidate
+    #[arg(long, value_name = "N")]
+    pub at: Option<u32>,
+    #[command(flatten)]
+    pub flags: Checked<ForkFlags>,
+}
+
+/// `by task accept`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskAccept {
+    pub task: String,
+    /// The attempt (default: the only one)
+    #[arg(long, value_name = "BRANCH")]
+    pub attempt: Option<String>,
+    /// In a repository: the branch to merge into (default: the current branch)
+    #[arg(long, value_name = "TARGET")]
+    pub into: Option<String>,
+}
+
+/// `by task rm`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskRm {
+    pub task: String,
+    /// Do not ask for confirmation
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `by map`'s actions besides running one.

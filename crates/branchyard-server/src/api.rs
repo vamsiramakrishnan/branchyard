@@ -774,6 +774,8 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::knowledge_routes::router())
         // Wide maps: `map_routes`.
         .merge(crate::map_routes::router())
+        // Tasks and their attempts: `task_routes`.
+        .merge(crate::task_routes::router())
         // The fleet's service registry: `services_routes`.
         .merge(crate::services_routes::router());
     let log = app.config.log_requests;

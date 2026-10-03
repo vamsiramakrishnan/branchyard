@@ -689,6 +689,9 @@ struct Extras {
     /// The maps running or unfinished, one line (docs/map.md).
     maps: Option<String>,
     maps_at: Option<std::time::Instant>,
+    /// The task of each branch, one line (docs/task-repos.md).
+    tasks: std::collections::BTreeMap<String, String>,
+    tasks_at: Option<std::time::Instant>,
 }
 
 /// How often the usage meters are read again.
@@ -697,14 +700,24 @@ const USAGE_EVERY: Duration = Duration::from_secs(60);
 const PORTS_EVERY: Duration = Duration::from_secs(5);
 /// How often the maps' progress is read again.
 const MAPS_EVERY: Duration = Duration::from_secs(2);
+/// How often the tasks are read again.
+const TASKS_EVERY: Duration = Duration::from_secs(2);
 
 impl Extras {
     fn refresh(&mut self, source: &Source) {
-        let Source::Local { yard, .. } = source else {
-            return;
-        };
         let stale = |at: Option<std::time::Instant>, every: Duration| {
             at.is_none_or(|at| at.elapsed() >= every)
+        };
+        if stale(self.tasks_at, TASKS_EVERY) {
+            let views = match source {
+                Source::Local { yard, .. } => branchyard::tasks::list(yard).ok(),
+                Source::Remote { repo, .. } => repo.tasks().ok(),
+            };
+            self.tasks = crate::task_cmd::watch_lines(&views.unwrap_or_default());
+            self.tasks_at = Some(std::time::Instant::now());
+        }
+        let Source::Local { yard, .. } = source else {
+            return;
         };
         if stale(self.usage_at, USAGE_EVERY) {
             let cwd = yard.root().to_path_buf();
@@ -933,6 +946,7 @@ impl tui::Effects for Cockpit {
             usage: self.extras.usage.clone(),
             maps: self.extras.maps.clone(),
             ports: self.extras.ports.clone(),
+            tasks: self.extras.tasks.clone(),
         })
     }
 

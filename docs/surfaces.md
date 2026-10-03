@@ -650,3 +650,27 @@ See [registry](registry.md).
 | server store | no services | `services` (SQLite), `by_services` and `by_service_seq` (PostgreSQL) |
 | Rust client | none | `services`, `register_service`, `deregister_service`, `reclaim_services`, `well_known`; `RegisterServiceRequest`, `ServiceList`, `ServiceSummary`, `WellKnown` in `schema/contract.json` |
 | SDK | none | `branchyard::services`: `Service`, `Capability`, `Endpoint`, `ServiceOwner`, `Health`, `ServiceState`, `Reclaim`, `ProcessGroup`, `Query`, `Clock`, `ServiceStore`, `Rows`, `LocalRegistry`, `Registration`, `resolve`, `candidates`, `expire`, `reap`, `reclaim_process`, `watch`, `Outcome`, `Reaped`, `conformance`; `Yard::services`, `register_service`, `resolve_service`, `reclaim_services`, `has_services` |
+
+## Added with task repositories
+
+See [task repositories](task-repos.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `by task new "PROMPT" [--folder PATH \| --no-files] [--large-threshold BYTES] [run flags]` | none | in a repository, `by run` as a task; with `--folder`, a task whose repository is `$BRANCHYARD_HOME/tasks/<id>/` and whose folder changes only on accept; with `--no-files`, a task whose results are its repository; then its first attempt |
+| `by task ls [--json]`, `by task show TASK [--json]` | none | this repository's tasks, then those with a repository of their own: ID, files, attempts by status, title; one task with what was asked, by whom, its policy, its repository, and each attempt's status, turns, checkpoint and conversation. `TASK` is an ID, a prefix of at least 4 characters, or an attempt |
+| `by task open TASK [--attempt A] [--editor E \| --print]` | none | an attempt's worktree, as `by open` |
+| `by task rewind TASK [--attempt A] --to N [--yes] [--json]` | none | `by rewind` of the attempt, its files and conversation together |
+| `by task fork TASK "PROMPT" [--attempt A] [--at N] [fork flags]` | none | another attempt, from the attempt's candidate or its checkpoint N |
+| `by task accept TASK [--attempt A] [--into TARGET] [--json]` | none | in a repository, `by merge`; in a task's own repository, `main` becomes the attempt's record and the folder gets exactly its change, refused (nothing written) where the folder changed outside the task |
+| `by task rm TASK [--yes] [--json]` | none | the task and its attempts; never the folder |
+| `by show` | no task | a `task` line (`<id> (attempt k of n): <title>`); `--json` adds `task` (`id`, `title`, `attempt`, `attempts`) |
+| `by watch` | no task | the detail pane's `task` line |
+| `by run`, `by fan`, `by map`, `by fork`, `by reincarnate` | branches only | each top-level branch is a task's attempt (a fan's and a map's share one; a fork joins its parent's) |
+| `refs/branchyard/<branch>/<incarnation>/record-<N>` | none | the task's record of checkpoint N: its files and `.task/` (`task.toml`, `conversation/<turn>.jsonl`, `effects.jsonl`); deleted with the branch |
+| `.branchyard/tasks/`, `.branchyard/task-attempts/` | none | the yard's tasks and which task each attempt belongs to |
+| `$BRANCHYARD_HOME` (default `~/.branchyard`) | none | `tasks/<id>/{git,work,accept}` for tasks with a repository of their own, `chunks/<aa>/<blake3>` for large files |
+| `branchyard.task`, `branchyard.files`, `branchyard.folder`, `branchyard.home`, `branchyard.largeFileThreshold`, `branchyard.chunks` | none | a task repository's git config |
+| `GET /v1/repos/{repo}/task-records`, `GET /v1/repos/{repo}/task-records/{task}` | none | `TaskList` and `TaskView` (`read` scope); `by --remote task ls` and `show` |
+| Rust client | none | `Repo::tasks`, `Repo::task`; `TaskList` and `TaskView` in `schema/contract.json` |
+| SDK | none | `branchyard::tasks`: `Task`, `TaskFiles`, `TaskView`, `AttemptView`, `NewTask`, `Accepted`, `create`, `list`, `view`, `find`, `task_of`, `pick_attempt`, `accept`, `accept_owned`, `remove`, `remove_home`, `home_tasks`, `open_home`, `home`, `new_id`, `effects_snapshot`, `TaskRepo`, `reachable_chunks`, `ChunkStore`, `Pointer`, `large`; `TaskOptions::join_task`; `Policy::summary` |

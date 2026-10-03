@@ -1385,6 +1385,13 @@ pub(crate) fn conclude(
     let snapshotted = match recorded {
         Some(snapshotted) => snapshotted,
         None => {
+            // In a task's own repository, large files become pointers;
+            // see `crate::tasks::large`.
+            if let Err(error) = crate::tasks::before_snapshot(yard, info) {
+                recorder.record(Activity::Warning(format!(
+                    "large files were not stored as chunks: {error}"
+                )))?;
+            }
             let snapshot = {
                 let _lock = git::lock();
                 let branch = names::validate(&info.name)?;

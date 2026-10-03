@@ -4,7 +4,7 @@ Branchyard's direction, set 1 October 2026: the capabilities of Claude Cowork, f
 
 | Cowork | Branchyard today | Gap | Wave |
 |---|---|---|---|
-| Works in folders the user grants, on any files | Works in git repositories: worktrees, diffs and merges | Every task becomes a git repository, a granted folder's git directory kept outside it, synced to cloud storage ([task repositories](task-repos.md)) | 6 |
+| Works in folders the user grants, on any files | Every task is a git repository: in a repository you have, or `by task new --folder PATH` with the folder's git directory kept outside it, attempts in their own worktrees and the folder written only on accept (refused over your own changes), large files chunked, or `--no-files`; the conversation committed beside each checkpoint ([task repositories](task-repos.md)) | Sync to cloud storage | 6 |
 | Code runs in an isolated VM | Local process, Microsandbox microVMs, Substrate actors, recipe machines | None in kind; egress restriction arrives with Wave 4 | 4 |
 | Projects: files, instructions and context kept across sessions; `CLAUDE.md` at global and folder level | Repositories, `[workspace]` setup, repository knowledge adopted after review | Instructions per folder and per person, not only per repository | 6 |
 | Sub-agents work in parallel and the results are combined | `by fan`, delegation, graphs; `by map` in Wave 4 | None once `by map` lands | 4 |

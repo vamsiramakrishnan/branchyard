@@ -316,6 +316,15 @@ pub struct MapList {
     pub maps: Vec<MapSummary>,
 }
 
+/// `GET /v1/repos/{repo}/task-records`: the repository's tasks and their
+/// attempts (docs/task-repos.md). `GET .../task-records/{task}`
+/// returns one [`branchyard::tasks::TaskView`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TaskList {
+    pub tasks: Vec<branchyard::tasks::TaskView>,
+}
+
 /// `POST /v1/repos/{repo}/branches/{branch}/send`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
