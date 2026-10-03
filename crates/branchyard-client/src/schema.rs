@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 
 use crate::api;
 use crate::companion;
+use crate::effects_api;
 use crate::knowledge_api;
 use crate::storage_api;
 use crate::triggers;
@@ -62,6 +63,17 @@ pub fn contract() -> Value {
     entry::<knowledge_api::PlanApproveRequest>("PlanApproveRequest", &mut types);
     entry::<knowledge_api::PlanRejectRequest>("PlanRejectRequest", &mut types);
     entry::<branchyard::KnowledgeEntry>("KnowledgeEntry", &mut types);
+    entry::<effects_api::ApprovalList>("ApprovalList", &mut types);
+    entry::<effects_api::ApprovalAnswerRequest>("ApprovalAnswerRequest", &mut types);
+    entry::<effects_api::EffectList>("EffectList", &mut types);
+    entry::<effects_api::EffectDetail>("EffectDetail", &mut types);
+    entry::<effects_api::EffectActionRequest>("EffectActionRequest", &mut types);
+    entry::<effects_api::UndoRequest>("UndoRequest", &mut types);
+    entry::<effects_api::UndoReport>("UndoReport", &mut types);
+    entry::<branchyard::effects::ApprovalAsk>("ApprovalAsk", &mut types);
+    entry::<branchyard::effects::EffectEntry>("EffectEntry", &mut types);
+    entry::<branchyard::effects::undo::UndoPlan>("UndoPlan", &mut types);
+    entry::<branchyard::effects::reconcile::Reconciled>("Reconciled", &mut types);
     entry::<branchyard::Distilled>("Distilled", &mut types);
     entry::<branchyard::PlanInfo>("PlanInfo", &mut types);
     entry::<api::SendRequest>("SendRequest", &mut types);

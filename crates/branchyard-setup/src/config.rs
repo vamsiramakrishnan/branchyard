@@ -128,6 +128,51 @@ pub struct ProjectConfig {
     /// file, since it runs software on your machine.
     #[serde(default, skip_serializing_if = "HarnessesConfig::is_empty")]
     pub harnesses: HarnessesConfig,
+    /// Your approvals for tools and connector operations
+    /// (docs/effects.md#approvals): allow, ask, block or stage, by pattern
+    /// and by effect class. Within a seat's, and never below an
+    /// administrator's on a server.
+    #[serde(default, skip_serializing_if = "ApprovalsConfig::is_empty")]
+    pub approvals: ApprovalsConfig,
+}
+
+/// `[approvals]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalsConfig {
+    /// Pattern to `allow`, `ask`, `block` or `stage`: a tool name glob
+    /// (`"Bash"`, `"mcp__*"`) or `connector:operation`
+    /// (`"github:issues.*"`, `"gmail:*"`). The most specific pattern wins.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rules: BTreeMap<String, String>,
+    /// Effect class (`reversible`, `compensable`, `irreversible`) to a
+    /// decision, for operations no rule names. Defaults: reversible
+    /// `allow`, compensable `ask`, irreversible `stage`; a deletion always
+    /// asks.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub classes: BTreeMap<String, String>,
+}
+
+impl ApprovalsConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == ApprovalsConfig::default()
+    }
+
+    /// The policy, checked; `None` when nothing is set.
+    pub fn policy(
+        &self,
+    ) -> Result<Option<branchyard_provision::approvals::ApprovalPolicy>, ConfigError> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        branchyard_provision::approvals::ApprovalPolicy::from_strings(
+            self.rules.clone(),
+            self.classes.clone(),
+            None,
+        )
+        .map(Some)
+        .map_err(|e| ConfigError(format!("approvals: {e}")))
+    }
 }
 
 /// `[harnesses]`.
@@ -650,6 +695,19 @@ pub struct Connectors {
     /// sandboxed branches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    /// Whether each turn calls the gateway through the effect ledger's
+    /// proxy, which decides approvals and writes every effectful call to
+    /// the ledger before it is made (docs/effects.md). Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_proxy: Option<bool>,
+    /// The address each turn's ledger proxy binds (default `127.0.0.1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_listen: Option<String>,
+    /// How a sandboxed harness reaches its ledger proxy: a host address
+    /// its guest routes to. Without it, a sandboxed turn calls the gateway
+    /// directly and its effects reach the ledger only from the audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_sandbox_host: Option<String>,
 }
 
 impl Connectors {
@@ -1784,6 +1842,15 @@ impl ProjectConfig {
             split_words(anvil).map_err(|e| ConfigError(format!("connectors.anvil: {e}")))?;
         }
         self.connectors.grant_entries()?;
+        if let Some(listen) = &self.connectors.effects_listen {
+            if listen.parse::<std::net::IpAddr>().is_err() {
+                return fail(
+                    "connectors.effects_listen",
+                    format!("{listen:?} is not an IP address"),
+                );
+            }
+        }
+        self.approvals.policy()?;
         self.network.policy()?;
         self.models.check()?;
         if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {

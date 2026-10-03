@@ -51,6 +51,8 @@ pub enum ActionId {
     ApprovePlan,
     Replan,
     RejectPlan,
+    AllowApproval,
+    DenyApproval,
 }
 
 /// What an action asks before it runs.
@@ -546,6 +548,32 @@ pub const ACTIONS: &[Action] = &[
         when: awaiting_plan,
         remote: Remote::Yes,
     },
+    Action {
+        key: 'A',
+        id: ActionId::AllowApproval,
+        name: "allow",
+        help: "allow the oldest approval waiting on the branch (by approvals allow --branch)",
+        ask: Ask::Confirm {
+            question: "Allow the oldest approval waiting on {branch}? (l shows what it asks)",
+        },
+        run: Run::Wait(&["approvals", "allow", "--branch", "{branch}"]),
+        when: always,
+        remote: Remote::Yes,
+    },
+    Action {
+        key: 'D',
+        id: ActionId::DenyApproval,
+        name: "deny",
+        help: "deny the oldest approval waiting on the branch (by approvals deny --branch)",
+        ask: Ask::Text {
+            title: "deny {branch}'s waiting approval because",
+        },
+        run: Run::Wait(&[
+            "approvals", "deny", "--branch", "{branch}", "--reason", "{text}",
+        ]),
+        when: always,
+        remote: Remote::Yes,
+    },
 ];
 
 /// The action bound to `key`.
@@ -770,6 +798,7 @@ mod tests {
                         branch,
                         into: None,
                         rm: false,
+                        promote_effects: false,
                     },
                 ) => {
                     assert_eq!(branch, "impl")
@@ -885,6 +914,33 @@ mod tests {
                     },
                 ) => {
                     assert_eq!(branch, "impl");
+                    assert_eq!(reason.as_deref(), Some(text));
+                }
+                (
+                    ActionId::AllowApproval,
+                    Command::Approvals(crate::args::ApprovalsArgs {
+                        action:
+                            Some(crate::args::ApprovalsAction::Allow {
+                                id: None,
+                                branch,
+                                reason: None,
+                            }),
+                        ..
+                    }),
+                ) => assert_eq!(branch.as_deref(), Some("impl")),
+                (
+                    ActionId::DenyApproval,
+                    Command::Approvals(crate::args::ApprovalsArgs {
+                        action:
+                            Some(crate::args::ApprovalsAction::Deny {
+                                id: None,
+                                branch,
+                                reason,
+                            }),
+                        ..
+                    }),
+                ) => {
+                    assert_eq!(branch.as_deref(), Some("impl"));
                     assert_eq!(reason.as_deref(), Some(text));
                 }
                 (id, command) => panic!("{id:?} parsed as {command:?}"),

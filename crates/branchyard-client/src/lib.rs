@@ -45,6 +45,7 @@
 
 pub mod api;
 pub mod companion;
+pub mod effects_api;
 pub mod http;
 pub mod knowledge_api;
 #[cfg(feature = "schema")]

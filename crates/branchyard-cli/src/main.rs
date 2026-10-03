@@ -12,6 +12,7 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod effects_cmd;
 mod env_cmd;
 mod fleet_cmd;
 mod gateway_cmd;
@@ -358,9 +359,22 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             json,
             follow,
         } => commands::log(env, target, &branch, json, follow),
-        Command::Merge { branch, into, rm } => {
+        Command::Merge {
+            branch,
+            into,
+            rm,
+            promote_effects,
+        } => {
+            if promote_effects {
+                effects_cmd::promote_before_merge(target, &branch)?;
+            }
             commands::merge(target, &branch, into.as_deref(), rm)
         }
+        Command::Approvals(a) => effects_cmd::approvals(target, a.action.as_ref(), a.json),
+        Command::Effects(e) => {
+            effects_cmd::effects(target, e.branch.as_deref(), e.action.as_ref(), e.json)
+        }
+        Command::Undo(u) => effects_cmd::undo(env, target, &u),
         Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
         Command::Recipe { json, action } => recipe_cmd::main(env, target, &action, json),
         Command::Env { json, action } => env_cmd::main(env, target, &action, json),

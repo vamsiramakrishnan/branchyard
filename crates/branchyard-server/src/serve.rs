@@ -746,6 +746,19 @@ async fn poll(
             if let Err(e) = yard.ingest_connector_audit() {
                 tracing::warn!(error = %e, "reading the connector gateway's audit log");
             }
+            // Effects whose outcome is unknown, looked up through the
+            // gateway on the recovery interval (docs/effects.md).
+            if recover {
+                match yard.reconcile_effects() {
+                    Ok(report) if !report.settled.is_empty() => tracing::info!(
+                        settled = report.settled.len(),
+                        still_unknown = report.unknown.len(),
+                        "reconciled the effect ledger"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "reconciling the effect ledger"),
+                }
+            }
             (feed.sync(), recovered)
         })
         .await;

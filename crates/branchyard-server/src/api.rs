@@ -769,6 +769,8 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::companion::router())
         // Repository knowledge and plan approval: `knowledge_routes`.
         .merge(crate::knowledge_routes::router())
+        // Approvals, the effect ledger and undo: `effects_routes`.
+        .merge(crate::effects_routes::router())
         // Wide maps: `map_routes`.
         .merge(crate::map_routes::router())
         // The fleet's service registry: `services_routes`.
@@ -899,6 +901,14 @@ pub(crate) async fn render_metrics(app: Shared) -> Response {
         let workers = registry.live_workers()?;
         crate::metrics::queue_gauges(&mut snapshot, &queue, &workers, crate::ops::now_ms() as i64);
         for repo in app.repos.values() {
+            // The effect ledger and the approvals waiting (docs/effects.md).
+            let entries = repo.yard.effects(None).map_err(std::io::Error::other)?;
+            let pending = repo
+                .yard
+                .approvals(true)
+                .map_err(std::io::Error::other)?
+                .len();
+            crate::metrics::effect_gauges(&mut snapshot, &repo.name, &entries, pending);
             // Only a repository whose workspace has a pool.
             if let Ok(Some(spec)) = app.workspace(repo) {
                 if spec.pool.is_some() {
@@ -1286,7 +1296,7 @@ async fn operation_by_key(
 }
 
 /// `%XX` escapes and `+` in a query value.
-fn percent_decode(value: &str) -> String {
+pub(crate) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
