@@ -529,7 +529,13 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
     let wait_for = |from: usize, text: &str| {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !shows_after(from, text) {
-            assert!(Instant::now() < deadline, "{text:?} never drawn");
+            if Instant::now() >= deadline {
+                // The screen as it is now: the last frame's rows, and any
+                // error `by watch` printed on its way out.
+                let screens = screens.lock().unwrap();
+                let now = screens[screens.len().saturating_sub(30)..].join("\n");
+                panic!("{text:?} never drawn; the screen:\n{now}");
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
     };
