@@ -352,6 +352,53 @@ const STEPS: &[(&str, &str)] = &[
         "by_model_usage_at",
         "CREATE INDEX IF NOT EXISTS by_model_usage_at ON by_model_usage (repo, at_ms)",
     ),
+    (
+        "by_effects",
+        "CREATE TABLE IF NOT EXISTS by_effects (
+            repo TEXT NOT NULL,
+            id TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_ms BIGINT NOT NULL,
+            entry TEXT NOT NULL,
+            PRIMARY KEY (repo, id)
+        )",
+    ),
+    (
+        "by_effects_branch",
+        "CREATE INDEX IF NOT EXISTS by_effects_branch ON by_effects (repo, branch, created_ms)",
+    ),
+    (
+        "by_effect_events",
+        "CREATE TABLE IF NOT EXISTS by_effect_events (
+            seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            repo TEXT NOT NULL,
+            id TEXT NOT NULL,
+            at_ms BIGINT NOT NULL,
+            change TEXT NOT NULL
+        )",
+    ),
+    (
+        "by_effect_events_id",
+        "CREATE INDEX IF NOT EXISTS by_effect_events_id ON by_effect_events (repo, id, seq)",
+    ),
+    (
+        "by_approval_asks",
+        "CREATE TABLE IF NOT EXISTS by_approval_asks (
+            repo TEXT NOT NULL,
+            id TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            created_ms BIGINT NOT NULL,
+            answered BOOLEAN NOT NULL,
+            ask TEXT NOT NULL,
+            PRIMARY KEY (repo, id)
+        )",
+    ),
+    (
+        "by_approval_asks_pending",
+        "CREATE INDEX IF NOT EXISTS by_approval_asks_pending ON by_approval_asks \
+         (repo, answered, created_ms)",
+    ),
 ];
 
 fn steer_row(r: &Row) -> SteerRow {
@@ -2854,6 +2901,201 @@ impl crate::models::UsageBackend for Postgres {
             )
         })?;
         Ok(rows.iter().map(usage_row).collect())
+    }
+}
+
+impl crate::effects::EffectBackend for Postgres {
+    fn open_effect(&self, entry: &crate::effects::EffectEntry) -> Result<(), Error> {
+        use crate::effects::EffectChange;
+        let text = encode("effect", entry)?;
+        let change = encode(
+            "effect",
+            &EffectChange::Opened {
+                entry: Box::new(entry.clone()),
+            },
+        )?;
+        // Durable before the call it records is made.
+        self.tx(true, |tx| {
+            tx.execute(
+                "INSERT INTO by_effects (repo, id, branch, state, created_ms, entry) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &self.repo,
+                    &entry.id,
+                    &entry.branch,
+                    &entry.state.as_str(),
+                    &int(entry.created_ms),
+                    &text,
+                ],
+            )
+            .map_err(db("effect"))?;
+            tx.execute(
+                "INSERT INTO by_effect_events (repo, id, at_ms, change) VALUES ($1, $2, $3, $4)",
+                &[&self.repo, &entry.id, &int(entry.created_ms), &change],
+            )
+            .map_err(db("effect"))?;
+            Ok(())
+        })
+    }
+
+    fn move_effect(
+        &self,
+        id: &str,
+        from: &[crate::effects::EffectState],
+        change: &crate::effects::EffectMove,
+        at_ms: u64,
+    ) -> Result<Option<crate::effects::EffectEntry>, Error> {
+        use crate::effects::{EffectChange, EffectEntry};
+        let event = encode("effect", &EffectChange::Moved(change.clone()))?;
+        self.tx(true, |tx| {
+            let text: Option<String> = tx
+                .query_opt(
+                    "SELECT entry FROM by_effects WHERE repo = $1 AND id = $2 FOR UPDATE",
+                    &[&self.repo, &id],
+                )
+                .map_err(db("effect"))?
+                .map(|r| r.get(0));
+            let Some(text) = text else {
+                return Ok(None);
+            };
+            let mut entry: EffectEntry = decode("effect", &text)?;
+            if !from.is_empty() && !from.contains(&entry.state) {
+                return Ok(None);
+            }
+            change.apply(&mut entry, at_ms);
+            let updated = encode("effect", &entry)?;
+            tx.execute(
+                "UPDATE by_effects SET state = $3, entry = $4 WHERE repo = $1 AND id = $2",
+                &[&self.repo, &id, &entry.state.as_str(), &updated],
+            )
+            .map_err(db("effect"))?;
+            tx.execute(
+                "INSERT INTO by_effect_events (repo, id, at_ms, change) VALUES ($1, $2, $3, $4)",
+                &[&self.repo, &id, &int(at_ms), &event],
+            )
+            .map_err(db("effect"))?;
+            Ok(Some(entry))
+        })
+    }
+
+    fn effect(&self, id: &str) -> Result<Option<crate::effects::EffectEntry>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+                "SELECT entry FROM by_effects WHERE repo = $1 AND id = $2",
+                &[&self.repo, &id],
+            )
+        })?;
+        row.map(|r| decode("effect", &r.get::<_, String>(0)))
+            .transpose()
+    }
+
+    fn effects(&self, branch: Option<&str>) -> Result<Vec<crate::effects::EffectEntry>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                "SELECT entry FROM by_effects WHERE repo = $1 \
+                 AND ($2::text IS NULL OR branch = $2) ORDER BY created_ms, id",
+                &[&self.repo, &branch],
+            )
+        })?;
+        rows.iter()
+            .map(|r| decode("effect", &r.get::<_, String>(0)))
+            .collect()
+    }
+
+    fn effect_events(&self, id: &str) -> Result<Vec<crate::effects::EffectEvent>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                "SELECT seq, at_ms, change FROM by_effect_events WHERE repo = $1 AND id = $2 \
+                 ORDER BY seq",
+                &[&self.repo, &id],
+            )
+        })?;
+        rows.iter()
+            .map(|r| {
+                Ok(crate::effects::EffectEvent {
+                    seq: uint(r.get(0)),
+                    id: id.to_owned(),
+                    at_ms: uint(r.get(1)),
+                    change: decode("effect event", &r.get::<_, String>(2))?,
+                })
+            })
+            .collect()
+    }
+
+    fn put_ask(&self, ask: &crate::effects::ApprovalAsk) -> Result<(), Error> {
+        let text = encode("approval", ask)?;
+        self.tx(true, |tx| {
+            tx.execute(
+                "INSERT INTO by_approval_asks (repo, id, branch, created_ms, answered, ask) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &self.repo,
+                    &ask.id,
+                    &ask.branch,
+                    &int(ask.created_ms),
+                    &ask.answer.is_some(),
+                    &text,
+                ],
+            )
+            .map_err(db("approval"))?;
+            Ok(())
+        })
+    }
+
+    fn answer_ask(
+        &self,
+        id: &str,
+        answer: &crate::effects::AskAnswer,
+    ) -> Result<Option<(crate::effects::ApprovalAsk, bool)>, Error> {
+        self.tx(true, |tx| {
+            let text: Option<String> = tx
+                .query_opt(
+                    "SELECT ask FROM by_approval_asks WHERE repo = $1 AND id = $2 FOR UPDATE",
+                    &[&self.repo, &id],
+                )
+                .map_err(db("approval"))?
+                .map(|r| r.get(0));
+            let Some(text) = text else {
+                return Ok(None);
+            };
+            let mut ask: crate::effects::ApprovalAsk = decode("approval", &text)?;
+            if ask.answer.is_some() {
+                return Ok(Some((ask, false)));
+            }
+            ask.answer = Some(answer.clone());
+            let updated = encode("approval", &ask)?;
+            tx.execute(
+                "UPDATE by_approval_asks SET answered = TRUE, ask = $3 \
+                 WHERE repo = $1 AND id = $2",
+                &[&self.repo, &id, &updated],
+            )
+            .map_err(db("approval"))?;
+            Ok(Some((ask, true)))
+        })
+    }
+
+    fn ask(&self, id: &str) -> Result<Option<crate::effects::ApprovalAsk>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+                "SELECT ask FROM by_approval_asks WHERE repo = $1 AND id = $2",
+                &[&self.repo, &id],
+            )
+        })?;
+        row.map(|r| decode("approval", &r.get::<_, String>(0)))
+            .transpose()
+    }
+
+    fn asks(&self, pending_only: bool) -> Result<Vec<crate::effects::ApprovalAsk>, Error> {
+        let rows = self.query(|client| {
+            client.query(
+                "SELECT ask FROM by_approval_asks WHERE repo = $1 AND (NOT $2 OR NOT answered) \
+                 ORDER BY created_ms, id",
+                &[&self.repo, &pending_only],
+            )
+        })?;
+        rows.iter()
+            .map(|r| decode("approval", &r.get::<_, String>(0)))
+            .collect()
     }
 }
 

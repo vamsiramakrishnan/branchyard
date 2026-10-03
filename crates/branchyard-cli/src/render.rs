@@ -504,6 +504,22 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             &activity.describe(),
         ),
         Activity::Access(activity) => style.paint(Tone::Yellow, &activity.describe()),
+        Activity::Effect(activity) => style.paint(
+            match activity.as_ref() {
+                branchyard::effects::EffectActivity::Proxy { .. } => Tone::Cyan,
+                branchyard::effects::EffectActivity::Entry { state, .. } => match state {
+                    branchyard::effects::EffectState::Confirmed
+                    | branchyard::effects::EffectState::Undone
+                    | branchyard::effects::EffectState::Compensated => Tone::Green,
+                    branchyard::effects::EffectState::Begun
+                    | branchyard::effects::EffectState::Staged => Tone::Cyan,
+                    _ => Tone::Yellow,
+                },
+                branchyard::effects::EffectActivity::Answered { allow: true, .. } => Tone::Green,
+                _ => Tone::Yellow,
+            },
+            &activity.describe(),
+        ),
         Activity::Goal(activity) => style.paint(
             match activity.as_ref() {
                 branchyard::GoalActivity::Verdict { met: true, .. } => Tone::Green,

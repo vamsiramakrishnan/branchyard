@@ -120,6 +120,12 @@ fn source(source: &DecisionSource) -> Value {
         DecisionSource::Default => json!({ "kind": "default" }),
         DecisionSource::Asked => json!({ "kind": "asked" }),
         DecisionSource::Engine => json!({ "kind": "engine" }),
+        DecisionSource::Approval { resolved, ask, by } => json!({
+            "kind": "approval",
+            "resolved": resolved,
+            "ask": ask,
+            "by": by,
+        }),
     }
 }
 
@@ -276,6 +282,11 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
         Activity::Access(activity) => json!({
             "activity": "access",
             "access": activity,
+            "text": activity.describe(),
+        }),
+        Activity::Effect(activity) => json!({
+            "activity": "effect",
+            "effect": activity,
             "text": activity.describe(),
         }),
     };

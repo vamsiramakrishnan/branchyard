@@ -1085,6 +1085,11 @@ pub(crate) fn prepare_send_with(
                 parent_spec.as_ref().and_then(|p| p.models.as_ref()),
             )
             .map_err(|why| Error::Denied(format!("{name}: {why}")))?;
+            // And its approvals, which may only be stricter.
+            spec.approvals = branchyard_provision::approvals::narrow(
+                spec.approvals.as_ref(),
+                parent_spec.as_ref().and_then(|p| p.approvals.as_ref()),
+            );
         }
         record.provision = Some(spec);
     }
@@ -1156,6 +1161,10 @@ fn same_model(name: &str, record: &Record, mut asked: Provisioning) -> Result<Pr
     // harness's reach, and its cost stays metered.
     if asked.models.is_none() {
         asked.models = had.and_then(|p| p.models.clone());
+    }
+    // So does a branch's approval policy, unless a send replaces it.
+    if asked.approvals.is_none() {
+        asked.approvals = had.and_then(|p| p.approvals.clone());
     }
     Ok(asked)
 }

@@ -169,7 +169,34 @@ impl PolicyPreset {
             false => Policy::deny_all(),
         };
         let policy = rules.deny.iter().fold(base, |p, tool| p.deny(*tool));
-        rules.allow.iter().fold(policy, |p, tool| p.allow(*tool))
+        rules
+            .allow
+            .iter()
+            .fold(policy, |p, tool| p.allow(*tool))
+            .with_preset(Some(*self))
+    }
+
+    /// The preset's approvals for connector operations, the last layer
+    /// they resolve through (`docs/effects.md#approvals`): `read-only` and
+    /// `edit-worktree` change nothing outside the machine, so they block
+    /// every effectful class; `full` leaves the class defaults.
+    pub fn approvals(&self) -> crate::effects::ApprovalPolicy {
+        use crate::effects::{Approval, EffectClass};
+        let classes = match self {
+            PolicyPreset::ReadOnly | PolicyPreset::EditWorktree => [
+                EffectClass::Reversible,
+                EffectClass::Compensable,
+                EffectClass::Irreversible,
+            ]
+            .into_iter()
+            .map(|c| (c, Approval::Block))
+            .collect(),
+            PolicyPreset::Full => Default::default(),
+        };
+        crate::effects::ApprovalPolicy {
+            classes,
+            ..Default::default()
+        }
     }
 }
 

@@ -77,6 +77,11 @@ pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
     if yard.has_services() {
         let _ = yard.reclaim_services();
     }
+    // Effects whose turn stopped between writing the ledger and recording
+    // the gateway's answer: unknown, for reconciliation, never retried.
+    if let Err(error) = crate::effects::reconcile::orphans(yard, now) {
+        failed = failed.or(Some(error));
+    }
     match failed {
         Some(error) => Err(error),
         None => Ok(recovered),

@@ -608,6 +608,9 @@ fn open_state(config: &Config) -> Result<Opened, String> {
             yard.use_models(gateway);
         }
         yard.use_ceilings(config.ceilings.clone());
+        // The administrator's locked approvals and the people's
+        // (docs/effects.md#approvals).
+        yard.use_approvals(config.approvals.clone());
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(

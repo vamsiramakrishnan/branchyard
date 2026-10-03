@@ -700,7 +700,8 @@ pub(crate) trait PoolBackend: Send + Sync + fmt::Debug {
 /// [`PortBackend`], [`SandboxBackend`], the outcome store
 /// ([`crate::fleet::OutcomeBackend`]), the knowledge store
 /// ([`crate::knowledge::KnowledgeBackend`]), pool slots ([`PoolBackend`])
-/// and the model usage store ([`crate::models::UsageBackend`]) together,
+/// the model usage store ([`crate::models::UsageBackend`]) and the effect
+/// ledger ([`crate::effects::EffectBackend`]) together,
 /// so a [`Store`] holds one trait object for them.
 pub(crate) trait Extras:
     PortBackend
@@ -709,6 +710,7 @@ pub(crate) trait Extras:
     + crate::knowledge::KnowledgeBackend
     + PoolBackend
     + crate::models::UsageBackend
+    + crate::effects::EffectBackend
 {
 }
 
@@ -718,7 +720,8 @@ impl<
             + crate::fleet::OutcomeBackend
             + crate::knowledge::KnowledgeBackend
             + PoolBackend
-            + crate::models::UsageBackend,
+            + crate::models::UsageBackend
+            + crate::effects::EffectBackend,
     > Extras for T
 {
 }
@@ -883,6 +886,12 @@ impl Store {
 
     /// Calls through the model gateway; see [`crate::models::UsageBackend`].
     pub fn usage(&self) -> &dyn crate::models::UsageBackend {
+        self.extras.as_ref()
+    }
+
+    /// The effect ledger and approval asks; see
+    /// [`crate::effects::EffectBackend`].
+    pub fn effects(&self) -> &dyn crate::effects::EffectBackend {
         self.extras.as_ref()
     }
 
