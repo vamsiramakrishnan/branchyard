@@ -128,7 +128,7 @@ impl Replicator {
         let refresh = {
             let mut rounds = self.rounds.lock().unwrap_or_else(|e| e.into_inner());
             *rounds += 1;
-            *rounds % REFRESH_EVERY == 0
+            (*rounds).is_multiple_of(REFRESH_EVERY)
         };
         let key = self.key();
         let mut queued = Vec::new();

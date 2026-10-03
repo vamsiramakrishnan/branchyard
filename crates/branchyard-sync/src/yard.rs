@@ -77,7 +77,7 @@ impl YardTasks {
     }
 
     fn source_for(&self, task: &str, name: &str, git_branch: &str) -> Result<BranchSource> {
-        Ok(BranchSource::new(&self.git_dir, name, git_branch)?.with_task_id(task)?)
+        BranchSource::new(&self.git_dir, name, git_branch)?.with_task_id(task)
     }
 }
 

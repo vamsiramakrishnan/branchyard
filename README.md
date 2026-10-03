@@ -442,6 +442,7 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Plans and goals](docs/plans-and-goals.md): read-only plans approved before execution, and goals a judge verifies.
 - [Effects, approvals and undo](docs/effects.md): the effect ledger, approval policy, staged effects and what undo can and cannot do upstream (design).
 - [Task repositories and sync](docs/task-repos.md): every task a git repository, synced to cloud storage (design).
+- [Sync](docs/sync.md): `by sync` and a server's `sync` replicate branches to Google Cloud Storage, S3 and compatible stores, Azure Blob, a git remote or a directory: content-addressed packs and chunks under one compare-and-swap manifest per task, conflict branches instead of lost writes, leases, client-side envelope encryption with keyed names, and safe garbage collection.
 - [Egress policy](docs/egress.md): the hosts a branch may reach, through an allowlisting proxy, enforced in a network namespace on Linux; and permission presets.
 - [Model gateway](docs/model-gateway.md): a harness's model calls through Branchyard on the turn's token, with the key held back, weighted backends, fallbacks, rate limits, budgets and exact cost; and one scope for connectors, models, network and delegation.
 - [Wide map](docs/map.md): one prompt over every item of a list, a branch each, answers checked against a JSON schema and collected into a table.

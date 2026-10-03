@@ -528,7 +528,7 @@ fn chunks_and_segments_sync_and_scrub_repairs_a_chunk() {
     let n = bytes.len();
     bytes[n - 1] ^= 1;
     std::fs::write(&path, &bytes).unwrap();
-    let scrub = rb.scrub(1000, 7, &[ca.clone()]).unwrap();
+    let scrub = rb.scrub(1000, 7, std::slice::from_ref(&ca)).unwrap();
     assert_eq!(scrub.repaired.len(), 1, "{scrub:?}");
     assert!(scrub.clean());
     assert!(rb.scrub(1000, 8, &[]).unwrap().clean());
@@ -774,7 +774,7 @@ fn leases_are_exclusive_expire_and_are_registered() {
 
     // A kept lease is registered in the service registry while held.
     let registry: Arc<dyn branchyard::services::ServiceStore> =
-        Arc::new(branchyard::services::LocalRegistry::open(&w.root.join("registry.db")).unwrap());
+        Arc::new(branchyard::services::LocalRegistry::open(w.root.join("registry.db")).unwrap());
     let keeper = branchyard_sync::lease::LeaseKeeper::start(
         ra.clone(),
         "feature",

@@ -121,7 +121,7 @@ pub fn string_to_sign(canonical: &str, date: &str, region: &str, service: &str) 
 
 /// The signature of `string_to_sign`.
 pub fn signature(secret: &str, date: &str, region: &str, service: &str, to_sign: &str) -> String {
-    let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), date[..8].as_bytes());
+    let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), &date.as_bytes()[..8]);
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, service.as_bytes());
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
