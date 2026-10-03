@@ -821,8 +821,10 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.connectors = partial.connectors;
     config.models = partial.models;
     config.ceilings = partial.ceilings;
+    config.approvals = partial.approvals;
     config.triggers.public_url = flags.public_url.or(partial.public_url);
     config.app = partial.app.unwrap_or_default();
+    config.sync = partial.sync;
     config.app.enabled |= flags.app;
     config.triggers.allow_prechecks = match flags.allow_trigger_prechecks {
         true => config::WorkspaceScripts::All,

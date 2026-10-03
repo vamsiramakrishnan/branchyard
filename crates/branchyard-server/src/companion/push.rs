@@ -42,6 +42,7 @@ use crate::store::OperationStore;
 pub const KINDS: &[&str] = &[
     "permission",
     "question",
+    "approval",
     "stalled",
     "failed",
     "interrupted",
@@ -152,6 +153,18 @@ impl Tracker {
                     format!("{} {verb} {}: {}", message.from, message.to, message.text),
                 )
             }
+            Activity::Effect(effect) => match effect.as_ref() {
+                branchyard::effects::EffectActivity::Asked { ask, about, .. } => {
+                    if !self.first(format!("approval:{ask}")) {
+                        return None;
+                    }
+                    (
+                        "approval",
+                        format!("{branch} waits for approval: {}", about.describe()),
+                    )
+                }
+                _ => return None,
+            },
             Activity::Stalled { since_ms } => {
                 if !self.first(format!("stall:{branch}:{since_ms}")) {
                     return None;
@@ -208,6 +221,7 @@ impl Tracker {
             body: short(&text, 240),
             url: match kind {
                 "question" => "#/inbox".to_owned(),
+                "approval" => "#/approvals".to_owned(),
                 _ => format!("#/b/{}/{}", url_part(repo), url_part(&target)),
             },
             tag: format!("{repo}/{target}/{kind}"),
@@ -578,7 +592,7 @@ pub async fn send(
         Err(e) => return Sent::Failed(e),
     };
     let urgency = match notice.kind {
-        "permission" | "question" | "failed" => "high",
+        "permission" | "question" | "approval" | "failed" => "high",
         _ => "normal",
     };
     let response = client
@@ -1074,6 +1088,24 @@ mod tests {
         assert_eq!(question.body, "child escalates to parent: need a decision");
         // Recorded on both branches' logs: one notice.
         assert_eq!(t.observe("app", "parent", &message), None);
+        // An approval a turn waits on, once.
+        let asked = Activity::Effect(Box::new(branchyard::effects::EffectActivity::Asked {
+            ask: "01ASK".into(),
+            about: branchyard::effects::AskAbout::Tool {
+                tool: "Bash".into(),
+            },
+            resolved: branchyard::effects::Resolved {
+                approval: branchyard::effects::Approval::Ask,
+                layer: branchyard::effects::Layer::Person,
+                rule: Some("Bash".into()),
+            },
+        }));
+        let approval = t.observe("app", "a", &asked).unwrap();
+        assert_eq!(
+            (approval.kind, approval.url.as_str(), approval.body.as_str()),
+            ("approval", "#/approvals", "a waits for approval: tool Bash")
+        );
+        assert_eq!(t.observe("app", "a", &asked), None);
         assert_eq!(url_part("a b/ü"), "a%20b%2F%C3%BC");
         for kind in KINDS {
             check_kind(kind).unwrap();

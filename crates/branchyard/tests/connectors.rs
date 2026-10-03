@@ -139,7 +139,14 @@ fn a_granted_turn_gets_packages_an_index_and_a_signed_token() {
     let events = branch.events().unwrap();
     assert_eq!(branch.info().status, BranchStatus::NoChanges, "{events:?}");
     let said = text(&events);
-    assert_eq!(after(&said, "url="), URL);
+    // The harness reaches the gateway through its turn's effect-ledger
+    // proxy on loopback (docs/effects.md); the token's audience stays the
+    // gateway's own URL.
+    let given = after(&said, "url=");
+    assert!(
+        given.starts_with("http://127.0.0.1:") && given.ends_with("/mcp") && given != URL,
+        "{given}"
+    );
     assert_eq!(after(&said, "mode="), "600");
     // Only the granted connector is placed, with the index.
     assert_eq!(after(&said, "placed="), "INDEX.md github");

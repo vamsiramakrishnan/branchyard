@@ -60,6 +60,9 @@ pub struct Snapshot {
     pub maps: Option<String>,
     /// Each branch's listening ports, one line each (local only).
     pub ports: std::collections::BTreeMap<String, Vec<String>>,
+    /// The task each branch is an attempt of, one line each
+    /// (docs/task-repos.md).
+    pub tasks: std::collections::BTreeMap<String, String>,
 }
 
 /// A key, as the dashboard reads it.
@@ -383,6 +386,8 @@ pub struct Model {
     pub maps: Option<String>,
     /// Each branch's listening ports.
     pub ports: std::collections::BTreeMap<String, Vec<String>>,
+    /// The task each branch is an attempt of.
+    pub tasks: std::collections::BTreeMap<String, String>,
 }
 
 /// One row of the tree as shown.
@@ -533,6 +538,7 @@ impl Model {
         self.usage = snapshot.usage;
         self.maps = snapshot.maps;
         self.ports = snapshot.ports;
+        self.tasks = snapshot.tasks;
         if self
             .toast
             .as_ref()
@@ -1532,6 +1538,9 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
             ),
         ]));
     }
+    if let Some(task) = model.tasks.get(&info.name) {
+        lines.push(Line::from(vec![label("task"), Span::raw(task.clone())]));
+    }
     if let Some(ports) = model.ports.get(&info.name).filter(|p| !p.is_empty()) {
         for (i, port) in ports.iter().enumerate() {
             lines.push(Line::from(vec![
@@ -2128,6 +2137,7 @@ mod tests {
             usage: None,
             maps: None,
             ports: Default::default(),
+            tasks: Default::default(),
         }
     }
 

@@ -12,6 +12,7 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod effects_cmd;
 mod env_cmd;
 mod fleet_cmd;
 mod gateway_cmd;
@@ -39,6 +40,8 @@ mod services_cmd;
 mod setup_io;
 mod ssh_remote;
 mod stats_cmd;
+mod sync_cmd;
+mod task_cmd;
 mod trackers;
 mod trigger_cmd;
 mod usage;
@@ -159,6 +162,15 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         Command::Remote { json, action } => return ssh_remote::command(globals, &action, json),
         // Live catalogs are cached for this user; no repository or server.
         Command::Catalog { json, action } => return catalog_cmd::live(&action, json),
+        // Sync runs on this machine's repository, against its own remote.
+        Command::Sync(sync) => {
+            return sync_cmd::main(
+                globals,
+                sync.task.as_deref(),
+                sync.action.as_ref(),
+                sync.json,
+            )
+        }
         // The catalog is built in; no repository or server is involved.
         Command::Connectors {
             json,
@@ -287,6 +299,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             task,
             ..
         } => commands::fork_at(env, target, &branch, turn, &prompt, &task),
+        Command::Task(task) => task_cmd::main(env, target, &task.action, task.json),
         Command::Rewind {
             branch,
             to,
@@ -358,9 +371,22 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             json,
             follow,
         } => commands::log(env, target, &branch, json, follow),
-        Command::Merge { branch, into, rm } => {
+        Command::Merge {
+            branch,
+            into,
+            rm,
+            promote_effects,
+        } => {
+            if promote_effects {
+                effects_cmd::promote_before_merge(target, &branch)?;
+            }
             commands::merge(target, &branch, into.as_deref(), rm)
         }
+        Command::Approvals(a) => effects_cmd::approvals(target, a.action.as_ref(), a.json),
+        Command::Effects(e) => {
+            effects_cmd::effects(target, e.branch.as_deref(), e.action.as_ref(), e.json)
+        }
+        Command::Undo(u) => effects_cmd::undo(env, target, &u),
         Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
         Command::Recipe { json, action } => recipe_cmd::main(env, target, &action, json),
         Command::Env { json, action } => env_cmd::main(env, target, &action, json),
@@ -486,6 +512,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Usage { .. }
         | Command::Remote { .. }
         | Command::Catalog { .. }
+        | Command::Sync(_)
         | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
     }
 }

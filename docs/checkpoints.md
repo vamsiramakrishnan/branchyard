@@ -29,6 +29,8 @@ Each checkpoint is also an event, `Activity::Checkpoint`:
 
 **Turn numbers only grow.** A rewind does not renumber: after rewinding from turn 3 to turn 1, the next turn is 4, with `after: 1`. Nothing is overwritten, so every checkpoint stays reachable until the branch is removed. `by rm` deletes the branch's refs with it (for every incarnation of the name); a merged branch keeps its git branch, as before, but not its checkpoint refs. There is no other garbage collection: the refs are small, and the commits are the branch's own.
 
+**The task's record beside each checkpoint.** A branch that is an attempt of a [task](task-repos.md) (every top-level branch since task repositories) also gets `refs/branchyard/<branch>/<incarnation>/record-<N>`: a commit whose tree is checkpoint N's files with `.task/` (what was asked, each turn's conversation, the effects) and whose parents are the record it continues and the checkpoint. The branch, its candidate and its checkpoint refs are unchanged. A rewind to N makes N's record the attempt's current one, so the files and the conversation go back together, and the next turn's record continues it; `fork --at N` starts from N's record. `by rm` deletes the records with the checkpoint refs. `by task show` lists the conversation of the record the branch is at.
+
 **Decided: no checkpoint at turn start.** After a turn the worktree is clean, because the snapshot committed everything. Edits made between turns (by a person, in the worktree) are in the next turn's checkpoint rather than one of their own. A rewind refuses to discard such edits (below), so nothing is lost.
 
 ## Sessions: native where it ended, otherwise a summary
@@ -125,6 +127,7 @@ The SDK calls behind them: `Branch::checkpoints`, `Branch::rewind`, `Branch::for
 | Where | What |
 |---|---|
 | [`checkpoint.rs`](../crates/branchyard/src/checkpoint.rs) | Refs, the `checkpoint` step, lineage, the session decision, summaries, the journaled rewind and its recovery |
+| [`tasks/mod.rs`](../crates/branchyard/src/tasks/mod.rs), [`tests/tasks.rs`](../crates/branchyard/tests/tasks.rs) | The task's record beside each checkpoint, continued across rewinds and forks; in a task's own repository, large files staged before a snapshot and restored after a rewind ([task repositories](task-repos.md)) |
 | [`snapshots.rs`](../crates/branchyard/src/snapshots.rs), [`tests/snapshots.rs`](../crates/branchyard/tests/snapshots.rs) | The provider snapshot with each checkpoint, and forks and rewinds branched from it ([sandbox snapshots](sandbox-snapshots.md)) |
 | [`run.rs`](../crates/branchyard/src/run.rs) | `fork --at`; a send after a rewind starting fresh with the summary |
 | [`spotlight.rs`](../crates/branchyard/src/spotlight.rs) | `try` |

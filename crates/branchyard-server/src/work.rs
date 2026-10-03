@@ -318,16 +318,67 @@ impl Executor for AppExecutor {
                 observability.tracer.note_branch(&repo.name, name, trace);
             }
         }
-        let result = serde_json::from_value::<Work>(work.clone())
-            .map_err(|e| *ApiError::internal(format!("unreadable operation description: {e}")).body)
-            .and_then(|work| {
-                work.run(
-                    app,
-                    repo,
-                    stored.principal.as_ref(),
-                    stored.trace.as_deref(),
-                )
-            });
+        // With sync: each branch's task pulled and its lease held for the
+        // operation (docs/sync.md).
+        let leases = match app
+            .sync
+            .as_ref()
+            .map(|s| s.begin(&repo.name, &operation.branches))
+        {
+            Some(Err(refusal)) => {
+                let (status, code, message) = match refusal {
+                    crate::sync::Refusal::Held(m) => (StatusCode::CONFLICT, "sync_lease_held", m),
+                    crate::sync::Refusal::Unavailable(m) => {
+                        (StatusCode::SERVICE_UNAVAILABLE, "sync_unavailable", m)
+                    }
+                };
+                return Finished {
+                    result: Err(*ApiError::new(status, code, message).body),
+                    end_cursor: None,
+                };
+            }
+            Some(Ok(leases)) => leases,
+            None => Vec::new(),
+        };
+        let run = || {
+            serde_json::from_value::<Work>(work.clone())
+                .map_err(|e| {
+                    *ApiError::internal(format!("unreadable operation description: {e}")).body
+                })
+                .and_then(|work| {
+                    work.run(
+                        app,
+                        repo,
+                        stored.principal.as_ref(),
+                        stored.trace.as_deref(),
+                    )
+                })
+        };
+        let (result, lost) = run_under_leases(app, repo, &operation.branches, &leases, run);
+        // A run whose lease was lost is not accepted: another runner may be
+        // running the same task, and what this one did after the loss is
+        // not pushed (its task is fenced).
+        let result = match lost {
+            Some(reason) => Err(*ApiError::new(
+                StatusCode::CONFLICT,
+                "sync_lease_lost",
+                format!("{reason}; the run was cancelled and its result is not accepted"),
+            )
+            .body),
+            None => result,
+        };
+        if let Some(sync) = &app.sync {
+            let mut branches = operation.branches.clone();
+            if let Ok(done) = &result {
+                for b in &done.branches {
+                    if !branches.contains(&b.name) {
+                        branches.push(b.name.clone());
+                    }
+                }
+            }
+            sync.end(&repo.name, &branches);
+        }
+        drop(leases);
         // Read the feed's head so the end cursor covers all the activity.
         let end_cursor = match repo.feed.sync() {
             Ok(head) => Some(head),
@@ -339,6 +390,73 @@ impl Executor for AppExecutor {
         observe_run(app, repo, stored, &before, &result, end_cursor);
         Finished { result, end_cursor }
     }
+}
+
+/// How often a run checks its sync leases while it runs.
+const LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Run `run` while watching `leases`: once one is lost, its task is fenced
+/// (the replicator stops pushing it) and every running turn on `branches`
+/// is cancelled, naming the loss, and cancelled again each poll while the
+/// run lasts, so a turn starting after the loss stops too. Returns the
+/// run's result and, when a lease was lost, why.
+fn run_under_leases<T>(
+    app: &App,
+    repo: &RepoState,
+    branches: &[String],
+    leases: &[crate::sync::HeldLease],
+    run: impl FnOnce() -> T,
+) -> (T, Option<String>) {
+    let (Some(sync), false) = (app.sync.as_ref(), leases.is_empty()) else {
+        return (run(), None);
+    };
+    let lost: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            // Owned here: the receiver is not shared between threads.
+            let finished = finished;
+            let mut fenced = std::collections::BTreeSet::new();
+            loop {
+                for held in leases {
+                    let Some(reason) = held.keeper.lost_reason() else {
+                        continue;
+                    };
+                    if fenced.insert(held.task.clone()) {
+                        let reason = format!("sync: {reason}");
+                        tracing::warn!(repo = %repo.name, task = %held.task, %reason, "a sync lease was lost; stopping the run");
+                        sync.fence(&repo.name, &held.task, &reason);
+                        lost.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get_or_insert(reason);
+                    }
+                }
+                let reason = lost.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(reason) = reason {
+                    for branch in branches.iter().chain(leases.iter().map(|h| &h.branch)) {
+                        let _ = repo.yard.cancel_as(branch, &reason);
+                    }
+                }
+                match finished.recv_timeout(LEASE_POLL) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => return,
+                }
+            }
+        });
+        let result = run();
+        drop(done);
+        result
+    });
+    // A loss the watcher had not seen yet still counts.
+    let mut lost = lost.into_inner().unwrap_or_else(|e| e.into_inner());
+    for held in leases {
+        if let Some(reason) = held.keeper.lost_reason() {
+            let reason = format!("sync: {reason}");
+            sync.fence(&repo.name, &held.task, &reason);
+            lost.get_or_insert(reason);
+        }
+    }
+    (result, lost)
 }
 
 /// Most feed entries an operation's metrics and spans are read from.

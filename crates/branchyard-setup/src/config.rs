@@ -128,6 +128,112 @@ pub struct ProjectConfig {
     /// file, since it runs software on your machine.
     #[serde(default, skip_serializing_if = "HarnessesConfig::is_empty")]
     pub harnesses: HarnessesConfig,
+    /// Syncing tasks to durable storage (docs/sync.md): the remote, its
+    /// encryption, how often and how fast. User file only: a repository
+    /// must not choose where your tasks are sent.
+    #[serde(default, skip_serializing_if = "SyncSection::is_empty")]
+    pub sync: SyncSection,
+    /// Your approvals for tools and connector operations
+    /// (docs/effects.md#approvals): allow, ask, block or stage, by pattern
+    /// and by effect class. Within a seat's, and never below an
+    /// administrator's on a server.
+    #[serde(default, skip_serializing_if = "ApprovalsConfig::is_empty")]
+    pub approvals: ApprovalsConfig,
+}
+
+/// `[approvals]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalsConfig {
+    /// Pattern to `allow`, `ask`, `block` or `stage`: a tool name glob
+    /// (`"Bash"`, `"mcp__*"`) or `connector:operation`
+    /// (`"github:issues.*"`, `"gmail:*"`). The most specific pattern wins.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rules: BTreeMap<String, String>,
+    /// Effect class (`reversible`, `compensable`, `irreversible`) to a
+    /// decision, for operations no rule names. Defaults: reversible
+    /// `allow`, compensable `ask`, irreversible `stage`; a deletion always
+    /// asks.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub classes: BTreeMap<String, String>,
+}
+
+impl ApprovalsConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == ApprovalsConfig::default()
+    }
+
+    /// The policy, checked; `None` when nothing is set.
+    pub fn policy(
+        &self,
+    ) -> Result<Option<branchyard_provision::approvals::ApprovalPolicy>, ConfigError> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        branchyard_provision::approvals::ApprovalPolicy::from_strings(
+            self.rules.clone(),
+            self.classes.clone(),
+            None,
+        )
+        .map(Some)
+        .map_err(|e| ConfigError(format!("approvals: {e}")))
+    }
+}
+
+/// `[sync]`; see docs/sync.md.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SyncSection {
+    /// Where tasks sync to: `gs://bucket/prefix`, `s3://bucket/prefix`
+    /// (`?endpoint=` for R2 or MinIO), `az://account/container/prefix`,
+    /// `file:///path`, or `git+https://`, `git+ssh://`, `git+file://`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// `none` (the default), `passphrase` (from BRANCHYARD_SYNC_PASSPHRASE
+    /// or `passphrase_file`), or a `kms://gcp/...`, `kms://aws/...` or
+    /// `kms://azure/...` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypt: Option<String>,
+    /// A file holding the passphrase for `encrypt = "passphrase"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase_file: Option<String>,
+    /// The data cipher of a new encrypted remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^(aes-256-gcm|chacha20-poly1305)$"))]
+    pub algorithm: Option<String>,
+    /// How often `by serve` and `by worker` look for changes to push, such
+    /// as `30s` or `5m`. Default `1m`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    /// Bytes a second, up and down together, such as `10MB/s`. Unlimited
+    /// when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth: Option<String>,
+    /// Objects in flight at once. Default 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub concurrency: Option<u32>,
+    /// Delete a task from the remote this long after its last change,
+    /// such as `90d`, unless it is on legal hold. Kept when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<String>,
+    /// How long an unreferenced object waits before `by sync gc` deletes
+    /// it. Default `24h`; at least 15 minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grace: Option<String>,
+    /// The stored bytes the remote may hold, such as `50GB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<String>,
+    /// This machine's name in conflict branches and leases. Default: the
+    /// host name and a random suffix, kept in .branchyard/sync.db.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+}
+
+impl SyncSection {
+    pub fn is_empty(&self) -> bool {
+        self == &SyncSection::default()
+    }
 }
 
 /// `[harnesses]`.
@@ -650,6 +756,19 @@ pub struct Connectors {
     /// sandboxed branches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    /// Whether each turn calls the gateway through the effect ledger's
+    /// proxy, which decides approvals and writes every effectful call to
+    /// the ledger before it is made (docs/effects.md). Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_proxy: Option<bool>,
+    /// The address each turn's ledger proxy binds (default `127.0.0.1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_listen: Option<String>,
+    /// How a sandboxed harness reaches its ledger proxy: a host address
+    /// its guest routes to. Without it, a sandboxed turn calls the gateway
+    /// directly and its effects reach the ledger only from the audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_sandbox_host: Option<String>,
 }
 
 impl Connectors {
@@ -1784,6 +1903,15 @@ impl ProjectConfig {
             split_words(anvil).map_err(|e| ConfigError(format!("connectors.anvil: {e}")))?;
         }
         self.connectors.grant_entries()?;
+        if let Some(listen) = &self.connectors.effects_listen {
+            if listen.parse::<std::net::IpAddr>().is_err() {
+                return fail(
+                    "connectors.effects_listen",
+                    format!("{listen:?} is not an IP address"),
+                );
+            }
+        }
+        self.approvals.policy()?;
         self.network.policy()?;
         self.models.check()?;
         if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {
@@ -1854,6 +1982,58 @@ impl ProjectConfig {
                 format!("{bad:?} is not a harness ID; see `by harnesses --all`"),
             );
         }
+        let sync = &self.sync;
+        if !sync.is_empty() {
+            match &sync.remote {
+                None => return fail("sync.remote", "is required when [sync] is set".into()),
+                Some(url)
+                    if ![
+                        "gs://",
+                        "s3://",
+                        "az://",
+                        "file:///",
+                        "git+https://",
+                        "git+ssh://",
+                        "git+file://",
+                    ]
+                    .iter()
+                    .any(|scheme| url.starts_with(scheme)) =>
+                {
+                    return fail(
+                        "sync.remote",
+                        format!(
+                            "must be a gs://, s3://, az://, file:///, or git+https://, git+ssh:// \
+                             or git+file:// URL, not {url:?}"
+                        ),
+                    )
+                }
+                Some(_) => {}
+            }
+            if let Some(e) = &sync.encrypt {
+                if !(e == "none" || e == "passphrase" || e.starts_with("kms://")) {
+                    return fail(
+                        "sync.encrypt",
+                        format!("must be \"none\", \"passphrase\" or a kms:// URL, not {e:?}"),
+                    );
+                }
+            }
+            if sync.concurrency == Some(0) {
+                return fail("sync.concurrency", "must be at least 1".into());
+            }
+            for (key, value) in [
+                ("sync.passphrase_file", &sync.passphrase_file),
+                ("sync.interval", &sync.interval),
+                ("sync.bandwidth", &sync.bandwidth),
+                ("sync.retention", &sync.retention),
+                ("sync.grace", &sync.grace),
+                ("sync.quota", &sync.quota),
+                ("sync.device", &sync.device),
+            ] {
+                if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+                    return fail(key, "must not be empty".into());
+                }
+            }
+        }
         if let Some(sandbox) = &self.microsandbox {
             if sandbox.image.trim().is_empty() {
                 return fail("microsandbox.image", "must not be empty".into());
@@ -1886,6 +2066,12 @@ impl ProjectConfig {
             Layer::User if self.workspace.is_some() => Err(ConfigError(
                 "workspace: [workspace] belongs in a repository's branchyard.toml; for one \
                  repository of your own, use [projects.\"/path/to/repo\".workspace] here"
+                    .into(),
+            )),
+            Layer::Project if !self.sync.is_empty() => Err(ConfigError(
+                "sync: [sync] belongs in your user configuration \
+                 (~/.config/branchyard/config.toml): a repository must not choose where your \
+                 tasks are sent"
                     .into(),
             )),
             Layer::Project if !self.projects.is_empty() => Err(ConfigError(
@@ -1927,6 +2113,7 @@ impl ProjectConfig {
         resolve(&mut self.defaults.instructions);
         resolve(&mut self.connectors.bundles);
         resolve(&mut self.connectors.vault_key);
+        resolve(&mut self.sync.passphrase_file);
         for source in self.secrets.values_mut() {
             if let Some(path) = source.strip_prefix('@') {
                 *source = format!("@{}", resolve_path(path, dir, home).display());
@@ -2368,6 +2555,26 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
             let grants: Vec<String> = c.grants.iter().map(|g| toml_string(g)).collect();
             out.push_str(&format!("grants = [{}]\n", grants.join(", ")));
         }
+        if let Some(enabled) = c.effects_proxy {
+            out.push_str(&format!("effects_proxy = {enabled}\n"));
+        }
+        for (key, value) in [
+            ("effects_listen", &c.effects_listen),
+            ("effects_sandbox_host", &c.effects_sandbox_host),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!("{key} = {}\n", toml_string(value)));
+            }
+        }
+    }
+    if !config.approvals.is_empty() {
+        out.push_str(
+            "\n# Your approvals: allow, ask, block or stage, by tool or connector:operation and\n\
+             # by effect class. See docs/effects.md.\n",
+        );
+        let table: BTreeMap<&str, &ApprovalsConfig> =
+            [("approvals", &config.approvals)].into_iter().collect();
+        out.push_str(&toml::to_string(&table).unwrap_or_default());
     }
     let n = &config.network;
     if !n.is_empty() {
@@ -2521,6 +2728,12 @@ sandbox_gateway = "http://192.168.127.1:8931/mcp"
 bundles = "connectors"
 anvil = "node /opt/anvil/bin-anvil.js"
 grants = ["github:read", "linear@work:write:issues.*"]
+effects_proxy = true
+effects_listen = "127.0.0.1"
+effects_sandbox_host = "192.168.127.1"
+[approvals]
+rules = { "github:issues.*" = "allow", "Bash" = "ask", "gmail:*" = "stage" }
+classes = { compensable = "allow" }
 "#;
 
     #[test]
@@ -2622,6 +2835,40 @@ grants = ["github:read", "linear@work:write:issues.*"]
     }
 
     #[test]
+    fn approvals_are_checked_and_become_a_policy() {
+        let config = parse(FULL).unwrap();
+        let policy = config.approvals.policy().unwrap().unwrap();
+        assert_eq!(
+            policy.rules["github:issues.*"],
+            branchyard_provision::approvals::Approval::Allow
+        );
+        assert_eq!(config.connectors.effects_proxy, Some(true));
+        assert_eq!(ApprovalsConfig::default().policy().unwrap(), None);
+        for (text, needle) in [
+            (
+                "[approvals]\nrules = { \"Bash\" = \"maybe\" }\n",
+                "approvals",
+            ),
+            (
+                "[approvals]\nclasses = { loud = \"ask\" }\n",
+                "effect class",
+            ),
+            (
+                "[approvals]\nrules = { \"github:\" = \"ask\" }\n",
+                "approval pattern",
+            ),
+            ("[approvals]\nlock = true\n", "lock"),
+            (
+                "[connectors]\neffects_listen = \"here\"\n",
+                "connectors.effects_listen",
+            ),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
     fn connectors_are_checked_with_the_flags_parser() {
         let config = parse(FULL).unwrap();
         let grants = config.connectors.grant_entries().unwrap();
@@ -2705,6 +2952,20 @@ grants = ["github:read", "linear@work:write:issues.*"]
             ("version = 2", "version"),
             ("[defaults]\nprovider = \"microsandbox\"", "[microsandbox]"),
             ("[notify]\nsound = true", "unknown field `sound`"),
+            ("[sync]\nremote = \"ftp://x\"", "sync.remote"),
+            ("[sync]\ninterval = \"5m\"", "sync.remote: is required"),
+            (
+                "[sync]\nremote = \"gs://b\"\nencrypt = \"rot13\"",
+                "sync.encrypt",
+            ),
+            (
+                "[sync]\nremote = \"gs://b\"\nconcurrency = 0",
+                "sync.concurrency",
+            ),
+            (
+                "[sync]\nremote = \"gs://b\"\nspeed = 1",
+                "unknown field `speed`",
+            ),
             ("[notify]\nterminal = \"osc99\"", "unknown variant `osc99`"),
             ("[notify]\nenabled = \"no\"", "line 2"),
             (
@@ -2715,6 +2976,26 @@ grants = ["github:read", "linear@work:write:issues.*"]
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn sync_belongs_in_the_user_file() {
+        let text = "[sync]\nremote = \"gs://bucket/branchyard\"\nencrypt = \"passphrase\"\n\
+                    passphrase_file = \"~/.config/branchyard/sync.pass\"\ninterval = \"5m\"\n\
+                    bandwidth = \"10MB/s\"\nretention = \"90d\"";
+        let mut config = parse(text).unwrap();
+        assert!(config.check_layer(Layer::User).is_ok());
+        let error = config.check_layer(Layer::Project).unwrap_err().to_string();
+        assert!(
+            error.contains("must not choose where your tasks are sent"),
+            "{error}"
+        );
+        config.resolve_paths(Path::new("/r"), Some(Path::new("/home/me")));
+        assert_eq!(
+            config.sync.passphrase_file.as_deref(),
+            Some("/home/me/.config/branchyard/sync.pass")
+        );
+        assert_eq!(config.flatten()["sync.interval"], "5m");
     }
 
     #[test]

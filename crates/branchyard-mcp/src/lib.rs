@@ -49,7 +49,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
 /// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 26] = [
+pub const TOOLS: [&str; 27] = [
     "spawn",
     "inspect",
     "events",
@@ -76,6 +76,7 @@ pub const TOOLS: [&str; 26] = [
     "inbox",
     "approve_plan",
     "reject_plan",
+    "answer_approval",
 ];
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
@@ -90,7 +91,7 @@ shows. You act only as your own branch and only \
 on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
-descendant's message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again.";
+descendant's message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {
@@ -501,6 +502,21 @@ pub fn tools() -> Vec<Tool> {
                     "replan": {"type": "boolean"},
                 },
                 "required": ["branch"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "answer_approval",
+            "Allow or deny a descendant's approval ask: a tool or connector call its turn waits \
+             on, or a staged effect it holds (docs/effects.md).",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The approval's id, or the end of it"},
+                    "allow": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["id", "allow"],
                 "additionalProperties": false,
             })),
         ),

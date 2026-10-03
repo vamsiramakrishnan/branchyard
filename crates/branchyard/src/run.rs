@@ -92,6 +92,10 @@ pub(crate) struct NewBranch<'a> {
     pub seed: Option<crate::snapshots::SandboxSeed>,
     /// Who it acts for at the connector gateway; see `crate::connectors`.
     pub actor: Option<crate::connectors::Actor>,
+    /// The task it is an attempt of, recorded once its record is written;
+    /// `None` for a branch that is part of another's work (a delegated
+    /// child, an adopted worktree).
+    pub task: Option<crate::tasks::Joining>,
 }
 
 /// The journaled step that creates a branch's worktree.
@@ -100,9 +104,13 @@ const STEP_CREATE: &str = "create";
 /// Write the record for a reserved name, take its lease for the first
 /// turn, and create its worktree as a journaled step. A worktree that
 /// cannot be created leaves the branch `Failed`.
-pub(crate) fn create(yard: &Yard, new: NewBranch<'_>) -> Result<(Record, Lease), Error> {
+pub(crate) fn create(yard: &Yard, mut new: NewBranch<'_>) -> Result<(Record, Lease), Error> {
     let store = yard.store();
+    let joining = new.task.take();
     let record = new_record(&store, new)?;
+    if let Some(joining) = &joining {
+        crate::tasks::attach(&yard.root, joining, &record.info.name)?;
+    }
     let lease = match store.acquire(&record)? {
         Taken::Granted(lease) => lease,
         Taken::Stale => return Err(Error::Running(record.info.name.clone())),
@@ -248,6 +256,12 @@ pub(crate) fn materialize(
         let outcome = match created {
             Ok(workspace) => {
                 record.info.worktree = workspace.path;
+                // A task's own repository keeps large files as pointers.
+                if let Err(error) = crate::tasks::after_checkout(yard, &record.info.worktree) {
+                    record.info.status = BranchStatus::Failed {
+                        reason: format!("could not restore its large files: {error}"),
+                    };
+                }
                 match &slot {
                     Some(taken) => json!({
                         "worktree": record.info.worktree,
@@ -382,6 +396,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
     crate::egress::check(options.provision.as_ref(), options.provider.as_ref())?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
+    let joining = crate::tasks::joining(yard, prompt, options, "run")?;
     let name = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
     let record = create(
         yard,
@@ -402,6 +417,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             workspace: options.workspace.clone(),
             seed: None,
             actor: options.actor.clone(),
+            task: Some(joining),
         },
     );
     let (mut record, lease) = record.inspect_err(|_| store.release(&name))?;
@@ -456,6 +472,8 @@ pub(crate) fn run_on(
     crate::egress::check(options.provision.as_ref(), options.provider.as_ref())?;
     let base = resolve_base(yard, options.base.as_deref())?;
     let store = yard.store();
+    let origin = if harnesses.len() > 1 { "fan" } else { "run" };
+    let joining = crate::tasks::joining(yard, prompt, options, origin)?;
     let reserved = names::reserve(
         &store,
         &yard.root,
@@ -485,6 +503,7 @@ pub(crate) fn run_on(
                 workspace: options.workspace.clone(),
                 seed: None,
                 actor: options.actor.clone(),
+                task: Some(joining.clone()),
             },
         )
         .and_then(|(mut record, lease)| {
@@ -612,6 +631,8 @@ pub(crate) fn run_attempts(
     if labels.is_empty() && specs.len() > 1 {
         return Err(Error::State("several attempts need labels".into()));
     }
+    let origin = if specs.len() > 1 { "fan" } else { "run" };
+    let joining = crate::tasks::joining(yard, prompt, options, origin)?;
     let reserved = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &labels)?;
     let mut turns = Vec::new();
     for (index, ((name, launch), (spec, o))) in reserved
@@ -639,6 +660,7 @@ pub(crate) fn run_attempts(
                 workspace: options.workspace.clone(),
                 seed: None,
                 actor: options.actor.clone(),
+                task: Some(joining.clone()),
             },
         )
         .and_then(|(mut record, lease)| {
@@ -1085,6 +1107,11 @@ pub(crate) fn prepare_send_with(
                 parent_spec.as_ref().and_then(|p| p.models.as_ref()),
             )
             .map_err(|why| Error::Denied(format!("{name}: {why}")))?;
+            // And its approvals, which may only be stricter.
+            spec.approvals = branchyard_provision::approvals::narrow(
+                spec.approvals.as_ref(),
+                parent_spec.as_ref().and_then(|p| p.approvals.as_ref()),
+            );
         }
         record.provision = Some(spec);
     }
@@ -1156,6 +1183,10 @@ fn same_model(name: &str, record: &Record, mut asked: Provisioning) -> Result<Pr
     // harness's reach, and its cost stays metered.
     if asked.models.is_none() {
         asked.models = had.and_then(|p| p.models.clone());
+    }
+    // So does a branch's approval policy, unless a send replaces it.
+    if asked.approvals.is_none() {
+        asked.approvals = had.and_then(|p| p.approvals.clone());
     }
     Ok(asked)
 }
@@ -1268,6 +1299,7 @@ pub(crate) fn fork(
     let provision = options.provision.clone().or(parent.provision.clone());
     crate::provisioning::check(provision.as_ref(), private)?;
     crate::egress::check(provision.as_ref(), provider.as_ref())?;
+    let joining = crate::tasks::joining_fork(yard, name, at, prompt, options)?;
     let reserved =
         names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
     // A forked session lives in the parent's home when it ran isolated.
@@ -1308,6 +1340,7 @@ pub(crate) fn fork(
                 .or_else(|| parent.workspace.as_ref().map(|w| w.spec.clone())),
             seed,
             actor: options.actor.clone().or(parent.actor.clone()),
+            task: Some(joining),
         },
     )
     .inspect_err(|_| store.release(&reserved))?;
@@ -1464,6 +1497,13 @@ pub(crate) fn reincarnate_with(
                 .or_else(|| parent.workspace.as_ref().map(|w| w.spec.clone())),
             seed: None,
             actor: options.actor.clone().or(parent.actor.clone()),
+            task: Some(crate::tasks::joining_fork(
+                yard,
+                name,
+                None,
+                &parent.info.prompt,
+                options,
+            )?),
         },
     )
     .inspect_err(|_| store.release(&reserved))?;

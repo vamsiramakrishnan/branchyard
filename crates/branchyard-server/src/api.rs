@@ -62,6 +62,9 @@ pub struct App {
     /// The web companion, when the operator turned it on; see
     /// `crate::companion`.
     pub companion: Option<Arc<crate::companion::Companion>>,
+    /// Sync to durable storage, when the configuration has `sync`; see
+    /// `crate::sync`.
+    pub sync: Option<Arc<crate::sync::ServerSync>>,
 }
 
 #[derive(Clone)]
@@ -769,8 +772,12 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::companion::router())
         // Repository knowledge and plan approval: `knowledge_routes`.
         .merge(crate::knowledge_routes::router())
+        // Approvals, the effect ledger and undo: `effects_routes`.
+        .merge(crate::effects_routes::router())
         // Wide maps: `map_routes`.
         .merge(crate::map_routes::router())
+        // Tasks and their attempts: `task_routes`.
+        .merge(crate::task_routes::router())
         // The fleet's service registry: `services_routes`.
         .merge(crate::services_routes::router());
     let log = app.config.log_requests;
@@ -899,6 +906,14 @@ pub(crate) async fn render_metrics(app: Shared) -> Response {
         let workers = registry.live_workers()?;
         crate::metrics::queue_gauges(&mut snapshot, &queue, &workers, crate::ops::now_ms() as i64);
         for repo in app.repos.values() {
+            // The effect ledger and the approvals waiting (docs/effects.md).
+            let entries = repo.yard.effects(None).map_err(std::io::Error::other)?;
+            let pending = repo
+                .yard
+                .approvals(true)
+                .map_err(std::io::Error::other)?
+                .len();
+            crate::metrics::effect_gauges(&mut snapshot, &repo.name, &entries, pending);
             // Only a repository whose workspace has a pool.
             if let Ok(Some(spec)) = app.workspace(repo) {
                 if spec.pool.is_some() {
@@ -906,6 +921,9 @@ pub(crate) async fn render_metrics(app: Shared) -> Response {
                     crate::metrics::pool_gauges(&mut snapshot, &repo.name, &slots);
                 }
             }
+        }
+        if let Some(sync) = &app.sync {
+            crate::metrics::sync_series(&mut snapshot, &sync.observe());
         }
         Ok::<_, std::io::Error>(crate::metrics::encode(&snapshot))
     })
@@ -1286,7 +1304,7 @@ async fn operation_by_key(
 }
 
 /// `%XX` escapes and `+` in a query value.
-fn percent_decode(value: &str) -> String {
+pub(crate) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

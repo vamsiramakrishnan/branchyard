@@ -168,6 +168,8 @@ Queue and observability ([observability](docs/observability.md)): `--priority N`
 
 Connectors ([connectors](docs/connectors.md)): `--connector CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,OP...]]` (repeatable) on `run`, `fan`, `send`, `fork` and `spawn`; `by gateway start [--foreground]|stop|status|rotate-key [--keep N]|jwks [--json]`; `by connect CONNECTOR [--account NAME] [--api-key-stdin] [--open]`.
 
+Approvals, effects and undo ([effects](docs/effects.md)): `[approvals]` in `branchyard.toml` (`rules` by tool or `connector:operation`, `classes` by effect class; a server's `approvals.admin` is locked); `by approvals [ls [--all] | allow ID | deny ID [--reason TEXT]]` (or `--branch B`; `A` and `D` in `by watch`); `by effects [--branch B] [show ID | promote ID | reconcile] [--json]`; `by undo BRANCH [--to TURN] [--plan] [--only ID...] [--yes]`; `by merge --promote-effects`. Each connector call goes through a ledger proxy for its turn, which decides allow, ask, block or stage and writes the call to the ledger before it is made.
+
 Model gateway ([model gateway](docs/model-gateway.md)): `--model-gateway[=MODELS]` on `run`, `fan`, `send`, `fork` and `reincarnate`, and `[models]` in `branchyard.toml` (backends, routes, budgets, prices; `allow` for new branches): the harness's base URL is a gateway for its turn and its key the turn's token; `by models [--period day|month|all]` shows routes, backends, budgets and usage, and `by show`, `by log`, `by stats` and `/metrics` the calls and their exact cost.
 
 Egress and permissions ([egress](docs/egress.md)): `--network open|none|HOST[:PORT],...` and `--network-enforce best-effort|required` on `run`, `fan`, `send`, `fork` and `reincarnate`, and `[network]` in `branchyard.toml`: the harness reaches only those hosts through an allowlisting proxy, confined to it in a network namespace on Linux where unprivileged namespaces are allowed and advisory elsewhere, which `by show` says. `--permissions read-only|edit-worktree|full` answers tool requests by a named preset, as do `[defaults] permissions` and a rig seat's `permission_policy`.
@@ -242,6 +244,18 @@ by rewind fix-the-flaky-test --to 2
 by try fix-the-flaky-test && by try --off
 by compare --fan speed-up-the-parser --check
 by compare --fan speed-up-the-parser --pick speed-up-the-parser-codex --discard-others
+```
+
+## Tasks
+
+Every run is a task: what was asked, by whom and under what policy, owning its attempts (a run's one branch, a fan's or a map's several, and the forks of any of them). Beside each checkpoint, the task's record is committed: the files with `.task/` (what was asked, each turn's prompt, answer, approvals and events), so a rewind or a fork moves the files and the conversation together. Merges, pull requests and diffs never see `.task/`. A task can also work on a folder that is not a repository: `by task new --folder PATH` keeps its git directory in `~/.branchyard/tasks/<id>/`, runs attempts in worktrees of their own, and writes the folder only when you accept one, refusing to overwrite a file you changed meanwhile. Large files there are stored once, as content-defined chunks, in a store every task shares. `by task new --no-files` starts a task whose conversation and results are its repository. See [task repositories](docs/task-repos.md).
+
+```sh
+by task new --folder ~/Documents/board "Update the Q3 deck from the new numbers"
+by task ls
+by task show 01JA2B3C
+by task rewind 01JA2B3C --to 1 --yes
+by task accept 01JA2B3C
 ```
 
 ## Fleet: routing and judging
@@ -440,7 +454,11 @@ Start with one complete remote task: shared contracts, a qualified sandbox provi
 - [Web companion](docs/companion.md): the page at `/app/`, pairing links, its security model and Web Push.
 - [Repository knowledge](docs/knowledge.md): entries proposed from branches, adopted after review, given to matching harnesses.
 - [Plans and goals](docs/plans-and-goals.md): read-only plans approved before execution, and goals a judge verifies.
+- [Effects, approvals and undo](docs/effects.md): the effect ledger, approval policy, staged effects and what undo can and cannot do upstream (design).
+- [Task repositories and sync](docs/task-repos.md): every task a git repository, synced to cloud storage (design).
+- [Sync](docs/sync.md): `by sync` and a server's `sync` replicate branches to Google Cloud Storage, S3 and compatible stores, Azure Blob, a git remote or a directory: content-addressed packs and chunks under one compare-and-swap manifest per task, conflict branches instead of lost writes, leases, client-side envelope encryption with keyed names, and safe garbage collection.
 - [Egress policy](docs/egress.md): the hosts a branch may reach, through an allowlisting proxy, enforced in a network namespace on Linux; and permission presets.
+- [Effects, approvals and undo](docs/effects.md): every connector call that changes the world written to a ledger before it is made, decided allow, ask, block or stage by layered policy, staged as a draft, reconciled after a crash, and undone where the upstream allows.
 - [Model gateway](docs/model-gateway.md): a harness's model calls through Branchyard on the turn's token, with the key held back, weighted backends, fallbacks, rate limits, budgets and exact cost; and one scope for connectors, models, network and delegation.
 - [Wide map](docs/map.md): one prompt over every item of a list, a branch each, answers checked against a JSON schema and collected into a table.
 - [Warm pools](docs/pools.md): ready worktrees with the prepared environment in place, taken by new branches and refilled by the server.

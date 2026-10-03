@@ -387,12 +387,33 @@ fn run(
         recorder.record(Activity::Access(Box::new(narrowed)))?;
     }
     let scopes = crate::access::TokenScopes::of(&scoped);
-    let connectors = match crate::connectors::prepare(turn.yard, &scoped, deadline_ms, &scopes) {
+    let mut connectors = match crate::connectors::prepare(turn.yard, &scoped, deadline_ms, &scopes)
+    {
         Ok(connectors) => connectors,
         Err(reason) => {
             driven.end = End::failed(format!("could not provide connectors: {reason}"));
             return Ok(driven);
         }
+    };
+    // The effect ledger's proxy in front of the gateway: every effectful
+    // call is decided and written to the ledger before it is made. It
+    // stops when this function returns, after the harness is gone.
+    let _effects = match connectors.as_mut() {
+        Some(prepared) => match effects_proxy(
+            recorder,
+            turn,
+            &scoped,
+            prepared,
+            deadline_ms,
+            bounds.policy.preset(),
+        ) {
+            Ok(proxy) => proxy,
+            Err(reason) => {
+                driven.end = End::failed(format!("could not start the effect ledger: {reason}"));
+                return Ok(driven);
+            }
+        },
+        None => None,
     };
     // The model gateway, on the same token when the turn has one; it
     // stops when this function returns, after the harness is gone.
@@ -907,6 +928,15 @@ fn run(
             }
             Event::PermissionRequested { request, .. } => {
                 let stopping = matches!(phase, Phase::Stopping { .. });
+                let cancelled = || {
+                    lease.lost()
+                        || store
+                            .backend()
+                            .cancel_requested(fence)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                };
                 let answered = answer(
                     recorder,
                     &mut session,
@@ -914,6 +944,7 @@ fn run(
                     &bounds.policy,
                     &request,
                     stopping,
+                    (deadline_ms, &cancelled),
                 )?;
                 // The policy may have blocked delivering this answer for a
                 // while (an `--ask` prompt, say); that time is never a
@@ -1300,6 +1331,7 @@ fn answer(
     policy: &Policy,
     request: &PermissionRequest,
     stopping: bool,
+    (deadline_ms, cancelled): (Option<u64>, &dyn Fn() -> bool),
 ) -> Result<Option<String>, Error> {
     let (decision, source) = if stopping {
         let decision = PermissionDecision::Deny {
@@ -1307,7 +1339,21 @@ fn answer(
         };
         (decision, DecisionSource::Engine)
     } else {
-        policy.decide_with_source(&turn.record.info.name, request)
+        let decided = policy.decide_with_source(&turn.record.info.name, request);
+        // Approvals only tighten what the policy allowed.
+        match decided {
+            (PermissionDecision::Allow, source) => crate::effects::tool::decide(
+                turn.yard,
+                &turn.record,
+                &request.tool,
+                &request.input,
+                policy.preset(),
+                deadline_ms,
+                cancelled,
+            )
+            .unwrap_or((PermissionDecision::Allow, source)),
+            denied => denied,
+        }
     };
     let (allowed, message) = match &decision {
         PermissionDecision::Allow => (true, None),
@@ -1337,6 +1383,71 @@ fn answer(
             Ok(Some(reason))
         }
     }
+}
+
+/// Start the turn's effect-ledger proxy and give it to the harness as the
+/// gateway. `None` when the yard turned it off, or for a sandboxed turn
+/// with no address a sandbox reaches it at (said in a warning: its calls
+/// reach the ledger only from the gateway's audit log).
+fn effects_proxy(
+    recorder: &mut Recorder,
+    turn: &Turn<'_>,
+    record: &Record,
+    prepared: &mut crate::connectors::Prepared,
+    deadline_ms: Option<u64>,
+    preset: Option<crate::PolicyPreset>,
+) -> Result<Option<crate::effects::proxy::EffectProxy>, String> {
+    let Some(gateway) = turn.yard.connectors() else {
+        return Ok(None);
+    };
+    let settings = &gateway.effects;
+    if !settings.enabled {
+        return Ok(None);
+    }
+    let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
+    let host = match (sandboxed, &settings.sandbox_host) {
+        (false, _) => match settings.listen {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+            std::net::IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_owned(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+            ip => ip.to_string(),
+        },
+        (true, Some(host)) => host.clone(),
+        (true, None) => {
+            recorder
+                .record(Activity::Warning(
+                    "this sandboxed turn calls the connector gateway directly: its effects reach                      the ledger only from the gateway's audit log, after the fact, and are not                      approved first; set [connectors] effects_sandbox_host (docs/effects.md)"
+                        .into(),
+                ))
+                .map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
+    };
+    let proxy = crate::effects::proxy::EffectProxy::start(
+        turn.yard,
+        record,
+        settings.listen,
+        crate::effects::proxy::ProxySpec {
+            upstream: gateway.url.clone(),
+            token: prepared.token.clone(),
+            deadline_ms,
+            preset,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let url = format!("http://{host}:{}/mcp", proxy.port());
+    for var in prepared.env.iter_mut() {
+        if var.name == crate::connectors::ENV_GATEWAY_URL {
+            var.value = url.clone();
+        }
+    }
+    prepared.gateway_url = url.clone();
+    recorder
+        .record(Activity::Effect(Box::new(
+            crate::effects::EffectActivity::Proxy { url },
+        )))
+        .map_err(|e| e.to_string())?;
+    Ok(Some(proxy))
 }
 
 /// What the `snapshot` step recorded.
@@ -1385,6 +1496,13 @@ pub(crate) fn conclude(
     let snapshotted = match recorded {
         Some(snapshotted) => snapshotted,
         None => {
+            // In a task's own repository, large files become pointers;
+            // see `crate::tasks::large`.
+            if let Err(error) = crate::tasks::before_snapshot(yard, info) {
+                recorder.record(Activity::Warning(format!(
+                    "large files were not stored as chunks: {error}"
+                )))?;
+            }
             let snapshot = {
                 let _lock = git::lock();
                 let branch = names::validate(&info.name)?;

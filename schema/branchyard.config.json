@@ -111,6 +111,14 @@
     "harnesses": {
       "$ref": "#/$defs/HarnessesConfig",
       "description": "Installing and updating harness CLIs (docs/harness-lifecycle.md):\nwhether `by harnesses install`, `update` and the router may run a\nharness's install command, and for which harnesses. A repository's\nfile may only say `install = \"never\"`; the rest belongs in your user\nfile, since it runs software on your machine."
+    },
+    "sync": {
+      "$ref": "#/$defs/SyncSection",
+      "description": "Syncing tasks to durable storage (docs/sync.md): the remote, its\nencryption, how often and how fast. User file only: a repository\nmust not choose where your tasks are sent."
+    },
+    "approvals": {
+      "$ref": "#/$defs/ApprovalsConfig",
+      "description": "Your approvals for tools and connector operations\n(docs/effects.md#approvals): allow, ask, block or stage, by pattern\nand by effect class. Within a seat's, and never below an\nadministrator's on a server."
     }
   },
   "title": "Branchyard configuration",
@@ -853,6 +861,27 @@
             "type": "string"
           },
           "description": "Grants for a new branch (`by run`, `by fan`) when `--connector`\ngives none, in its form: `\"github:read\"`,\n`\"github@work:write:issues.*\"`. Applied only to isolated or\nsandboxed branches."
+        },
+        "effects_proxy": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether each turn calls the gateway through the effect ledger's\nproxy, which decides approvals and writes every effectful call to\nthe ledger before it is made (docs/effects.md). Default true."
+        },
+        "effects_listen": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The address each turn's ledger proxy binds (default `127.0.0.1`)."
+        },
+        "effects_sandbox_host": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "How a sandboxed harness reaches its ledger proxy: a host address\nits guest routes to. Without it, a sandboxed turn calls the gateway\ndirectly and its effects reach the ledger only from the audit log."
         }
       },
       "description": "`[connectors]`."
@@ -1457,6 +1486,114 @@
         }
       ],
       "description": "`install` in `[harnesses]`."
+    },
+    "SyncSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "remote": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where tasks sync to: `gs://bucket/prefix`, `s3://bucket/prefix`\n(`?endpoint=` for R2 or MinIO), `az://account/container/prefix`,\n`file:///path`, or `git+https://`, `git+ssh://`, `git+file://`."
+        },
+        "encrypt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`none` (the default), `passphrase` (from BRANCHYARD_SYNC_PASSPHRASE\nor `passphrase_file`), or a `kms://gcp/...`, `kms://aws/...` or\n`kms://azure/...` key."
+        },
+        "passphrase_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A file holding the passphrase for `encrypt = \"passphrase\"`."
+        },
+        "algorithm": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The data cipher of a new encrypted remote.",
+          "pattern": "^(aes-256-gcm|chacha20-poly1305)$"
+        },
+        "interval": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "How often `by serve` and `by worker` look for changes to push, such\nas `30s` or `5m`. Default `1m`."
+        },
+        "bandwidth": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Bytes a second, up and down together, such as `10MB/s`. Unlimited\nwhen unset."
+        },
+        "concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Objects in flight at once. Default 8."
+        },
+        "retention": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Delete a task from the remote this long after its last change,\nsuch as `90d`, unless it is on legal hold. Kept when unset."
+        },
+        "grace": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "How long an unreferenced object waits before `by sync gc` deletes\nit. Default `24h`; at least 15 minutes."
+        },
+        "quota": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The stored bytes the remote may hold, such as `50GB`."
+        },
+        "device": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "This machine's name in conflict branches and leases. Default: the\nhost name and a random suffix, kept in .branchyard/sync.db."
+        }
+      },
+      "description": "`[sync]`; see docs/sync.md."
+    },
+    "ApprovalsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Pattern to `allow`, `ask`, `block` or `stage`: a tool name glob\n(`\"Bash\"`, `\"mcp__*\"`) or `connector:operation`\n(`\"github:issues.*\"`, `\"gmail:*\"`). The most specific pattern wins."
+        },
+        "classes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Effect class (`reversible`, `compensable`, `irreversible`) to a\ndecision, for operations no rule names. Defaults: reversible\n`allow`, compensable `ask`, irreversible `stage`; a deletion always\nasks."
+        }
+      },
+      "description": "`[approvals]`."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

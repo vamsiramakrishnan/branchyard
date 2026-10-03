@@ -142,6 +142,10 @@ pub struct SeatSpec {
     /// its parent's (the root's: off the gateway). Within its parent
     /// seat's.
     pub models: Option<branchyard::models::ModelAccess>,
+    /// Its approvals for tools and connector operations (allow, ask,
+    /// block, stage); within its parent seat's when spawned
+    /// (docs/effects.md).
+    pub approvals: Option<branchyard::effects::ApprovalPolicy>,
     pub telemetry: Option<Telemetry>,
     pub isolated: bool,
     pub budget: ChildBudget,
@@ -732,6 +736,10 @@ struct RawSeat {
     /// go through the gateway. Unset: its parent seat's. Within its parent
     /// seat's.
     models: Option<Vec<String>>,
+    /// Approvals for tools and connector operations (docs/effects.md):
+    /// rules = { "github:issues.*" = "allow", "Bash" = "ask" }, classes =
+    /// { compensable = "allow" }. A child seat's may only be stricter.
+    approvals: Option<RawApprovals>,
     /// `off`, or an http:// or https:// OTLP collector endpoint.
     telemetry: Option<String>,
     /// Run in a home private to the branch; inherited by the seats below.
@@ -765,6 +773,21 @@ struct RawSeat {
     /// Only resume_if_possible: a send resumes the branch's session.
     #[cfg_attr(feature = "schema", schemars(with = "Option<schema::Restore>"))]
     restore_policy: Option<String>,
+}
+
+/// A seat's approvals.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "Approvals"))]
+#[serde(deny_unknown_fields)]
+struct RawApprovals {
+    /// Pattern to allow, ask, block or stage: a tool name glob, or
+    /// connector:operation.
+    #[serde(default)]
+    rules: BTreeMap<String, String>,
+    /// Effect class (reversible, compensable, irreversible) to a decision.
+    #[serde(default)]
+    classes: BTreeMap<String, String>,
 }
 
 /// Limits for one branch in this seat.
@@ -1068,6 +1091,15 @@ impl RawSeat {
             let access = branchyard::models::ModelAccess { allow: models };
             access.check().map_err(|e| fail("models", e))?;
             seat.models = Some(access);
+        }
+        if let Some(approvals) = self.approvals {
+            let policy = branchyard::effects::ApprovalPolicy::from_strings(
+                approvals.rules,
+                approvals.classes,
+                None,
+            )
+            .map_err(|e| fail("approvals", e))?;
+            seat.approvals = Some(policy);
         }
         if let Some(text) = self.telemetry {
             seat.telemetry = Some(Telemetry::parse(&text).map_err(|e| fail("telemetry", e))?);
@@ -1829,6 +1861,7 @@ fn provision(
         connectors: seat.connectors.clone(),
         network: seat.network.clone(),
         models: seat.models.clone(),
+        approvals: seat.approvals.clone(),
         instructions: Some(text),
         model: seat.model.clone(),
         effort: seat.effort,

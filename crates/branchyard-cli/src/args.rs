@@ -156,6 +156,34 @@ Examples:
 
 See docs/plans-and-goals.md.";
 
+const APPROVALS_EXAMPLES: &str = "\
+Examples:
+  by approvals
+  by approvals allow 7Q2M9K4D
+  by approvals deny 7Q2M9K4D --reason \"not before the board meets\"
+  by approvals ls --all --json
+
+See docs/effects.md.";
+
+const EFFECTS_EXAMPLES: &str = "\
+Examples:
+  by effects
+  by effects --branch board-update --json
+  by effects show 5H3XK2PA
+  by effects promote 5H3XK2PA
+  by effects reconcile
+
+See docs/effects.md.";
+
+const UNDO_EXAMPLES: &str = "\
+Examples:
+  by undo board-update --to 3 --plan
+  by undo board-update --to 3
+  by undo board-update --to 3 --only 5H3XK2PA 9TQ0WZ1R
+  by undo board-update --yes
+
+See docs/effects.md.";
+
 const KNOWLEDGE_EXAMPLES: &str = "\
 Examples:
   by knowledge review
@@ -164,6 +192,103 @@ Examples:
   by knowledge export --out AGENTS.md
 
 See docs/knowledge.md.";
+
+/// `by approvals`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct ApprovalsArgs {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    #[command(subcommand)]
+    pub action: Option<ApprovalsAction>,
+}
+
+/// `by effects`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct EffectsArgs {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Only this branch's
+    #[arg(long, value_name = "BRANCH")]
+    pub branch: Option<String>,
+    #[command(subcommand)]
+    pub action: Option<EffectsAction>,
+}
+
+/// `by undo`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct UndoArgs {
+    pub branch: String,
+    /// Go back to this checkpoint (default: the branch's base, 0); effects of later turns are
+    /// planned
+    #[arg(long, value_name = "TURN")]
+    pub to: Option<u32>,
+    /// Print the plan and change nothing
+    #[arg(long)]
+    pub plan: bool,
+    /// Undo only these upstream effects (ids or their ends)
+    #[arg(long, value_name = "ID", num_args = 1..)]
+    pub only: Vec<String>,
+    /// Undo every reversible effect without asking
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+    /// Print JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `by approvals`' actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum ApprovalsAction {
+    /// List the approvals waiting (the default)
+    Ls {
+        /// Answered ones too
+        #[arg(long)]
+        all: bool,
+    },
+    /// Allow it: the waiting call or tool goes ahead, a staged effect is performed
+    Allow {
+        /// The approval's id, or the end of it
+        #[arg(required_unless_present = "branch")]
+        id: Option<String>,
+        /// The oldest approval waiting on this branch instead
+        #[arg(long, value_name = "BRANCH", conflicts_with = "id")]
+        branch: Option<String>,
+        /// Why, recorded with the answer
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        reason: Option<String>,
+    },
+    /// Deny it: the call or tool is refused, a staged effect is discarded
+    Deny {
+        /// The approval's id, or the end of it
+        #[arg(required_unless_present = "branch")]
+        id: Option<String>,
+        /// The oldest approval waiting on this branch instead
+        #[arg(long, value_name = "BRANCH", conflicts_with = "id")]
+        branch: Option<String>,
+        /// Why, recorded with the answer
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        reason: Option<String>,
+    },
+}
+
+/// `by effects`' actions.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum EffectsAction {
+    /// One entry and the events it is projected from
+    Show {
+        /// The entry's id, or the end of it
+        id: String,
+    },
+    /// Perform a staged effect for real: promote its draft, or make the held call
+    Promote {
+        /// The entry's id, or the end of it
+        id: String,
+    },
+    /// Settle entries whose outcome is unknown through their operation's lookup
+    Reconcile,
+}
 
 /// `by plan`'s actions.
 #[derive(Subcommand, Clone, Debug, PartialEq)]
@@ -665,6 +790,23 @@ const FORK_EXAMPLES: &str = "\
 Examples:
   by fork fix-the-flaky-test \"try a lock instead\" -n with-lock";
 
+const TASK_EXAMPLES: &str = "\
+Every run is a task: `by run` starts one with one attempt, `by fan` one with an
+attempt per harness, `by map` one whose items are its attempts. Beside each
+checkpoint, the task's record is committed: the files with .task/ (what was
+asked, each turn's conversation), never merged or diffed. A folder task keeps its git
+directory in ~/.branchyard/tasks/<id>/ and writes the folder only on accept,
+refusing to overwrite a file changed outside the task.
+
+Examples:
+  by task new --folder ~/Documents/board \"Update the Q3 deck from the new numbers\"
+  by task new --no-files \"Draft a reply to the vendor\"
+  by task ls
+  by task show 01JA2B3C
+  by task rewind 01JA2B3C --to 1 --yes
+  by task fork 01JA2B3C --at 1 \"Try a shorter version\"
+  by task accept 01JA2B3C --attempt update-the-q3-deck-2";
+
 const REWIND_EXAMPLES: &str = "\
 Each turn ends with a checkpoint, refs/branchyard/<branch>/<incarnation>/turn-<N>;
 `by show` lists them. Later checkpoints are kept until the branch is removed, so
@@ -835,6 +977,23 @@ Examples:
 holding each key), the routes by model, and daily and monthly budgets. A
 branch on the gateway gets its own gateway each turn, on the turn's token; the
 key never reaches the harness. See docs/model-gateway.md.";
+
+const SYNC_EXAMPLES: &str = "\
+Examples:
+  by sync                          # push and pull every branch that changed
+  by sync fix-login                # one branch
+  by sync status                   # the remote, each task's state and lag, the counters
+  by sync pull 3f2a9c01be47.fix-login
+  by sync gc --dry-run
+  by sync scrub --sample 500
+  by sync hold fix-login --reason \"audit 42\"
+
+[sync] in your user configuration (~/.config/branchyard/config.toml) says where:
+remote = \"gs://bucket/prefix\" (or s3://, az://, file:///, git+https://),
+encrypt = \"passphrase\" or \"kms://...\", interval, bandwidth, retention. Objects are
+written first and each task's manifest is swapped by compare-and-swap; two
+machines that moved one branch apart keep both, the second as
+refs/heads/conflict/<device>/<n>. See docs/sync.md.";
 
 const SERVICES_EXAMPLES: &str = "\
 Examples:
@@ -1018,6 +1177,10 @@ pub enum Command {
         /// Then remove the branch, running its workspace teardown, as `by rm` does
         #[arg(long)]
         rm: bool,
+        /// Also perform the branch's staged effects (drafts and held calls), as approving
+        /// each would
+        #[arg(long)]
+        promote_effects: bool,
     },
     /// A branch's workspace: trust its scripts, show it, or run a named script in it
     #[command(display_order = 110, subcommand_required = true, after_help = WORKSPACE_EXAMPLES)]
@@ -1073,6 +1236,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Tasks: what was asked and its attempts, in this repository, a folder you grant, or none
+    #[command(display_order = 107, subcommand_required = true, after_help = TASK_EXAMPLES)]
+    Task(Box<TaskCommand>),
     /// Apply a branch's changes to this checkout to try them; --off restores it
     #[command(display_order = 108, after_help = TRY_EXAMPLES)]
     Try {
@@ -1158,6 +1324,17 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Approvals waiting for an answer: list them, allow or deny one
+    #[command(display_order = 114, after_help = APPROVALS_EXAMPLES)]
+    Approvals(ApprovalsArgs),
+    /// The effect ledger: what branches did outside the machine; show, promote or reconcile
+    /// an entry
+    #[command(display_order = 115, after_help = EFFECTS_EXAMPLES)]
+    Effects(EffectsArgs),
+    /// Undo a branch: rewind its files and conversation, and undo what it did upstream where
+    /// the upstream allows
+    #[command(display_order = 116, after_help = UNDO_EXAMPLES)]
+    Undo(UndoArgs),
     /// A branch's plan: show it, approve it (as proposed or edited) or reject it
     #[command(display_order = 112, subcommand_required = true, after_help = PLAN_EXAMPLES)]
     Plan {
@@ -1620,6 +1797,14 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<ServicesAction>,
     },
+    /// Sync tasks to durable storage: push and pull a branch, or every branch that changed
+    #[command(
+        display_order = 407,
+        after_help = SYNC_EXAMPLES,
+        args_conflicts_with_subcommands = true,
+        subcommand_negates_reqs = true
+    )]
+    Sync(SyncArgs),
     /// Refresh the connector and harness catalogs from live registries, or show what is cached
     #[command(display_order = 406, subcommand_required = true, after_help = CATALOG_EXAMPLES)]
     Catalog {
@@ -1628,6 +1813,74 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: CatalogAction,
+    },
+}
+
+/// `by sync`'s arguments, parsed in a function of their own (it keeps
+/// the stack frame of `Command`'s parser small).
+#[derive(Args, Clone, Debug, PartialEq, Eq)]
+pub struct SyncArgs {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// A branch, or a task ID (`<repository key>.<branch>`); every branch when omitted
+    pub task: Option<String>,
+    #[command(subcommand)]
+    pub action: Option<SyncAction>,
+}
+
+/// `by sync ...`; see docs/sync.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum SyncAction {
+    /// The remote, this machine's device name, each task's state and lag, what is queued, and
+    /// the counters
+    Status,
+    /// Bring a task from the remote: create or fast-forward its refs here
+    Pull {
+        /// A branch, or a task ID from `by sync ls`
+        task: String,
+    },
+    /// The tasks in the remote
+    Ls,
+    /// Collect garbage: objects no manifest references, after their grace period; tasks past
+    /// their retention unless held
+    Gc {
+        /// Say what would be deleted, and delete nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Read a sample of objects back and check each against its name; repair chunks from here
+    Scrub {
+        /// Objects to read (all of them when larger than their number)
+        #[arg(long, default_value_t = 100)]
+        sample: usize,
+        /// The sample's seed, to repeat one
+        #[arg(long)]
+        seed: Option<u64>,
+    },
+    /// Put a task on legal hold (never deleted or collected), or release it
+    Hold {
+        /// A branch, or a task ID
+        task: String,
+        /// Why, recorded with the hold
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Release the hold instead
+        #[arg(long)]
+        release: bool,
+    },
+    /// Delete a task from the remote (refused under a legal hold); `gc` reclaims its objects
+    Rm {
+        /// A branch, or a task ID
+        task: String,
+    },
+    /// Rotate the tenant key: a new key version, every object's data key rewrapped, the old
+    /// versions retired
+    RotateKey {
+        /// Wrap the keys from now on with this instead: `passphrase` (the new one in
+        /// BRANCHYARD_SYNC_NEW_PASSPHRASE) or a kms:// URL
+        #[arg(long, value_name = "WRAPPER")]
+        to: Option<String>,
     },
 }
 
@@ -2251,6 +2504,11 @@ impl Command {
             Command::Send { task, .. } => task,
             Command::Review { task, .. } => task,
             Command::Spawn { spawn, .. } => &spawn.task,
+            Command::Task(task) => match &task.action {
+                TaskAction::New(new) => &new.task,
+                TaskAction::Fork(fork) => &fork.flags,
+                _ => return None,
+            },
             _ => return None,
         };
         task.recipe.as_ref().map(|r| r.name.as_str())
@@ -3090,6 +3348,135 @@ impl Flags for FanFlags {
     }
 }
 
+/// `by task`, as its own struct and boxed: [`Command`]'s parser builds every
+/// command's arguments in one function, whose debug-build stack frame is
+/// near a test thread's limit, so this one adds only a call.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskCommand {
+    /// Print JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+    #[command(subcommand)]
+    pub action: TaskAction,
+}
+
+/// `by task`'s actions (docs/task-repos.md), each with its own flags.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum TaskAction {
+    /// Start a task and run its first attempt: in this repository, in a folder you grant
+    /// (--folder), or with no files (--no-files)
+    New(Box<TaskNew>),
+    /// List tasks: this repository's, then those with a repository of their own
+    Ls,
+    /// Show a task: what was asked, its attempts and their conversations
+    Show(TaskShow),
+    /// Open an attempt's worktree in your editor (or print its path)
+    Open(TaskOpen),
+    /// Reset an attempt, its files and its conversation, to one of its checkpoints
+    Rewind(TaskRewind),
+    /// Start another attempt from an attempt's candidate, or from its checkpoint N
+    Fork(Box<TaskFork>),
+    /// Accept an attempt: merge it here, or apply it to the task's folder
+    Accept(TaskAccept),
+    /// Remove a task and its attempts (never the folder you granted)
+    Rm(TaskRm),
+}
+
+/// `by task new`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskNew {
+    /// What to do; quote it
+    pub prompt: String,
+    /// A folder to work on (not a git repository): attempts run in their own worktrees and
+    /// the folder changes only when you accept one
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath, conflicts_with = "no_files")]
+    pub folder: Option<std::path::PathBuf>,
+    /// A task with no files: its conversation and results are its repository
+    #[arg(long)]
+    pub no_files: bool,
+    /// With --folder or --no-files: files of at least this many bytes are stored as chunks
+    /// (default 1048576)
+    #[arg(long, value_name = "BYTES")]
+    pub large_threshold: Option<u64>,
+    #[command(flatten)]
+    pub task: Checked<RunFlags>,
+}
+
+/// `by task show`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskShow {
+    /// The task's ID (or a prefix of at least 4 characters) or one of its attempts
+    pub task: String,
+}
+
+/// `by task open`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskOpen {
+    pub task: String,
+    /// The attempt (default: the only one)
+    #[arg(long, value_name = "BRANCH")]
+    pub attempt: Option<String>,
+    /// The editor: code, cursor, zed, nvim, ... or a command line (default: $VISUAL, then
+    /// $EDITOR)
+    #[arg(long, value_name = "EDITOR", conflicts_with = "print")]
+    pub editor: Option<String>,
+    /// Print the worktree's path instead of opening it
+    #[arg(long)]
+    pub print: bool,
+}
+
+/// `by task rewind`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskRewind {
+    pub task: String,
+    /// The attempt (default: the only one)
+    #[arg(long, value_name = "BRANCH")]
+    pub attempt: Option<String>,
+    /// The checkpoint: a turn number, or 0 for the attempt's base
+    #[arg(long, value_name = "N")]
+    pub to: u32,
+    /// Do not ask for confirmation
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+/// `by task fork`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskFork {
+    pub task: String,
+    /// The new attempt's prompt; quote it
+    pub prompt: String,
+    /// The attempt to fork (default: the only one)
+    #[arg(long, value_name = "BRANCH")]
+    pub attempt: Option<String>,
+    /// Fork from checkpoint N (0 is its base) instead of its candidate
+    #[arg(long, value_name = "N")]
+    pub at: Option<u32>,
+    #[command(flatten)]
+    pub flags: Checked<ForkFlags>,
+}
+
+/// `by task accept`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskAccept {
+    pub task: String,
+    /// The attempt (default: the only one)
+    #[arg(long, value_name = "BRANCH")]
+    pub attempt: Option<String>,
+    /// In a repository: the branch to merge into (default: the current branch)
+    #[arg(long, value_name = "TARGET")]
+    pub into: Option<String>,
+}
+
+/// `by task rm`.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct TaskRm {
+    pub task: String,
+    /// Do not ask for confirmation
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
 /// `by map`'s actions besides running one.
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 pub enum MapAction {
@@ -3571,8 +3958,14 @@ impl Flags for PrFlags {
     }
 }
 
-/// `by`'s command, with the grouped command list in its help.
+/// `by`'s command, with the grouped command list in its help. Built on a
+/// thread with [`PARSE_STACK`], like parsing, so help, completions and the
+/// man page never depend on the caller's stack either.
 pub fn command() -> clap::Command {
+    on_parse_stack(build_command)
+}
+
+fn build_command() -> clap::Command {
     let cmd = Cli::command();
     let header = *cmd.get_styles().get_header();
     let listing = command_listing(&cmd);
@@ -3628,6 +4021,12 @@ fn command_listing(cmd: &clap::Command) -> String {
     text
 }
 
+/// The stack [`parse_from`] parses on: clap's derived parser for every
+/// command is one function whose unoptimized frame outgrew the 2 MiB a
+/// spawned thread (a test, a worker) gets, so it never depends on the
+/// caller's stack.
+const PARSE_STACK: usize = 8 << 20;
+
 /// Parse `by`'s command line, program name first.
 pub fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
@@ -3635,7 +4034,22 @@ where
     T: Into<OsString> + Clone,
 {
     let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
-    let mut cmd = command();
+    on_parse_stack(move || parse_argv(argv))
+}
+
+/// Run `f` on a thread with [`PARSE_STACK`], passing on its panic.
+fn on_parse_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    std::thread::Builder::new()
+        .name("by-args".into())
+        .stack_size(PARSE_STACK)
+        .spawn(f)
+        .expect("could not start the argument parser's thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn parse_argv(argv: Vec<OsString>) -> Result<Cli, clap::Error> {
+    let mut cmd = build_command();
     let matches = cmd
         .try_get_matches_from_mut(argv.iter().cloned())
         .map_err(|error| with_step_tip(with_prompt_tip(error, &cmd, &argv)))?;
@@ -4870,6 +5284,34 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_str("sync fix-login --json").unwrap(),
+            Command::Sync(SyncArgs {
+                json: true,
+                task: Some("fix-login".into()),
+                action: None,
+            })
+        );
+        assert_eq!(
+            parse_str("sync gc --dry-run").unwrap(),
+            Command::Sync(SyncArgs {
+                json: false,
+                task: None,
+                action: Some(SyncAction::Gc { dry_run: true }),
+            })
+        );
+        assert_eq!(
+            parse_str("sync hold t --reason audit --release").unwrap(),
+            Command::Sync(SyncArgs {
+                json: false,
+                task: None,
+                action: Some(SyncAction::Hold {
+                    task: "t".into(),
+                    reason: Some("audit".into()),
+                    release: true,
+                }),
+            })
+        );
+        assert_eq!(
             parse_str("services gc --json").unwrap(),
             Command::Services {
                 json: true,
@@ -4897,7 +5339,8 @@ mod tests {
             Command::Merge {
                 branch: "b".into(),
                 into: None,
-                rm: false
+                rm: false,
+                promote_effects: false
             }
         );
         assert_eq!(
@@ -4905,7 +5348,8 @@ mod tests {
             Command::Merge {
                 branch: "b".into(),
                 into: Some("release".into()),
-                rm: false
+                rm: false,
+                promote_effects: false
             }
         );
         assert_eq!(
@@ -4921,7 +5365,8 @@ mod tests {
             Command::Merge {
                 branch: "b".into(),
                 into: None,
-                rm: true
+                rm: true,
+                promote_effects: false
             }
         );
     }

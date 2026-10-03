@@ -162,7 +162,9 @@ A preset is a named permission policy that stands for explicit rules. It is usab
 | `edit-worktree` | the same, and edits: `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `fileChange`, `write_file`, `replace` | commands (`Bash`, `commandExecution`, `run_shell_command`, `shell`, …) and the web (`WebFetch`, `WebSearch`, …) | deny |
 | `full` | everything, as `--yes` | nothing | allow |
 
-`read-only` is the policy a [planning turn](plans-and-goals.md) runs under. Rules match tool names only: `edit-worktree` says a harness may edit, not where; the harness's own tools decide what path an edit touches.
+`read-only` is the policy a [planning turn](plans-and-goals.md) runs under.
+
+A preset is also the last layer of [approvals](effects.md#approvals) for connector operations (`PolicyPreset::approvals`): `read-only` and `edit-worktree` block every reversible, compensable and irreversible operation, since they change nothing outside the machine; `full` keeps the class defaults (reversible allowed, compensable asked, irreversible staged, deletions asked). Approvals that name a tool only tighten what the preset allowed. Rules match tool names only: `edit-worktree` says a harness may edit, not where; the harness's own tools decide what path an edit touches.
 
 How a preset combines:
 

@@ -279,6 +279,29 @@ CREATE TABLE IF NOT EXISTS pool_slots (
     changed_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS pool_slots_place ON pool_slots (place, created_ms);
+CREATE TABLE IF NOT EXISTS effects (
+    id TEXT PRIMARY KEY,
+    branch TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    entry TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS effects_branch ON effects (branch, created_ms);
+CREATE TABLE IF NOT EXISTS effect_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    change TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS effect_events_id ON effect_events (id, seq);
+CREATE TABLE IF NOT EXISTS approval_asks (
+    id TEXT PRIMARY KEY,
+    branch TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    answered INTEGER NOT NULL,
+    ask TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS approval_asks_pending ON approval_asks (answered, created_ms);
 ";
 
 #[derive(Debug)]
@@ -2837,6 +2860,222 @@ impl crate::models::UsageBackend for Sqlite {
                 .query_map(params![int(since_ms)], usage_row)
                 .map_err(e)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(e)
+        })
+    }
+}
+
+impl crate::effects::EffectBackend for Sqlite {
+    fn open_effect(&self, entry: &crate::effects::EffectEntry) -> Result<(), Error> {
+        use crate::effects::EffectChange;
+        // Durable before the call it records is made.
+        self.tx(true, |tx| {
+            let e = |error| db("effect", error);
+            tx.execute(
+                "INSERT INTO effects (id, branch, state, created_ms, entry) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    entry.id,
+                    entry.branch,
+                    entry.state.as_str(),
+                    int(entry.created_ms),
+                    encode("effect", entry)?
+                ],
+            )
+            .map_err(e)?;
+            let change = EffectChange::Opened {
+                entry: Box::new(entry.clone()),
+            };
+            tx.execute(
+                "INSERT INTO effect_events (id, at_ms, change) VALUES (?1, ?2, ?3)",
+                params![entry.id, int(entry.created_ms), encode("effect", &change)?],
+            )
+            .map_err(e)?;
+            Ok(())
+        })
+    }
+
+    fn move_effect(
+        &self,
+        id: &str,
+        from: &[crate::effects::EffectState],
+        change: &crate::effects::EffectMove,
+        at_ms: u64,
+    ) -> Result<Option<crate::effects::EffectEntry>, Error> {
+        use crate::effects::{EffectChange, EffectEntry};
+        self.tx(true, |tx| {
+            let e = |error| db("effect", error);
+            let text: Option<String> = tx
+                .query_row(
+                    "SELECT entry FROM effects WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(e)?;
+            let Some(text) = text else {
+                return Ok(None);
+            };
+            let mut entry: EffectEntry = decode("effect", &text)?;
+            if !from.is_empty() && !from.contains(&entry.state) {
+                return Ok(None);
+            }
+            change.apply(&mut entry, at_ms);
+            tx.execute(
+                "UPDATE effects SET state = ?2, entry = ?3 WHERE id = ?1",
+                params![id, entry.state.as_str(), encode("effect", &entry)?],
+            )
+            .map_err(e)?;
+            tx.execute(
+                "INSERT INTO effect_events (id, at_ms, change) VALUES (?1, ?2, ?3)",
+                params![
+                    id,
+                    int(at_ms),
+                    encode("effect", &EffectChange::Moved(Box::new(change.clone())))?
+                ],
+            )
+            .map_err(e)?;
+            Ok(Some(entry))
+        })
+    }
+
+    fn effect(&self, id: &str) -> Result<Option<crate::effects::EffectEntry>, Error> {
+        self.query(|conn| {
+            let text: Option<String> = conn
+                .query_row(
+                    "SELECT entry FROM effects WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| db("effect", e))?;
+            text.map(|t| decode("effect", &t)).transpose()
+        })
+    }
+
+    fn effects(&self, branch: Option<&str>) -> Result<Vec<crate::effects::EffectEntry>, Error> {
+        self.query(|conn| {
+            let e = |error| db("effects", error);
+            let mut statement = conn
+                .prepare(
+                    "SELECT entry FROM effects WHERE ?1 IS NULL OR branch = ?1 \
+                     ORDER BY created_ms, id",
+                )
+                .map_err(e)?;
+            let rows = statement
+                .query_map(params![branch], |r| r.get::<_, String>(0))
+                .map_err(e)?;
+            let texts = rows.collect::<Result<Vec<_>, _>>().map_err(e)?;
+            texts.iter().map(|t| decode("effect", t)).collect()
+        })
+    }
+
+    fn effect_events(&self, id: &str) -> Result<Vec<crate::effects::EffectEvent>, Error> {
+        self.query(|conn| {
+            let e = |error| db("effect events", error);
+            let mut statement = conn
+                .prepare("SELECT seq, at_ms, change FROM effect_events WHERE id = ?1 ORDER BY seq")
+                .map_err(e)?;
+            let rows = statement
+                .query_map(params![id], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(e)?;
+            let rows = rows.collect::<Result<Vec<_>, _>>().map_err(e)?;
+            rows.into_iter()
+                .map(|(seq, at, change)| {
+                    Ok(crate::effects::EffectEvent {
+                        seq: uint(seq),
+                        id: id.to_owned(),
+                        at_ms: uint(at),
+                        change: decode("effect event", &change)?,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    fn put_ask(&self, ask: &crate::effects::ApprovalAsk) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            tx.execute(
+                "INSERT INTO approval_asks (id, branch, created_ms, answered, ask) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    ask.id,
+                    ask.branch,
+                    int(ask.created_ms),
+                    ask.answer.is_some(),
+                    encode("approval", ask)?
+                ],
+            )
+            .map_err(|e| db("approval", e))?;
+            Ok(())
+        })
+    }
+
+    fn answer_ask(
+        &self,
+        id: &str,
+        answer: &crate::effects::AskAnswer,
+    ) -> Result<Option<(crate::effects::ApprovalAsk, bool)>, Error> {
+        self.tx(true, |tx| {
+            let e = |error| db("approval", error);
+            let text: Option<String> = tx
+                .query_row(
+                    "SELECT ask FROM approval_asks WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(e)?;
+            let Some(text) = text else {
+                return Ok(None);
+            };
+            let mut ask: crate::effects::ApprovalAsk = decode("approval", &text)?;
+            if ask.answer.is_some() {
+                return Ok(Some((ask, false)));
+            }
+            ask.answer = Some(answer.clone());
+            tx.execute(
+                "UPDATE approval_asks SET answered = 1, ask = ?2 WHERE id = ?1 AND answered = 0",
+                params![id, encode("approval", &ask)?],
+            )
+            .map_err(e)?;
+            Ok(Some((ask, true)))
+        })
+    }
+
+    fn ask(&self, id: &str) -> Result<Option<crate::effects::ApprovalAsk>, Error> {
+        self.query(|conn| {
+            let text: Option<String> = conn
+                .query_row(
+                    "SELECT ask FROM approval_asks WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| db("approval", e))?;
+            text.map(|t| decode("approval", &t)).transpose()
+        })
+    }
+
+    fn asks(&self, pending_only: bool) -> Result<Vec<crate::effects::ApprovalAsk>, Error> {
+        self.query(|conn| {
+            let e = |error| db("approvals", error);
+            let mut statement = conn
+                .prepare(
+                    "SELECT ask FROM approval_asks WHERE ?1 = 0 OR answered = 0 \
+                     ORDER BY created_ms, id",
+                )
+                .map_err(e)?;
+            let rows = statement
+                .query_map(params![pending_only], |r| r.get::<_, String>(0))
+                .map_err(e)?;
+            let texts = rows.collect::<Result<Vec<_>, _>>().map_err(e)?;
+            texts.iter().map(|t| decode("approval", t)).collect()
         })
     }
 }

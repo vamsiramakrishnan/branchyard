@@ -104,6 +104,7 @@ mod compare;
 mod conformance;
 pub mod connectors;
 mod delegation;
+pub mod effects;
 mod egress;
 mod engine;
 mod environments;
@@ -145,6 +146,7 @@ mod state;
 mod steer;
 mod storage;
 mod tarball;
+pub mod tasks;
 mod workspace;
 
 use std::fmt;
@@ -1326,6 +1328,11 @@ pub struct TaskOptions {
     /// branch is created by `run`, `run_on` or a routed run; stored with
     /// it, except a custom judge.
     pub goal: Option<Goal>,
+    /// The task a new top-level branch joins as another attempt (its ID);
+    /// `None` starts a task of its own (a fan's branches share one, and a
+    /// fork joins its parent's). Read only when a branch is created; see
+    /// [`tasks`].
+    pub join_task: Option<String>,
 }
 
 /// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.
@@ -2070,6 +2077,9 @@ pub enum StallAction {
 pub struct Policy {
     rules: Vec<Rule>,
     fallback: Fallback,
+    /// The preset this policy came from, whose approvals are the last
+    /// layer connector operations resolve through (`docs/effects.md`).
+    preset: Option<PolicyPreset>,
 }
 
 /// Answers `(branch, request)` for requests no rule decides.
@@ -2112,10 +2122,40 @@ impl Default for Policy {
 }
 
 impl Policy {
+    /// One line saying what the rules allow and deny, and what happens to
+    /// everything else: a task's record of the policy it ran under.
+    pub fn summary(&self) -> String {
+        let tools = |allow: bool| {
+            self.rules
+                .iter()
+                .filter(|r| r.allow == allow)
+                .map(|r| r.tool.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut parts = Vec::new();
+        for (allow, word) in [(true, "allow"), (false, "deny")] {
+            let listed = tools(allow);
+            if !listed.is_empty() {
+                parts.push(format!("{word} {listed}"));
+            }
+        }
+        parts.push(
+            match self.fallback {
+                Fallback::Allow => "allow the rest",
+                Fallback::Deny => "deny the rest",
+                Fallback::Ask(_) => "ask about the rest",
+            }
+            .into(),
+        );
+        parts.join("; ")
+    }
+
     pub fn allow_all() -> Self {
         Policy {
             rules: Vec::new(),
             fallback: Fallback::Allow,
+            preset: None,
         }
     }
 
@@ -2123,6 +2163,7 @@ impl Policy {
         Policy {
             rules: Vec::new(),
             fallback: Fallback::Deny,
+            preset: None,
         }
     }
 
@@ -2133,6 +2174,7 @@ impl Policy {
         Policy {
             rules: Vec::new(),
             fallback: Fallback::Ask(Arc::new(ask)),
+            preset: None,
         }
     }
 
@@ -2171,6 +2213,18 @@ impl Policy {
         self
     }
 
+    /// The preset this policy stands for, when it came from one.
+    pub fn preset(&self) -> Option<PolicyPreset> {
+        self.preset
+    }
+
+    /// Remember that this policy stands for `preset`, whose approvals
+    /// connector operations then resolve through.
+    pub fn with_preset(mut self, preset: Option<PolicyPreset>) -> Self {
+        self.preset = preset;
+        self
+    }
+
     /// Decide one request: the first matching rule, else the fallback.
     pub fn decide(&self, branch: &str, request: &PermissionRequest) -> PermissionDecision {
         self.decide_with_source(branch, request).0
@@ -2200,6 +2254,18 @@ pub enum DecisionSource {
     /// The engine, which could not deliver the policy's answer and
     /// interrupted the turn instead.
     Engine,
+    /// The approval policy, which tightened what the policy allowed: a
+    /// block, or an ask a person (or the ask's expiry) answered. See
+    /// `docs/effects.md`.
+    Approval {
+        resolved: effects::Resolved,
+        /// The ask, when one was asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<String>,
+        /// Who answered it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+    },
 }
 
 /// Something that happened on a branch, as recorded and observed.
@@ -2365,6 +2431,10 @@ pub enum Activity {
     /// The person's ceiling narrowed what the turn may reach. See
     /// [`AccessActivity`].
     Access(Box<AccessActivity>),
+    /// Approvals and the effect ledger: a person asked and answering, a
+    /// call blocked, an entry begun, confirmed, staged, reconciled or
+    /// undone. See [`effects::EffectActivity`] and `docs/effects.md`.
+    Effect(Box<effects::EffectActivity>),
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

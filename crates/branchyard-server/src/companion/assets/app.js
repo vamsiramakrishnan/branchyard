@@ -28,6 +28,8 @@
     permissions: [],
     inbox: [],
     inboxStamp: 0,
+    approvals: [],
+    effects: [],
     route: { name: 'branches' },
     pushInfo: null,
   };
@@ -264,6 +266,12 @@
       kind = 'question';
       target = a.message.to;
       text = `${a.message.from} ${a.message.kind === 'question' ? 'asks' : 'escalates to'} ${a.message.to}: ${a.message.text}`;
+    } else if (a.effect && a.effect.kind === 'asked') {
+      const k = `approval:${a.effect.ask}`;
+      if (state.seen.has(k)) return null;
+      state.seen.add(k);
+      kind = 'approval';
+      text = `${b} waits for approval: ${aboutText(a.effect.about)}`;
     } else if (a.stalled) {
       const k = `stall:${b}:${a.stalled.since_ms}`;
       if (state.seen.has(k)) return null;
@@ -290,7 +298,7 @@
     } else {
       return null;
     }
-    const href = kind === 'question' ? '#/inbox' : `#/b/${enc(state.repo)}/${enc(target)}`;
+    const href = kind === 'question' ? '#/inbox' : kind === 'approval' ? '#/approvals' : `#/b/${enc(state.repo)}/${enc(target)}`;
     return { kind, text, href };
   }
 
@@ -389,6 +397,8 @@
     state.loaded = false;
     state.permissions = [];
     state.inbox = [];
+    state.approvals = [];
+    state.effects = [];
     if (state.stream) state.stream.abort();
     openStream();
     await loadBranches();
@@ -399,6 +409,7 @@
     state.branches = new Map(branches.map((b) => [b.name, b]));
     state.loaded = true;
     refreshInbox();
+    refreshApprovals();
     if (['branches', 'queue'].includes(state.route.name)) render();
     if (state.route.name === 'branch') updateBranchHeader();
   }
@@ -508,6 +519,7 @@
       if (p) p.decision = a.decision.allowed ? 'allowed' : 'denied';
     }
     if (a.message) refreshInbox();
+    if (a.effect) refreshApprovals();
     if (state.loaded && Date.now() - entry.at_ms < 60000) {
       const n = notice(entry);
       if (n) {
@@ -520,6 +532,7 @@
     refreshBranch(entry.branch);
     if (state.route.name === 'branch' && state.route.branch === entry.branch) appendEvent(entry);
     if (state.route.name === 'inbox') renderInbox();
+    if (state.route.name === 'approvals' && a.effect) renderApprovals();
   }
 
   // ---------------------------------------------------------------
@@ -532,6 +545,7 @@
       case '': return { name: 'branches' };
       case 'b': return { name: 'branch', repo: parts[1], branch: parts.slice(2).join('/') };
       case 'inbox': return { name: 'inbox' };
+      case 'approvals': return { name: 'approvals' };
       case 'triggers': return { name: 'triggers' };
       case 'queue': return { name: 'queue' };
       case 'settings': return { name: 'settings' };
@@ -560,6 +574,7 @@
     switch (state.route.name) {
       case 'branch': return renderBranch();
       case 'inbox': return renderInbox();
+      case 'approvals': return renderApprovals();
       case 'triggers': return renderTriggers();
       case 'queue': return renderQueue();
       case 'settings': return renderSettings();
@@ -1047,6 +1062,94 @@
         ? h('ul', { class: 'events' }, perms.map((p) => h('li', {}, h('time', { text: clock(p.at_ms) }),
           h('a', { href: `#/b/${enc(state.repo)}/${enc(p.branch)}`, text: p.branch }), ` asked to use ${p.tool}${p.decision ? `: ${p.decision}` : ''}`)))
         : h('p', { class: 'muted', text: 'None seen since this page opened.' }),
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // Approvals: tools and connector calls a turn waits on, and staged
+  // effects held until approved (docs/effects.md); and the effect ledger
+
+  let approvalsTimer = null;
+  function refreshApprovals() {
+    clearTimeout(approvalsTimer);
+    approvalsTimer = setTimeout(loadApprovals, 300);
+  }
+
+  async function loadApprovals() {
+    try {
+      const [{ approvals }, { effects }] = await Promise.all([
+        api('GET', `${repoPath()}/approvals`),
+        api('GET', `${repoPath()}/effects`),
+      ]);
+      state.approvals = approvals;
+      state.effects = effects.slice(-50).reverse();
+    } catch (_) { return; }
+    const count = $('approvals-count');
+    count.hidden = !state.approvals.length;
+    count.textContent = String(state.approvals.length);
+    if (state.route.name === 'approvals') renderApprovals();
+  }
+
+  function aboutText(about) {
+    switch (about.kind) {
+      case 'tool': return `use the tool ${about.tool}`;
+      case 'operation': return `${about.connector} ${about.operation} (${about.class}${about.deletion ? ', deletes' : ''})`;
+      case 'promote': return `perform the staged ${about.connector} ${about.operation} (${about.class})`;
+      default: return about.kind;
+    }
+  }
+
+  function approvalForm(a) {
+    const id = nextId('approval');
+    const area = h('textarea', { id, placeholder: 'Optional reason' });
+    const disabled = !can('run');
+    const send = async (allow) => {
+      if (!allow || a.about.kind === 'promote') {
+        const ok = await confirmDialog(allow ? 'Perform it?' : 'Deny it?',
+          allow ? `This performs ${aboutText(a.about)} for real.` : `${a.branch} is refused ${aboutText(a.about)}.`,
+          allow ? 'Perform' : 'Deny', !allow);
+        if (!ok) return;
+      }
+      const reason = area.value.trim();
+      try {
+        await api('POST', `${repoPath()}/approvals/${enc(a.id)}/${allow ? 'allow' : 'deny'}`,
+          { surface: 'companion', ...(reason ? { reason } : {}) });
+        toast(`${allow ? 'Allowed' : 'Denied'}: ${aboutText(a.about)}.`);
+        loadApprovals();
+      } catch (e) {
+        toast(`Refused: ${e.message}`);
+      }
+    };
+    return h('div', { class: 'action' },
+      h('label', { class: 'block', for: id, text: 'Reason' }), area,
+      h('div', { class: 'row' },
+        h('button', { type: 'button', disabled, text: 'Allow', onclick: () => send(true) }),
+        h('button', { type: 'button', class: 'danger', disabled, text: 'Deny', onclick: () => send(false) })),
+      disabled ? h('p', { class: 'hint', text: 'This token lacks the run scope.' }) : null);
+  }
+
+  function renderApprovals() {
+    const waiting = state.approvals;
+    const ledger = state.effects;
+    main(
+      h('h1', { text: 'Approvals' }),
+      waiting.length
+        ? h('ul', { class: 'list' }, waiting.map((a) => h('li', {}, h('div', { class: 'item' },
+          h('div', { class: 'item-head' },
+            h('a', { class: 'item-name', href: `#/b/${enc(state.repo)}/${enc(a.branch)}`, text: a.branch }),
+            h('span', { class: 'badge s-waiting', text: a.resolved ? a.resolved.layer : 'ask' })),
+          h('p', { class: 'prompt', text: `May it ${aboutText(a.about)}?` }),
+          a.request ? h('pre', { class: 'diff', text: JSON.stringify(a.request, null, 2).slice(0, 2000) }) : null,
+          h('div', { class: 'item-meta', text: [`turn ${a.turn}`, ago(a.created_ms), a.deadline_ms ? `waits until ${clock(a.deadline_ms)}` : null].filter(Boolean).join(' · ') }),
+          approvalForm(a)))))
+        : h('p', { class: 'muted', text: 'Nothing waiting for approval.' }),
+      h('h2', { text: 'Effect ledger' }),
+      h('p', { class: 'hint', text: 'What branches did outside the machine. by undo plans and performs inverses where the upstream allows.' }),
+      ledger.length
+        ? h('ul', { class: 'events' }, ledger.map((e) => h('li', {}, h('time', { text: clock(e.updated_ms) }),
+          h('a', { href: `#/b/${enc(state.repo)}/${enc(e.branch)}`, text: e.branch }),
+          ` ${e.connector} ${e.operation}: ${e.state} (${e.class})${e.undo ? ` · undo ${e.undo.operation}` : (e.undo_unavailable ? ` · no undo: ${e.undo_unavailable}` : '')}`)))
+        : h('p', { class: 'muted', text: 'No effects recorded.' }),
     );
   }
 

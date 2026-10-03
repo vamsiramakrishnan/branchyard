@@ -45,6 +45,7 @@
 
 pub mod api;
 pub mod companion;
+pub mod effects_api;
 pub mod http;
 pub mod knowledge_api;
 #[cfg(feature = "schema")]
@@ -74,7 +75,7 @@ use api::{
     ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest,
     InventoryReport, MapList, MapRequest, MapResumeRequest, MergeRequest, Operation,
     ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest,
-    TaskRequest, TextRequest,
+    TaskList, TaskRequest, TextRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -527,6 +528,21 @@ impl Repo {
             request,
             key,
         )
+    }
+
+    /// The repository's tasks, oldest first, with their attempts.
+    pub fn tasks(&self) -> Result<Vec<branchyard::tasks::TaskView>, Error> {
+        Ok(self
+            .client
+            .get::<TaskList>(&self.path("/task-records"))?
+            .tasks)
+    }
+
+    /// The task `key` names: its ID, a prefix of at least four characters,
+    /// or one of its attempts.
+    pub fn task(&self, key: &str) -> Result<branchyard::tasks::TaskView, Error> {
+        self.client
+            .get(&self.path(&format!("/task-records/{}", encode(key))))
     }
 
     /// The repository's recorded maps.

@@ -90,6 +90,18 @@ pub const POOL_MADE: &str = "branchyard_pool_slots_made_total";
 pub const POOL_FILL: &str = "branchyard_pool_fill_seconds";
 pub const POOL_DISCARDED: &str = "branchyard_pool_slots_discarded_total";
 pub const START: &str = "branchyard_start_seconds";
+pub const SYNC_BYTES: &str = "branchyard_sync_bytes_total";
+pub const SYNC_OBJECTS: &str = "branchyard_sync_objects_total";
+pub const SYNC_SWAPS: &str = "branchyard_sync_swaps_total";
+pub const SYNC_SWAP_CONFLICTS: &str = "branchyard_sync_swap_conflicts_total";
+pub const SYNC_RETRIES: &str = "branchyard_sync_retries_total";
+pub const SYNC_DIVERGENCES: &str = "branchyard_sync_divergences_total";
+pub const SYNC_CORRUPT: &str = "branchyard_sync_corrupt_total";
+pub const SYNC_ERRORS: &str = "branchyard_sync_errors_total";
+pub const SYNC_PENDING: &str = "branchyard_sync_pending";
+pub const SYNC_LAG: &str = "branchyard_sync_lag_seconds";
+pub const EFFECTS: &str = "branchyard_effects";
+pub const APPROVALS_PENDING: &str = "branchyard_approvals_pending";
 
 /// Every family this server exposes, in the order it is written.
 pub const FAMILIES: &[Family] = &[
@@ -206,6 +218,16 @@ pub const FAMILIES: &[Family] = &[
         "Seconds since each live worker last recorded itself alive.",
     ),
     family(
+        EFFECTS,
+        Kind::Gauge,
+        "Entries in each repository's effect ledger, by class (reversible, compensable, irreversible) and state.",
+    ),
+    family(
+        APPROVALS_PENDING,
+        Kind::Gauge,
+        "Approvals waiting for an answer in each repository.",
+    ),
+    family(
         POOL_SLOTS,
         Kind::Gauge,
         "Warm pool slots of each repository on this host, by state (ready, filling, claimed).",
@@ -237,6 +259,56 @@ pub const FAMILIES: &[Family] = &[
         help: "Start latency of a task's new branches, from admission to the harness's first prompt, by pool (hit, miss, none).",
         buckets: START_SECONDS,
     },
+    family(
+        SYNC_BYTES,
+        Kind::Counter,
+        "Bytes this process's sync sent to and read from the remote, by repository and direction (up, down).",
+    ),
+    family(
+        SYNC_OBJECTS,
+        Kind::Counter,
+        "Objects this process's sync wrote to and read from the remote, by repository and direction (up, down).",
+    ),
+    family(
+        SYNC_SWAPS,
+        Kind::Counter,
+        "Task manifests this process swapped into the remote, by repository.",
+    ),
+    family(
+        SYNC_SWAP_CONFLICTS,
+        Kind::Counter,
+        "Manifest swaps that lost to another writer and were merged and tried again, by repository.",
+    ),
+    family(
+        SYNC_RETRIES,
+        Kind::Counter,
+        "Remote requests tried again after a transient failure, by repository.",
+    ),
+    family(
+        SYNC_DIVERGENCES,
+        Kind::Counter,
+        "Divergences recorded as conflict branches, by repository.",
+    ),
+    family(
+        SYNC_CORRUPT,
+        Kind::Counter,
+        "Objects read from the remote and refused because they did not match their name, by repository.",
+    ),
+    family(
+        SYNC_ERRORS,
+        Kind::Counter,
+        "Task syncs that failed (and were queued to try again), by repository.",
+    ),
+    family(
+        SYNC_PENDING,
+        Kind::Gauge,
+        "Tasks queued in the sync outbox, by repository.",
+    ),
+    family(
+        SYNC_LAG,
+        Kind::Gauge,
+        "How long the oldest queued change has waited to reach the remote, by repository.",
+    ),
 ];
 
 fn declared(name: &str) -> &'static Family {
@@ -345,6 +417,48 @@ impl Metrics {
     /// The counters and histograms as they are now.
     pub fn snapshot(&self) -> Snapshot {
         self.with(|series| series.clone())
+    }
+}
+
+/// Each repository's sync counters (this process's, read from the
+/// replicator at scrape time), queued tasks and lag.
+pub fn sync_series(
+    snapshot: &mut Snapshot,
+    repos: &[(String, branchyard_sync::stats::Snapshot, usize, f64)],
+) {
+    for (repo, s, pending, lag) in repos {
+        let r = repo.as_str();
+        let mut counter = |name: &str, pairs: &[(&str, &str)], value: u64| {
+            let family = declared(name);
+            snapshot
+                .entry(family.name)
+                .or_default()
+                .insert(labels(pairs), Value::Number(value as f64));
+        };
+        counter(SYNC_BYTES, &[("repo", r), ("direction", "up")], s.bytes_up);
+        counter(
+            SYNC_BYTES,
+            &[("repo", r), ("direction", "down")],
+            s.bytes_down,
+        );
+        counter(
+            SYNC_OBJECTS,
+            &[("repo", r), ("direction", "up")],
+            s.objects_up,
+        );
+        counter(
+            SYNC_OBJECTS,
+            &[("repo", r), ("direction", "down")],
+            s.objects_down,
+        );
+        counter(SYNC_SWAPS, &[("repo", r)], s.swaps);
+        counter(SYNC_SWAP_CONFLICTS, &[("repo", r)], s.swap_conflicts);
+        counter(SYNC_RETRIES, &[("repo", r)], s.retries);
+        counter(SYNC_DIVERGENCES, &[("repo", r)], s.divergences);
+        counter(SYNC_CORRUPT, &[("repo", r)], s.corrupt);
+        counter(SYNC_ERRORS, &[("repo", r)], s.errors);
+        set(snapshot, SYNC_PENDING, &[("repo", r)], *pending as f64);
+        set(snapshot, SYNC_LAG, &[("repo", r)], *lag);
     }
 }
 
@@ -538,6 +652,37 @@ pub fn pool_gauges(snapshot: &mut Snapshot, repo: &str, slots: &[branchyard::Poo
             n as f64,
         );
     }
+}
+
+/// The effect ledger's gauges read at scrape time: `repo`'s entries by
+/// class and state (only pairs that occur), and its waiting approvals
+/// (zero included).
+pub fn effect_gauges(
+    snapshot: &mut Snapshot,
+    repo: &str,
+    entries: &[branchyard::effects::EffectEntry],
+    pending: usize,
+) {
+    let mut counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for entry in entries {
+        *counts
+            .entry((entry.class.as_str(), entry.state.as_str()))
+            .or_default() += 1;
+    }
+    for ((class, state), n) in counts {
+        set(
+            snapshot,
+            EFFECTS,
+            &[("repo", repo), ("class", class), ("state", state)],
+            n as f64,
+        );
+    }
+    set(
+        snapshot,
+        APPROVALS_PENDING,
+        &[("repo", repo)],
+        pending as f64,
+    );
 }
 
 /// Count what a keeper's fill of `repo`'s pool did.

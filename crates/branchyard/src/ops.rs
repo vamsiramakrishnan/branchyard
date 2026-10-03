@@ -323,6 +323,8 @@ pub(crate) fn remove(
     }
     crate::checkpoint::remove_refs(&yard.root, name)?;
     store.delete(name)?;
+    // Its task lists it as removed, and the name is free for another.
+    crate::tasks::forget(&yard.root, name);
     // What waited for it can never start now.
     crate::graph::settled(yard, name, None);
     crate::storage::gc_after_removal(&store)?;

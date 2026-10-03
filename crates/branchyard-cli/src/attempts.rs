@@ -153,8 +153,25 @@ pub fn rewind(
     as_json: bool,
 ) -> Outcome {
     local_only(target, "by rewind")?;
-    let yard = open()?;
+    rewind_in(env, &open()?, branch, to, yes, as_json)
+}
+
+/// `by rewind` in `yard`, as `by task rewind` runs it in a task's own
+/// repository.
+pub(crate) fn rewind_in(
+    env: &Env,
+    yard: &branchyard::Yard,
+    branch: &str,
+    to: u32,
+    yes: bool,
+    as_json: bool,
+) -> Outcome {
     let handle = yard.branch(branch)?;
+    // Rewinding past effectful turns leaves the world as it is: say so,
+    // with what `by undo` could do (docs/effects.md).
+    if let Some(note) = crate::effects_cmd::rewind_note(yard, branch, to) {
+        eprint!("{note}");
+    }
     if !yes {
         let list = handle.checkpoints()?;
         let later: Vec<String> = list

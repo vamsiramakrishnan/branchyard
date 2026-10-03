@@ -2,7 +2,8 @@
 //! confinement turned off (`BRANCHYARD_EGRESS_NETNS=off`, as on a host
 //! without user namespaces), a best-effort policy runs with the proxy's
 //! variables and says it is advisory, a required one is refused before
-//! anything is created, the connector gateway is allowed on its own, and a
+//! anything is created, the connector gateway (through the turn's
+//! effect-ledger proxy) is allowed on its own, and a
 //! delegated child's policy is never wider than its parent's. Hermetic:
 //! every host is a listener on this machine's loopback.
 
@@ -180,6 +181,9 @@ impl Packager for OnePackager {
     }
 }
 
+/// A grant allows the gateway as the turn gives it: its effect-ledger
+/// proxy (docs/effects.md), which reaches the gateway itself from outside
+/// the policy. The gateway is not reachable around the ledger.
 #[test]
 fn a_connector_grant_allows_the_gateway() {
     let f = fixture();
@@ -193,10 +197,15 @@ fn a_connector_grant_allows_the_gateway() {
         network: Some(Network::none()),
         ..Provisioning::default()
     };
+    // The port the turn's gateway URL names, read in the harness's shell.
+    let given = format!(
+        "SH python3 {} proxy $(echo $ANVIL_GATEWAY_URL | sed 's|.*:\\([0-9]*\\)/mcp|\\1|')\n",
+        probe.display()
+    );
     let branch = f
-        .task(&prompt(
-            &probe,
-            &[("proxy", gateway.port), ("proxy", other.port)],
+        .task(&format!(
+            "{given}{}",
+            prompt(&probe, &[("proxy", gateway.port), ("proxy", other.port)])
         ))
         .options(TaskOptions {
             isolated: true,
@@ -207,19 +216,42 @@ fn a_connector_grant_allows_the_gateway() {
         .unwrap();
     let events = branch.events().unwrap();
     let said = text(&events);
+    let ledger = events
+        .iter()
+        .find_map(|e| match &e.activity {
+            Activity::Effect(effect) => match effect.as_ref() {
+                branchyard::effects::EffectActivity::Proxy { url } => Some(url.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the turn's ledger proxy");
+    let port: u16 = ledger
+        .trim_end_matches("/mcp")
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Through the ledger's proxy to the gateway.
     assert!(
-        said.contains(&format!("proxy {0}: upstream {0}", gateway.port)),
+        said.contains(&format!("proxy {port}: upstream {}", gateway.port)),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("proxy {}: 403", gateway.port)),
         "{said}"
     );
     assert!(
         said.contains(&format!("proxy {}: 403", other.port)),
         "{said}"
     );
-    let rule = format!("127.0.0.1:{}", gateway.port);
+    let rule = format!("127.0.0.1:{port}");
     assert_eq!(
         decisions(&events),
         [
-            ("GET".to_owned(), gateway.port, true, Some(rule.clone())),
+            ("GET".to_owned(), port, true, Some(rule.clone())),
+            ("GET".to_owned(), gateway.port, false, None),
             ("GET".to_owned(), other.port, false, None),
         ]
     );

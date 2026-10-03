@@ -610,6 +610,25 @@ See [harness lifecycle](harness-lifecycle.md).
 | Server API and client | `GET /v1/harnesses` | adds `GET /v1/inventory` (`InventoryReport`, `WorkerInventory`), `Client::inventory`; in `schema/contract.json` |
 | Server configuration | `labels` | adds `inventory` (default true) and `--no-inventory`; `Config::inventory_source`, `ops::InventorySource`, `ops::set_inventory_source` |
 
+## Added with sync
+
+See [sync](sync.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `by sync [TASK] [--json]` | none | push and pull one branch (or task ID), or every branch: import what the remote has, fast-forward, record divergence as `refs/heads/conflict/<device>/<n>`, upload what it lacks, swap the manifest |
+| `by sync status`, `ls`, `pull TASK` | none | the remote, device, encryption, each task's state and lag, the queue and counters; the remote's tasks; bring a task here |
+| `by sync gc [--dry-run]`, `scrub [--sample N] [--seed S]` | none | two-phase collection with grace, retention and holds; read a sample back and check it against its names |
+| `by sync hold TASK [--reason R] [--release]`, `rm TASK`, `rotate-key [--to WRAPPER]` | none | legal holds; delete a task from the remote; rotate the tenant key |
+| `[sync]` in the user configuration | design only | `remote`, `encrypt`, `passphrase_file`, `algorithm`, `interval`, `bandwidth`, `concurrency`, `retention`, `grace`, `quota`, `device`; refused in a repository's `branchyard.toml`; in `schema/branchyard.config.json` |
+| `BRANCHYARD_SYNC_PASSPHRASE`, `BRANCHYARD_SYNC_NEW_PASSPHRASE`, `BRANCHYARD_SYNC_CA_FILE` | none | the passphrase, the new one for `rotate-key --to passphrase`, extra CA certificates for a private endpoint |
+| `.branchyard/sync.db` | none | the outbox: queue, task states, resumable uploads, recent outcomes, counters; 0600 |
+| Server configuration | none | `sync` (the same keys and `lease_seconds`); operations pull first and run under the task's lease (`sync_lease_held`, `sync_unavailable`, `sync_lease_lost`); `<data_dir>/sync/<repo>.db`; in `schema/server.config.json` |
+| `/metrics` | none | `branchyard_sync_bytes_total`, `_objects_total`, `_swaps_total`, `_swap_conflicts_total`, `_retries_total`, `_divergences_total`, `_corrupt_total`, `_errors_total`, `branchyard_sync_pending`, `branchyard_sync_lag_seconds` |
+| Service registry | no `sync_lease` | a held task lease, with `task`, `attempt`, `remote` and `epoch` |
+| Crate | none | `branchyard-sync`: `ObjectStore` and its backends (`file`, `s3`, `gcs`, `azure`, `git`, `memory`), `store::conformance`, `Remote`, `Settings`, `TaskState`, `SyncReport`, `plan`, `SyncSource`, `BranchSource`, `ChunkId`, `Segment`, `manifest::Manifest`, `seal::{Sealer, Encryption, Algorithm, rotate}`, `kms::{Wrapper, Passphrase, GcpKms, AwsKms, AzureKeyVault}`, `lease::{LeaseKeeper, LeaseRecord}`, `gc::GcReport`, `scrub::ScrubReport`, `outbox::Outbox`, `replicator::{Replicator, SourceProvider, Status}`, `yard::YardTasks`, `SyncConfig`; `testing` (feature) for the stand-ins |
+| Engine | a checked-out ref was never moved by sync | (sync only) a clean worktree follows a fast-forward pulled from the remote |
+
 ## Added with the ambient registry
 
 See [registry](registry.md).
@@ -631,3 +650,54 @@ See [registry](registry.md).
 | server store | no services | `services` (SQLite), `by_services` and `by_service_seq` (PostgreSQL) |
 | Rust client | none | `services`, `register_service`, `deregister_service`, `reclaim_services`, `well_known`; `RegisterServiceRequest`, `ServiceList`, `ServiceSummary`, `WellKnown` in `schema/contract.json` |
 | SDK | none | `branchyard::services`: `Service`, `Capability`, `Endpoint`, `ServiceOwner`, `Health`, `ServiceState`, `Reclaim`, `ProcessGroup`, `Query`, `Clock`, `ServiceStore`, `Rows`, `LocalRegistry`, `Registration`, `resolve`, `candidates`, `expire`, `reap`, `reclaim_process`, `watch`, `Outcome`, `Reaped`, `conformance`; `Yard::services`, `register_service`, `resolve_service`, `reclaim_services`, `has_services` |
+
+## Added with task repositories
+
+See [task repositories](task-repos.md).
+
+| Surface | Before | Now |
+|---|---|---|
+| `by task new "PROMPT" [--folder PATH \| --no-files] [--large-threshold BYTES] [run flags]` | none | in a repository, `by run` as a task; with `--folder`, a task whose repository is `$BRANCHYARD_HOME/tasks/<id>/` and whose folder changes only on accept; with `--no-files`, a task whose results are its repository; then its first attempt |
+| `by task ls [--json]`, `by task show TASK [--json]` | none | this repository's tasks, then those with a repository of their own: ID, files, attempts by status, title; one task with what was asked, by whom, its policy, its repository, and each attempt's status, turns, checkpoint and conversation. `TASK` is an ID, a prefix of at least 4 characters, or an attempt |
+| `by task open TASK [--attempt A] [--editor E \| --print]` | none | an attempt's worktree, as `by open` |
+| `by task rewind TASK [--attempt A] --to N [--yes] [--json]` | none | `by rewind` of the attempt, its files and conversation together |
+| `by task fork TASK "PROMPT" [--attempt A] [--at N] [fork flags]` | none | another attempt, from the attempt's candidate or its checkpoint N |
+| `by task accept TASK [--attempt A] [--into TARGET] [--json]` | none | in a repository, `by merge`; in a task's own repository, `main` becomes the attempt's record and the folder gets exactly its change, refused (nothing written) where the folder changed outside the task |
+| `by task rm TASK [--yes] [--json]` | none | the task and its attempts; never the folder |
+| `by show` | no task | a `task` line (`<id> (attempt k of n): <title>`); `--json` adds `task` (`id`, `title`, `attempt`, `attempts`) |
+| `by watch` | no task | the detail pane's `task` line |
+| `by run`, `by fan`, `by map`, `by fork`, `by reincarnate` | branches only | each top-level branch is a task's attempt (a fan's and a map's share one; a fork joins its parent's) |
+| `refs/branchyard/<branch>/<incarnation>/record-<N>` | none | the task's record of checkpoint N: its files and `.task/` (`task.toml`, `conversation/<turn>.jsonl`, `effects.jsonl`); deleted with the branch |
+| `.branchyard/tasks/`, `.branchyard/task-attempts/` | none | the yard's tasks and which task each attempt belongs to |
+| `$BRANCHYARD_HOME` (default `~/.branchyard`) | none | `tasks/<id>/{git,work,accept}` for tasks with a repository of their own, `chunks/<aa>/<blake3>` for large files |
+| `branchyard.task`, `branchyard.files`, `branchyard.folder`, `branchyard.home`, `branchyard.largeFileThreshold`, `branchyard.chunks` | none | a task repository's git config |
+| `GET /v1/repos/{repo}/task-records`, `GET /v1/repos/{repo}/task-records/{task}` | none | `TaskList` and `TaskView` (`read` scope); `by --remote task ls` and `show` |
+| Rust client | none | `Repo::tasks`, `Repo::task`; `TaskList` and `TaskView` in `schema/contract.json` |
+| SDK | none | `branchyard::tasks`: `Task`, `TaskFiles`, `TaskView`, `AttemptView`, `NewTask`, `Accepted`, `create`, `list`, `view`, `find`, `task_of`, `pick_attempt`, `accept`, `accept_owned`, `remove`, `remove_home`, `home_tasks`, `open_home`, `home`, `new_id`, `effects_snapshot`, `TaskRepo`, `reachable_chunks`, `ChunkStore`, `Pointer`, `large`; `TaskOptions::join_task`; `Policy::summary` |
+
+## Added with approvals and effects
+
+Every connector call that changes the world is decided, written to a ledger before it is made, and undone where the upstream allows; see [effects](effects.md).
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| List asks | `Yard::approvals`, `approval` | `approvals [ls [--all]] [--json]` | yes | `GET …/approvals[?all=true]` | `Repo::approvals` | no |
+| Answer an ask | `Yard::answer_approval` | `approvals allow\|deny ID\|--branch B [--reason]`; `A`, `D` in `by watch` | yes | `POST …/approvals/{id}/allow\|deny` (`ApprovalAnswerRequest`) | `Repo::answer_approval` | `Delegate::answer_approval`, the MCP `answer_approval` tool, `by approvals` in its shell; descendants only |
+| The ledger | `Yard::effects`, `effect`, `effect_history` | `effects [--branch B] [show ID] [--json]` | yes | `GET …/effects[?branch=]`, `GET …/effects/{id}` | `Repo::effects`, `effect` | no |
+| Promote a staged effect | `Yard::promote_effect`, `promote_staged` | `effects promote ID`; `merge --promote-effects` | yes | `POST …/effects/{id}/promote` | `Repo::promote_effect` | no |
+| Reconcile | `Yard::reconcile_effects`, `reconcile_effects_at` | `effects reconcile` | yes | `POST …/effects/reconcile` | `Repo::reconcile_effects` | no |
+| Undo | `Yard::undo_plan`, `undo_plan_at`, `undo_effects`, `undo_effects_at`; `effects::undo::render` | `undo BRANCH [--to N] [--plan] [--only ID...] [--yes] [--json]`; `rewind` notes what it leaves upstream | upstream only | `GET\|POST …/branches/{b}/undo` (`UndoRequest`, `UndoReport`) | `Repo::undo_plan`, `undo` | no |
+
+| Surface | Before | Now |
+|---|---|---|
+| A turn's `ANVIL_GATEWAY_URL` | the gateway | the turn's effect-ledger proxy in front of it; the token and its audience unchanged; the egress rule names the proxy |
+| `Provisioning::approvals`; a rig seat's `approvals` | none | the seat's policy (`rules`, `classes`), narrowed for children and kept by sends; in `schema/contract.json` and `schema/rig.json` |
+| `[approvals]`; `[connectors] effects_proxy`, `effects_listen`, `effects_sandbox_host` | none | the person's policy and the proxy's settings; in `schema/branchyard.config.json` |
+| A server's `approvals` (`admin`, `people`) and `connectors.effects_*` | none | in `schema/server.config.json` |
+| `branchyard::effects` | none | `EffectEntry`, `EffectState`, `EffectClass`, `Undo`, `UndoKind`, `Lookup`, `ApprovalRecord`, `Staged`, `EffectMove`, `EffectChange`, `EffectEvent`, `project`, `ApprovalAsk`, `AskAbout`, `AskAnswer`, `EffectActivity`, `ApprovalSettings`, `ApprovalPolicy`, `Approval`, `Layer`, `Layers`, `Resolved`, `Subject`, `resolve`, `narrow_approvals`, `is_deletion_name`, `ulid`, `request_digest`, `short_id`; `mcp` (the gateway's wire), `proxy::EffectProxy`, `reconcile::Reconciled`, `undo` (`UndoPlan`, `UndoItem`, `UndoOutcome`, `render`, `clock`); `Yard::use_approvals`, `approval_settings` |
+| `PolicyPreset::approvals`, `Policy::preset`, `Policy::with_preset` | none | a preset's approvals, carried by the policy it makes |
+| `connectors::Gateway::effects` (`EffectsProxy`) | none | whether, where and how sandboxes reach each turn's proxy |
+| `Activity::Effect` (`EffectActivity`: `proxy`, `asked`, `answered`, `blocked`, `entry`); `DecisionSource::Approval` | none | `effect` in `by log --json` and event streams, lines in `by log`, the latest in `by watch`, `effects` in `by show` and `by show --json`; in `schema/contract.json` |
+| `/metrics` | | adds `branchyard_effects{repo,class,state}` and `branchyard_approvals_pending{repo}` |
+| The companion page | Branches, Inbox, Triggers, Queue, Settings | adds Approvals (asks and the ledger) and the `approval` notice; push kind `approval` |
+| Store | | `effects`, `effect_events`, `approval_asks` (SQLite); `by_effects`, `by_effect_events`, `by_approval_asks` (PostgreSQL, each made on its own when missing) |

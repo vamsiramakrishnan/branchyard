@@ -424,6 +424,9 @@ pub struct Config {
     /// Each principal's ceiling: the most a branch acting for it may reach
     /// (docs/model-gateway.md#one-scope).
     pub ceilings: BTreeMap<String, branchyard::Ceiling>,
+    /// The administrator's locked approval policy and the people's
+    /// (docs/effects.md#approvals).
+    pub approvals: branchyard::effects::ApprovalSettings,
     /// Waiting this long queued raises an operation's effective priority
     /// by one; `None` turns aging off. See `docs/server.md#scheduling`.
     pub aging: Option<Duration>,
@@ -443,6 +446,18 @@ pub struct Config {
     /// The web companion at `/app/`, pairing links and Web Push; off by
     /// default. See `docs/companion.md`.
     pub app: AppConfig,
+    /// Sync served repositories' branches to durable storage: pull a task
+    /// before running it, under its lease, and push as it goes. `None`
+    /// (the default): no sync. See `docs/sync.md`.
+    pub sync: Option<SyncSettings>,
+}
+
+/// `sync` in the configuration file; see `docs/sync.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncSettings {
+    pub config: branchyard_sync::SyncConfig,
+    /// How long a task's lease lasts between renewals.
+    pub lease: Duration,
 }
 
 /// Push services a subscription may name by default: Chrome's (FCM),
@@ -554,6 +569,13 @@ pub struct ConnectorsConfig {
     /// The gateway's vault key file. Default: `<data_dir>/gateway/vault.key`,
     /// made if missing.
     pub vault_key: Option<PathBuf>,
+    /// Whether each turn calls the gateway through the effect ledger's
+    /// proxy (docs/effects.md). Default on.
+    pub effects_proxy: Option<bool>,
+    /// What each turn's ledger proxy binds. Default loopback.
+    pub effects_listen: Option<std::net::IpAddr>,
+    /// How a sandboxed harness reaches its ledger proxy.
+    pub effects_sandbox_host: Option<String>,
 }
 
 impl Config {
@@ -597,12 +619,14 @@ impl Config {
             connectors: None,
             models: None,
             ceilings: BTreeMap::new(),
+            approvals: branchyard::effects::ApprovalSettings::default(),
             aging: Some(crate::store::DEFAULT_AGING),
             fair_share_window: crate::store::DEFAULT_FAIR_SHARE_WINDOW,
             metrics: None,
             observability: None,
             triggers: crate::triggers::Settings::default(),
             app: AppConfig::default(),
+            sync: None,
         }
     }
 
@@ -1038,6 +1062,9 @@ pub(crate) struct FileConfig {
     /// asks for (docs/model-gateway.md#one-scope).
     #[serde(default)]
     ceilings: BTreeMap<String, FileCeiling>,
+    /// The administrator's locked approval policy and each principal's
+    /// (docs/effects.md#approvals).
+    approvals: Option<FileApprovals>,
     /// Seconds an operation waits queued before its effective priority
     /// rises by one, so low-priority work cannot starve; 0 turns aging
     /// off. Default 60. See docs/server.md#scheduling.
@@ -1060,6 +1087,46 @@ pub(crate) struct FileConfig {
     /// The web companion at /app/ (docs/companion.md): `true`, or its
     /// settings. Off by default.
     app: Option<FileApp>,
+    /// Sync served repositories' branches to durable storage
+    /// (docs/sync.md): the remote, its encryption, how often and how fast.
+    sync: Option<FileSync>,
+}
+
+/// `sync`: the same keys as `[sync]` in branchyard.toml, and the lease.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileSync {
+    /// `gs://bucket/prefix`, `s3://bucket/prefix` (`?endpoint=` for R2 or
+    /// MinIO), `az://account/container/prefix`, `file:///path`, or
+    /// `git+https://`, `git+ssh://`, `git+file://`.
+    remote: String,
+    /// `none` (the default), `passphrase` (from
+    /// BRANCHYARD_SYNC_PASSPHRASE or `passphrase_file`), or a `kms://` URL.
+    encrypt: Option<String>,
+    passphrase_file: Option<PathBuf>,
+    /// `aes-256-gcm` (the default) or `chacha20-poly1305`, for a new
+    /// encrypted remote.
+    algorithm: Option<String>,
+    /// How often to look for changes to push, such as `30s`. Default `1m`.
+    interval: Option<String>,
+    /// Bytes a second, up and down together, such as `10MB/s`.
+    bandwidth: Option<String>,
+    /// Objects in flight at once. Default 8.
+    concurrency: Option<usize>,
+    /// Delete a task this long after its last change, such as `90d`,
+    /// unless held.
+    retention: Option<String>,
+    /// How long an unreferenced object waits before collection. Default
+    /// `24h`.
+    grace: Option<String>,
+    /// The stored bytes the remote may hold, such as `50GB`.
+    quota: Option<String>,
+    /// This server's name in conflict branches and leases. Default: the
+    /// host name and a random suffix.
+    device: Option<String>,
+    /// Seconds a task's lease lasts between renewals. Default 60.
+    lease_seconds: Option<f64>,
 }
 
 /// `app`: `true`/`false`, or the companion's settings (which turn it on
@@ -1184,6 +1251,75 @@ pub(crate) struct FileConnectors {
     /// The gateway's vault key (a 0600 file of 64 hex characters).
     /// Default: `<data_dir>/gateway/vault.key`, made if missing.
     vault_key: Option<PathBuf>,
+    /// Call the gateway through each turn's effect-ledger proxy, which
+    /// decides approvals and writes every effectful call to the ledger
+    /// before it is made (docs/effects.md). Default true.
+    effects_proxy: Option<bool>,
+    /// The address each turn's ledger proxy binds. Default `127.0.0.1`.
+    effects_listen: Option<std::net::IpAddr>,
+    /// How a sandboxed harness reaches its ledger proxy (a host address
+    /// its guest routes to). Without it, a sandboxed turn calls the
+    /// gateway directly and its effects reach the ledger only from the
+    /// audit log.
+    effects_sandbox_host: Option<String>,
+}
+
+/// `approvals`: the administrator's locked policy and the people's
+/// (docs/effects.md#approvals).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileApprovals {
+    /// Locked: nothing below it can loosen it, and only it may change how
+    /// deletions are treated.
+    admin: Option<FileApprovalPolicy>,
+    /// Each principal's policy, by its name.
+    #[serde(default)]
+    people: BTreeMap<String, FileApprovalPolicy>,
+}
+
+/// One approval policy.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct FileApprovalPolicy {
+    /// Pattern to `allow`, `ask`, `block` or `stage`: a tool name glob
+    /// (`Bash`), or `connector:operation` (`github:issues.*`).
+    #[serde(default)]
+    rules: BTreeMap<String, String>,
+    /// Effect class (`reversible`, `compensable`, `irreversible`) to a
+    /// decision, for operations no rule names.
+    #[serde(default)]
+    classes: BTreeMap<String, String>,
+    /// How deletions are treated; honoured only in `admin`.
+    deletion: Option<String>,
+}
+
+impl FileApprovalPolicy {
+    fn policy(self, at: &str) -> Result<branchyard::effects::ApprovalPolicy, String> {
+        branchyard::effects::ApprovalPolicy::from_strings(self.rules, self.classes, self.deletion)
+            .map_err(|e| format!("{at}: {e}"))
+    }
+}
+
+impl FileApprovals {
+    fn settings(self) -> Result<branchyard::effects::ApprovalSettings, String> {
+        Ok(branchyard::effects::ApprovalSettings {
+            admin: self
+                .admin
+                .map(|a| a.policy("approvals.admin"))
+                .transpose()?,
+            person: None,
+            people: self
+                .people
+                .into_iter()
+                .map(|(name, p)| {
+                    let at = format!("approvals.people.{name}");
+                    p.policy(&at).map(|p| (name, p))
+                })
+                .collect::<Result<_, _>>()?,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -1306,6 +1442,7 @@ pub struct Partial {
     pub connectors: Option<ConnectorsConfig>,
     pub models: Option<branchyard_setup::config::ModelsConfig>,
     pub ceilings: BTreeMap<String, branchyard::Ceiling>,
+    pub approvals: branchyard::effects::ApprovalSettings,
     /// `aging_seconds`: `Some(None)` turns aging off.
     pub aging: Option<Option<Duration>>,
     pub fair_share_window: Option<Duration>,
@@ -1314,6 +1451,8 @@ pub struct Partial {
     pub allow_trigger_prechecks: WorkspaceScripts,
     /// `app`, when the file sets it.
     pub app: Option<AppConfig>,
+    /// `sync`, when the file sets it.
+    pub sync: Option<SyncSettings>,
     /// Warnings to print, such as a world-readable token file.
     pub warnings: Vec<String>,
 }
@@ -1459,6 +1598,38 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
     };
     let aging = seconds("aging_seconds", file.aging_seconds)?.map(|d| (!d.is_zero()).then_some(d));
     let fair_share_window = seconds("fair_share_window_seconds", file.fair_share_window_seconds)?;
+    let sync = match file.sync {
+        None => None,
+        Some(s) => {
+            let lease = match s.lease_seconds {
+                Some(v) if (1.0..86_400.0).contains(&v) => Duration::from_secs_f64(v),
+                Some(v) => {
+                    return Err(format!(
+                        "config {}: sync.lease_seconds {v} is not between 1 and 86400",
+                        path.display()
+                    ))
+                }
+                None => Duration::from_secs(60),
+            };
+            let config = branchyard_sync::SyncConfig {
+                remote: s.remote,
+                encrypt: s.encrypt,
+                passphrase_file: s.passphrase_file.map(&resolve),
+                algorithm: s.algorithm,
+                interval: s.interval,
+                bandwidth: s.bandwidth,
+                concurrency: s.concurrency,
+                retention: s.retention,
+                grace: s.grace,
+                quota: s.quota,
+                device: s.device,
+            };
+            config
+                .check()
+                .map_err(|e| format!("config {}: sync: {e}", path.display()))?;
+            Some(SyncSettings { config, lease })
+        }
+    };
     let metrics = match file.metrics {
         None => None,
         Some(m) => {
@@ -1494,6 +1665,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         aging,
         fair_share_window,
         metrics,
+        sync,
         listen,
         data_dir: file.data_dir.map(resolve),
         repos: file
@@ -1572,6 +1744,9 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             run_gateway: c.run_gateway,
             listen: c.listen,
             vault_key: c.vault_key.map(resolve),
+            effects_proxy: c.effects_proxy,
+            effects_listen: c.effects_listen,
+            effects_sandbox_host: c.effects_sandbox_host,
         }),
         models: match file.models {
             Some(models) => {
@@ -1588,6 +1763,12 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
             .map(|(name, c)| c.ceiling(&name).map(|c| (name, c)))
             .collect::<Result<_, String>>()
             .map_err(|e| format!("config {}: {e}", path.display()))?,
+        approvals: file
+            .approvals
+            .map(FileApprovals::settings)
+            .transpose()
+            .map_err(|e| format!("config {}: {e}", path.display()))?
+            .unwrap_or_default(),
         public_url: file.public_url,
         allow_trigger_prechecks: scripts(file.allow_trigger_prechecks),
         app: file.app.map(|app| match app {
@@ -1843,6 +2024,72 @@ mod tests {
             write(models, ceilings);
             let error = load_file(&path).unwrap_err();
             assert!(error.contains(needle), "{models} {ceilings}: {error}");
+        }
+    }
+
+    #[test]
+    fn approvals_and_the_ledger_proxy_load_and_are_checked() {
+        use branchyard::effects::{Approval, EffectClass};
+        let temp = tempfile::Builder::new()
+            .prefix("branchyard-config-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("t.token"), "0123456789abcdef\n").unwrap();
+        let path = dir.join("server.json");
+        let write = |approvals: &str| {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"listen": "127.0.0.1:0", "data_dir": "data", "repos": {{"app": "repo"}},
+                    "tokens": [{{"name": "ci", "token_file": "t.token"}}],
+                    "connectors": {{"gateway": "http://127.0.0.1:8931/mcp", "bundles": "b",
+                                    "effects_proxy": true, "effects_listen": "0.0.0.0",
+                                    "effects_sandbox_host": "192.168.127.1"}},
+                    "approvals": {approvals}}}"#
+                ),
+            )
+            .unwrap();
+        };
+        write(
+            r#"{"admin": {"rules": {"gmail:*": "ask", "Bash": "block"},
+                          "classes": {"compensable": "ask"}, "deletion": "ask"},
+                "people": {"ci": {"rules": {"github:*": "allow"}}}}"#,
+        );
+        let partial = load_file(&path).unwrap();
+        let admin = partial.approvals.admin.clone().unwrap();
+        assert_eq!(admin.rules["gmail:*"], Approval::Ask);
+        assert_eq!(admin.classes[&EffectClass::Compensable], Approval::Ask);
+        assert_eq!(admin.deletion, Some(Approval::Ask));
+        assert_eq!(
+            partial.approvals.people["ci"].rules["github:*"],
+            Approval::Allow
+        );
+        let connectors = partial.connectors.unwrap();
+        assert_eq!(connectors.effects_proxy, Some(true));
+        assert_eq!(connectors.effects_listen, Some("0.0.0.0".parse().unwrap()));
+        assert_eq!(
+            connectors.effects_sandbox_host.as_deref(),
+            Some("192.168.127.1")
+        );
+        for (approvals, needle) in [
+            (
+                r#"{"admin": {"rules": {"x:y": "maybe"}}}"#,
+                "approvals.admin",
+            ),
+            (
+                r#"{"people": {"ci": {"classes": {"loud": "ask"}}}}"#,
+                "approvals.people.ci",
+            ),
+            (
+                r#"{"admin": {"rules": {"github:": "ask"}}}"#,
+                "approval pattern",
+            ),
+            (r#"{"admin": {"lock": true}}"#, "lock"),
+        ] {
+            write(approvals);
+            let error = load_file(&path).unwrap_err();
+            assert!(error.contains(needle), "{approvals}: {error}");
         }
     }
 
