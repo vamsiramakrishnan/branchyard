@@ -2435,6 +2435,26 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
             let grants: Vec<String> = c.grants.iter().map(|g| toml_string(g)).collect();
             out.push_str(&format!("grants = [{}]\n", grants.join(", ")));
         }
+        if let Some(enabled) = c.effects_proxy {
+            out.push_str(&format!("effects_proxy = {enabled}\n"));
+        }
+        for (key, value) in [
+            ("effects_listen", &c.effects_listen),
+            ("effects_sandbox_host", &c.effects_sandbox_host),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!("{key} = {}\n", toml_string(value)));
+            }
+        }
+    }
+    if !config.approvals.is_empty() {
+        out.push_str(
+            "\n# Your approvals: allow, ask, block or stage, by tool or connector:operation and\n\
+             # by effect class. See docs/effects.md.\n",
+        );
+        let table: BTreeMap<&str, &ApprovalsConfig> =
+            [("approvals", &config.approvals)].into_iter().collect();
+        out.push_str(&toml::to_string(&table).unwrap_or_default());
     }
     let n = &config.network;
     if !n.is_empty() {
@@ -2588,6 +2608,12 @@ sandbox_gateway = "http://192.168.127.1:8931/mcp"
 bundles = "connectors"
 anvil = "node /opt/anvil/bin-anvil.js"
 grants = ["github:read", "linear@work:write:issues.*"]
+effects_proxy = true
+effects_listen = "127.0.0.1"
+effects_sandbox_host = "192.168.127.1"
+[approvals]
+rules = { "github:issues.*" = "allow", "Bash" = "ask", "gmail:*" = "stage" }
+classes = { compensable = "allow" }
 "#;
 
     #[test]
@@ -2682,6 +2708,40 @@ grants = ["github:read", "linear@work:write:issues.*"]
             ),
             ("[models]\nlisten = 1\n", "expected a string"),
             ("[models]\nkeys = 1\n", "keys"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn approvals_are_checked_and_become_a_policy() {
+        let config = parse(FULL).unwrap();
+        let policy = config.approvals.policy().unwrap().unwrap();
+        assert_eq!(
+            policy.rules["github:issues.*"],
+            branchyard_provision::approvals::Approval::Allow
+        );
+        assert_eq!(config.connectors.effects_proxy, Some(true));
+        assert_eq!(ApprovalsConfig::default().policy().unwrap(), None);
+        for (text, needle) in [
+            (
+                "[approvals]\nrules = { \"Bash\" = \"maybe\" }\n",
+                "approvals",
+            ),
+            (
+                "[approvals]\nclasses = { loud = \"ask\" }\n",
+                "effect class",
+            ),
+            (
+                "[approvals]\nrules = { \"github:\" = \"ask\" }\n",
+                "approval pattern",
+            ),
+            ("[approvals]\nlock = true\n", "lock"),
+            (
+                "[connectors]\neffects_listen = \"here\"\n",
+                "connectors.effects_listen",
+            ),
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");

@@ -917,6 +917,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -1194,6 +1205,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         },
         "Seats": {
           "type": "object",
@@ -2264,6 +2343,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -2541,6 +2631,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         },
         "Seats": {
           "type": "object",
@@ -4795,6 +4953,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -5072,6 +5241,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         }
       }
     },
@@ -5451,6 +5688,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -5728,6 +5976,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         }
       }
     },
@@ -5904,6 +6220,3343 @@
             }
           ],
           "description": "Whether an entry is used."
+        }
+      }
+    },
+    "ApprovalList": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalAsk"
+          }
+        }
+      },
+      "required": [
+        "approvals"
+      ],
+      "description": "`GET /v1/repos/{repo}/approvals[?all=true]`: the asks waiting, or all.",
+      "title": "ApprovalList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ApprovalAsk": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "subject": {
+              "type": "string",
+              "description": "Who the branch acts for."
+            },
+            "about": {
+              "$ref": "#/$defs/AskAbout"
+            },
+            "effect": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ledger entry it is about, when there is one."
+            },
+            "resolved": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Resolved"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the policy decided, and which layer."
+            },
+            "request": {
+              "description": "The tool's input or the call's arguments, so the person sees what\nthey approve; for a call held in the outbox, what is performed."
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "deadline_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the waiting turn gives up: its budget."
+            },
+            "answer": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AskAnswer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "branch",
+            "turn",
+            "subject",
+            "about",
+            "created_ms"
+          ],
+          "description": "A question in the person's inbox: allow this, or not."
+        },
+        "AskAbout": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "tool"
+                }
+              },
+              "required": [
+                "kind",
+                "tool"
+              ],
+              "description": "A harness's tool."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "deletion": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "operation"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "A connector operation, before it is called."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "promote"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "Performing a staged effect for real."
+            }
+          ],
+          "description": "What an ask is about."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
+        },
+        "AskAnswer": {
+          "type": "object",
+          "properties": {
+            "allow": {
+              "type": "boolean"
+            },
+            "by": {
+              "type": "string"
+            },
+            "surface": {
+              "type": "string",
+              "description": "`cli`, `watch`, `companion`, `api`, `parent`, `sdk`, or `expired`\nwhen the turn's budget ran out first."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "allow",
+            "by",
+            "surface",
+            "at_ms"
+          ],
+          "description": "The answer to an ask."
+        }
+      }
+    },
+    "ApprovalAnswerRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "surface": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where the person answered: `api` (the default), `companion` or\n`watch`."
+        }
+      },
+      "description": "`POST .../approvals/{id}/allow` and `.../deny`. The answer is the\ncaller's.",
+      "title": "ApprovalAnswerRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "EffectList": {
+      "type": "object",
+      "properties": {
+        "effects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EffectEntry"
+          }
+        }
+      },
+      "required": [
+        "effects"
+      ],
+      "description": "`GET /v1/repos/{repo}/effects[?branch=B]`: the ledger, oldest first.",
+      "title": "EffectList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "EffectEntry": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "A ULID; also the call's idempotency key upstream."
+            },
+            "task": {
+              "type": "string",
+              "description": "The task the branch serves: its delegation tree's root."
+            },
+            "branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "subject": {
+              "type": "string",
+              "description": "Who the branch acts for."
+            },
+            "connector": {
+              "type": "string"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "class": {
+              "$ref": "#/$defs/EffectClass"
+            },
+            "state": {
+              "$ref": "#/$defs/EffectState"
+            },
+            "request_digest": {
+              "type": "string",
+              "description": "blake3 of the canonical request (connector, operation, arguments);\nnever the arguments themselves."
+            },
+            "undo": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who approved it, when policy asked; or the policy, when it allowed."
+            },
+            "decided": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Resolved"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the approval policy decided before the call."
+            },
+            "undo_approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who approved its inverse or compensation, once one was performed."
+            },
+            "deletion": {
+              "type": "boolean",
+              "default": false
+            },
+            "staged": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Staged"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lookup": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lookup"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "declared": {
+              "type": "boolean",
+              "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
+              "default": false
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, from the gateway, such as `message in #board`."
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The upstream's last answer, or why the state is what it is."
+            },
+            "upstream_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The idempotency key the gateway used upstream, when it says."
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "updated_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "task",
+            "branch",
+            "turn",
+            "subject",
+            "connector",
+            "operation",
+            "class",
+            "state",
+            "request_digest",
+            "created_ms",
+            "updated_ms"
+          ],
+          "description": "One effectful call, as the ledger projects it."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "Undo": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+            },
+            "arguments": {
+              "default": null
+            },
+            "kind": {
+              "$ref": "#/$defs/UndoKind"
+            },
+            "deadline_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, such as `the message will be deleted`."
+            }
+          },
+          "required": [
+            "operation",
+            "kind"
+          ],
+          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+        },
+        "UndoKind": {
+          "type": "string",
+          "enum": [
+            "inverse",
+            "compensate"
+          ],
+          "description": "Whether an undo is a true inverse or a compensation."
+        },
+        "ApprovalRecord": {
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string"
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "surface": {
+              "type": "string",
+              "description": "`cli`, `watch`, `companion`, `api`, `parent`, `sdk`, or `policy`\nwhen the policy allowed it without asking."
+            },
+            "allowed": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "by",
+            "at_ms",
+            "surface",
+            "allowed"
+          ],
+          "description": "Who answered for an effect, and how."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
+        },
+        "Staged": {
+          "type": "object",
+          "properties": {
+            "draft": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+            },
+            "ask": {
+              "type": "string",
+              "description": "The ask that holds the call and its arguments."
+            }
+          },
+          "required": [
+            "ask"
+          ],
+          "description": "How a staged entry is held."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string"
+            },
+            "arguments": {
+              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
+              "default": null
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened."
+        }
+      }
+    },
+    "EffectDetail": {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/EffectEntry"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EffectEvent"
+          }
+        }
+      },
+      "required": [
+        "entry",
+        "events"
+      ],
+      "description": "`GET /v1/repos/{repo}/effects/{id}`: one entry and the events it is\nprojected from.",
+      "title": "EffectDetail",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "EffectEntry": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "A ULID; also the call's idempotency key upstream."
+            },
+            "task": {
+              "type": "string",
+              "description": "The task the branch serves: its delegation tree's root."
+            },
+            "branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "subject": {
+              "type": "string",
+              "description": "Who the branch acts for."
+            },
+            "connector": {
+              "type": "string"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "class": {
+              "$ref": "#/$defs/EffectClass"
+            },
+            "state": {
+              "$ref": "#/$defs/EffectState"
+            },
+            "request_digest": {
+              "type": "string",
+              "description": "blake3 of the canonical request (connector, operation, arguments);\nnever the arguments themselves."
+            },
+            "undo": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who approved it, when policy asked; or the policy, when it allowed."
+            },
+            "decided": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Resolved"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the approval policy decided before the call."
+            },
+            "undo_approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who approved its inverse or compensation, once one was performed."
+            },
+            "deletion": {
+              "type": "boolean",
+              "default": false
+            },
+            "staged": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Staged"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lookup": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lookup"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "declared": {
+              "type": "boolean",
+              "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
+              "default": false
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, from the gateway, such as `message in #board`."
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The upstream's last answer, or why the state is what it is."
+            },
+            "upstream_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The idempotency key the gateway used upstream, when it says."
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "updated_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "task",
+            "branch",
+            "turn",
+            "subject",
+            "connector",
+            "operation",
+            "class",
+            "state",
+            "request_digest",
+            "created_ms",
+            "updated_ms"
+          ],
+          "description": "One effectful call, as the ledger projects it."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "Undo": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+            },
+            "arguments": {
+              "default": null
+            },
+            "kind": {
+              "$ref": "#/$defs/UndoKind"
+            },
+            "deadline_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, such as `the message will be deleted`."
+            }
+          },
+          "required": [
+            "operation",
+            "kind"
+          ],
+          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+        },
+        "UndoKind": {
+          "type": "string",
+          "enum": [
+            "inverse",
+            "compensate"
+          ],
+          "description": "Whether an undo is a true inverse or a compensation."
+        },
+        "ApprovalRecord": {
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string"
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "surface": {
+              "type": "string",
+              "description": "`cli`, `watch`, `companion`, `api`, `parent`, `sdk`, or `policy`\nwhen the policy allowed it without asking."
+            },
+            "allowed": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "by",
+            "at_ms",
+            "surface",
+            "allowed"
+          ],
+          "description": "Who answered for an effect, and how."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
+        },
+        "Staged": {
+          "type": "object",
+          "properties": {
+            "draft": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+            },
+            "ask": {
+              "type": "string",
+              "description": "The ask that holds the call and its arguments."
+            }
+          },
+          "required": [
+            "ask"
+          ],
+          "description": "How a staged entry is held."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string"
+            },
+            "arguments": {
+              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
+              "default": null
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened."
+        },
+        "EffectEvent": {
+          "type": "object",
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Increases across the store."
+            },
+            "id": {
+              "type": "string"
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "change": {
+              "$ref": "#/$defs/EffectChange"
+            }
+          },
+          "required": [
+            "seq",
+            "id",
+            "at_ms",
+            "change"
+          ],
+          "description": "An entry's event, as stored."
+        },
+        "EffectChange": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "entry": {
+                  "$ref": "#/$defs/EffectEntry"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "opened"
+                }
+              },
+              "required": [
+                "kind",
+                "entry"
+              ],
+              "description": "The entry, as first written (`staged` or `begun`)."
+            },
+            {
+              "$ref": "#/$defs/EffectMove",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "moved"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A change after that."
+            }
+          ],
+          "description": "One event in an entry's history."
+        },
+        "EffectMove": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EffectState"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "class": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "undo": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "no_undo": {
+              "type": "boolean",
+              "description": "Drop the undo: the gateway said there is none."
+            },
+            "approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "undo_approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "declared": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "upstream_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The draft's handle, when staging made one."
+            }
+          },
+          "description": "A change to an entry after it was opened. Fields left out are kept."
+        }
+      }
+    },
+    "EffectActionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`POST .../effects/{id}/promote` and `.../effects/reconcile`.",
+      "title": "EffectActionRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "UndoRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "to": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        },
+        "only": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "`POST .../branches/{branch}/undo`: undo the chosen upstream effects of\nturns after `to` (0: every turn). `only` empty: every reversible effect\nand every staged call. The server does not rewind files; `by undo`\ndoes, locally.",
+      "title": "UndoRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "UndoReport": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/UndoPlan"
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UndoOutcome"
+          }
+        }
+      },
+      "required": [
+        "plan",
+        "outcomes"
+      ],
+      "description": "What an undo did.",
+      "title": "UndoReport",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "UndoPlan": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "to": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The checkpoint files and conversation go back to; effects of later\nturns are planned."
+            },
+            "reversible": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UndoItem"
+              },
+              "description": "Effects with a true inverse, before its deadline."
+            },
+            "compensable": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UndoItem"
+              },
+              "description": "Effects with a compensation, which leaves a trace."
+            },
+            "irreversible": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UndoItem"
+              },
+              "description": "Effects that cannot be undone, or whose undo expired."
+            },
+            "unknown": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UndoItem"
+              },
+              "description": "Calls whose outcome is unknown: reconcile them first."
+            },
+            "staged": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UndoItem"
+              },
+              "description": "Staged calls that never happened: undoing discards them."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the plan was made (milliseconds since the Unix epoch)."
+            }
+          },
+          "required": [
+            "branch",
+            "to",
+            "reversible",
+            "compensable",
+            "irreversible",
+            "unknown",
+            "staged",
+            "at_ms"
+          ],
+          "description": "What undoing a branch to a turn would do."
+        },
+        "UndoItem": {
+          "type": "object",
+          "properties": {
+            "entry": {
+              "$ref": "#/$defs/EffectEntry"
+            },
+            "note": {
+              "type": "string",
+              "description": "What undoing it does, or why it cannot be, for people."
+            }
+          },
+          "required": [
+            "entry",
+            "note"
+          ],
+          "description": "One upstream effect in a plan."
+        },
+        "EffectEntry": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "A ULID; also the call's idempotency key upstream."
+            },
+            "task": {
+              "type": "string",
+              "description": "The task the branch serves: its delegation tree's root."
+            },
+            "branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "subject": {
+              "type": "string",
+              "description": "Who the branch acts for."
+            },
+            "connector": {
+              "type": "string"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "class": {
+              "$ref": "#/$defs/EffectClass"
+            },
+            "state": {
+              "$ref": "#/$defs/EffectState"
+            },
+            "request_digest": {
+              "type": "string",
+              "description": "blake3 of the canonical request (connector, operation, arguments);\nnever the arguments themselves."
+            },
+            "undo": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who approved it, when policy asked; or the policy, when it allowed."
+            },
+            "decided": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Resolved"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the approval policy decided before the call."
+            },
+            "undo_approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who approved its inverse or compensation, once one was performed."
+            },
+            "deletion": {
+              "type": "boolean",
+              "default": false
+            },
+            "staged": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Staged"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lookup": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lookup"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "declared": {
+              "type": "boolean",
+              "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
+              "default": false
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, from the gateway, such as `message in #board`."
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The upstream's last answer, or why the state is what it is."
+            },
+            "upstream_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The idempotency key the gateway used upstream, when it says."
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "updated_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "task",
+            "branch",
+            "turn",
+            "subject",
+            "connector",
+            "operation",
+            "class",
+            "state",
+            "request_digest",
+            "created_ms",
+            "updated_ms"
+          ],
+          "description": "One effectful call, as the ledger projects it."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "Undo": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+            },
+            "arguments": {
+              "default": null
+            },
+            "kind": {
+              "$ref": "#/$defs/UndoKind"
+            },
+            "deadline_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, such as `the message will be deleted`."
+            }
+          },
+          "required": [
+            "operation",
+            "kind"
+          ],
+          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+        },
+        "UndoKind": {
+          "type": "string",
+          "enum": [
+            "inverse",
+            "compensate"
+          ],
+          "description": "Whether an undo is a true inverse or a compensation."
+        },
+        "ApprovalRecord": {
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string"
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "surface": {
+              "type": "string",
+              "description": "`cli`, `watch`, `companion`, `api`, `parent`, `sdk`, or `policy`\nwhen the policy allowed it without asking."
+            },
+            "allowed": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "by",
+            "at_ms",
+            "surface",
+            "allowed"
+          ],
+          "description": "Who answered for an effect, and how."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
+        },
+        "Staged": {
+          "type": "object",
+          "properties": {
+            "draft": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+            },
+            "ask": {
+              "type": "string",
+              "description": "The ask that holds the call and its arguments."
+            }
+          },
+          "required": [
+            "ask"
+          ],
+          "description": "How a staged entry is held."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string"
+            },
+            "arguments": {
+              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
+              "default": null
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened."
+        },
+        "UndoOutcome": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/EffectState",
+              "description": "The state the entry reached; unchanged when refused."
+            },
+            "detail": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "state",
+            "detail"
+          ],
+          "description": "What undoing one entry did."
+        }
+      }
+    },
+    "ApprovalAsk": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "turn": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "subject": {
+          "type": "string",
+          "description": "Who the branch acts for."
+        },
+        "about": {
+          "$ref": "#/$defs/AskAbout"
+        },
+        "effect": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The ledger entry it is about, when there is one."
+        },
+        "resolved": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resolved"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the policy decided, and which layer."
+        },
+        "request": {
+          "description": "The tool's input or the call's arguments, so the person sees what\nthey approve; for a call held in the outbox, what is performed."
+        },
+        "created_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "deadline_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "When the waiting turn gives up: its budget."
+        },
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AskAnswer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "branch",
+        "turn",
+        "subject",
+        "about",
+        "created_ms"
+      ],
+      "description": "A question in the person's inbox: allow this, or not.",
+      "title": "ApprovalAsk",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "AskAbout": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "tool"
+                }
+              },
+              "required": [
+                "kind",
+                "tool"
+              ],
+              "description": "A harness's tool."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "deletion": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "operation"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "A connector operation, before it is called."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "promote"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "Performing a staged effect for real."
+            }
+          ],
+          "description": "What an ask is about."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
+        },
+        "AskAnswer": {
+          "type": "object",
+          "properties": {
+            "allow": {
+              "type": "boolean"
+            },
+            "by": {
+              "type": "string"
+            },
+            "surface": {
+              "type": "string",
+              "description": "`cli`, `watch`, `companion`, `api`, `parent`, `sdk`, or `expired`\nwhen the turn's budget ran out first."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "allow",
+            "by",
+            "surface",
+            "at_ms"
+          ],
+          "description": "The answer to an ask."
+        }
+      }
+    },
+    "EffectEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "A ULID; also the call's idempotency key upstream."
+        },
+        "task": {
+          "type": "string",
+          "description": "The task the branch serves: its delegation tree's root."
+        },
+        "branch": {
+          "type": "string"
+        },
+        "turn": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "subject": {
+          "type": "string",
+          "description": "Who the branch acts for."
+        },
+        "connector": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "account": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "class": {
+          "$ref": "#/$defs/EffectClass"
+        },
+        "state": {
+          "$ref": "#/$defs/EffectState"
+        },
+        "request_digest": {
+          "type": "string",
+          "description": "blake3 of the canonical request (connector, operation, arguments);\nnever the arguments themselves."
+        },
+        "undo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Undo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who approved it, when policy asked; or the policy, when it allowed."
+        },
+        "decided": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resolved"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the approval policy decided before the call."
+        },
+        "undo_approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who approved its inverse or compensation, once one was performed."
+        },
+        "deletion": {
+          "type": "boolean",
+          "default": false
+        },
+        "staged": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Staged"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lookup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Lookup"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "declared": {
+          "type": "boolean",
+          "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
+          "default": false
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "One line for people, from the gateway, such as `message in #board`."
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The upstream's last answer, or why the state is what it is."
+        },
+        "upstream_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The idempotency key the gateway used upstream, when it says."
+        },
+        "created_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "updated_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "task",
+        "branch",
+        "turn",
+        "subject",
+        "connector",
+        "operation",
+        "class",
+        "state",
+        "request_digest",
+        "created_ms",
+        "updated_ms"
+      ],
+      "description": "One effectful call, as the ledger projects it.",
+      "title": "EffectEntry",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "Undo": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+            },
+            "arguments": {
+              "default": null
+            },
+            "kind": {
+              "$ref": "#/$defs/UndoKind"
+            },
+            "deadline_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, such as `the message will be deleted`."
+            }
+          },
+          "required": [
+            "operation",
+            "kind"
+          ],
+          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+        },
+        "UndoKind": {
+          "type": "string",
+          "enum": [
+            "inverse",
+            "compensate"
+          ],
+          "description": "Whether an undo is a true inverse or a compensation."
+        },
+        "ApprovalRecord": {
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string"
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "surface": {
+              "type": "string",
+              "description": "`cli`, `watch`, `companion`, `api`, `parent`, `sdk`, or `policy`\nwhen the policy allowed it without asking."
+            },
+            "allowed": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "by",
+            "at_ms",
+            "surface",
+            "allowed"
+          ],
+          "description": "Who answered for an effect, and how."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
+        },
+        "Staged": {
+          "type": "object",
+          "properties": {
+            "draft": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+            },
+            "ask": {
+              "type": "string",
+              "description": "The ask that holds the call and its arguments."
+            }
+          },
+          "required": [
+            "ask"
+          ],
+          "description": "How a staged entry is held."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string"
+            },
+            "arguments": {
+              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
+              "default": null
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened."
+        }
+      }
+    },
+    "UndoPlan": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "to": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The checkpoint files and conversation go back to; effects of later\nturns are planned."
+        },
+        "reversible": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UndoItem"
+          },
+          "description": "Effects with a true inverse, before its deadline."
+        },
+        "compensable": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UndoItem"
+          },
+          "description": "Effects with a compensation, which leaves a trace."
+        },
+        "irreversible": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UndoItem"
+          },
+          "description": "Effects that cannot be undone, or whose undo expired."
+        },
+        "unknown": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UndoItem"
+          },
+          "description": "Calls whose outcome is unknown: reconcile them first."
+        },
+        "staged": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UndoItem"
+          },
+          "description": "Staged calls that never happened: undoing discards them."
+        },
+        "at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "When the plan was made (milliseconds since the Unix epoch)."
+        }
+      },
+      "required": [
+        "branch",
+        "to",
+        "reversible",
+        "compensable",
+        "irreversible",
+        "unknown",
+        "staged",
+        "at_ms"
+      ],
+      "description": "What undoing a branch to a turn would do.",
+      "title": "UndoPlan",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "UndoItem": {
+          "type": "object",
+          "properties": {
+            "entry": {
+              "$ref": "#/$defs/EffectEntry"
+            },
+            "note": {
+              "type": "string",
+              "description": "What undoing it does, or why it cannot be, for people."
+            }
+          },
+          "required": [
+            "entry",
+            "note"
+          ],
+          "description": "One upstream effect in a plan."
+        },
+        "EffectEntry": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "A ULID; also the call's idempotency key upstream."
+            },
+            "task": {
+              "type": "string",
+              "description": "The task the branch serves: its delegation tree's root."
+            },
+            "branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "subject": {
+              "type": "string",
+              "description": "Who the branch acts for."
+            },
+            "connector": {
+              "type": "string"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "class": {
+              "$ref": "#/$defs/EffectClass"
+            },
+            "state": {
+              "$ref": "#/$defs/EffectState"
+            },
+            "request_digest": {
+              "type": "string",
+              "description": "blake3 of the canonical request (connector, operation, arguments);\nnever the arguments themselves."
+            },
+            "undo": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Undo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who approved it, when policy asked; or the policy, when it allowed."
+            },
+            "decided": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Resolved"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the approval policy decided before the call."
+            },
+            "undo_approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who approved its inverse or compensation, once one was performed."
+            },
+            "deletion": {
+              "type": "boolean",
+              "default": false
+            },
+            "staged": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Staged"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lookup": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lookup"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "declared": {
+              "type": "boolean",
+              "description": "Whether the gateway described the effect (`_meta.effect`); without\nit, the entry is irreversible with no undo.",
+              "default": false
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, from the gateway, such as `message in #board`."
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The upstream's last answer, or why the state is what it is."
+            },
+            "upstream_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The idempotency key the gateway used upstream, when it says."
+            },
+            "created_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "updated_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "task",
+            "branch",
+            "turn",
+            "subject",
+            "connector",
+            "operation",
+            "class",
+            "state",
+            "request_digest",
+            "created_ms",
+            "updated_ms"
+          ],
+          "description": "One effectful call, as the ledger projects it."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "Undo": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The inverse's operation (the gateway's tool name, without the\nconnector)."
+            },
+            "arguments": {
+              "default": null
+            },
+            "kind": {
+              "$ref": "#/$defs/UndoKind"
+            },
+            "deadline_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch after which the inverse no longer\nworks."
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "One line for people, such as `the message will be deleted`."
+            }
+          },
+          "required": [
+            "operation",
+            "kind"
+          ],
+          "description": "How an effect can be undone: the operation the gateway resolved, its\nconcrete arguments, and until when."
+        },
+        "UndoKind": {
+          "type": "string",
+          "enum": [
+            "inverse",
+            "compensate"
+          ],
+          "description": "Whether an undo is a true inverse or a compensation."
+        },
+        "ApprovalRecord": {
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string"
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "surface": {
+              "type": "string",
+              "description": "`cli`, `watch`, `companion`, `api`, `parent`, `sdk`, or `policy`\nwhen the policy allowed it without asking."
+            },
+            "allowed": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "by",
+            "at_ms",
+            "surface",
+            "allowed"
+          ],
+          "description": "Who answered for an effect, and how."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
+        },
+        "Staged": {
+          "type": "object",
+          "properties": {
+            "draft": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The draft's handle upstream, when the operation declares a draft\nform; `None` when the call is held in the outbox."
+            },
+            "ask": {
+              "type": "string",
+              "description": "The ask that holds the call and its arguments."
+            }
+          },
+          "required": [
+            "ask"
+          ],
+          "description": "How a staged entry is held."
+        },
+        "Lookup": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string"
+            },
+            "arguments": {
+              "description": "Fixed arguments; the entry's id is added as `idempotency_key`.",
+              "default": null
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "description": "How reconciliation asks the upstream whether a call happened."
+        }
+      }
+    },
+    "Reconciled": {
+      "type": "object",
+      "properties": {
+        "settled": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/EffectState"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "description": "Entries settled, with the state each reached."
+        },
+        "unknown": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "description": "Entries still `unknown`, with why."
+        }
+      },
+      "required": [
+        "settled",
+        "unknown"
+      ],
+      "description": "What one reconciliation did.",
+      "title": "Reconciled",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
         }
       }
     },
@@ -6648,6 +10301,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -6925,6 +10589,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         }
       }
     },
@@ -7634,6 +11366,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -7911,6 +11654,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         }
       }
     },
@@ -8608,6 +12419,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -8885,6 +12707,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         }
       }
     },
@@ -12956,6 +16846,19 @@
               ],
               "additionalProperties": false,
               "description": "The person's ceiling narrowed what the turn may reach. See\n[`AccessActivity`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "$ref": "#/$defs/EffectActivity"
+                }
+              },
+              "required": [
+                "effect"
+              ],
+              "additionalProperties": false,
+              "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -13561,9 +17464,123 @@
                 "kind"
               ],
               "description": "The engine, which could not deliver the policy's answer and\ninterrupted the turn instead."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "ask": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The ask, when one was asked."
+                },
+                "by": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Who answered it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "approval"
+                }
+              },
+              "required": [
+                "kind",
+                "resolved"
+              ],
+              "description": "The approval policy, which tightened what the policy allowed: a\nblock, or an ask a person (or the ask's expiry) answered. See\n`docs/effects.md`."
             }
           ],
           "description": "What answered a permission request."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
         },
         "CandidateInfo": {
           "type": "object",
@@ -16408,6 +20425,300 @@
             "narrowed"
           ],
           "description": "What a person's ceiling did to a turn's access, recorded when it\nnarrowed something."
+        },
+        "EffectActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "proxy"
+                }
+              },
+              "required": [
+                "kind",
+                "url"
+              ],
+              "description": "The turn's connector calls go through the ledger's proxy at `url`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ask": {
+                  "type": "string"
+                },
+                "about": {
+                  "$ref": "#/$defs/AskAbout"
+                },
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "asked"
+                }
+              },
+              "required": [
+                "kind",
+                "ask",
+                "about",
+                "resolved"
+              ],
+              "description": "A person was asked."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ask": {
+                  "type": "string"
+                },
+                "allow": {
+                  "type": "boolean"
+                },
+                "by": {
+                  "type": "string"
+                },
+                "surface": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "answered"
+                }
+              },
+              "required": [
+                "kind",
+                "ask",
+                "allow",
+                "by",
+                "surface"
+              ],
+              "description": "The ask was answered."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "resolved"
+              ],
+              "description": "A call was refused by policy before it was made."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "state": {
+                  "$ref": "#/$defs/EffectState"
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "entry"
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "connector",
+                "operation",
+                "class",
+                "state"
+              ],
+              "description": "A ledger entry changed."
+            }
+          ],
+          "description": "What the ledger and approvals did on a branch, recorded as\n[`crate::Activity::Effect`]."
+        },
+        "AskAbout": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "tool"
+                }
+              },
+              "required": [
+                "kind",
+                "tool"
+              ],
+              "description": "A harness's tool."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "deletion": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "operation"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "A connector operation, before it is called."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "promote"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "Performing a staged effect for real."
+            }
+          ],
+          "description": "What an ask is about."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
         }
       }
     },
@@ -17044,6 +21355,19 @@
               ],
               "additionalProperties": false,
               "description": "The person's ceiling narrowed what the turn may reach. See\n[`AccessActivity`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "$ref": "#/$defs/EffectActivity"
+                }
+              },
+              "required": [
+                "effect"
+              ],
+              "additionalProperties": false,
+              "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -17649,9 +21973,123 @@
                 "kind"
               ],
               "description": "The engine, which could not deliver the policy's answer and\ninterrupted the turn instead."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "ask": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The ask, when one was asked."
+                },
+                "by": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Who answered it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "approval"
+                }
+              },
+              "required": [
+                "kind",
+                "resolved"
+              ],
+              "description": "The approval policy, which tightened what the policy allowed: a\nblock, or an ask a person (or the ask's expiry) answered. See\n`docs/effects.md`."
             }
           ],
           "description": "What answered a permission request."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
         },
         "CandidateInfo": {
           "type": "object",
@@ -20496,6 +24934,300 @@
             "narrowed"
           ],
           "description": "What a person's ceiling did to a turn's access, recorded when it\nnarrowed something."
+        },
+        "EffectActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "proxy"
+                }
+              },
+              "required": [
+                "kind",
+                "url"
+              ],
+              "description": "The turn's connector calls go through the ledger's proxy at `url`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ask": {
+                  "type": "string"
+                },
+                "about": {
+                  "$ref": "#/$defs/AskAbout"
+                },
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "asked"
+                }
+              },
+              "required": [
+                "kind",
+                "ask",
+                "about",
+                "resolved"
+              ],
+              "description": "A person was asked."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ask": {
+                  "type": "string"
+                },
+                "allow": {
+                  "type": "boolean"
+                },
+                "by": {
+                  "type": "string"
+                },
+                "surface": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "answered"
+                }
+              },
+              "required": [
+                "kind",
+                "ask",
+                "allow",
+                "by",
+                "surface"
+              ],
+              "description": "The ask was answered."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "resolved"
+              ],
+              "description": "A call was refused by policy before it was made."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "state": {
+                  "$ref": "#/$defs/EffectState"
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "entry"
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "connector",
+                "operation",
+                "class",
+                "state"
+              ],
+              "description": "A ledger entry changed."
+            }
+          ],
+          "description": "What the ledger and approvals did on a branch, recorded as\n[`crate::Activity::Effect`]."
+        },
+        "AskAbout": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "tool"
+                }
+              },
+              "required": [
+                "kind",
+                "tool"
+              ],
+              "description": "A harness's tool."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "deletion": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "operation"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "A connector operation, before it is called."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "promote"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "Performing a staged effect for real."
+            }
+          ],
+          "description": "What an ask is about."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
         }
       }
     },
@@ -24208,6 +28940,19 @@
               ],
               "additionalProperties": false,
               "description": "The person's ceiling narrowed what the turn may reach. See\n[`AccessActivity`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "$ref": "#/$defs/EffectActivity"
+                }
+              },
+              "required": [
+                "effect"
+              ],
+              "additionalProperties": false,
+              "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -24813,9 +29558,123 @@
                 "kind"
               ],
               "description": "The engine, which could not deliver the policy's answer and\ninterrupted the turn instead."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "ask": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The ask, when one was asked."
+                },
+                "by": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Who answered it."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "approval"
+                }
+              },
+              "required": [
+                "kind",
+                "resolved"
+              ],
+              "description": "The approval policy, which tightened what the policy allowed: a\nblock, or an ask a person (or the ask's expiry) answered. See\n`docs/effects.md`."
             }
           ],
           "description": "What answered a permission request."
+        },
+        "Resolved": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "layer": {
+              "$ref": "#/$defs/Layer"
+            },
+            "rule": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule's pattern, or `class:<class>`, when one decided."
+            }
+          },
+          "required": [
+            "approval",
+            "layer"
+          ],
+          "description": "A decision and what made it."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
+        },
+        "Layer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "admin",
+              "description": "An administrator's locked policy."
+            },
+            {
+              "type": "string",
+              "const": "seat",
+              "description": "The seat's or rig's (a delegating parent's included)."
+            },
+            {
+              "type": "string",
+              "const": "person",
+              "description": "The person's."
+            },
+            {
+              "type": "string",
+              "const": "preset",
+              "description": "The permission preset's."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The effect class's default."
+            },
+            {
+              "type": "string",
+              "const": "deletion",
+              "description": "A deletion, asked about whatever the policy said."
+            }
+          ],
+          "description": "Which layer decided."
         },
         "CandidateInfo": {
           "type": "object",
@@ -27660,6 +32519,300 @@
             "narrowed"
           ],
           "description": "What a person's ceiling did to a turn's access, recorded when it\nnarrowed something."
+        },
+        "EffectActivity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "proxy"
+                }
+              },
+              "required": [
+                "kind",
+                "url"
+              ],
+              "description": "The turn's connector calls go through the ledger's proxy at `url`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ask": {
+                  "type": "string"
+                },
+                "about": {
+                  "$ref": "#/$defs/AskAbout"
+                },
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "asked"
+                }
+              },
+              "required": [
+                "kind",
+                "ask",
+                "about",
+                "resolved"
+              ],
+              "description": "A person was asked."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ask": {
+                  "type": "string"
+                },
+                "allow": {
+                  "type": "boolean"
+                },
+                "by": {
+                  "type": "string"
+                },
+                "surface": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "answered"
+                }
+              },
+              "required": [
+                "kind",
+                "ask",
+                "allow",
+                "by",
+                "surface"
+              ],
+              "description": "The ask was answered."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "resolved": {
+                  "$ref": "#/$defs/Resolved"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "resolved"
+              ],
+              "description": "A call was refused by policy before it was made."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "state": {
+                  "$ref": "#/$defs/EffectState"
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "entry"
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "connector",
+                "operation",
+                "class",
+                "state"
+              ],
+              "description": "A ledger entry changed."
+            }
+          ],
+          "description": "What the ledger and approvals did on a branch, recorded as\n[`crate::Activity::Effect`]."
+        },
+        "AskAbout": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "tool"
+                }
+              },
+              "required": [
+                "kind",
+                "tool"
+              ],
+              "description": "A harness's tool."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "deletion": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "operation"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "A connector operation, before it is called."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "class": {
+                  "$ref": "#/$defs/EffectClass"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "promote"
+                }
+              },
+              "required": [
+                "kind",
+                "connector",
+                "operation",
+                "class"
+              ],
+              "description": "Performing a staged effect for real."
+            }
+          ],
+          "description": "What an ask is about."
+        },
+        "EffectClass": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read",
+              "description": "Changes nothing: lists, searches, fetches."
+            },
+            {
+              "type": "string",
+              "const": "reversible",
+              "description": "The upstream offers a true inverse."
+            },
+            {
+              "type": "string",
+              "const": "compensable",
+              "description": "The upstream offers an action that cancels the effect, leaving a\ntrace."
+            },
+            {
+              "type": "string",
+              "const": "irreversible",
+              "description": "No undo exists. What an operation that declares nothing is taken to\nbe."
+            }
+          ],
+          "description": "What an effect does to the world, as the operation that causes it\ndeclares (Anvil's `effect.class`); never guessed by a harness."
+        },
+        "EffectState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "const": "staged",
+              "description": "Held: a draft upstream, or a call in the outbox, until approved."
+            },
+            {
+              "type": "string",
+              "const": "begun",
+              "description": "Written before the call; the call's outcome is not known yet."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "The call may or may not have happened; reconciliation asks the\nupstream, never calls again."
+            },
+            {
+              "type": "string",
+              "const": "undone",
+              "description": "Its inverse was performed."
+            },
+            {
+              "type": "string",
+              "const": "compensated",
+              "description": "Its compensation was performed."
+            },
+            {
+              "type": "string",
+              "const": "undo_failed",
+              "description": "Its inverse or compensation failed; the upstream's answer is kept."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its inverse's deadline passed before it was asked for."
+            }
+          ],
+          "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
         }
       }
     },
@@ -29593,6 +34746,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -29870,6 +35034,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         },
         "Seats": {
           "type": "object",
@@ -31169,6 +36401,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -31446,6 +36689,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         },
         "Seats": {
           "type": "object",
@@ -32764,6 +38075,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -33041,6 +38363,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         },
         "Seats": {
           "type": "object",
@@ -34355,6 +39745,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -34632,6 +40033,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         },
         "Seats": {
           "type": "object",
@@ -36311,6 +41780,17 @@
                 }
               ],
               "description": "Whether the harness calls its model provider through Branchyard's\nmodel gateway (`--model-gateway`), and which models it may call\nthere; see `docs/model-gateway.md`. Unset: the harness calls its\nprovider itself. A delegated child of a branch on the gateway stays\non it, within its parent's models."
+            },
+            "approvals": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The seat's or rig's approval policy for tools and connector\noperations (allow, ask, block or stage); see `docs/effects.md`. A\ndelegated child's is held within its parent's: it may only be\nstricter."
             }
           },
           "description": "What a task asks to have provisioned. Stored with the branch, so it\nholds where secrets come from, never their values; every turn resolves\nthem again."
@@ -36588,6 +42068,74 @@
             "allow"
           ],
           "description": "What a branch may call through the model gateway."
+        },
+        "ApprovalPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "Pattern to decision: a tool name glob, or `connector:operation`\nwith globs on both sides."
+            },
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Approval"
+              },
+              "description": "A decision per effect class, for operations no rule matches."
+            },
+            "deletion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Approval"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How deletions are treated. Only an administrator's is honoured:\notherwise every deletion is asked about at least."
+            },
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A delegating parent's policy, which this one may only tighten: the\nresult is the stricter of the two. Set by narrowing, never by hand."
+            }
+          },
+          "description": "One layer's policy."
+        },
+        "Approval": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "allow",
+              "description": "Done without asking."
+            },
+            {
+              "type": "string",
+              "const": "stage",
+              "description": "Done as a draft (or held in the outbox) until a person approves it."
+            },
+            {
+              "type": "string",
+              "const": "ask",
+              "description": "A person is asked first; the turn waits within its budget."
+            },
+            {
+              "type": "string",
+              "const": "block",
+              "description": "Refused."
+            }
+          ],
+          "description": "What a tool or an operation resolves to."
         },
         "Seats": {
           "type": "object",

@@ -214,6 +214,10 @@
             "type": "string"
           }
         },
+        "approvals": {
+          "description": "Approvals for tools and connector operations (docs/effects.md):\nrules = { \"github:issues.*\" = \"allow\", \"Bash\" = \"ask\" }, classes =\n{ compensable = \"allow\" }. A child seat's may only be stricter.",
+          "$ref": "#/$defs/Approvals"
+        },
         "telemetry": {
           "description": "`off`, or an http:// or https:// OTLP collector endpoint.",
           "type": "string"
@@ -291,6 +295,29 @@
         "restore_policy": {
           "description": "Only resume_if_possible: a send resumes the branch's session.",
           "$ref": "#/$defs/Restore"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Approvals": {
+      "description": "A seat's approvals.",
+      "type": "object",
+      "properties": {
+        "rules": {
+          "description": "Pattern to allow, ask, block or stage: a tool name glob, or\nconnector:operation.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "classes": {
+          "description": "Effect class (reversible, compensable, irreversible) to a decision.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
         }
       },
       "additionalProperties": false

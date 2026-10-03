@@ -1940,6 +1940,72 @@ mod tests {
     }
 
     #[test]
+    fn approvals_and_the_ledger_proxy_load_and_are_checked() {
+        use branchyard::effects::{Approval, EffectClass};
+        let temp = tempfile::Builder::new()
+            .prefix("branchyard-config-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("t.token"), "0123456789abcdef\n").unwrap();
+        let path = dir.join("server.json");
+        let write = |approvals: &str| {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"listen": "127.0.0.1:0", "data_dir": "data", "repos": {{"app": "repo"}},
+                    "tokens": [{{"name": "ci", "token_file": "t.token"}}],
+                    "connectors": {{"gateway": "http://127.0.0.1:8931/mcp", "bundles": "b",
+                                    "effects_proxy": true, "effects_listen": "0.0.0.0",
+                                    "effects_sandbox_host": "192.168.127.1"}},
+                    "approvals": {approvals}}}"#
+                ),
+            )
+            .unwrap();
+        };
+        write(
+            r#"{"admin": {"rules": {"gmail:*": "ask", "Bash": "block"},
+                          "classes": {"compensable": "ask"}, "deletion": "ask"},
+                "people": {"ci": {"rules": {"github:*": "allow"}}}}"#,
+        );
+        let partial = load_file(&path).unwrap();
+        let admin = partial.approvals.admin.clone().unwrap();
+        assert_eq!(admin.rules["gmail:*"], Approval::Ask);
+        assert_eq!(admin.classes[&EffectClass::Compensable], Approval::Ask);
+        assert_eq!(admin.deletion, Some(Approval::Ask));
+        assert_eq!(
+            partial.approvals.people["ci"].rules["github:*"],
+            Approval::Allow
+        );
+        let connectors = partial.connectors.unwrap();
+        assert_eq!(connectors.effects_proxy, Some(true));
+        assert_eq!(connectors.effects_listen, Some("0.0.0.0".parse().unwrap()));
+        assert_eq!(
+            connectors.effects_sandbox_host.as_deref(),
+            Some("192.168.127.1")
+        );
+        for (approvals, needle) in [
+            (
+                r#"{"admin": {"rules": {"x:y": "maybe"}}}"#,
+                "approvals.admin",
+            ),
+            (
+                r#"{"people": {"ci": {"classes": {"loud": "ask"}}}}"#,
+                "approvals.people.ci",
+            ),
+            (
+                r#"{"admin": {"rules": {"github:": "ask"}}}"#,
+                "approval pattern",
+            ),
+            (r#"{"admin": {"lock": true}}"#, "lock"),
+        ] {
+            write(approvals);
+            let error = load_file(&path).unwrap_err();
+            assert!(error.contains(needle), "{approvals}: {error}");
+        }
+    }
+
+    #[test]
     fn files_resolve_relative_paths_and_reject_unknown_keys() {
         let temp = tempfile::Builder::new()
             .prefix("branchyard-config-")

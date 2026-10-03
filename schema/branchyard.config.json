@@ -111,6 +111,10 @@
     "harnesses": {
       "$ref": "#/$defs/HarnessesConfig",
       "description": "Installing and updating harness CLIs (docs/harness-lifecycle.md):\nwhether `by harnesses install`, `update` and the router may run a\nharness's install command, and for which harnesses. A repository's\nfile may only say `install = \"never\"`; the rest belongs in your user\nfile, since it runs software on your machine."
+    },
+    "approvals": {
+      "$ref": "#/$defs/ApprovalsConfig",
+      "description": "Your approvals for tools and connector operations\n(docs/effects.md#approvals): allow, ask, block or stage, by pattern\nand by effect class. Within a seat's, and never below an\nadministrator's on a server."
     }
   },
   "title": "Branchyard configuration",
@@ -853,6 +857,27 @@
             "type": "string"
           },
           "description": "Grants for a new branch (`by run`, `by fan`) when `--connector`\ngives none, in its form: `\"github:read\"`,\n`\"github@work:write:issues.*\"`. Applied only to isolated or\nsandboxed branches."
+        },
+        "effects_proxy": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether each turn calls the gateway through the effect ledger's\nproxy, which decides approvals and writes every effectful call to\nthe ledger before it is made (docs/effects.md). Default true."
+        },
+        "effects_listen": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The address each turn's ledger proxy binds (default `127.0.0.1`)."
+        },
+        "effects_sandbox_host": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "How a sandboxed harness reaches its ledger proxy: a host address\nits guest routes to. Without it, a sandboxed turn calls the gateway\ndirectly and its effects reach the ledger only from the audit log."
         }
       },
       "description": "`[connectors]`."
@@ -1457,6 +1482,27 @@
         }
       ],
       "description": "`install` in `[harnesses]`."
+    },
+    "ApprovalsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Pattern to `allow`, `ask`, `block` or `stage`: a tool name glob\n(`\"Bash\"`, `\"mcp__*\"`) or `connector:operation`\n(`\"github:issues.*\"`, `\"gmail:*\"`). The most specific pattern wins."
+        },
+        "classes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Effect class (`reversible`, `compensable`, `irreversible`) to a\ndecision, for operations no rule names. Defaults: reversible\n`allow`, compensable `ask`, irreversible `stage`; a deletion always\nasks."
+        }
+      },
+      "description": "`[approvals]`."
     }
   },
   "$id": "https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json"

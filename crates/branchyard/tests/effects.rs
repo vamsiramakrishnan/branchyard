@@ -763,3 +763,57 @@ fn an_expired_undo_is_not_called_and_a_failed_one_says_why() {
     // It stays in the plan, to try again.
     assert_eq!(f2.yard.undo_plan("refused", 0).unwrap().reversible.len(), 1);
 }
+
+#[test]
+fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
+    let f = Fixture::new();
+    let (mock, script) = setup(&f, person(&[("flaky:*", Approval::Allow)]));
+    f.task(&calls(&script, &[("flaky__charge", r#"{"amount": 5}"#)]))
+        .options(granted(&f))
+        .name("audited")
+        .run()
+        .unwrap();
+    let lost = f.yard.effects(Some("audited")).unwrap().remove(0);
+    assert_eq!(lost.state, EffectState::Unknown);
+    assert_eq!(mock.calls_to("flaky__charge").len(), 1);
+    // The gateway's audit line for that call carries its key: it happened.
+    // A second line is a call that did not go through the proxy, and says
+    // its effect.
+    let audit = f.root.join(".branchyard/gateway/audit.jsonl");
+    let lines = format!(
+        "{}\n{}\n",
+        serde_json::json!({"time": "2026-10-03T10:00:00Z", "by_branch": "audited", "by_turn": "1",
+            "sub": "local:me", "connector": "flaky", "operation": "charge", "decision": "allowed",
+            "upstream_status": 200, "idempotency_key": lost.id}),
+        serde_json::json!({"time": "2026-10-03T10:00:01Z", "by_branch": "audited", "by_turn": "1",
+            "sub": "local:me", "connector": "slack", "operation": "chat_post", "decision": "allowed",
+            "upstream_status": 200, "effect": {"class": "reversible",
+                "undo": {"operation": "chat_delete", "arguments": {"ts": "7"}}}}),
+    );
+    fs::write(&audit, &lines).unwrap();
+    f.yard.ingest_connector_audit().unwrap();
+    let settled = f.yard.effect(&lost.id).unwrap();
+    assert_eq!(settled.state, EffectState::Confirmed);
+    assert!(
+        settled.detail.as_deref().unwrap().contains("audit log"),
+        "{settled:?}"
+    );
+    let ledger = f.yard.effects(Some("audited")).unwrap();
+    assert_eq!(ledger.len(), 2, "{ledger:?}");
+    let around = &ledger[1];
+    assert_eq!(around.connector, "slack");
+    assert_eq!(around.state, EffectState::Confirmed);
+    assert_eq!(around.class, EffectClass::Reversible);
+    assert_eq!(around.undo.as_ref().unwrap().operation, "chat_delete");
+    assert_eq!(around.approval, None, "never approved");
+    assert!(around
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("did not go through"));
+    // Read again from the start (a replaced log): recorded once.
+    fs::remove_file(&audit).unwrap();
+    fs::write(&audit, &lines).unwrap();
+    f.yard.ingest_connector_audit().unwrap();
+    assert_eq!(f.yard.effects(Some("audited")).unwrap().len(), 2);
+}
