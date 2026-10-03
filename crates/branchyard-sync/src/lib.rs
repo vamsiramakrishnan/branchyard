@@ -50,6 +50,7 @@ pub mod seal;
 pub mod source;
 pub mod stats;
 pub mod store;
+pub mod tasks;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod util;

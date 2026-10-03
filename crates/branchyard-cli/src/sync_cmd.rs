@@ -9,6 +9,7 @@ use branchyard::services::Clock;
 use branchyard_sync::outbox::Outbox;
 use branchyard_sync::replicator::{describe, Replicator};
 use branchyard_sync::seal::Encryption;
+use branchyard_sync::tasks::{HomeTasks, Providers};
 use branchyard_sync::yard::YardTasks;
 use branchyard_sync::{Remote, SyncConfig};
 use serde_json::json;
@@ -73,8 +74,16 @@ pub fn main(
     let outbox = Arc::new(Outbox::open(&Outbox::path_for(yard.root())).map_err(failure)?);
     let remote = Arc::new(config.open(&outbox, Clock::system()).map_err(failure)?);
     let tasks = YardTasks::new(yard.clone()).map_err(failure)?;
-    let replicator = Replicator::new(remote.clone(), outbox, Arc::new(tasks.clone()));
-    let resolve = |t: &str| tasks.resolve(t).map_err(failure);
+    // Tasks with a repository of their own (folder tasks, tasks with no
+    // files) sync beside this repository's branches; their IDs are ULIDs,
+    // so a task here is tried first and anything else is a branch.
+    let home = HomeTasks::new(branchyard::tasks::home());
+    let providers = Providers(vec![Arc::new(home.clone()), Arc::new(tasks.clone())]);
+    let replicator = Replicator::new(remote.clone(), outbox, Arc::new(providers));
+    let resolve = |t: &str| match home.resolve(t) {
+        Some(id) => Ok(id),
+        None => tasks.resolve(t).map_err(failure),
+    };
     match action {
         None => sync(
             &replicator,

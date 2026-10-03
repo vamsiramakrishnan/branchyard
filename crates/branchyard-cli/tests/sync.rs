@@ -80,6 +80,7 @@ impl World {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("NO_COLOR", "1")
             .env("BRANCHYARD_USER_CONFIG", &self.config)
+            .env("BRANCHYARD_HOME", self.dir.join("home"))
             .env("PAGER", "cat");
         for var in [
             "BRANCHYARD_DELEGATION",
@@ -276,6 +277,71 @@ fn by_sync_through_an_encrypted_remote() {
     assert_eq!(w.git(&b, &["show", "hello:hello.txt"]), "hi");
     let status = w.json(&b, &["sync", "status", "--json"], &pass);
     assert_eq!(status["encrypted"], true);
+}
+
+/// A folder task (a repository of its own under BRANCHYARD_HOME, not in
+/// any repository) syncs beside the repository's branches, under its ULID.
+#[test]
+fn by_sync_carries_a_folder_task_beside_the_branches() {
+    let w = World::new("");
+    let a = w.machine(&[]);
+    let folder = w.dir.join("folder");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("notes.txt"), "draft\n").unwrap();
+    let agent = fake_agent().display().to_string();
+    let out = w.by(
+        &w.dir,
+        &[
+            "task",
+            "new",
+            "--folder",
+            folder.to_str().unwrap(),
+            "WRITE notes.txt=final",
+            "--name",
+            "edit",
+            "--harness",
+            "gemini-cli",
+            "--command",
+            &agent,
+            "--yes",
+        ],
+        &[],
+    );
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    let listed = w.json(&w.dir, &["task", "ls", "--json"], &[]);
+    let id = listed
+        .as_array()
+        .and_then(|tasks| tasks.first())
+        .or_else(|| listed["tasks"].as_array().and_then(|t| t.first()))
+        .and_then(|t| t["id"].as_str().or_else(|| t["task"]["id"].as_str()))
+        .unwrap_or_else(|| panic!("no task id in {listed}"))
+        .to_owned();
+
+    // From the repository: its branch and the folder task, each its own task.
+    let synced = w.json(&a, &["sync", "--json"], &[]);
+    let tasks: Vec<String> = synced["synced"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["task"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(tasks.iter().any(|t| t.ends_with(".hello")), "{tasks:?}");
+    assert!(tasks.contains(&id), "{id} not in {tasks:?}");
+    let remote = w.json(&a, &["sync", "ls", "--json"], &[]);
+    let listed: Vec<&str> = remote["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["task"].as_str().unwrap())
+        .collect();
+    assert!(listed.contains(&id.as_str()), "{listed:?}");
+    // The task syncs by its ID too, and the folder was left alone.
+    let one = w.json(&a, &["sync", &id, "--json"], &[]);
+    assert_eq!(one["synced"][0]["task"], id.as_str(), "{one}");
+    assert_eq!(
+        fs::read_to_string(folder.join("notes.txt")).unwrap(),
+        "draft\n"
+    );
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {

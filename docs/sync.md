@@ -196,7 +196,7 @@ The keys are those of `[sync]` plus `lease_seconds` (default 60), in `schema/ser
 
 ## Task repositories
 
-The task-repository work (`Task`, `.task/`, the separate git directory for folder tasks, the chunk store at `~/.branchyard/chunks`, `reachable_chunks`) plugs in by implementing `SyncSource` for its `TaskRepo`:
+Tasks with a repository of their own (folder tasks and tasks with no files, under `$BRANCHYARD_HOME/tasks/`) sync through `branchyard_sync::tasks::TaskSource`, which implements `SyncSource` for a `TaskRepo`, and `HomeTasks`, which lists them. `by sync` uses both beside the repository's branches (`Providers`), so one `by sync` carries the branches and every such task; a task's ID is its ULID, and `by sync TASK` takes it or a unique prefix. The mapping:
 
 | Method | A task repository returns |
 |---|---|
@@ -210,6 +210,8 @@ The task-repository work (`Task`, `.task/`, the separate git directory for folde
 | `ledger_watermark` | the effect ledger's last entry synced |
 
 and a `SourceProvider` listing its tasks, so the replicator, `by sync` and servers work unchanged. The chunk directory layout sync reads and writes is `<aa>/<blake3 hex>`, each file checked against its name.
+
+Not built yet: pulling a task's own repository onto a machine that never had it (`by sync pull` needs the task there), and a server's replicator syncs its repositories' branches, not tasks under its home.
 
 ## Observability
 
