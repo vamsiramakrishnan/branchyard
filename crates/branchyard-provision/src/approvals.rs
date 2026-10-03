@@ -505,10 +505,8 @@ pub fn is_deletion_name(operation: &str) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
     for c in last.chars() {
-        if c == '_' || c == '-' || c.is_ascii_uppercase() {
-            if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
-            }
+        if (c == '_' || c == '-' || c.is_ascii_uppercase()) && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
         }
         if c != '_' && c != '-' {
             word.push(c.to_ascii_lowercase());

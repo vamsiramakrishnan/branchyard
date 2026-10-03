@@ -71,7 +71,7 @@ impl EffectBackend for Memory {
             seq,
             id: id.to_owned(),
             at_ms,
-            change: EffectChange::Moved(change.clone()),
+            change: EffectChange::Moved(Box::new(change.clone())),
         });
         change.apply(&mut entry, at_ms);
         Ok(Some(entry))

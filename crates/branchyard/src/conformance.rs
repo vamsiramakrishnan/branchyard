@@ -1734,7 +1734,10 @@ pub(crate) fn effects_backend(
     let other = again();
     assert_eq!(other.effect("01A").unwrap(), Some(a.clone()));
     assert_eq!(other.effects(None).unwrap(), [a.clone(), b.clone()]);
-    assert_eq!(other.effects(Some("other")).unwrap(), [b.clone()]);
+    assert_eq!(
+        other.effects(Some("other")).unwrap(),
+        std::slice::from_ref(&b)
+    );
     assert_eq!(other.effect("nope").unwrap(), None);
 
     // Moves only from the named states, from either handle.

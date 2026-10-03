@@ -401,6 +401,76 @@ fn a_tool_approval_asks_and_never_loosens_the_policy() {
     assert!(!denied.info().worktree.join("q.txt").exists());
 }
 
+/// What a harness might send to slip a call past the ledger: a batch, an
+/// encoded body, another token. Prints each status.
+const AROUND: &str = r#"import gzip, json, os, urllib.error, urllib.request
+url = os.environ["ANVIL_GATEWAY_URL"]
+token = open(os.environ["ANVIL_GATEWAY_TOKEN_FILE"]).read().strip()
+call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "slack__chat_post", "arguments": {"channel": "x"}}}
+def send(name, body, headers):
+    h = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    h.update(headers)
+    try:
+        status = urllib.request.urlopen(urllib.request.Request(url, method="POST", data=body, headers=h)).status
+    except urllib.error.HTTPError as e:
+        status = e.code
+    print("around %s: %d" % (name, status))
+send("batch", json.dumps([call]).encode(), {})
+send("gzip", gzip.compress(json.dumps(call).encode()), {"Content-Encoding": "gzip"})
+send("token", json.dumps(call).encode(), {"Authorization": "Bearer someone-else"})
+"#;
+
+#[test]
+fn a_call_cannot_go_around_the_ledger_through_its_proxy() {
+    let f = Fixture::new();
+    let (mock, _) = setup(&f, ApprovalSettings::default());
+    let around = f.dir.join("around.py");
+    fs::write(&around, AROUND).unwrap();
+    let branch = f
+        .task(&format!("SH python3 {}", around.display()))
+        .options(granted(&f))
+        .name("around")
+        .run()
+        .unwrap();
+    let said = text(&branch.events().unwrap());
+    assert!(said.contains("around batch: 400"), "{said}");
+    assert!(said.contains("around gzip: 415"), "{said}");
+    assert!(said.contains("around token: 401"), "{said}");
+    assert!(mock.calls_to("slack__chat_post").is_empty());
+    assert!(f.yard.effects(None).unwrap().is_empty());
+}
+
+#[test]
+fn an_ask_nobody_answers_expires_with_the_turns_budget() {
+    let f = Fixture::new();
+    f.yard.use_approvals(person(&[("write *", Approval::Ask)]));
+    let branch = f
+        .task("PERMISSION WRITE p.txt=1")
+        .policy(Policy::allow_all())
+        .budget(Budget {
+            max_duration: Some(Duration::from_secs(2)),
+            ..Budget::default()
+        })
+        .name("unanswered")
+        .run()
+        .unwrap();
+    assert!(!branch.info().worktree.join("p.txt").exists());
+    let ask = f.yard.approvals(false).unwrap().remove(0);
+    let answer = ask.answer.unwrap();
+    assert!(!answer.allow);
+    assert_eq!(
+        (answer.by.as_str(), answer.surface.as_str()),
+        ("branchyard", "expired")
+    );
+    assert!(f.yard.approvals(true).unwrap().is_empty());
+    // An expired ask cannot be answered later.
+    assert!(matches!(
+        f.yard.answer_approval(&ask.id, true, "ana", "cli", None),
+        Err(Error::Denied(_))
+    ));
+}
+
 #[test]
 fn a_childs_ask_is_escalated_to_its_parent_which_answers_it() {
     let f = Fixture::new();
@@ -676,7 +746,13 @@ fn undo_plans_by_what_the_upstream_supports_and_undoes_what_was_chosen() {
     );
     let outcomes = f
         .yard
-        .undo_effects_at(&plan, &[issue.id.clone()], "ana", "cli", 1_000_000)
+        .undo_effects_at(
+            &plan,
+            std::slice::from_ref(&issue.id),
+            "ana",
+            "cli",
+            1_000_000,
+        )
         .unwrap();
     assert_eq!(outcomes[0].state, EffectState::Compensated);
     assert!(mock.calls_to("github__issues_close")[0].arguments["number"].is_u64());
@@ -684,7 +760,13 @@ fn undo_plans_by_what_the_upstream_supports_and_undoes_what_was_chosen() {
     let staged = plan.staged[0].entry.clone();
     let outcomes = f
         .yard
-        .undo_effects_at(&plan, &[staged.id.clone()], "ana", "cli", 1_000_000)
+        .undo_effects_at(
+            &plan,
+            std::slice::from_ref(&staged.id),
+            "ana",
+            "cli",
+            1_000_000,
+        )
         .unwrap();
     assert_eq!(outcomes[0].state, EffectState::Failed);
     assert!(mock.calls_to("webhook__fire").is_empty());
@@ -724,7 +806,7 @@ fn an_expired_undo_is_not_called_and_a_failed_one_says_why() {
     // Chosen from an older plan, past the deadline: expired, not called.
     let outcomes = f
         .yard
-        .undo_effects_at(&before, &[a.clone()], "ana", "cli", 6_000_000)
+        .undo_effects_at(&before, std::slice::from_ref(&a), "ana", "cli", 6_000_000)
         .unwrap();
     assert_eq!(outcomes[0].state, EffectState::Expired);
     assert!(mock.calls_to("slack__chat_delete").is_empty());
@@ -747,7 +829,7 @@ fn an_expired_undo_is_not_called_and_a_failed_one_says_why() {
     let id = plan.reversible[0].entry.id.clone();
     let outcomes = f2
         .yard
-        .undo_effects(&plan, &[id.clone()], "ana", "cli")
+        .undo_effects(&plan, std::slice::from_ref(&id), "ana", "cli")
         .unwrap();
     assert_eq!(outcomes[0].state, EffectState::UndoFailed);
     let failed = f2.yard.effect(&id).unwrap();

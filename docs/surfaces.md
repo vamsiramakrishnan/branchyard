@@ -631,3 +631,31 @@ See [registry](registry.md).
 | server store | no services | `services` (SQLite), `by_services` and `by_service_seq` (PostgreSQL) |
 | Rust client | none | `services`, `register_service`, `deregister_service`, `reclaim_services`, `well_known`; `RegisterServiceRequest`, `ServiceList`, `ServiceSummary`, `WellKnown` in `schema/contract.json` |
 | SDK | none | `branchyard::services`: `Service`, `Capability`, `Endpoint`, `ServiceOwner`, `Health`, `ServiceState`, `Reclaim`, `ProcessGroup`, `Query`, `Clock`, `ServiceStore`, `Rows`, `LocalRegistry`, `Registration`, `resolve`, `candidates`, `expire`, `reap`, `reclaim_process`, `watch`, `Outcome`, `Reaped`, `conformance`; `Yard::services`, `register_service`, `resolve_service`, `reclaim_services`, `has_services` |
+
+## Added with approvals and effects
+
+Every connector call that changes the world is decided, written to a ledger before it is made, and undone where the upstream allows; see [effects](effects.md).
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| List asks | `Yard::approvals`, `approval` | `approvals [ls [--all]] [--json]` | yes | `GET …/approvals[?all=true]` | `Repo::approvals` | no |
+| Answer an ask | `Yard::answer_approval` | `approvals allow\|deny ID\|--branch B [--reason]`; `A`, `D` in `by watch` | yes | `POST …/approvals/{id}/allow\|deny` (`ApprovalAnswerRequest`) | `Repo::answer_approval` | `Delegate::answer_approval`, the MCP `answer_approval` tool, `by approvals` in its shell; descendants only |
+| The ledger | `Yard::effects`, `effect`, `effect_history` | `effects [--branch B] [show ID] [--json]` | yes | `GET …/effects[?branch=]`, `GET …/effects/{id}` | `Repo::effects`, `effect` | no |
+| Promote a staged effect | `Yard::promote_effect`, `promote_staged` | `effects promote ID`; `merge --promote-effects` | yes | `POST …/effects/{id}/promote` | `Repo::promote_effect` | no |
+| Reconcile | `Yard::reconcile_effects`, `reconcile_effects_at` | `effects reconcile` | yes | `POST …/effects/reconcile` | `Repo::reconcile_effects` | no |
+| Undo | `Yard::undo_plan`, `undo_plan_at`, `undo_effects`, `undo_effects_at`; `effects::undo::render` | `undo BRANCH [--to N] [--plan] [--only ID...] [--yes] [--json]`; `rewind` notes what it leaves upstream | upstream only | `GET\|POST …/branches/{b}/undo` (`UndoRequest`, `UndoReport`) | `Repo::undo_plan`, `undo` | no |
+
+| Surface | Before | Now |
+|---|---|---|
+| A turn's `ANVIL_GATEWAY_URL` | the gateway | the turn's effect-ledger proxy in front of it; the token and its audience unchanged; the egress rule names the proxy |
+| `Provisioning::approvals`; a rig seat's `approvals` | none | the seat's policy (`rules`, `classes`), narrowed for children and kept by sends; in `schema/contract.json` and `schema/rig.json` |
+| `[approvals]`; `[connectors] effects_proxy`, `effects_listen`, `effects_sandbox_host` | none | the person's policy and the proxy's settings; in `schema/branchyard.config.json` |
+| A server's `approvals` (`admin`, `people`) and `connectors.effects_*` | none | in `schema/server.config.json` |
+| `branchyard::effects` | none | `EffectEntry`, `EffectState`, `EffectClass`, `Undo`, `UndoKind`, `Lookup`, `ApprovalRecord`, `Staged`, `EffectMove`, `EffectChange`, `EffectEvent`, `project`, `ApprovalAsk`, `AskAbout`, `AskAnswer`, `EffectActivity`, `ApprovalSettings`, `ApprovalPolicy`, `Approval`, `Layer`, `Layers`, `Resolved`, `Subject`, `resolve`, `narrow_approvals`, `is_deletion_name`, `ulid`, `request_digest`, `short_id`; `mcp` (the gateway's wire), `proxy::EffectProxy`, `reconcile::Reconciled`, `undo` (`UndoPlan`, `UndoItem`, `UndoOutcome`, `render`, `clock`); `Yard::use_approvals`, `approval_settings` |
+| `PolicyPreset::approvals`, `Policy::preset`, `Policy::with_preset` | none | a preset's approvals, carried by the policy it makes |
+| `connectors::Gateway::effects` (`EffectsProxy`) | none | whether, where and how sandboxes reach each turn's proxy |
+| `Activity::Effect` (`EffectActivity`: `proxy`, `asked`, `answered`, `blocked`, `entry`); `DecisionSource::Approval` | none | `effect` in `by log --json` and event streams, lines in `by log`, the latest in `by watch`, `effects` in `by show` and `by show --json`; in `schema/contract.json` |
+| `/metrics` | | adds `branchyard_effects{repo,class,state}` and `branchyard_approvals_pending{repo}` |
+| The companion page | Branches, Inbox, Triggers, Queue, Settings | adds Approvals (asks and the ledger) and the `approval` notice; push kind `approval` |
+| Store | | `effects`, `effect_events`, `approval_asks` (SQLite); `by_effects`, `by_effect_events`, `by_approval_asks` (PostgreSQL, each made on its own when missing) |
+| `.cargo/config.toml` | none | `RUST_MIN_STACK` for test threads: `by`'s clap parser needs a little over 2 MiB in a debug build |

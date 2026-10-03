@@ -348,7 +348,7 @@ pub enum EffectChange {
     /// The entry, as first written (`staged` or `begun`).
     Opened { entry: Box<EffectEntry> },
     /// A change after that.
-    Moved(EffectMove),
+    Moved(Box<EffectMove>),
 }
 
 /// An entry's event, as stored.

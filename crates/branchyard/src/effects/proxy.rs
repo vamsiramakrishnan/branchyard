@@ -294,6 +294,7 @@ fn reason(status: u16) -> &'static str {
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        415 => "Unsupported Media Type",
         502 => "Bad Gateway",
         _ => "Error",
     }
@@ -423,13 +424,38 @@ fn handle(stream: TcpStream, state: &ProxyState) {
             return;
         }
     };
+    // A body the proxy cannot read could hold a call it must ledger: an
+    // encoded body is refused, never forwarded.
+    let encoded = request
+        .header("content-encoding")
+        .is_some_and(|e| !e.trim().eq_ignore_ascii_case("identity"));
+    if request.method == "POST" && encoded {
+        respond(
+            &mut out,
+            415,
+            &[],
+            b"Branchyard's effect proxy takes requests without a Content-Encoding",
+        );
+        return;
+    }
     let json: Option<Value> = match request.method == "POST" && !request.body.is_empty() {
         true => serde_json::from_slice(&request.body).ok(),
         false => None,
     };
-    let call = json
-        .as_ref()
-        .filter(|j| j.get("method").and_then(Value::as_str) == Some("tools/call"));
+    let is_call = |j: &Value| j.get("method").and_then(Value::as_str) == Some("tools/call");
+    // A batch holding a call is refused: each call is ledgered on its own.
+    if let Some(Value::Array(items)) = &json {
+        if items.iter().any(is_call) {
+            rpc_error(
+                &mut out,
+                400,
+                &Value::Null,
+                "Branchyard's effect proxy takes one tools/call per request, not a batch",
+            );
+            return;
+        }
+    }
+    let call = json.as_ref().filter(|j| is_call(j));
     let Some(call) = call else {
         return pass(state, &request, &mut out);
     };
@@ -454,8 +480,9 @@ fn handle(stream: TcpStream, state: &ProxyState) {
         None => (String::new(), name.clone()),
     };
     // A connector the grant only reads cannot change anything: the
-    // gateway refuses its writes itself.
-    if !state.writes(&connector) {
+    // gateway refuses its writes itself. A name without a connector is
+    // ledgered as the worst case.
+    if !connector.is_empty() && !state.writes(&connector) {
         return pass(state, &request, &mut out);
     }
     let decl = state.decl(&name);

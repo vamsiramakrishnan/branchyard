@@ -2946,7 +2946,7 @@ impl crate::effects::EffectBackend for Postgres {
         at_ms: u64,
     ) -> Result<Option<crate::effects::EffectEntry>, Error> {
         use crate::effects::{EffectChange, EffectEntry};
-        let event = encode("effect", &EffectChange::Moved(change.clone()))?;
+        let event = encode("effect", &EffectChange::Moved(Box::new(change.clone())))?;
         self.tx(true, |tx| {
             let text: Option<String> = tx
                 .query_opt(

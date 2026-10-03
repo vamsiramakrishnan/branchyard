@@ -2930,7 +2930,7 @@ impl crate::effects::EffectBackend for Sqlite {
                 params![
                     id,
                     int(at_ms),
-                    encode("effect", &EffectChange::Moved(change.clone()))?
+                    encode("effect", &EffectChange::Moved(Box::new(change.clone())))?
                 ],
             )
             .map_err(e)?;

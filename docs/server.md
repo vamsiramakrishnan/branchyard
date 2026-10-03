@@ -189,8 +189,20 @@ Removing a branch (`DELETE .../branches/{b}`, needing `admin`) frees its `max_br
 | `bundles`, `anvil` | The bundle root the gateway serves, and Anvil's command (default `["anvil"]`), for packaging and for `run_gateway` |
 | `run_gateway` | Run `anvil serve mcp <bundles> --fleet --http <port>` in branchyard mode beside the server, supervised and restarted, reading the public keys from the file above; stopped with the server. A worker (`by worker`) never runs it |
 | `listen`, `vault_key` | The address the gateway run here binds when not loopback, and its vault key (default `<data_dir>/gateway/vault.key`, made 0600) |
+| `effects_proxy`, `effects_listen`, `effects_sandbox_host` | Each turn's effect-ledger proxy in front of the gateway (default on, on `127.0.0.1`), and how a sandboxed harness reaches it ([effects](effects.md#begun-before-the-call)) |
 
 A branch's token names the principal that created it (`sub` its name, `by_tenant` its tenant; forks and delegated children keep their parent's) and the branch as `<repo>/<branch>`, so one gateway and one audit log can serve every repository; each repository's poller records only its own lines. A request naming connectors on a server without `connectors` is `403 connectors_not_configured`. Requests choose grants freely within what they ask for: the gateway enforces each grant against the person's own connected accounts, and a delegated child's is narrowed to its parent's. `by connect` and `by gateway` act locally only.
+
+## Approvals
+
+`"approvals"` sets the layers of [approvals](effects.md#approvals) the server holds: `admin`, the administrator's locked policy, which nothing below it can loosen and which alone may change how deletions are treated; and `people`, each principal's own policy by name. A seat's policy comes with the request (`provision.approvals`).
+
+```json
+"approvals": {
+  "admin": {"rules": {"gmail:*": "ask", "Bash": "block"}, "classes": {"irreversible": "stage"}, "deletion": "ask"},
+  "people": {"ana": {"rules": {"github:issues.*": "allow"}}}
+}
+```
 
 ## Model gateway and ceilings
 
@@ -278,6 +290,11 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/knowledge/{id}/adopt`, `/reject` (`{reason?}`), `/edit` (`{text?, path?, kind?}`, `""` clearing) | A person's decision, as the caller (`run`) | `KnowledgeEntry` |
 | `GET /v1/repos/{repo}/knowledge/export` | The adopted entries as an `AGENTS.md`-style file | `{"markdown", "entries"}` |
 | `POST /v1/repos/{repo}/branches/{b}/distill` | Propose entries from `b` with the deterministic extractor (`run`) | `Distilled` |
+| `GET /v1/repos/{repo}/approvals[?all=true]` | The [approvals](effects.md#approvals) waiting, or every one | `ApprovalList` |
+| `POST /v1/repos/{repo}/approvals/{id}/allow`, `/deny` (`{reason?, surface?}`) | Answer one as the caller (`run`); `surface` is `api` (default), `companion` or `watch` | `ApprovalAsk` |
+| `GET /v1/repos/{repo}/effects[?branch=B]`, `GET …/effects/{id}` | The [effect ledger](effects.md), or one entry and its events | `EffectList`, `EffectDetail` |
+| `POST /v1/repos/{repo}/effects/{id}/promote`, `POST …/effects/reconcile` | Perform a staged effect as the caller; reconcile the ledger (`run`) | `EffectEntry`, `Reconciled` |
+| `GET /v1/repos/{repo}/branches/{b}/undo?to=N`, `POST …` (`{to, only?}`) | The undo plan for turns after `N`; perform the chosen inverses as the caller (`run`), files untouched | `UndoPlan`, `UndoReport` |
 
 ### Requests
 
