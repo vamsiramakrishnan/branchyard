@@ -140,7 +140,7 @@ Packaging is behind the `Packager` trait ([`packager.rs`](../crates/branchyard/s
 
 ```toml
 [connectors]
-gateway = "http://127.0.0.1:8931/mcp"     # the gateway's /mcp URL: tokens' audience; without it, connectors are off
+gateway = "http://127.0.0.1:8931/mcp"     # a pin: the gateway's /mcp URL, tokens' audience; without it, the registered gateway
 bundles = "../connectors"                  # the bundle root (default: connectors/ at the repository root)
 anvil = "node /opt/anvil/packages/cli/dist/bin-anvil.js"   # default: anvil
 grants = ["github:read"]                   # for new isolated or sandboxed branches that name none
@@ -149,11 +149,15 @@ grants = ["github:read"]                   # for new isolated or sandboxed branc
 # vault_key = "~/.config/branchyard/vault.key"        # default .branchyard/gateway/vault.key, made 0600
 ```
 
+`gateway` is optional. Without it, `by gateway start` picks a free loopback port and registers the gateway in the repository's [service registry](registry.md#the-connector-gateway); every consumer (`by connect`, `by gateway status`, a turn's `ANVIL_GATEWAY_URL`) finds the live gateway registered with this yard's issuer. A configured `gateway` is an explicit pin and always wins. With neither, connectors are off.
+
 A server's configuration file takes `"connectors": {"gateway", "bundles", "anvil": [...], "issuer", "signing_key", "audit_file", "sandbox_gateway", "run_gateway", "listen", "vault_key"}`; see [server](server.md#connectors). A request that names connectors on a server without them is refused `403 connectors_not_configured`.
 
 ### Running the gateway
 
 `by gateway start` runs `anvil serve mcp <bundles> --fleet --http <port>` with `ANVIL_INBOUND_AUTH_MODE=branchyard`, the yard's issuer, the gateway URL as audience, `ANVIL_INBOUND_JWKS_URI=file://…/.branchyard/gateway/jwks.json`, `ANVIL_AUDIT_FILE=.branchyard/gateway/audit.jsonl`, `ANVIL_VAULT_KEY_FILE` (made if missing: 32 random bytes, 64 hex characters, 0600) and `ANVIL_VAULT_DIR=.branchyard/gateway/vault`. It starts a supervisor in the background, in its own process group, which restarts the gateway when it exits (backing off up to 30 seconds), reads its audit log every half second, and records itself in `.branchyard/gateway/gateway.json` (pid and start time, so a reused pid is never mistaken for it); output goes to `.branchyard/gateway/gateway.log`. `--foreground` runs the supervisor in the terminal. `by gateway status [--json]` says whether it runs and listens, what it serves and which keys sign; `by gateway stop` ends the process group. Other variables, such as `ANVIL_ALLOWED_HOSTS` and `ANVIL_CONNECT_<CONNECTOR>_CLIENT_ID`, pass through from `by`'s environment.
+
+The supervisor registers the gateway as a `connector_gateway` service: its URL, the yard's issuer, the connectors it serves, `sandbox_url`, its health (`starting` until it listens), and the Anvil process to reclaim (with the supervisor's process group when started in the background). If the supervisor is killed without stopping its gateway, the next `by` in the repository, or `by services gc`, stops the leaked gateway. When something this repository did not start already listens at a pinned URL, `by gateway start` adopts it instead: it is registered for ten minutes, owned by no process, with nothing to reclaim. `by gateway status --json` says where the URL came from (`source`: `pinned` or `registry`). See [registry](registry.md).
 
 A server with `"run_gateway": true` supervises one the same way beside `by serve`, stopped with it; without it, the server only signs tokens and reads the audit log of a gateway someone else runs.
 
@@ -213,7 +217,7 @@ Built in Anvil (ADR-0029 there, `docs/branchyard.md`): the `branchyard` inbound 
 
 ## Catalog
 
-[`catalog/connectors.toml`](../catalog/connectors.toml) is the starting list of connectors Anvil adopts from: 55 servers, generated from emdash's MCP catalog (`apps/emdash-desktop/src/core/primitives/mcp/api/catalog.ts`, Apache-2.0, pinned under `vendor/emdash/`). `by connectors catalog [--json]` prints it. Listing a connector grants nothing: a branch reaches one only through a grant and the gateway above.
+[`catalog/connectors.toml`](../catalog/connectors.toml) is the starting list of connectors Anvil adopts from: 55 servers, generated from emdash's MCP catalog (`apps/emdash-desktop/src/core/primitives/mcp/api/catalog.ts`, Apache-2.0, pinned under `vendor/emdash/`). `by connectors catalog [--json]` prints it, followed by what `by catalog refresh` last read from the official MCP registry (`"live": true` in JSON), each pinned at its version and matched to a baseline entry with the same URL or package (`same_as`). The live part is cached with checksums and refused when they do not verify; see [live catalogs](registry.md#live-catalogs). Listing a connector grants nothing: a branch reaches one only through a grant and the gateway above.
 
 Each entry has:
 

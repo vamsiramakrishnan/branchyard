@@ -105,6 +105,8 @@ Support is detected at run time, once per process, by confining `/bin/sh -c 'exi
 
 ## What you see
 
+While a turn runs, its proxy is registered in the repository's [service registry](registry.md) as an `egress_proxy`: the branch, the enforcement, the rules in force, and the proxy's loopback URL (advisory) or the namespace it serves (enforced). `by services` lists it. The proxy lives in the engine's process, so there is nothing to reclaim: the record is deregistered when the turn ends, and reaped as soon as the engine is known gone.
+
 | Where | What |
 |---|---|
 | `by run` and the other commands that follow a turn | `egress enforced: github.com (required)`, or `egress advisory: none (only tools that honor the proxy variables are held to it: …)` |

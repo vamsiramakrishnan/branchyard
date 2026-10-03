@@ -566,6 +566,14 @@ What it is not yet:
 - **TLS to the database.** Connections are plain; keep the database on a trusted network or a Unix socket.
 - **Waits** poll every 100 ms, as SQLite's do across processes; nothing listens for `NOTIFY`.
 
+### Service registry
+
+The operation store also keeps the fleet's [service registry](registry.md): `services` in SQLite, `by_services` and `by_service_seq` in PostgreSQL (catalog-checked steps, like the store's other tables). Workers are the workers table's rows, read as `worker` services. Each server registers itself (`server`: its URL, repositories, labels, whether it has connectors) there and in each served repository's own registry, so a `by` on that machine finds it with `by services --kind server`; it deregisters when it stops. Every recovery interval it expires and reclaims records whose lease ran out.
+
+- `GET /.well-known/branchyard` (no token): the server, its API, its JWKS (`/.well-known/jwks.json`, with connectors), and the kinds, capabilities and health of its live services, without endpoints or owners.
+- `GET /v1/services[?kind=K]` (`read`): every record with endpoints, owners and leases. `by --remote URL services`.
+- `POST /v1/services` (`admin`): register or renew (`RegisterServiceRequest`); a model gateway registers itself this way. Never with anything to reclaim. `DELETE /v1/services/{id}` and `POST /v1/services/gc` (`admin`).
+
 ## Security
 
 - **No isolation by default, even remotely.** Unless a request names an allowed sandbox provider, the server runs harnesses with the local process provider: as the server's operating-system user, with its environment, home and credentials. A remote caller with a token and `--yes` (policy `allow`) can make a harness do anything that user can. Serving a repository is granting its token holders that user's authority. Run the server as a dedicated, unprivileged user on a machine you are willing to hand over. `--allow-provider` does not restrict callers to that provider; they may still ask for `local`. Neither sandbox provider is qualified yet (design §4, M2).
@@ -575,7 +583,8 @@ What it is not yet:
 - **The web companion** ([its security model](companion.md#security-model)) is off unless `--app`; its page is static, adds no authority beyond the caller's token, and is served with a strict Content Security Policy.
 - **Scopes and tenants bound what a credential can reach (`read`/`run`/`merge`/`admin`, a tenant's repositories, quotas), but not what it does within reach.** A `run`-scoped credential on an allowed repository can still make a harness do anything the server's operating-system user can, exactly as before: scopes are not sandboxing. Configured credentials still have no expiry beyond a hash the operator removes, and no hot rotation or revocation — replacing a hash (or a `tokens` entry) and restarting is how one is rotated or revoked; paired tokens expire and are revoked at once ([companion](companion.md)).
 - **Plain HTTP** exposes tokens, prompts and code to anyone on the path. The server refuses it off loopback unless told `--insecure-bind`.
-- **Information exposure.** Responses include server paths (worktrees, repository roots) and the server's harness availability.
+- **Information exposure.** Responses include server paths (worktrees, repository roots) and the server's harness availability. `GET /.well-known/branchyard` is public: it names the served repositories and the kinds and capabilities of live services, not their endpoints or owners.
+- **Service registrations** need the `admin` scope, are owned by the registering principal, and never carry anything for the server to reclaim.
 - **Policy is per request.** A `deny` default is safe; rules match tool names only, as in the SDK.
 
 ## Code
