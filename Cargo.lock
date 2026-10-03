@@ -903,6 +903,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-sync"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "branchyard",
+ "branchyard-client",
+ "branchyard-sync",
+ "httparse",
+ "ring",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "branchyard-workspace"
 version = "0.0.1"
 dependencies = [
