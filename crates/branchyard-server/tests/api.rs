@@ -620,7 +620,10 @@ fn a_client_disconnect_does_not_stop_a_turn() {
     let mut abandoned = TcpStream::connect(server.addr).unwrap();
     abandoned.write_all(request.as_bytes()).unwrap();
     drop(abandoned);
-    std::thread::sleep(Duration::from_millis(100));
+    wait::settle(
+        "the server to see the abandoned request",
+        Duration::from_millis(100),
+    );
     let op = repo
         .submit_task(&task("WRITE r.txt=1", "retried"), "retry-1")
         .unwrap();

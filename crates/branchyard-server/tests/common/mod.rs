@@ -9,7 +9,6 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
 use std::time::Duration;
 
@@ -23,7 +22,6 @@ pub use branchyard_testkit::fake_agent_here as fake_agent;
 
 pub const TOKEN: &str = "test-token-0123456789";
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 static HERMETIC: Once = Once::new();
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
@@ -46,6 +44,8 @@ pub struct Fixture {
     pub dir: PathBuf,
     pub root: PathBuf,
     pub data: PathBuf,
+
+    _scratch: branchyard_testkit::Scratch,
 }
 
 impl Fixture {
@@ -56,14 +56,9 @@ impl Fixture {
         });
         // Build the agent before any test body starts timing.
         fake_agent();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-server-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = branchyard_testkit::Scratch::new("server");
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let root = dir.join("repo");
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["config", "user.name", "Test"]);
@@ -76,6 +71,7 @@ impl Fixture {
             data: dir.join("data"),
             dir,
             root,
+            _scratch: scratch,
         }
     }
 
@@ -119,12 +115,6 @@ impl Fixture {
             std::sync::Arc::new(|| None),
         ));
         config
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

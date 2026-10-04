@@ -13,6 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use branchyard_client::{new_key, Client};
+use branchyard_testkit::wait;
 use common::{fake_agent, started, task, Fixture, TOKEN};
 
 /// The server binary on an ephemeral port, serving the fixture's
@@ -61,19 +62,19 @@ fn stop(child: &mut Child, signal: &str, limit: Duration) -> (Option<i32>, Durat
         .status()
         .unwrap();
     assert!(status.success());
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let elapsed = sent.elapsed();
+    let exited = wait::try_until_for(limit, || child.try_wait().unwrap());
+    let elapsed = sent.elapsed();
+    match exited {
+        Ok(status) => {
             let mut stderr = String::new();
             std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
-            return (status.code(), elapsed, stderr);
+            (status.code(), elapsed, stderr)
         }
-        if sent.elapsed() > limit {
+        Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
             panic!("still running {limit:?} after SIG{signal}");
         }
-        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -90,7 +91,7 @@ fn sigterm_and_sigint_stop_an_idle_server_at_once() {
              Authorization: Bearer {TOKEN}\r\n\r\n"
         )
         .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
+        wait::settle("the stream is established", Duration::from_millis(200));
         let (code, elapsed, stderr) = stop(&mut child, signal, Duration::from_secs(20));
         assert_eq!(code, Some(0), "SIG{signal}: {stderr}");
         assert!(
@@ -114,16 +115,12 @@ fn sigterm_stops_the_server_within_its_grace_period() {
         .repo("app")
         .submit_task(&task("HANG", "held"), &new_key())
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !started(&client, "app", "held") {
-        assert!(Instant::now() < deadline, "the turn never started");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait::until("the turn to start", || started(&client, "app", "held"));
     let addr = url.strip_prefix("http://").unwrap();
     let mut slow = TcpStream::connect(addr).unwrap();
     slow.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n")
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    wait::settle("the slow request is read", Duration::from_millis(200));
     let (code, elapsed, stderr) = stop(&mut child, "TERM", Duration::from_secs(30));
     assert_eq!(code, Some(0), "{stderr}");
     assert!(

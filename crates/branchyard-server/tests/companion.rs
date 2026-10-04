@@ -298,7 +298,6 @@ fn expired_codes_and_tokens_are_refused() {
     let token = json(&body)["token"].as_str().unwrap().to_owned();
     assert_eq!(raw(server.addr, &get("/v1/repos", Some(&token))).0, 200);
     wait::until("the token to expire", || {
-        std::thread::sleep(Duration::from_millis(200));
         raw(server.addr, &get("/v1/repos", Some(&token))).0 == 401
     });
 

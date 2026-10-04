@@ -207,3 +207,35 @@ fn a_scratch_directory_is_removed_on_drop_and_close() {
     scratch.close();
     assert!(!path.exists());
 }
+
+#[test]
+fn a_hanging_response_holds_the_connection_open_until_the_server_is_finished() {
+    let mock = MockHttp::start(|_| Response::hang());
+    let mut stream = TcpStream::connect(mock.addr()).unwrap();
+    stream.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+    mock.await_requests(1);
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let err = stream.read(&mut buf).expect_err("nothing may be answered");
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "{err}"
+    );
+    mock.finish();
+    stream.set_read_timeout(None).unwrap();
+    assert_eq!(stream.read(&mut buf).unwrap(), 0, "closed once finished");
+}
+
+#[test]
+fn a_closing_response_ends_the_connection_without_a_byte() {
+    let mock = MockHttp::start(|_| Response::close());
+    let reply = send(mock.addr(), "GET / HTTP/1.1\r\n\r\n");
+    assert_eq!(reply, "");
+    assert_eq!(mock.requests().len(), 1);
+    mock.finish();
+}

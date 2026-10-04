@@ -132,10 +132,32 @@ impl Repo {
     }
 
     /// `by <args>`; fails the test, showing its output, unless it succeeds.
-    pub fn by_ok(&self, args: &[&str]) -> Output {
+    pub fn ok(&self, args: &[&str]) -> Output {
         let out = self.by(args);
         assert!(out.status.success(), "by {args:?}\n{}", shown(&out));
         out
+    }
+
+    /// `by <args>` with `input` on its standard input; fails the test,
+    /// showing its output, unless it succeeds.
+    pub fn by_with_stdin(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = self
+            .command(&self.by)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("run {}: {e}", self.by.display()));
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(input.as_bytes())
+            .expect("write to by's standard input");
+        child.wait_with_output().expect("wait for by")
     }
 
     /// `by <args>` with the fake agent as the gemini-cli harness (unless
@@ -152,7 +174,7 @@ impl Repo {
 
     /// `by <args>` that must succeed and print JSON.
     pub fn json(&self, args: &[&str]) -> Value {
-        let out = self.by_ok(args);
+        let out = self.ok(args);
         serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("by {args:?} did not print JSON ({e})\n{}", shown(&out)))
     }

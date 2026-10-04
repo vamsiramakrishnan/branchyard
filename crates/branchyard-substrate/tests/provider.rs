@@ -438,7 +438,10 @@ fn stop_and_checkpoint_wait_for_running_execs_or_refuse() {
 
     // Once the work ends, a waiting checkpoint proceeds.
     let finisher = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
+        wait::settle(
+            "the checkpoint must be waiting on the exec before it ends",
+            Duration::from_millis(300),
+        );
         // SAFETY: plain syscall on the test's own sleeper.
         unsafe { libc_kill(sleeper) };
         process.wait().unwrap()

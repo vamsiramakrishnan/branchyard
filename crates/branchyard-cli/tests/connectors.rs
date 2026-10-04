@@ -9,15 +9,12 @@
 use std::fs;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 
 use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const FAKE_ANVIL: &str = r##"#!/usr/bin/env python3
 import base64, http.server, json, os, sys
@@ -106,40 +103,32 @@ except urllib.error.HTTPError as e:
     print("call %s: %d" % (sys.argv[1], e.code))
 "#;
 
+/// The kit's repository, plus what this file adds.
 struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+    kit: branchyard_testkit::Repo,
     url: String,
+}
+
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-connectors-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let root = dir.join("repo");
         // A free port for the gateway.
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
+        let kit = branchyard_testkit::repo!();
         let repo = Repo {
-            root,
             url: format!("http://127.0.0.1:{port}/mcp"),
-            dir,
+            kit,
         };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
         let anvil = repo.dir.join("fake-anvil");
         fs::write(&anvil, FAKE_ANVIL).unwrap();
         fs::set_permissions(&anvil, fs::Permissions::from_mode(0o755)).unwrap();
@@ -165,54 +154,6 @@ impl Repo {
         )
         .unwrap();
         repo
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            );
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.by(args);
-        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = self.by(&["gateway", "stop"]);
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -360,11 +301,9 @@ fn the_gateway_runs_supervised_a_granted_turn_calls_it_and_by_log_shows_the_call
 
     let stopped = repo.json(&["gateway", "stop", "--json"]);
     assert_eq!(stopped["stopped"], true);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while repo.json(&["gateway", "status", "--json"])["listening"] == true {
-        assert!(Instant::now() < deadline, "the gateway still listens");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait::until("the gateway to stop listening", || {
+        repo.json(&["gateway", "status", "--json"])["listening"] != true
+    });
 }
 
 #[test]

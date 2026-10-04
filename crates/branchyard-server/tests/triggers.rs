@@ -137,7 +137,10 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     assert_eq!(trigger.next_due_ms, Some(T0 + 3_600_000));
     assert_eq!(trigger.webhook_url, None);
     // Nothing before its time, however often the dispatcher looks.
-    std::thread::sleep(Duration::from_millis(300));
+    wait::settle(
+        "the dispatcher looks often and still finds nothing due",
+        Duration::from_millis(300),
+    );
     assert!(client.trigger_runs("nightly", 10).unwrap().is_empty());
 
     clock.store(T0 + 3_600_000 + 5_000, Ordering::SeqCst);
@@ -157,7 +160,7 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     let shown = client.trigger("nightly").unwrap();
     assert_eq!(shown.next_due_ms, Some(T0 + 7_200_000));
     // Still once, after more ticks at the same time.
-    std::thread::sleep(Duration::from_millis(300));
+    wait::settle("more ticks at the same time", Duration::from_millis(300));
     assert_eq!(client.trigger_runs("nightly", 10).unwrap().len(), 1);
     let prompt = client.repo("app").branch("nightly-20260921-1513").unwrap();
     assert_eq!(prompt.name, "nightly-20260921-1513");
@@ -578,7 +581,10 @@ fn a_run_recorded_before_a_restart_fires_after_it() {
     let body = r#"{"id":"r-1"}"#;
     let headers = generic_headers(created.secret.as_ref().unwrap(), body);
     assert_eq!(deliver(&server, &created.trigger.id, &headers, body).0, 202);
-    std::thread::sleep(Duration::from_millis(200));
+    wait::settle(
+        "a delivery that must stay pending would have moved by now",
+        Duration::from_millis(200),
+    );
     assert_eq!(
         client.trigger_runs("later", 10).unwrap()[0].state,
         RunState::Pending
@@ -1035,7 +1041,10 @@ mod postgres {
         let runs = runs_when(&client, "both", "the scheduled run to fire", |runs| {
             runs.iter().any(|r| r.state == RunState::Fired)
         });
-        std::thread::sleep(Duration::from_millis(500));
+        wait::settle(
+            "the other server would have fired too, if it was going to",
+            Duration::from_millis(500),
+        );
         let runs_b = b.client().trigger_runs("both", 10).unwrap();
         assert_eq!(runs_b.len(), 1, "{runs_b:?}");
         assert_eq!(

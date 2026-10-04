@@ -35,25 +35,15 @@ fn spawn(prompt: &str, name: &str) -> Spawn {
 /// for a later one, as `begin_submit` would otherwise be free to
 /// do if the turn's handshake with its harness is still in flight.
 fn wait_for_own_prompt(f: &Fixture, branch: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let has_prompt = f
-            .yard
+    wait::until(&format!("{branch} to record its own prompt"), || {
+        f.yard
             .branch(branch)
             .unwrap()
             .events()
             .unwrap()
             .iter()
-            .any(|e| matches!(e.activity, Activity::Prompt(_)));
-        if has_prompt {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{branch} never recorded its own prompt"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+            .any(|e| matches!(e.activity, Activity::Prompt(_)))
+    });
 }
 
 #[test]
@@ -118,17 +108,11 @@ fn a_child_reports_and_asks_its_parent_across_both_event_logs() {
     assert!(inbox.messages[0].delivered, "steered into the running turn");
     // The engine records the delivery event just after it settles the
     // steer that marked the message delivered; wait for the entry.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
+    wait::until("the steered delivery to be recorded", || {
         let kid_log = f.yard.branch("kid").unwrap().events().unwrap();
-        if kid_log.iter().any(|e| matches!(&e.activity,
+        kid_log.iter().any(|e| matches!(&e.activity,
             Activity::MessagesDelivered { ids, via: DeliveredVia::Steer { .. } } if ids == &[answer.id]))
-        {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "{kid_log:?}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    });
 
     // A fresh question, answered from a background thread while `ask`
     // blocks for it: the wait sees the answer across processes' writes,
@@ -139,10 +123,13 @@ fn a_child_reports_and_asks_its_parent_across_both_event_logs() {
         .unwrap()
         .delegate(options.clone())
         .unwrap();
+    let questions = root_delegate.inbox().unwrap().messages.len();
     let waiter = std::thread::spawn(move || {
         waiting_kid.ask("ready to merge?", Some(Duration::from_secs(10)))
     });
-    std::thread::sleep(Duration::from_millis(150));
+    wait::until("the new question to reach the root's inbox", || {
+        root_delegate.inbox().unwrap().messages.len() > questions
+    });
     let root_inbox = root_delegate.inbox().unwrap();
     let latest = root_inbox
         .messages
@@ -164,12 +151,9 @@ fn a_child_reports_and_asks_its_parent_across_both_event_logs() {
         .unwrap()
         .send("WHOAMI", options.clone())
         .unwrap();
-    loop {
-        if f.yard.branch("root").unwrap().info().status != BranchStatus::Running {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("the root's turn to end", || {
+        f.yard.branch("root").unwrap().info().status != BranchStatus::Running
+    });
     let events = f.yard.branch("root").unwrap().events().unwrap();
     let prompt = events
         .iter()
@@ -433,7 +417,10 @@ fn a_turn_waiting_for_an_answer_is_not_stalled() {
     // The harness blocks in `ask --wait`: the same call a harness's `by ask
     // --wait` reaches through the broker, recorded in the store.
     let asking = std::thread::spawn(move || kid.ask("which way?", Some(Duration::from_secs(2))));
-    std::thread::sleep(Duration::from_millis(1500));
+    wait::settle(
+        "the stall window passes while the turn waits for an answer",
+        Duration::from_millis(1500),
+    );
     let stalled = |f: &Fixture| {
         events(f, "kid")
             .iter()

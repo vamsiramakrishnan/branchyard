@@ -9,47 +9,34 @@
 //! Requires `git`, `sh` and `kill`.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
 
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+/// The kit's repository, plus what this file adds.
+struct Repo(branchyard_testkit::Repo);
+
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
         fake_agent!();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-map-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        fs::write(repo.root.join(".gitignore"), "branchyard.toml\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
-        repo
+        Repo(branchyard_testkit::repo!(&[
+            ("a.txt", "one\n"),
+            (".gitignore", "branchyard.toml\n")
+        ]))
     }
 
     /// A file outside the repository, with `text`; its path.
@@ -60,76 +47,6 @@ impl Repo {
         }
         fs::write(&path, text).unwrap();
         path.display().to_string()
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env("BRANCHYARD_USER_CONFIG", self.dir.join("user/config.toml"))
-            .env("PAGER", "cat");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_TOKEN_FILE",
-            "BRANCHYARD_REPO",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(BY)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-    }
-
-    fn by_with_stdin(&self, args: &[&str], input: &str) -> Output {
-        let mut child = self
-            .command(BY)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        child.wait_with_output().unwrap()
-    }
-
-    fn ok(&self, args: &[&str]) -> Output {
-        let out = self.by(args);
-        assert!(
-            out.status.success(),
-            "by {args:?}\nstdout:\n{}\nstderr:\n{}",
-            stdout(&out),
-            stderr(&out)
-        );
-        out
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        serde_json::from_slice(&self.ok(args).stdout).unwrap()
     }
 
     /// The branch names `by ls` lists.
@@ -152,12 +69,6 @@ impl Repo {
         all.extend(args);
         all.extend(["--harness", "gemini-cli", "--command", &agent, "--yes"]);
         self.by(&all)
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -498,9 +409,7 @@ fn an_interrupted_map_resumes_without_redoing_what_is_done() {
         .spawn()
         .unwrap();
     // Wait until item a is recorded and item b's branch is mid-turn.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        assert!(Instant::now() < deadline, "the map never reached item b");
+    wait::until("the map to reach item b", || {
         assert!(first.try_wait().unwrap().is_none(), "the map ended early");
         let recorded = fs::read_to_string(repo.root.join(".branchyard/maps/halted/results.jsonl"))
             .unwrap_or_default();
@@ -510,11 +419,8 @@ fn an_interrupted_map_resumes_without_redoing_what_is_done() {
             .unwrap()
             .iter()
             .any(|b| b["name"] == "halted-b" && b["status"]["state"] == "running");
-        if recorded.contains("\"id\":\"a\"") && running {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        recorded.contains("\"id\":\"a\"") && running
+    });
     let shown = repo.json(&["map", "show", "halted", "--json"]);
     assert_eq!(shown["running"], true, "{shown}");
     assert_eq!(shown["done"], 1);
@@ -966,12 +872,11 @@ impl Drop for Served {
         let _ = Command::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
             .status();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if self.child.try_wait().unwrap().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let exited = wait::try_until_for(Duration::from_secs(20), || {
+            self.child.try_wait().unwrap().is_some()
+        });
+        if exited.is_ok() {
+            return;
         }
         let _ = self.child.kill();
         let _ = self.child.wait();

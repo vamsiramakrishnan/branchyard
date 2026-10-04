@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use branchyard_bridge::{Claims, ClientTls, Endpoint, Signer};
 use branchyard_sandbox::{ExecSpec, Process, ProviderError};
@@ -151,14 +151,9 @@ impl Bridge {
         if self.wrapper.is_empty() {
             return child;
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(pid) = children_of(child).first() {
-                return *pid;
-            }
-            assert!(Instant::now() < deadline, "the wrapper started nothing");
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait::until("the wrapper to start something", || {
+            children_of(child).first().copied()
+        })
     }
 
     fn work(&self) -> PathBuf {
@@ -562,14 +557,9 @@ fn orphans_of_an_exec_are_reparented_to_the_bridge_and_reaped() {
         assert_eq!(parent, bridge_pid, "the orphan went elsewhere");
     }
     // It exits on its own and is reaped: no zombie is left.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Path::new(&format!("/proc/{orphan}")).exists() {
-        assert!(
-            Instant::now() < deadline,
-            "orphan {orphan} was never reaped"
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait::until(&format!("orphan {orphan} to be reaped"), || {
+        !Path::new(&format!("/proc/{orphan}")).exists()
+    });
     assert!(zombies_of(bridge_pid).is_empty());
     drop(process);
 }
@@ -651,11 +641,11 @@ fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
     // Nothing reads stderr yet: the client's pipe, both sockets and the
     // bridge's pipe fill, and the bridge's stderr pump blocks holding the
     // connection's writer.
-    thread::sleep(Duration::from_millis(500));
+    wait::settle("the pipes fill", Duration::from_millis(500));
     // SAFETY: plain syscall.
     assert_eq!(unsafe { libc::kill(bridge.pid() as i32, libc::SIGTERM) }, 0);
     // The trap has run and the shell has exited well before stderr is read.
-    thread::sleep(Duration::from_millis(300));
+    wait::settle("the shell exits", Duration::from_millis(300));
     let drained = thread::spawn(move || io::copy(&mut stderr, &mut io::sink()).unwrap());
     line.clear();
     stdout.read_line(&mut line).unwrap();
@@ -711,22 +701,14 @@ fn as_process_1_it_reaps_orphans_and_only_the_runtime_can_stop_it() {
     assert_eq!(parent, "1\n");
     let zombies =
         "for s in /proc/[0-9]*/stat; do awk '$3 == \"Z\" {print $1}' $s; done 2>/dev/null";
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
+    wait::until(&format!("orphan {orphan} to be reaped"), || {
         let (_, gone, _) = run(
             &endpoint,
             &bridge.work(),
             &format!("test -e /proc/{orphan} && echo no || echo yes"),
         );
-        if gone == "yes\n" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "orphan {orphan} was never reaped"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
+        gone == "yes\n"
+    });
     assert_eq!(run(&endpoint, &bridge.work(), zombies).1, "");
     drop(process);
 
@@ -869,9 +851,7 @@ fn status_names_the_running_execs_and_what_they_run() {
 
     process.teardown();
     drop(process);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !endpoint.status().unwrap().execs.is_empty() {
-        assert!(Instant::now() < deadline, "the exec is still reported");
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("the exec to stop being reported", || {
+        endpoint.status().unwrap().execs.is_empty()
+    });
 }

@@ -8,9 +8,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -139,12 +140,10 @@ impl Served {
         let _ = Command::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
             .status();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                return status.code();
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        if let Ok(status) =
+            wait::try_until_for(Duration::from_secs(20), || self.child.try_wait().unwrap())
+        {
+            return status.code();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -487,11 +486,9 @@ fn by_cancel_stops_a_turn_on_the_server() {
         .spawn()
         .unwrap();
     let runner = std::thread::spawn(move || running.wait_with_output().unwrap());
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !text(&server.by(&dir.0, &["log", "held"]).stdout).contains("prompt: HANG") {
-        assert!(Instant::now() < deadline, "the turn never started");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait::until("the turn to start", || {
+        text(&server.by(&dir.0, &["log", "held"]).stdout).contains("prompt: HANG")
+    });
     let cancel = server.by(&dir.0, &["cancel", "held"]);
     assert!(cancel.status.success(), "{}", text(&cancel.stderr));
     assert_eq!(text(&cancel.stdout), "asked held to stop\n");
@@ -526,11 +523,9 @@ fn by_send_steer_reaches_a_turn_on_the_server() {
         .spawn()
         .unwrap();
     let runner = std::thread::spawn(move || running.wait_with_output().unwrap());
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !text(&server.by(&dir.0, &["log", "live"]).stdout).contains("waiting for steering") {
-        assert!(Instant::now() < deadline, "the turn never started");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait::until("the turn to start", || {
+        text(&server.by(&dir.0, &["log", "live"]).stdout).contains("waiting for steering")
+    });
     let steer = server.by(
         &dir.0,
         &["send", "live", "--steer", "and the tests", "--json"],
@@ -1369,8 +1364,7 @@ fn graph_commands_print_what_local_ones_do() {
     // The server runs children on its own threads; wait there for them as
     // the local command already did.
     let settled = |names: &[&str]| {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
+        wait::until("the children to settle", || {
             let graph = json(
                 &server
                     .by(&dir.0, &["graph", "show", "root", "--json"])
@@ -1382,11 +1376,11 @@ fn graph_commands_print_what_local_ones_do() {
                     || !matches!(c["status"]["state"].as_str(), Some("running"))
             });
             if done {
-                return;
+                Ok(())
+            } else {
+                Err(graph)
             }
-            assert!(Instant::now() < deadline, "{graph}");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        });
     };
     let (l, r) = both(&["run", "say hi", "--name", "root", "--delegate", "--yes"]);
     assert!(
@@ -1642,16 +1636,14 @@ fn work_requiring_a_label_no_worker_carries_says_why_in_by_show() {
         .spawn()
         .unwrap();
     let mut running = Killed(running);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let shown = loop {
-        let out = server.by(&dir.0, &["show", "on-gpu"]);
-        let shown = text(&out.stdout);
+    let shown = wait::until("by show to say why it waits", || {
+        let shown = text(&server.by(&dir.0, &["show", "on-gpu"]).stdout);
         if shown.contains("waiting") {
-            break shown;
+            Ok(shown)
+        } else {
+            Err(shown)
         }
-        assert!(Instant::now() < deadline, "never said why: {shown}");
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    });
     assert!(shown.contains("not created yet"), "{shown}");
     assert!(shown.contains("requires  gpu"), "{shown}");
     assert!(shown.contains("no live worker carries"), "{shown}");
@@ -1660,18 +1652,14 @@ fn work_requiring_a_label_no_worker_carries_says_why_in_by_show() {
     assert_eq!(json["operation"]["requires"][0], "gpu");
     assert_eq!(json["operation"]["state"], "queued");
     // The waiting `by run` says so on its standard error.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !fs::read_to_string(dir.0.join("run.err"))
-        .unwrap_or_default()
-        .contains("is still queued: no live worker carries")
-    {
-        assert!(
-            Instant::now() < deadline,
-            "{}",
-            fs::read_to_string(dir.0.join("run.err")).unwrap_or_default()
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait::until("the run to say it is still queued", || {
+        let err = fs::read_to_string(dir.0.join("run.err")).unwrap_or_default();
+        if err.contains("is still queued: no live worker carries") {
+            Ok(())
+        } else {
+            Err(err)
+        }
+    });
     assert!(running.0.try_wait().unwrap().is_none());
     drop(running);
     // Locally there are no workers to choose among.
@@ -1749,17 +1737,16 @@ fn priority_reaches_the_queue_and_by_stats_summarizes_it() {
         .spawn()
         .unwrap();
     let running = Killed(running);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let stats = loop {
+    let stats = wait::until("the operation to be queued", || {
         let out = server.by(&dir.0, &["stats", "--json"]);
         assert!(out.status.success(), "{}", text(&out.stderr));
         let stats: Value = serde_json::from_slice(&out.stdout).unwrap();
         if stats["queue"]["queued"]["7"] == 1 {
-            break stats;
+            Ok(stats)
+        } else {
+            Err(stats)
         }
-        assert!(Instant::now() < deadline, "never queued: {stats}");
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    });
     assert_eq!(stats["branches"]["ready"], 1, "{stats}");
     assert_eq!(stats["turns"]["gemini-cli"], 1, "{stats}");
     let shown = text(&server.by(&dir.0, &["stats"]).stdout);

@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use branchyard_harness::acp::Acp;

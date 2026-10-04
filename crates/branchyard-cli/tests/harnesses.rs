@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
@@ -860,20 +861,16 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
         w.by(&all)
     };
     // The worker detects in the background and advertises with its beats.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let report = loop {
+    let report = wait::until("the worker to advertise its inventory", || {
         let out = remote(&["harnesses", "--json"]);
         assert!(out.status.success(), "{}", text(&out.stderr));
         let report: Value = serde_json::from_slice(&out.stdout).unwrap();
         if report["workers"][0]["inventory"].is_object() {
-            break report;
+            Ok(report)
+        } else {
+            Err(report)
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no inventory: {report}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
+    });
     let worker = &report["workers"][0];
     assert_eq!(worker["this"], true);
     assert_eq!(worker["repos"], serde_json::json!(["app"]));

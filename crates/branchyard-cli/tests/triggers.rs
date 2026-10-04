@@ -9,9 +9,10 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -159,12 +160,11 @@ impl Drop for Served {
         let _ = Command::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
             .status();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if self.child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let exited = wait::try_until_for(Duration::from_secs(20), || {
+            self.child.try_wait().ok().flatten().is_some()
+        });
+        if exited.is_ok() {
+            return;
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -295,15 +295,14 @@ fn local_triggers_are_kept_where_by_serve_fires_them_and_remote_sees_them() {
         body,
     );
     assert_eq!(status, 202);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let runs = loop {
+    let runs = wait::until("the run to settle", || {
         let runs = json(&fake(&["trigger", "runs", "hooks", "--json"]));
         if runs["runs"][0]["outcome"].is_object() {
-            break runs;
+            Ok(runs)
+        } else {
+            Err(runs)
         }
-        assert!(Instant::now() < deadline, "the run never settled: {runs}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+    });
     assert_eq!(runs["runs"][0]["state"], "fired", "{runs}");
     assert_eq!(runs["runs"][0]["branches"][0], "hook-served");
     assert_eq!(runs["runs"][0]["outcome"]["ok"], true, "{runs}");

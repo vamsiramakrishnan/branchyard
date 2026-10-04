@@ -7,42 +7,31 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Output, Stdio};
 
 use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
+/// The kit's repository, plus what this file adds.
 struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+    kit: branchyard_testkit::Repo,
+}
+
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-plans-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        fs::write(repo.root.join(".gitignore"), "branchyard.toml\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
-        repo
+        let mut kit =
+            branchyard_testkit::repo!(&[("a.txt", "one\n"), (".gitignore", "branchyard.toml\n")]);
+        kit.set_env("USER", "ana");
+        kit.remove_env("VISUAL");
+        kit.remove_env("EDITOR");
+        Repo { kit }
     }
 
     /// Write `branchyard.toml`, with `AGENT` replaced by the fake agent and
@@ -55,36 +44,6 @@ impl Repo {
                 .replace("DIR", &self.dir.display().to_string()),
         )
         .unwrap();
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env("USER", "ana")
-            .env("BRANCHYARD_USER_CONFIG", self.dir.join("user/config.toml"))
-            .env("PAGER", "cat");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-            "VISUAL",
-            "EDITOR",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
     }
 
     fn by_with(&self, args: &[&str], stdin: &str) -> Output {
@@ -139,12 +98,6 @@ impl Repo {
         args.extend(extra.iter().map(|a| (*a).to_owned()));
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.by(&args)
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

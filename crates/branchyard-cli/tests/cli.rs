@@ -3,103 +3,25 @@
 //! network. Requires `git` and `sh`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use branchyard_testkit::{fake_agent, wait};
 use serde_json::Value;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The kit's repository, plus what this file adds.
+struct Repo(branchyard_testkit::Repo);
 
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
-        repo
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            // Never a person's own ~/.config/branchyard/config.toml.
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            )
-            .env("PAGER", "cat");
-        // Never inherit a delegating harness's identity from whoever runs
-        // the tests.
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
-    /// `by <args>` with the fake agent as the gemini-cli harness.
-    fn by_agent(&self, args: &[&str]) -> Output {
-        let agent = fake_agent!().display().to_string();
-        let mut all: Vec<&str> = args.to_vec();
-        all.extend(["--command", &agent]);
-        if args[0] != "send" && !args.contains(&"--harness") {
-            all.extend(["--harness", "gemini-cli"]);
-        }
-        self.by(&all)
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.by(args);
-        assert!(out.status.success(), "{}", stderr(&out));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        Repo(branchyard_testkit::repo!())
     }
 }
 
@@ -265,18 +187,9 @@ fn by_cancel_stops_a_turn_that_another_by_runs() {
         .spawn()
         .unwrap();
     let runner = std::thread::spawn(move || running.wait_with_output().unwrap());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let log = repo.by(&["log", "held"]);
-        if stdout(&log).contains("prompt: HANG") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the turn never started"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    wait::until("the turn to start", || {
+        stdout(&repo.by(&["log", "held"])).contains("prompt: HANG")
+    });
     // Another process may not send to it while it runs.
     let refused = repo.by_agent(&["send", "held", "WHOAMI"]);
     assert!(!refused.status.success());
@@ -411,17 +324,15 @@ fn watch_prints_the_tree_once_or_logs_changes_until_q() {
     let second = lines.next().unwrap().unwrap();
     assert!(second.contains("  w-alt  ready"), "{second}");
     child.stdin.take().unwrap().write_all(b"q\n").unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success());
-            break;
-        }
-        if std::time::Instant::now() > deadline {
+    let exited = wait::try_until_for(std::time::Duration::from_secs(10), || {
+        child.try_wait().unwrap()
+    });
+    match exited {
+        Ok(status) => assert!(status.success()),
+        Err(_) => {
             let _ = child.kill();
             panic!("by watch did not exit on q");
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -781,15 +692,10 @@ fn send_steer_reaches_a_turn_another_process_runs() {
             .spawn()
             .unwrap(),
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let waiting = || {
+    wait::until("live to start", || {
         let log = repo.by(&["log", "live", "--json"]);
         log.status.success() && stdout(&log).contains("waiting for steering")
-    };
-    while !waiting() {
-        assert!(std::time::Instant::now() < deadline, "live never started");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    });
     let limited = repo.by(&["send", "live", "--steer", "x", "--budget-usd", "1"]);
     assert!(!limited.status.success());
     assert!(stderr(&limited).contains("send --steer takes only --json"));

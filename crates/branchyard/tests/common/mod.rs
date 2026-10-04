@@ -6,7 +6,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
 
 use branchyard::{Activity, Event, RecordedEvent, TaskBuilder, TaskOptions, Yard};
@@ -22,7 +21,6 @@ pub fn bridge_binary() -> &'static Path {
     )
 }
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 static HERMETIC: Once = Once::new();
 
 /// A temporary directory holding a repository at `repo/` with one commit
@@ -31,6 +29,8 @@ pub struct Fixture {
     pub dir: PathBuf,
     pub root: PathBuf,
     pub yard: Yard,
+
+    _scratch: branchyard_testkit::Scratch,
 }
 
 impl Fixture {
@@ -49,14 +49,9 @@ impl Fixture {
         // differently from `cargo test --workspace`), which must not count
         // against a test's own timing.
         fake_agent();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-sdk-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = branchyard_testkit::Scratch::new("sdk");
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let root = dir.join("repo");
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["config", "user.name", "Test"]);
@@ -66,7 +61,12 @@ impl Fixture {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "initial"]);
         let yard = Yard::open(&root).unwrap();
-        Fixture { dir, root, yard }
+        Fixture {
+            dir,
+            root,
+            yard,
+            _scratch: scratch,
+        }
     }
 
     pub fn git(&self, args: &[&str]) -> String {
@@ -84,12 +84,6 @@ impl Fixture {
 
     pub fn task(&self, prompt: &str) -> TaskBuilder {
         self.yard.task(prompt).options(self.options())
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

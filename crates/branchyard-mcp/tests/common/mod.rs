@@ -7,15 +7,14 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
 
 use branchyard::{Activity, Envelope, Event, Policy, RecordedEvent, TaskOptions, Yard};
+use branchyard_testkit::wait;
 use serde_json::{json, Value};
 
 pub use branchyard_testkit::fake_agent_here as fake_agent;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 static HERMETIC: Once = Once::new();
 
 pub const SERVER: &str = env!("CARGO_BIN_EXE_branchyard-mcp");
@@ -25,6 +24,8 @@ pub struct Fixture {
     pub dir: PathBuf,
     pub root: PathBuf,
     pub yard: Yard,
+
+    _scratch: branchyard_testkit::Scratch,
 }
 
 impl Fixture {
@@ -34,14 +35,9 @@ impl Fixture {
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         });
         fake_agent();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-mcp-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = branchyard_testkit::Scratch::new("mcp");
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let root = dir.join("repo");
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["config", "user.name", "Test"]);
@@ -50,7 +46,12 @@ impl Fixture {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "initial"]);
         let yard = Yard::open(&root).unwrap();
-        Fixture { dir, root, yard }
+        Fixture {
+            dir,
+            root,
+            yard,
+            _scratch: scratch,
+        }
     }
 
     pub fn git(&self, args: &[&str]) -> String {
@@ -68,12 +69,6 @@ impl Fixture {
             delegation_server: Some(vec![SERVER.into()]),
             ..TaskOptions::default()
         }
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -179,17 +174,11 @@ impl Client {
     /// Close stdin and wait for the server to exit on its own.
     pub fn finish(mut self) -> std::process::ExitStatus {
         self.stdin.take();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                return status;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the server did not exit when its input closed"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait::until_for(
+            "the server to exit when its input closed",
+            std::time::Duration::from_secs(10),
+            || self.child.try_wait().unwrap(),
+        )
     }
 }
 

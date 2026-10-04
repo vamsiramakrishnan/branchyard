@@ -11,7 +11,7 @@ mod common;
 
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard::{Activity, BranchStatus, Error, Policy, Yard};
 use branchyard_testkit::wait;
@@ -130,7 +130,10 @@ fn a_waiting_reader_sees_another_yards_events() {
             .wait_for_events(head, 10, Duration::from_secs(30))
             .unwrap()
     });
-    std::thread::sleep(Duration::from_millis(200));
+    wait::settle(
+        "the reader is waiting for events",
+        Duration::from_millis(200),
+    );
     pg.yard
         .task("say hi")
         .options(pg.f.options())

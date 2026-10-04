@@ -16,7 +16,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
 use branchyard::{
     Activity, BranchStatus, Effort, Policy, Provider, Provisioning, RecipeOptions, SandboxEvent,
@@ -384,9 +383,7 @@ fn recovery_brings_back_the_work_of_an_engine_that_died_and_destroys_its_machine
         .spawn()
         .unwrap();
     // The ORPHAN prompt writes orphan.log on the machine and hangs.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let pids: Vec<u32> = loop {
-        assert!(Instant::now() < deadline, "the harness never started");
+    let pids: Vec<u32> = wait::until("the harness to start", || {
         let said = f
             .yard
             .branch("crashy")
@@ -394,14 +391,12 @@ fn recovery_brings_back_the_work_of_an_engine_that_died_and_destroys_its_machine
             .and_then(|b| b.events().ok())
             .map(|e| text(&e))
             .unwrap_or_default();
-        if let Some(rest) = said.strip_prefix("orphan ") {
-            break rest
-                .split_whitespace()
+        said.strip_prefix("orphan ").map(|rest| {
+            rest.split_whitespace()
                 .filter_map(|p| p.parse().ok())
-                .collect();
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
+                .collect()
+        })
+    });
     let machine = recorded(&f)
         .pop()
         .expect("the turn's machine")

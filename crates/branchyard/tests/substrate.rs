@@ -9,7 +9,6 @@ mod common;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use branchyard::{
     Activity, BranchStatus, Effort, Envelope, Policy, Provider, Provisioning, SecretSource,
@@ -357,9 +356,7 @@ fn kill_engine_mid_turn(
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let pids: Vec<u32> = loop {
-        assert!(Instant::now() < deadline, "the harness never started");
+    let pids: Vec<u32> = wait::until("the harness to start", || {
         let said = f
             .yard
             .branch("crashy")
@@ -367,14 +364,12 @@ fn kill_engine_mid_turn(
             .and_then(|b| b.events().ok())
             .map(|e| text(&e))
             .unwrap_or_default();
-        if let Some(rest) = said.strip_prefix("orphan ") {
-            break rest
-                .split_whitespace()
+        said.strip_prefix("orphan ").map(|rest| {
+            rest.split_whitespace()
                 .filter_map(|p| p.parse().ok())
-                .collect();
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
+                .collect()
+        })
+    });
     let actor = fake.actor_names().pop().expect("the turn's actor");
     let bridge = fake.bridge_pid(&actor).expect("its bridge");
     assert!(f.root.join(".branchyard/transfer").join(&actor).is_dir());

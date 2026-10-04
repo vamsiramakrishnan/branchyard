@@ -249,7 +249,10 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
     // What changes here afterwards is not pushed while another runner
     // holds the task (a push already under way when the lease was lost
     // has finished by now).
-    std::thread::sleep(Duration::from_millis(1500));
+    wait::settle(
+        "a push under way when the lease was lost finishes",
+        Duration::from_millis(1500),
+    );
     let before = pushed();
     let git_branch = branch.info().git_branch.clone();
     let tip = git(&f.root, &["rev-parse", &format!("refs/heads/{git_branch}")]);
@@ -273,7 +276,10 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
             late.trim(),
         ],
     );
-    std::thread::sleep(Duration::from_secs(3));
+    wait::settle(
+        "pushes that must not happen would have by now",
+        Duration::from_secs(3),
+    );
     let after = pushed();
     assert_eq!(after.seq, before.seq, "{after:?}");
     assert_eq!(after.refs, before.refs);

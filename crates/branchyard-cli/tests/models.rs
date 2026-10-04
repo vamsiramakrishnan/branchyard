@@ -7,14 +7,11 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Output;
 
 use branchyard_testkit::fake_agent;
 use branchyard_testkit::{MockHttp, Response};
-use serde_json::{json, Value};
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+use serde_json::json;
 
 const KEY: &str = "sk-real-anthropic-cli";
 
@@ -58,33 +55,28 @@ fn keys(upstream: &MockHttp) -> Vec<String> {
         .collect()
 }
 
+/// The kit's repository, plus the harness script beside it.
 struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+    kit: branchyard_testkit::Repo,
     harness: PathBuf,
+}
+
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
 }
 
 impl Repo {
     fn new(port: u16) -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-models-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
+        let kit = branchyard_testkit::repo!();
         let repo = Repo {
-            root: dir.join("repo"),
-            harness: dir.join("harness.py"),
-            dir,
+            harness: kit.dir.join("harness.py"),
+            kit,
         };
         fs::write(&repo.harness, HARNESS).unwrap();
         fs::write(repo.dir.join("anthropic-key"), KEY).unwrap();
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
         fs::write(
             repo.root.join("branchyard.toml"),
             format!(
@@ -98,44 +90,8 @@ impl Repo {
         )
         .unwrap();
         repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
+        repo.git(&["commit", "-q", "--amend", "--no-edit"]);
         repo
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            );
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .output()
-            .unwrap()
     }
 
     fn run(&self, name: &str, flags: &[&str], models: &[&str]) -> Output {
@@ -156,22 +112,10 @@ impl Repo {
         self.by(&args)
     }
 
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.by(args);
-        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-
     fn text(&self, args: &[&str]) -> String {
         let out = self.by(args);
         assert!(out.status.success(), "{args:?}: {}", stderr(&out));
         String::from_utf8_lossy(&out.stdout).into_owned()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

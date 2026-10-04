@@ -141,7 +141,10 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     // The engine dies; the harness ignores its closed stdin and lives on.
     child.kill().unwrap();
     child.wait().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    wait::settle(
+        "a harness that was going to die with its engine would have by now",
+        Duration::from_millis(200),
+    );
     assert!(running(agent), "the harness outlived its engine");
     assert_eq!(
         f.yard.branch("crashy").unwrap().info().status,

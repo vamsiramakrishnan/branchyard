@@ -172,6 +172,21 @@ pub fn until_value<T: Debug>(
     })
 }
 
+/// Let `duration` pass (multiplied by `BY_TEST_TIMEOUT_SCALE`) because the
+/// test needs time itself to go by, not an event: a pipe to fill, a lease
+/// or token to expire, a quiet period in which nothing may happen. `why`
+/// says which, so that the next reader can judge whether an event could be
+/// awaited instead.
+///
+/// It is never the way to wait *for* something: that is [`until`], which
+/// returns the moment the thing happens and cannot be too short on a slow
+/// machine. `tools/check_test_hygiene.py` counts the calls to this function
+/// and fails if the count grows.
+pub fn settle(why: &str, duration: Duration) {
+    let _ = why;
+    std::thread::sleep(scaled(duration));
+}
+
 /// The one place a test sleeps: a fixed interval plus a jitter taken from
 /// the poll count (no randomness, so a failure replays the same way).
 fn pause(polls: u64) {

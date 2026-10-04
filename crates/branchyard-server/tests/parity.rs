@@ -434,14 +434,9 @@ fn a_person_applies_a_graph_through_the_server() {
         }
         other => panic!("{other:?}"),
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while repo.inspect("second").unwrap().status != BranchStatus::Ready {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "second never finished"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    wait::until("second to finish", || {
+        repo.inspect("second").unwrap().status == BranchStatus::Ready
+    });
     let yard = Yard::open(&f.root).unwrap();
     assert_eq!(repo.graph("root").unwrap(), yard.graph("root").unwrap());
     let (status, _, body) = raw(

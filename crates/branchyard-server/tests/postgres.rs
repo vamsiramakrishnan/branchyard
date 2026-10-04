@@ -833,18 +833,14 @@ fn finished(url: &str, id: &str) -> Operation {
         },
     )
     .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    loop {
+    wait::until(&format!("operation {id} to finish"), || {
         let op = registry.get(id).unwrap().unwrap();
         if op.state.is_terminal() {
-            return op;
+            Ok(op)
+        } else {
+            Err(format!("{:?}", op.state))
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "operation {id} did not finish"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    })
 }
 
 #[test]
@@ -913,7 +909,7 @@ fn a_spawn_that_waits_is_queued_run_by_a_worker_and_started_later() {
     assert_eq!(status("app"), BranchStatus::Waiting);
     assert_eq!(yard.branch("app").unwrap().info().turns, 0);
     // Several recovery ticks pass: it keeps waiting for the integration.
-    std::thread::sleep(Duration::from_millis(500));
+    wait::settle("several recovery ticks pass", Duration::from_millis(500));
     assert_eq!(status("app"), BranchStatus::Waiting);
 
     // Integrating lib, also queued work the worker runs, starts app there,
@@ -1002,7 +998,7 @@ fn servers_and_a_worker_resuming_graphs_on_one_database_start_a_dependent_once()
         repo.branch("first").unwrap().status == BranchStatus::Ready
     });
     // Recovery ticks on all three pass over a dependent still waiting.
-    std::thread::sleep(Duration::from_millis(500));
+    wait::settle("recovery ticks pass", Duration::from_millis(500));
     assert_eq!(repo.branch("second").unwrap().status, BranchStatus::Waiting);
     // The state an engine that stopped between settling the prerequisite
     // and starting the dependent leaves: satisfied, never claimed. Every
@@ -1022,7 +1018,7 @@ fn servers_and_a_worker_resuming_graphs_on_one_database_start_a_dependent_once()
         )
     });
     // Many more ticks on every process: still one turn.
-    std::thread::sleep(Duration::from_millis(1000));
+    wait::settle("many more ticks pass", Duration::from_millis(1000));
     assert_eq!(prompts(&client, "second"), 1, "started exactly once");
     assert_eq!(repo.branch("second").unwrap().turns, 1);
     assert_eq!(prompts(&b.client(), "second"), 1);
@@ -1196,7 +1192,7 @@ fn a_registry_opened_beside_a_working_server_does_not_deadlock_with_it() {
         std::thread::scope(|scope| {
             let opening = scope.spawn(|| PostgresStore::open(&url).map(drop));
             // Long enough for the open to reach the queue.
-            std::thread::sleep(Duration::from_millis(500));
+            wait::settle("the open to reach the queue", Duration::from_millis(500));
             tx.execute(
                 "UPDATE by_operations SET body = '{\"done\":true}' WHERE id = 'op-old'",
                 &[],

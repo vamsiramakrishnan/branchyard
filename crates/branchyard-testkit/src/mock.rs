@@ -63,6 +63,17 @@ pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    reply: Reply,
+}
+
+/// Whether and how the server answers once the request is read.
+#[derive(Clone, Copy, Debug)]
+enum Reply {
+    Answer,
+    /// Hold the connection open, silent, until the server is finished.
+    Hang,
+    /// Close the connection without writing a byte.
+    Close,
 }
 
 impl Response {
@@ -71,6 +82,25 @@ impl Response {
             status,
             headers: Vec::new(),
             body: body.into(),
+            reply: Reply::Answer,
+        }
+    }
+
+    /// Read the request, then never answer: the connection stays open until
+    /// the server is finished. A receiver that hangs.
+    pub fn hang() -> Response {
+        Response {
+            reply: Reply::Hang,
+            ..Response::new(0, "")
+        }
+    }
+
+    /// Read the request, then close the connection without a response: a
+    /// receiver that resets.
+    pub fn close() -> Response {
+        Response {
+            reply: Reply::Close,
+            ..Response::new(0, "")
         }
     }
 
@@ -145,9 +175,10 @@ impl MockHttp {
                         }
                         Err(e) => Err(e),
                     };
-                    let (handler, requests) = (handler.clone(), requests.clone());
+                    let (handler, requests, stop) =
+                        (handler.clone(), requests.clone(), stop.clone());
                     connections.push(std::thread::spawn(move || match stream {
-                        Ok(stream) => connection(stream, &*handler, &requests),
+                        Ok(stream) => connection(stream, &*handler, &requests, &stop),
                         Err(e) => Err(format!("accept: {e}")),
                     }));
                 }
@@ -245,6 +276,7 @@ fn connection(
     stream: TcpStream,
     handler: &Handler,
     requests: &Mutex<Vec<Request>>,
+    stop: &AtomicBool,
 ) -> Result<(), String> {
     // A client that connects and then says nothing must not hang the test.
     stream
@@ -308,6 +340,17 @@ fn connection(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push(request.clone());
+
+    match response.reply {
+        Reply::Answer => {}
+        Reply::Close => return Ok(()),
+        Reply::Hang => {
+            wait::until("the mock server to be finished", || {
+                stop.load(Ordering::SeqCst)
+            });
+            return Ok(());
+        }
+    }
 
     let mut head = format!(
         "HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n",

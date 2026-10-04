@@ -28,3 +28,16 @@ pub use agent::{built, fake_agent, fake_agent_here};
 pub use mock::{MockHttp, Request, Response};
 pub use repo::Repo;
 pub use scratch::Scratch;
+
+/// A [`Repo`] driven through the `by` binary of the crate this expands in
+/// (only the `branchyard-cli` tests have one): `repo!()` holds `a.txt`;
+/// `repo!(&[("a.txt", "one\n"), (".gitignore", "x\n")])` holds those files.
+#[macro_export]
+macro_rules! repo {
+    () => {
+        $crate::Repo::init(::std::path::Path::new(env!("CARGO_BIN_EXE_by")))
+    };
+    ($files:expr) => {
+        $crate::Repo::init_with(::std::path::Path::new(env!("CARGO_BIN_EXE_by")), $files)
+    };
+}

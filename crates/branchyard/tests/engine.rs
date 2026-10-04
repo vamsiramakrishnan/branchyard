@@ -12,6 +12,7 @@ use branchyard::{
     Activity, BranchEvent, BranchStatus, Budget, DecisionSource, Error, Event, PermissionDecision,
     Policy, RecordedEvent, StallAction, TaskOptions, TurnOutcome, Yard,
 };
+use branchyard_testkit::wait;
 use common::{edit_record, fake_agent, text, Fixture};
 
 fn status_of(fixture: &Fixture, name: &str) -> BranchStatus {
@@ -633,17 +634,16 @@ fn a_stall_is_recorded_but_does_not_stop_the_turn_by_default() {
         .name("stalls-notify")
         .budget(Budget::default().stall_after(Duration::from_millis(150)));
     let turn = std::thread::spawn(move || task.run());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !f
-        .yard
-        .branch("stalls-notify")
-        .is_ok_and(|b| b.info().stalled)
-    {
-        assert!(Instant::now() < deadline, "the branch never stalled");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("the branch to stall", || {
+        f.yard
+            .branch("stalls-notify")
+            .is_ok_and(|b| b.info().stalled)
+    });
     // Notify keeps the turn running; still stalled a moment later.
-    std::thread::sleep(Duration::from_millis(100));
+    wait::settle(
+        "a notified stall must still be running, still stalled, a moment later",
+        Duration::from_millis(100),
+    );
     assert_eq!(
         f.yard.branch("stalls-notify").unwrap().info().status,
         BranchStatus::Running
@@ -669,7 +669,10 @@ fn a_stall_is_never_declared_while_answering_a_permission_request() {
         .name("stall-permission-wait")
         .budget(Budget::default().stall_after(Duration::from_millis(150)))
         .policy(Policy::ask(|_, _| {
-            std::thread::sleep(Duration::from_millis(400));
+            wait::settle(
+                "an answer slower than the stall window",
+                Duration::from_millis(400),
+            );
             PermissionDecision::Allow
         }))
         .run()
@@ -696,15 +699,11 @@ fn a_stall_is_not_declared_while_a_child_is_running() {
             .name("stall-wait-child");
         std::thread::spawn(move || task.run())
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !f
-        .yard
-        .branch("stall-wait-child")
-        .is_ok_and(|b| b.info().status == BranchStatus::Running)
-    {
-        assert!(Instant::now() < deadline, "the child never started running");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("the child to start running", || {
+        f.yard
+            .branch("stall-wait-child")
+            .is_ok_and(|b| b.info().status == BranchStatus::Running)
+    });
     let parent = {
         let task = f
             .yard
@@ -714,17 +713,11 @@ fn a_stall_is_not_declared_while_a_child_is_running() {
             .budget(Budget::default().stall_after(Duration::from_millis(150)));
         std::thread::spawn(move || task.run())
     };
-    while !f
-        .yard
-        .branch("stall-wait-parent")
-        .is_ok_and(|b| b.info().status == BranchStatus::Running)
-    {
-        assert!(
-            Instant::now() < deadline,
-            "the parent never started running"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("the parent to start running", || {
+        f.yard
+            .branch("stall-wait-parent")
+            .is_ok_and(|b| b.info().status == BranchStatus::Running)
+    });
     // Stands in for a child spawned during the parent's own turn, which the
     // engine only sees by re-reading the store, not from its own stale
     // snapshot of the record.
@@ -732,7 +725,10 @@ fn a_stall_is_not_declared_while_a_child_is_running() {
         record["info"]["children"] = serde_json::json!(["stall-wait-child"]);
     });
     // Well past the stall window, but the child is still running.
-    std::thread::sleep(Duration::from_millis(500));
+    wait::settle(
+        "past the stall window, with the child still running",
+        Duration::from_millis(500),
+    );
     assert!(
         !f.yard.branch("stall-wait-parent").unwrap().info().stalled,
         "excluded while its child runs"
@@ -742,14 +738,11 @@ fn a_stall_is_not_declared_while_a_child_is_running() {
     assert_eq!(child.info().status, BranchStatus::Interrupted);
     // With the child gone, the parent's own idle time (already past its
     // window) is now seen.
-    while !f
-        .yard
-        .branch("stall-wait-parent")
-        .is_ok_and(|b| b.info().stalled)
-    {
-        assert!(Instant::now() < deadline, "the parent never stalled");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("the parent to stall", || {
+        f.yard
+            .branch("stall-wait-parent")
+            .is_ok_and(|b| b.info().stalled)
+    });
     assert!(!f.yard.cancel("stall-wait-parent").unwrap().is_empty());
     let parent = parent.join().unwrap().unwrap();
     assert_eq!(parent.info().status, BranchStatus::Interrupted);
@@ -1034,21 +1027,16 @@ fn a_branch_cancelled_before_its_harness_opened_a_session_starts_a_fresh_one_on_
         .options(silent)
         .name("unopened");
     let turn = std::thread::spawn(move || task.run());
-    let deadline = Instant::now() + Duration::from_secs(30);
     let db = f.root.join(".branchyard/state.db");
     let started = || {
         rusqlite::Connection::open(&db)
             .and_then(|c| c.query_row("SELECT COUNT(*) FROM processes", [], |r| r.get(0)))
             .is_ok_and(|n: i64| n == 1)
     };
-    while !started() {
-        assert!(Instant::now() < deadline, "the harness never started");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    while f.yard.cancel("unopened").map_or(true, |c| c.is_empty()) {
-        assert!(Instant::now() < deadline, "the turn never started");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("the harness to start", started);
+    wait::until("the turn to start", || {
+        f.yard.cancel("unopened").is_ok_and(|c| !c.is_empty())
+    });
     let cancelled = turn.join().unwrap().unwrap();
     assert_eq!(cancelled.info().status, BranchStatus::Interrupted);
     assert_eq!(cancelled.info().session, None);

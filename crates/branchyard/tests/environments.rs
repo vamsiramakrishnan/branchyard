@@ -10,12 +10,13 @@ mod common;
 
 use std::fs;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard::{
     Activity, BranchStatus, EnvironmentOrigin, EnvironmentState, RecordedEvent, TaskOptions,
     WorkspaceReport, WorkspaceSpec, Yard,
 };
+use branchyard_testkit::wait;
 use common::{fake_agent, text, Fixture};
 
 fn reports(events: &[RecordedEvent]) -> Vec<WorkspaceReport> {
@@ -452,7 +453,7 @@ fn pruning_keeps_the_newest_of_each_recipe() {
             .run()
             .unwrap();
         // Distinct build times.
-        std::thread::sleep(Duration::from_millis(5));
+        wait::settle("distinct build times", Duration::from_millis(5));
     }
     assert_eq!(f.yard.environments().len(), 3);
     let newest = f.yard.environments()[0].key.clone();
@@ -527,11 +528,7 @@ fn a_half_built_environment_is_removed_by_recovery() {
         .spawn()
         .unwrap();
     let mut child = Killed(child);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !marker.exists() {
-        assert!(Instant::now() < deadline, "setup never started");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("setup to start", || marker.exists());
     child.0.kill().unwrap();
     child.0.wait().unwrap();
 

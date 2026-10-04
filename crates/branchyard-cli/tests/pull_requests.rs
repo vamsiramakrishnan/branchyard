@@ -8,12 +8,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::{json, Value};
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A fake `gh`: appends its arguments to `calls.log` (one line per call),
 /// saves a body read from stdin, and answers from files in its directory.
@@ -59,30 +57,42 @@ case "$1 $2" in
 esac
 "#;
 
+/// The kit's repository, plus what this file adds.
 struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+    kit: branchyard_testkit::Repo,
     /// The fake gh's directory: its script, answers and call log.
     gh: PathBuf,
     remote: PathBuf,
 }
 
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
+}
+
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-pr-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        fs::create_dir_all(dir.join("gh")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
+        let mut kit = branchyard_testkit::repo!();
+        let gh = kit.dir.join("gh");
+        fs::create_dir_all(&gh).unwrap();
+        kit.set_env(
+            "PATH",
+            &format!(
+                "{}:{}",
+                gh.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        kit.set_env("FAKE_GH_DIR", &gh.display().to_string());
+        for var in ["VISUAL", "EDITOR", "GH_TOKEN", "GITHUB_TOKEN"] {
+            kit.remove_env(var);
+        }
         let repo = Repo {
-            root: dir.join("repo"),
-            gh: dir.join("gh"),
-            remote: dir.join("remote.git"),
-            dir,
+            gh,
+            remote: kit.dir.join("remote.git"),
+            kit,
         };
         let script = repo.gh.join("gh");
         fs::write(&script, FAKE_GH).unwrap();
@@ -92,12 +102,6 @@ impl Repo {
             r#"[{"number": 7, "url": "https://github.com/acme/widgets/pull/7", "isDraft": false, "baseRefName": "main"}]"#,
         )
         .unwrap();
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
         let out = repo
             .command("git")
             .args(["init", "-q", "--bare"])
@@ -109,61 +113,11 @@ impl Repo {
         repo
     }
 
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        let path = format!(
-            "{}:{}",
-            self.gh.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        command
-            .current_dir(&self.root)
-            .env("PATH", path)
-            .env("FAKE_GH_DIR", &self.gh)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            )
-            .env("PAGER", "cat")
-            .env_remove("VISUAL")
-            .env_remove("EDITOR");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_TOKEN_FILE",
-            "BRANCHYARD_REPO",
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
-        String::from_utf8(out.stdout).unwrap()
-    }
-
     /// `git` in the bare remote.
     fn remote_git(&self, args: &[&str]) -> Output {
         self.command("git")
             .arg("--git-dir")
             .arg(&self.remote)
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
             .args(args)
             .output()
             .unwrap()
@@ -244,12 +198,6 @@ impl Repo {
                 fs::remove_file(path).unwrap();
             }
         }
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -1066,18 +1014,14 @@ fn watch_steers_feedback_into_a_running_turn() {
             .spawn()
             .unwrap(),
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
+    wait::until("the turn to start", || {
         let log = stdout(&repo.by(&["log", "feat"]));
         if log.contains("waiting for steering") {
-            break;
+            Ok(())
+        } else {
+            Err(log)
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the turn never started:\n{log}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    });
     let mut open = view("OPEN", &"5".repeat(40));
     open["comments"] = json!([
         {"id": "IC_1", "author": {"login": "carol"}, "body": "Rename the flag, please."}
