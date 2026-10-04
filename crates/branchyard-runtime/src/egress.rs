@@ -47,6 +47,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// What the caller's decision says about one destination.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Verdict {
+    /// Whether the destination may be reached.
     pub allowed: bool,
     /// The rule that allowed it, for the report.
     pub rule: Option<String>,
@@ -60,9 +61,13 @@ pub struct Verdict {
 pub struct Decision {
     /// `CONNECT`, or the plain HTTP request's method.
     pub method: String,
+    /// The destination host.
     pub host: String,
+    /// The destination port.
     pub port: u16,
+    /// Whether the request was allowed.
     pub allowed: bool,
+    /// The rule that allowed it, when one did.
     pub rule: Option<String>,
     /// Why it was refused, or why an allowed one failed.
     pub reason: Option<String>,

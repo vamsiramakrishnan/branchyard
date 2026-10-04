@@ -40,7 +40,7 @@
 //!
 //! The `fake-acp-agent` binary in this crate is a test fixture speaking just
 //! enough ACP v1 for the crate's tests; it is not a harness.
-
+#![warn(missing_docs)]
 #![cfg(unix)]
 
 pub mod egress;
@@ -167,6 +167,7 @@ impl Environment {
         self
     }
 
+    /// The private (or, with [`Environment::inherit`], inherited) `HOME` the harness runs with.
     pub fn home(&self) -> &Path {
         &self.home
     }
@@ -205,12 +206,16 @@ impl Environment {
 pub enum RuntimeError {
     /// The launch could not be started.
     Spawn {
+        /// The command line that could not be started.
         argv: Vec<String>,
+        /// The operating-system error.
         source: io::Error,
     },
     /// Writing to the harness or the transcript failed.
     Io {
+        /// What was being written: the harness's input or the transcript.
         context: &'static str,
+        /// The operating-system error.
         source: io::Error,
     },
     /// Nothing matched before the deadline. The session is still usable.
@@ -219,7 +224,10 @@ pub enum RuntimeError {
     Rejected(Rejected),
     /// The harness's stdout closed. The driver's closing events, such as
     /// [`Event::OutcomeUnknown`], are in [`Session::events`].
-    HarnessExited { stderr: String },
+    HarnessExited {
+        /// What the harness wrote to standard error before it closed.
+        stderr: String,
+    },
     /// The driver reported [`Event::OpenFailed`].
     OpenFailed(String),
 }
@@ -256,7 +264,9 @@ impl From<Rejected> for RuntimeError {
 /// One completed turn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnReport {
+    /// The turn's number, counting from 1 in its session.
     pub turn: u64,
+    /// How the turn ended.
     pub outcome: TurnOutcome,
     /// The turn's message deltas, concatenated.
     pub text: String,

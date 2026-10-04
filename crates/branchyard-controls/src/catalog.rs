@@ -34,10 +34,12 @@ use serde::{Deserialize, Serialize};
 pub struct HarnessEntry {
     /// The ID in [`crate::harness::HARNESSES`].
     pub id: String,
+    /// The harness's display name.
     pub name: String,
     /// Executable names, the usual one first.
     #[serde(default)]
     pub binaries: Vec<String>,
+    /// The homepage URL, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
     /// Commands that install it on Linux, the recommended one first.
@@ -52,8 +54,10 @@ pub struct HarnessEntry {
     /// Model names its model flag takes.
     #[serde(default)]
     pub models: Vec<String>,
+    /// The flag that selects a model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_flag: Option<String>,
+    /// The flag that resumes a session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_flag: Option<String>,
     /// Where the entry came from: `emdash:<plugin id>`, `orca:<agent key>`.
@@ -67,6 +71,7 @@ pub struct HarnessEntry {
 pub struct Credential {
     /// The header or variable that carries it.
     pub name: String,
+    /// Whether the credential must be present.
     pub required: bool,
 }
 
@@ -74,27 +79,36 @@ pub struct Credential {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorEntry {
+    /// The connector's ID in the catalog.
     pub id: String,
+    /// The connector's display name.
     pub name: String,
+    /// What the connector gives a harness access to.
     pub description: String,
     /// `remote-mcp` (a Streamable HTTP MCP server at `url`),
     /// `stdio-package` (a package run over stdio, such as `npx -y pkg`) or
     /// `stdio-command` (a CLI's own MCP mode, such as `gt mcp`).
     pub kind: String,
+    /// The URL of a `remote-mcp` connector's server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The command a `stdio-command` connector runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The arguments the command takes.
     #[serde(default)]
     pub args: Vec<String>,
+    /// The package a `stdio-package` connector runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     /// `server` (the remote server runs its own authorization, as the MCP
     /// authorization specification describes), `header` (a credential in
     /// an HTTP header), `env` (a credential in a variable) or `none`.
     pub auth: String,
+    /// The credentials the upstream takes, if any.
     #[serde(default)]
     pub credentials: Vec<Credential>,
+    /// The connector's homepage URL.
     pub homepage: String,
     /// `emdash:<catalog key>`.
     pub source: String,

@@ -6,8 +6,10 @@
 //! [`harness`]'s tests validate against; see its module comment for why the
 //! upstream CLI-recipe builder it once carried was removed rather than kept
 //! unused.
+#![warn(missing_docs)]
 pub mod catalog;
 pub mod harness;
+/// The registry check [`harness`]'s tests validate against.
 pub mod resume;
 #[cfg(test)]
 mod tsdata;
