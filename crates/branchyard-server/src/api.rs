@@ -973,7 +973,6 @@ struct RequestId(String);
 /// looks safe to reuse, else a fresh one), so the access log line above
 /// and the response both carry it. Headers, including `Authorization`,
 /// are never logged.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 async fn request_id(mut request: Request, next: Next) -> Response {
     let id = request
         .headers()
@@ -985,8 +984,10 @@ async fn request_id(mut request: Request, next: Next) -> Response {
                 && v.chars()
                     .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
         })
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("req_{}", &branchyard_client::new_key()[..16]));
+        .map_or_else(
+            || format!("req_{}", &branchyard_client::new_key()[..16]),
+            str::to_owned,
+        );
     request.extensions_mut().insert(RequestId(id.clone()));
     let mut response = next.run(request).await;
     if let Ok(value) = HeaderValue::from_str(&id) {

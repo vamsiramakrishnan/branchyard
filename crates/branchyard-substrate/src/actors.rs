@@ -1,3 +1,4 @@
+use branchyard_support::best_effort;
 use std::fmt;
 
 use branchyard_sandbox::{Capabilities, SandboxState};
@@ -322,7 +323,6 @@ impl Actors {
     ///
     /// The actor must already be stopped. Checkpointing does not suspend
     /// implicitly: the caller chooses the quiescent point.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
     pub async fn checkpoint(
         &mut self,
         actor: &ActorHandle,
@@ -376,16 +376,18 @@ impl Actors {
         // replaced while it was taken; if it was, the tag may hold the
         // newer actor's state and is deleted, fenced by its own UID.
         if let Err(error) = self.confirm(actor, "CreateTag", None).await {
-            let _ = self
-                .client
-                .delete_tag(pb::DeleteTagRequest {
-                    tag: self.reference(&metadata.name),
-                    options: Some(pb::DeleteOptions {
-                        uid: metadata.uid.clone(),
-                        ..Default::default()
-                    }),
-                })
-                .await;
+            best_effort(
+                "default.await",
+                self.client
+                    .delete_tag(pb::DeleteTagRequest {
+                        tag: self.reference(&metadata.name),
+                        options: Some(pb::DeleteOptions {
+                            uid: metadata.uid.clone(),
+                            ..Default::default()
+                        }),
+                    })
+                    .await,
+            );
             return Err(error);
         }
         Ok(CheckpointRef {

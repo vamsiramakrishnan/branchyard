@@ -9,7 +9,6 @@ use crate::plan::{ArtifactKind, Plan, PlannedFile};
 use crate::probe::{unapproved_tools, Facts, Probe};
 use crate::Topic;
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
     let lead = facts.preferred_harness();
     let other = match lead.as_str() {
@@ -110,7 +109,7 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
                 "The lead's check; children keep it unless their seat sets one.",
             )
             .optional()
-            .default(facts.suggested_check.clone().map(Value::from).unwrap_or(Value::Null))
+            .default(facts.suggested_check.clone().map_or(Value::Null, Value::from))
             .choices(choices)
             .rule(Rule::CommandLine)
         },

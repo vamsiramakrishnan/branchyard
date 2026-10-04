@@ -812,7 +812,7 @@ pub(crate) fn release_environment(
 /// End a turn's sandbox `name`: park it (pause and record it for the next
 /// turn) when the branch keeps its sandbox and the provider can pause, then
 /// evict beyond `max_paused`; otherwise destroy it. Returns what to record.
-#[allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn park(
     yard: &Yard,
     record: &Record,
@@ -823,7 +823,7 @@ pub(crate) fn park(
     let Some(policy) = lifecycle(record.provider.as_ref()) else {
         return Vec::new();
     };
-    let kind = record.provider.as_ref().map(provider_name).unwrap_or("");
+    let kind = record.provider.as_ref().map_or("", provider_name);
     let key = record
         .provider
         .as_ref()
@@ -888,9 +888,12 @@ pub(crate) fn park(
             }));
         }
         Err(error) => {
-            let _ = store
-                .sandboxes()
-                .take_sandbox(&row.branch, SandboxKind::Kept, name);
+            branchyard_support::best_effort(
+                "sandboxes.take_sandbox",
+                store
+                    .sandboxes()
+                    .take_sandbox(&row.branch, SandboxKind::Kept, name),
+            );
             branchyard_support::best_effort(
                 "store.backend.finish_step",
                 store.backend().finish_step(
@@ -960,7 +963,7 @@ pub(crate) fn evict(yard: &Yard, key: &str, max: u32, except: &str) -> Vec<Activ
 /// provider snapshot, keeping the newest `snapshots`. Journaled as
 /// [`STEP_SNAPSHOT`] before anything is taken. Returns the snapshot, and
 /// what to record.
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn snapshot_turn(
     yard: &Yard,
     fence: &Fence,
@@ -972,7 +975,9 @@ pub(crate) fn snapshot_turn(
     let Some(policy) = lifecycle(record.provider.as_ref()) else {
         return (None, said);
     };
-    let provider_options = record.provider.clone().expect("a lifecycle has a provider");
+    let Some(provider_options) = record.provider.clone() else {
+        return (None, said);
+    };
     let store = yard.store();
     let key = provider_key(&provider_options);
     let kind = provider_name(&provider_options);
@@ -987,7 +992,10 @@ pub(crate) fn snapshot_turn(
         return (None, said);
     };
     kept.turn = Some(turn);
-    let _ = store.sandboxes().put_sandbox(&kept);
+    branchyard_support::best_effort(
+        "sandboxes.put_sandbox",
+        store.sandboxes().put_sandbox(&kept),
+    );
     if policy.snapshots == 0 {
         return (None, said);
     }
@@ -1073,7 +1081,10 @@ pub(crate) fn snapshot_turn(
                 detail: detail.text(),
                 used_ms: now_ms(),
             };
-            let _ = store.sandboxes().put_sandbox(&row);
+            branchyard_support::best_effort(
+                "sandboxes.put_sandbox",
+                store.sandboxes().put_sandbox(&row),
+            );
             branchyard_support::best_effort(
                 "store.backend.finish_step",
                 store.backend().finish_step(

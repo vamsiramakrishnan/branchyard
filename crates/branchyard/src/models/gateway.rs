@@ -13,7 +13,7 @@
 //! URL's path. Every response is streamed to the harness as it arrives,
 //! with `Transfer-Encoding: chunked` and `Connection: close`.
 
-#![allow(clippy::let_underscore_must_use)] // ratchet: branchyard
+use branchyard_support::best_effort;
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -126,7 +126,10 @@ impl TurnGateway {
                 SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
             });
         }
-        let _ = TcpStream::connect_timeout(&wake, Duration::from_secs(1));
+        best_effort(
+            "TcpStream.connect_timeout",
+            TcpStream::connect_timeout(&wake, Duration::from_secs(1)),
+        );
         if let Some(thread) = self.thread.take() {
             branchyard_support::join_reporting("model gateway accept", thread);
         }
@@ -198,6 +201,7 @@ impl Request {
 /// Read one request from the harness, through the wire codec: a head it
 /// cannot frame (both `Content-Length` and `Transfer-Encoding`, a bad chunk
 /// size, a body cut short) is an `Err`, which the caller answers with 400.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn read_request(
     reader: &mut BufReader<TcpStream>,
     out: &mut TcpStream,
@@ -321,6 +325,7 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 /// Answer the harness without forwarding.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn refuse(
     out: &mut TcpStream,
     api: Api,
@@ -423,12 +428,16 @@ fn take_request(reader: &mut BufReader<TcpStream>, out: &mut TcpStream) -> Optio
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn handle(stream: TcpStream, state: &TurnState) {
     let started = Instant::now();
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
+    best_effort(
+        "stream.set_read_timeout",
+        stream.set_read_timeout(Some(Duration::from_secs(300))),
+    );
     let mut reader = BufReader::new(stream);
     let Some(request) = take_request(&mut reader, &mut out) else {
         return;
@@ -751,7 +760,10 @@ fn handle(stream: TcpStream, state: &TurnState) {
     if let Some(cost) = call.cost_usd {
         *state.metered.lock_recovering("metered") += cost;
     }
-    let _ = state.yard.store().usage().put_usage(&row);
+    best_effort(
+        "usage.put_usage",
+        state.yard.store().usage().put_usage(&row),
+    );
     done(&mut call, decision, status, reason);
     alert(state);
     if !no_body && !client_gone && broken.is_none() {
@@ -928,7 +940,10 @@ fn append(state: &TurnState, activity: ModelActivity) {
         at_ms: now_ms(),
         activity: Activity::Model(Box::new(activity)),
     };
-    let _ = state.yard.store().append(&state.branch, &event, None);
+    best_effort(
+        "store.append",
+        state.yard.store().append(&state.branch, &event, None),
+    );
 }
 
 #[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report

@@ -476,7 +476,6 @@ fn verdict(text: &str) -> Option<String> {
 /// and `head` hold, and comments), block ends as line breaks, character
 /// references decoded, blank lines dropped. The result is plain text,
 /// never markup.
-#[allow(clippy::expect_used)] // ratchet: branchyard-server
 pub fn strip_html(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len() / 2);
@@ -526,7 +525,9 @@ pub fn strip_html(html: &str) -> String {
             i += end;
             continue;
         }
-        let c = html[i..].chars().next().expect("in bounds");
+        let Some(c) = html[i..].chars().next() else {
+            break;
+        };
         out.push(c);
         i += c.len_utf8();
     }
@@ -607,7 +608,6 @@ fn base64_len(text: &str) -> u64 {
 }
 
 /// Read a delivery's fields (and file parts) into an event.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 pub fn read(
     source: EventSource,
     fields: &Map<String, Value>,
@@ -628,8 +628,7 @@ pub fn read(
             let full = fields.get("FromFull");
             from = full
                 .and_then(|f| f.get("Email"))
-                .map(|e| text_of(Some(e)))
-                .unwrap_or_else(|| get("From"));
+                .map_or_else(|| get("From"), |e| text_of(Some(e)));
             email.from_name = full
                 .and_then(|f| f.get("Name"))
                 .map(|n| text_of(Some(n)))
@@ -853,10 +852,9 @@ pub fn read(
 
 /// Whether `address` is one `allowed` names: an exact address, or a
 /// `@domain` (that domain exactly, not its subdomains), ignoring case.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 pub fn allowed(allowed: &[String], address: &str) -> bool {
     let address = address.to_ascii_lowercase();
-    let domain = address.rsplit_once('@').map(|(_, d)| d).unwrap_or("");
+    let domain = address.rsplit_once('@').map_or("", |(_, d)| d);
     allowed.iter().any(|entry| {
         let entry = entry.trim().to_ascii_lowercase();
         match entry.strip_prefix('@') {

@@ -834,7 +834,6 @@ fn direct_reason(gateway: &Gateway, record: &Record, api: Option<Api>) -> Option
 /// gateway. `token` is the connector token when the turn has one (it
 /// carries the model scope too); otherwise the gateway's own is minted. A
 /// failure is the turn's, by name.
-#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn prepare(
     yard: &Yard,
     record: &Record,
@@ -853,7 +852,7 @@ pub(crate) fn prepare(
     let spec = record
         .provision
         .as_ref()
-        .expect("models imply provisioning");
+        .ok_or("models imply provisioning, but this branch has none")?;
     if let Some(key) = spec
         .secrets
         .iter()

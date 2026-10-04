@@ -1,5 +1,6 @@
 //! Binding, TLS, the accept loop and graceful shutdown.
 
+use branchyard_support::best_effort;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -134,7 +135,10 @@ impl Running {
         let _ = begun.wait_for(|stop| *stop).await;
         drop(self.pools);
         let services = self.services;
-        let _ = tokio::task::spawn_blocking(move || drop(services)).await;
+        best_effort(
+            "drop.await",
+            tokio::task::spawn_blocking(move || drop(services)).await,
+        );
         for poller in self.pollers {
             poller.abort();
         }
@@ -159,7 +163,10 @@ impl Running {
             .await
             .unwrap_or(0);
         if let Some(sync) = self.sync {
-            let _ = tokio::task::spawn_blocking(move || sync.finish()).await;
+            best_effort(
+                "finish.await",
+                tokio::task::spawn_blocking(move || sync.finish()).await,
+            );
         }
         if let Some(path) = &self.unix {
             branchyard_support::cleanup_file(path);

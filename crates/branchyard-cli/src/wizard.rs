@@ -250,7 +250,6 @@ fn ask(q: &Question) -> io::Result<Value> {
 }
 
 /// The wizard: detect, ask batch by batch, review, confirm, write.
-#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn run(topic: Option<Topic>, defaults: bool) -> Outcome {
     cliclack::intro(paint(true, "1;7", " by init ")).map_err(Failure::Io)?;
     let topic = match topic {
@@ -299,7 +298,9 @@ pub fn run(topic: Option<Topic>, defaults: bool) -> Outcome {
             raw.insert(q.id.clone(), value);
         }
     };
-    let plan = response.plan.expect("done has a plan");
+    let Some(plan) = response.plan else {
+        return Err(Failure::Message("the setup finished without a plan".into()));
+    };
     cliclack::note("Review", review_text(&plan, true)).map_err(Failure::Io)?;
     if !plan.valid {
         cliclack::outro_cancel("The plan failed validation; nothing was written. Run by init again to change the answers.")

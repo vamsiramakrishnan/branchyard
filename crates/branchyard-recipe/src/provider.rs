@@ -325,7 +325,6 @@ impl SandboxProvider for RecipeProvider {
         }))
     }
 
-    #[allow(clippy::expect_used)] // ratchet: branchyard-recipe
     fn exec(&self, name: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
         let machine = self
             .machine(name)
@@ -401,7 +400,14 @@ impl SandboxProvider for RecipeProvider {
         // Until the wrapper says the program starts, stderr is the
         // transport's and the wrapper's; whatever came before the marker is
         // kept for the caller.
-        let mut stderr = BufReader::new(child.stderr.take().expect("piped"));
+        let Some(piped) = child.stderr.take() else {
+            branchyard_support::best_effort("kill wrapper", child.kill());
+            branchyard_support::best_effort("reap wrapper", child.wait());
+            return Err(ProviderError::Io(std::io::Error::other(
+                "the wrapper's stderr is not piped",
+            )));
+        };
+        let mut stderr = BufReader::new(piped);
         let mut before = Vec::new();
         let mut line = Vec::new();
         let started = loop {
@@ -466,14 +472,13 @@ impl SandboxProvider for RecipeProvider {
         Ok(())
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
     fn destroy(&self, name: &str) -> Result<(), ProviderError> {
         let Some(machine) = self.machine(name) else {
             return Ok(());
         };
         if machine.held == Held::Running {
             // Best effort: the machine is going away regardless.
-            let _ = self.remote(name, STOP, &[&key(name)]);
+            branchyard_support::best_effort("self.remote", self.remote(name, STOP, &[&key(name)]));
         }
         if let Some(destroy) = &self.recipe.destroy {
             self.lifecycle(name, destroy, Mode::Destroy, &machine.result)?;
@@ -603,12 +608,11 @@ impl Process for RemoteProcess {
         Ok(())
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
     fn teardown(&mut self) -> Vec<String> {
         self.torn_down = true;
         let names = self.remote(TEARDOWN).unwrap_or_default();
         self.kill_local();
-        let _ = self.child.try_wait();
+        branchyard_support::best_effort("child.try_wait", self.child.try_wait());
         names
             .lines()
             .map(str::trim)
@@ -619,17 +623,16 @@ impl Process for RemoteProcess {
 }
 
 impl Drop for RemoteProcess {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
     fn drop(&mut self) {
         if self.torn_down {
             return;
         }
         match self.try_wait() {
             Ok(Some(_)) => {
-                let _ = self.remote(FORGET);
+                branchyard_support::best_effort("self.remote", self.remote(FORGET));
             }
             _ => {
-                let _ = self.remote(KILL);
+                branchyard_support::best_effort("self.remote", self.remote(KILL));
                 let _ = self.teardown();
                 branchyard_support::best_effort("reap child", self.child.wait());
             }

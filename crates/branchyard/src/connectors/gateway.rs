@@ -272,10 +272,12 @@ fn supervise(
 }
 
 /// SIGTERM, then SIGKILL after five seconds.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn terminate(child: &mut Child) {
     if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+        branchyard_support::best_effort(
+            "process.kill_process",
+            rustix::process::kill_process(pid, rustix::process::Signal::TERM),
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {

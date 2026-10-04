@@ -426,7 +426,7 @@ impl Drop for TempBlob {
 /// install exactly that file at its content address. Returns the digest
 /// and size. Opening `path` once and never again means the stored bytes are
 /// the bytes that were hashed, whatever happens to `path` meanwhile.
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let io = |what: &str, p: &Path, e: std::io::Error| {
@@ -470,7 +470,9 @@ fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
     if std::fs::metadata(&dest).is_ok_and(|m| m.len() == size) {
         return Ok((digest, size));
     }
-    let parent = dest.parent().expect("blob_path has a parent");
+    let parent = dest
+        .parent()
+        .ok_or_else(|| Error::State(format!("blob path {} has no parent", dest.display())))?;
     std::fs::create_dir_all(parent).map_err(|e| io("create", parent, e))?;
     // Immutable once written: never opened for writing again.
     if let Ok(meta) = std::fs::metadata(&temp_path) {
@@ -488,7 +490,6 @@ fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
 /// digest, and records provenance whether or not another artifact already
 /// has the same digest (bytes are kept until no artifact references them;
 /// see [`gc_after_removal`]).
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn publish(
     yard: &Yard,
     branch: &str,
@@ -504,8 +505,7 @@ pub(crate) fn publish(
     let (digest, size) = store_blob(store.dir(), path)?;
     let name = name.unwrap_or_else(|| {
         path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| digest.clone())
+            .map_or_else(|| digest.clone(), |n| n.to_string_lossy().into_owned())
     });
     let row = store.storage().create_artifact(&NewArtifact {
         digest,

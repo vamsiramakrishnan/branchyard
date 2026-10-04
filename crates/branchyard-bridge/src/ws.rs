@@ -199,7 +199,7 @@ pub struct WsReader {
 impl WsReader {
     /// The next binary message, or `None` once the peer closed the
     /// WebSocket or the connection.
-    #[allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // ratchet: branchyard-bridge
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
         let mut message: Option<Vec<u8>> = None;
         loop {
@@ -253,11 +253,12 @@ impl WsReader {
                     message = Some(payload);
                 }
                 OP_CONTINUATION if message.is_some() => {
-                    let whole = message.as_mut().unwrap();
+                    let mut whole = message.take().unwrap_or_default();
                     whole.extend_from_slice(&payload);
                     if fin {
-                        return Ok(message);
+                        return Ok(Some(whole));
                     }
+                    message = Some(whole);
                 }
                 OP_PING => {
                     let mut writer = self.writer.lock_recovering("writer");

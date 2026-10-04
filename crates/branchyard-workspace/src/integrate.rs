@@ -1,5 +1,6 @@
 //! Validated promotion of a candidate into a target branch.
 
+use branchyard_support::best_effort;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -161,7 +162,6 @@ impl Repository {
     /// promotion happened. A dirty-tree edit made between the final check and
     /// the CAS is not detected before promotion, but `read-tree -m -u` will
     /// not overwrite it.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     pub fn integrate(
         &self,
         candidate: &Candidate,
@@ -244,9 +244,12 @@ impl Repository {
 
         let mut stale_checkouts = Vec::new();
         for worktree in checkouts {
-            let _ = Git::new(&worktree)
-                .args(["update-index", "-q", "--refresh"])
-                .output();
+            best_effort(
+                "args.output",
+                Git::new(&worktree)
+                    .args(["update-index", "-q", "--refresh"])
+                    .output(),
+            );
             let moved = Git::new(&worktree)
                 .no_hooks()
                 .args(["read-tree", "-m", "-u", expected.as_str(), merged.as_str()])
@@ -357,7 +360,6 @@ impl Repository {
 
 /// Merges the candidate head into the detached `expected` in `dir`; returns
 /// the merge commit.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
 fn merge(
     dir: &Path,
     candidate: &Candidate,
@@ -380,7 +382,10 @@ fn merge(
         let unmerged = Git::new(dir)
             .args(["diff", "--name-only", "-z", "--diff-filter=U"])
             .run();
-        let _ = Git::new(dir).args(["merge", "--abort"]).output();
+        best_effort(
+            "args.output",
+            Git::new(dir).args(["merge", "--abort"]).output(),
+        );
         let files: Vec<String> = unmerged
             .unwrap_or_default()
             .split('\0')
@@ -486,7 +491,6 @@ impl TempWorktree {
 }
 
 impl Drop for TempWorktree {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     fn drop(&mut self) {
         let removed = Git::new(&self.root)
             .args(["worktree", "remove", "--force", "--force"])
@@ -494,7 +498,10 @@ impl Drop for TempWorktree {
             .run();
         if removed.is_err() || self.path.exists() {
             branchyard_support::cleanup_dir(&self.path);
-            let _ = Git::new(&self.root).args(["worktree", "prune"]).run();
+            best_effort(
+                "git worktree prune",
+                Git::new(&self.root).args(["worktree", "prune"]).run(),
+            );
         }
     }
 }

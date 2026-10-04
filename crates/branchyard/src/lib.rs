@@ -154,6 +154,7 @@ mod tarball;
 pub mod tasks;
 mod workspace;
 
+use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -603,11 +604,10 @@ impl Yard {
     /// Merge `branch`'s candidate into the local branch `target`, running the
     /// branch's check. Refuses if `target` moved since the check started, if
     /// the check fails, or if the merge conflicts.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn merge(&self, branch: &str, target: &str) -> Result<Merged, Error> {
         let merged = ops::merge(self, branch, target)?;
         // The outcome store learns the merge; it never undoes one.
-        let _ = fleet::observe(self, branch, None);
+        best_effort("fleet.observe", fleet::observe(self, branch, None));
         // So may the knowledge store, as proposals a person reviews.
         knowledge::on_end(self, branch, DistillTrigger::Merged);
         Ok(merged)

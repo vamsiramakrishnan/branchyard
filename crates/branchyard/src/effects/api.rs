@@ -1,6 +1,7 @@
 //! The ledger and approvals on [`Yard`]: what every surface (`by`, the
 //! server, the companion, a delegating parent) calls.
 
+use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;
 use std::sync::Arc;
 
@@ -167,7 +168,6 @@ impl Yard {
     /// `surface`: promote its draft with the gateway's promote call, or make
     /// the call held in the outbox. The entry is `begun` before the call,
     /// as any effect is, and the call carries the entry's id as its key.
-    #[allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
     pub fn promote_effect(&self, id: &str, by: &str, surface: &str) -> Result<EffectEntry, Error> {
         let entry = self.effect(id)?;
         if entry.state != EffectState::Staged {
@@ -210,16 +210,19 @@ impl Yard {
         };
         // The approval's own record, when it still waits.
         if held.as_ref().is_some_and(ApprovalAsk::pending) {
-            let _ = ask::answer(
-                self,
-                &staged.ask,
-                &AskAnswer {
-                    allow: true,
-                    by: by.to_owned(),
-                    surface: surface.to_owned(),
-                    at_ms: now,
-                    reason: Some("promoted".into()),
-                },
+            best_effort(
+                "ask.answer",
+                ask::answer(
+                    self,
+                    &staged.ask,
+                    &AskAnswer {
+                        allow: true,
+                        by: by.to_owned(),
+                        surface: surface.to_owned(),
+                        at_ms: now,
+                        reason: Some("promoted".into()),
+                    },
+                ),
             );
         }
         let mut begin = EffectMove::to(EffectState::Begun);
@@ -241,10 +244,10 @@ impl Yard {
             Some(promote) => client.follow_up(&promote.tool, &promote.arguments, Some(&entry.id)),
             // The outbox: the call as the harness made it.
             None => {
-                let tool = request["name"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("{}__{}", entry.connector, entry.operation));
+                let tool = request["name"].as_str().map_or_else(
+                    || format!("{}__{}", entry.connector, entry.operation),
+                    str::to_owned,
+                );
                 let arguments = request.get("arguments").cloned().unwrap_or(json!({}));
                 client.call(
                     &tool,

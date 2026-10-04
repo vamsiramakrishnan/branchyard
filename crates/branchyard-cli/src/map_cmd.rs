@@ -326,7 +326,6 @@ fn launch() -> Value {
 
 /// Run `name` again with the command line that started it, from where it
 /// ran, with its recorded items.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn resume(env: &Env, name: &str, retry_failed: bool, json: bool) -> Outcome {
     let yard = commands::open()?;
     let stored = yard.map_spec(name)?;
@@ -340,8 +339,7 @@ fn resume(env: &Env, name: &str, retry_failed: bool, json: bool) -> Outcome {
         .unwrap_or_default();
     let cwd = stored.launch["cwd"]
         .as_str()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| yard.root().to_path_buf());
+        .map_or_else(|| yard.root().to_path_buf(), PathBuf::from);
     let cli = crate::args::parse_from(std::iter::once("by".to_owned()).chain(argv))
         .map_err(|e| Failure::Message(format!("map {name}'s recorded command line: {e}")))?;
     let Some(command) = cli.command else {

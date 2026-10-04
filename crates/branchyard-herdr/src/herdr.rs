@@ -44,7 +44,6 @@ impl Herdr {
     }
 
     /// Run `herdr <args>` and return its JSON response.
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-herdr
     pub fn call(&self, args: &[String]) -> Result<Value, HerdrError> {
         let output = Command::new(&self.bin)
             .args(args)
@@ -77,11 +76,13 @@ impl Herdr {
             .as_ref()
             .and_then(|e| e.get("message"))
             .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                let text = format!("{} {}", stdout.trim(), stderr.trim());
-                format!("herdr {} failed: {}", args.join(" "), text.trim())
-            });
+            .map_or_else(
+                || {
+                    let text = format!("{} {}", stdout.trim(), stderr.trim());
+                    format!("herdr {} failed: {}", args.join(" "), text.trim())
+                },
+                str::to_owned,
+            );
         Err(HerdrError { code, message })
     }
 

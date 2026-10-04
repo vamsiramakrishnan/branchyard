@@ -768,7 +768,6 @@ pub fn request_digest(connector: &str, operation: &str, arguments: &Value) -> St
 }
 
 /// Find one entry by its id or the end of it (what people type).
-#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn find_effect(backend: &dyn EffectBackend, id: &str) -> Result<EffectEntry, Error> {
     if let Some(entry) = backend.effect(id)? {
         return Ok(entry);
@@ -779,17 +778,17 @@ pub(crate) fn find_effect(backend: &dyn EffectBackend, id: &str) -> Result<Effec
         .into_iter()
         .filter(|e| e.id.ends_with(&wanted))
         .collect();
-    match matches.len() {
-        1 => Ok(matches.into_iter().next().expect("one")),
-        0 => Err(Error::Denied(format!("no effect {id} in the ledger"))),
-        n => Err(Error::Denied(format!(
-            "{id} names {n} effects; give more of its id"
+    let count = matches.len();
+    match matches.into_iter().next() {
+        Some(only) if count == 1 => Ok(only),
+        None => Err(Error::Denied(format!("no effect {id} in the ledger"))),
+        Some(_) => Err(Error::Denied(format!(
+            "{id} names {count} effects; give more of its id"
         ))),
     }
 }
 
 /// Find one ask by its id or the end of it.
-#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn find_ask(backend: &dyn EffectBackend, id: &str) -> Result<ApprovalAsk, Error> {
     if let Some(ask) = backend.ask(id)? {
         return Ok(ask);
@@ -800,11 +799,12 @@ pub(crate) fn find_ask(backend: &dyn EffectBackend, id: &str) -> Result<Approval
         .into_iter()
         .filter(|a| a.id.ends_with(&wanted))
         .collect();
-    match matches.len() {
-        1 => Ok(matches.into_iter().next().expect("one")),
-        0 => Err(Error::Denied(format!("no approval {id}"))),
-        n => Err(Error::Denied(format!(
-            "{id} names {n} approvals; give more of its id"
+    let count = matches.len();
+    match matches.into_iter().next() {
+        Some(only) if count == 1 => Ok(only),
+        None => Err(Error::Denied(format!("no approval {id}"))),
+        Some(_) => Err(Error::Denied(format!(
+            "{id} names {count} approvals; give more of its id"
         ))),
     }
 }

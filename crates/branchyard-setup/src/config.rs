@@ -1299,7 +1299,6 @@ impl WorkspaceConfig {
 
     /// The run script `by workspace run` runs for `name`, or, given none,
     /// the default one, or the only one.
-    #[allow(clippy::expect_used)] // ratchet: branchyard-setup
     pub fn run_script(&self, name: Option<&str>) -> Result<(String, Vec<String>), String> {
         let names = || self.run.keys().cloned().collect::<Vec<_>>().join(", ");
         let chosen = match name {
@@ -1311,9 +1310,13 @@ impl WorkspaceConfig {
                         false => format!("no run script named {name}; there are {}", names()),
                     })?
             }
-            None => match self.run.iter().find(|(_, r)| r.default) {
+            None => match self
+                .run
+                .iter()
+                .find(|(_, r)| r.default)
+                .or_else(|| self.run.iter().next().filter(|_| self.run.len() == 1))
+            {
                 Some(found) => found,
-                None if self.run.len() == 1 => self.run.iter().next().expect("one"),
                 None if self.run.is_empty() => {
                     return Err("[workspace] has no run scripts".to_owned())
                 }

@@ -11,6 +11,7 @@
 //! the next turn under the caller's own policy; rejection ends the branch,
 //! or with `replan`, runs another read-only planning turn with the reason.
 
+use branchyard_support::best_effort;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{self, Turn};
@@ -290,7 +291,6 @@ fn reply(events: &[RecordedEvent]) -> String {
 /// Settle a planning turn that just ended, in `conclude`: one that
 /// completed proposes its reply as the plan and leaves the branch awaiting
 /// approval. Any other ending leaves it planning, as its status says.
-#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn conclude(
     yard: &Yard,
     record: &mut Record,
@@ -312,7 +312,9 @@ pub(crate) fn conclude(
         Ok(tasks) => (tasks, None),
         Err(why) => (None, Some(why)),
     };
-    let state = record.plan.as_mut().expect("planning checked above");
+    let Some(state) = record.plan.as_mut() else {
+        return Ok(());
+    };
     let plan = Plan {
         markdown,
         tasks,
@@ -341,7 +343,6 @@ pub(crate) fn conclude(
 
 /// After a turn's lease is released: a delegated child whose plan now
 /// awaits approval escalates it to its parent's inbox, once per round.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn settled(yard: &Yard, name: &str) {
     let store = yard.store();
     let Ok(record) = store.read(name) else {
@@ -376,10 +377,13 @@ pub(crate) fn settled(yard: &Yard, name: &str) {
     };
     if let Ok(message) = delegate.escalate(&text) {
         if let Ok(mut recorder) = Recorder::open(&store, name, None) {
-            let _ = recorder.record(Activity::Plan(Box::new(PlanActivity::Escalated {
-                to: parent.clone(),
-                message: message.id,
-            })));
+            best_effort(
+                "recorder.record",
+                recorder.record(Activity::Plan(Box::new(PlanActivity::Escalated {
+                    to: parent.clone(),
+                    message: message.id,
+                }))),
+            );
         }
     }
 }
@@ -566,7 +570,6 @@ pub(crate) fn approve(
 
 /// Reject `name`'s plan: end the branch, or with `replan`, run another
 /// read-only planning turn with the reason.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn reject(
     yard: &Yard,
     name: &str,
@@ -609,7 +612,7 @@ pub(crate) fn reject(
     let mut recorder = Recorder::fenced(&store, lease.fence(), options.observer.clone());
     recorder.record(Activity::Plan(Box::new(activity)))?;
     recorder.finish(lease, &record)?;
-    let _ = crate::fleet::observe(yard, name, None);
+    best_effort("fleet.observe", crate::fleet::observe(yard, name, None));
     yard.branch(name)
 }
 

@@ -25,6 +25,7 @@
 //!    when the gateway described nothing; `failed` on a refusal or a tool
 //!    error; `unknown` when the answer was lost after the call was sent.
 
+use branchyard_support::best_effort;
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
@@ -213,7 +214,6 @@ impl EffectProxy {
         self.address.port()
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn shut(&mut self) {
         if self.state.stop.swap(true, Ordering::SeqCst) {
             return;
@@ -222,7 +222,10 @@ impl EffectProxy {
         if wake.ip().is_unspecified() {
             wake.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
         }
-        let _ = TcpStream::connect_timeout(&wake, Duration::from_secs(1));
+        best_effort(
+            "TcpStream.connect_timeout",
+            TcpStream::connect_timeout(&wake, Duration::from_secs(1)),
+        );
         if let Some(thread) = self.thread.take() {
             branchyard_support::join_reporting("effect proxy accept", thread);
         }
@@ -556,12 +559,14 @@ fn rest_tool(request: &Request) -> Option<String> {
         .map(std::borrow::Cow::into_owned)
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn handle(stream: TcpStream, state: &ProxyState) {
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
+    best_effort(
+        "stream.set_read_timeout",
+        stream.set_read_timeout(Some(Duration::from_secs(300))),
+    );
     let mut reader = BufReader::new(stream);
     let request = match read_request(&mut reader, &mut out) {
         Ok(Some(request)) => request,
@@ -978,7 +983,6 @@ fn perform(
 }
 
 /// Stage the call: its draft form when it declares one, else the outbox.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream) {
     let ledger = state.yard.store();
     let id = match ulid(now_ms()) {
@@ -1092,9 +1096,12 @@ fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream
                 false => EffectState::Failed,
             })
             .detail(format!("the draft call: {why}"));
-            let _ = ledger
-                .effects()
-                .move_effect(&id, &[EffectState::Staged], &change, now_ms());
+            best_effort(
+                "effects.move_effect",
+                ledger
+                    .effects()
+                    .move_effect(&id, &[EffectState::Staged], &change, now_ms()),
+            );
             call.wire.error(
                 out,
                 502,

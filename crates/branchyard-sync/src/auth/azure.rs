@@ -142,7 +142,6 @@ impl ManagedIdentity {
         self
     }
 
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sync
     pub fn token(&self, now_ms: u64) -> Result<String> {
         let mut cached = self.cached.lock_recovering("cached");
         if let Some((token, expires)) = cached.as_ref() {
@@ -152,11 +151,10 @@ impl ManagedIdentity {
         }
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
         let resource = uri_encode(&self.resource, false);
-        let configured = self
-            .endpoint
-            .clone()
-            .map(|(e, h)| (Some(e), Some(h)))
-            .unwrap_or_else(|| (var("IDENTITY_ENDPOINT"), var("IDENTITY_HEADER")));
+        let configured = self.endpoint.clone().map_or_else(
+            || (var("IDENTITY_ENDPOINT"), var("IDENTITY_HEADER")),
+            |(e, h)| (Some(e), Some(h)),
+        );
         let request = match configured {
             (Some(endpoint), Some(header)) => Request::new(
                 "GET",
@@ -192,8 +190,7 @@ impl ManagedIdentity {
         let expires = value
             .get("expires_on")
             .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
-            .map(|s| s * 1000)
-            .unwrap_or(now_ms + 300_000);
+            .map_or(now_ms + 300_000, |s| s * 1000);
         *cached = Some((token.clone(), expires));
         Ok(token)
     }

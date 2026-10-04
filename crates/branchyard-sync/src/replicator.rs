@@ -178,7 +178,6 @@ impl Replicator {
 
     /// Sync one task now, recording the outcome. A fenced task is refused
     /// (`Kind::LeaseHeld`) and left queued.
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sync
     pub fn sync_task(&self, task: &str) -> Result<SyncReport> {
         if let Some(reason) = self.fenced(task) {
             return Err(Error::new(
@@ -209,8 +208,7 @@ impl Replicator {
                     .pending(&key)?
                     .into_iter()
                     .find(|p| p.task == task)
-                    .map(|p| p.attempts)
-                    .unwrap_or(0);
+                    .map_or(0, |p| p.attempts);
                 let next = self.clock.now() + self.backoff(attempts + 1);
                 self.outbox.failed(&key, task, &e.to_string(), next)?;
                 self.outbox

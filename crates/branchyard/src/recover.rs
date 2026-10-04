@@ -22,6 +22,7 @@
 //! the branch: gone from this host, or reserved longer ago than
 //! [`crate::state::RESERVATION_TTL`].
 
+use branchyard_support::best_effort;
 use std::collections::BTreeSet;
 
 use serde_json::Value;
@@ -38,7 +39,6 @@ use branchyard_support::time::now_ms;
 /// Recover every branch that needs it. A branch that cannot be recovered
 /// does not stop the others; the first such error is returned after all
 /// were tried.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
     let store = yard.store();
     let now = now_ms();
@@ -77,7 +77,7 @@ pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
     // registry that cannot be read never keeps the repository from
     // opening; `by services gc` says why.
     if yard.has_services() {
-        let _ = yard.reclaim_services();
+        best_effort("yard.reclaim_services", yard.reclaim_services());
     }
     // Effects whose turn stopped between writing the ledger and recording
     // the gateway's answer: unknown, for reconciliation, never retried.

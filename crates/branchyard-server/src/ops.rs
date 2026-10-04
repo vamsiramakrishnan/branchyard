@@ -34,7 +34,6 @@
 //! queued ones stay queued for the next worker, here after a restart or on
 //! another server.
 
-#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-server
 use branchyard_support::time::now_ms;
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
@@ -177,6 +176,7 @@ static INVENTORY_SOURCE: std::sync::OnceLock<InventorySource> = std::sync::OnceL
 /// Detect inventories with `source` in every registry this process opens
 /// from a configuration: how `by serve` and `by worker` add the usage
 /// meters `by usage` reads. Only the first call counts.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn set_inventory_source(source: InventorySource) {
     let _ = INVENTORY_SOURCE.set(source);
 }
@@ -472,6 +472,7 @@ impl Registry {
     /// Admit a new operation durably, with `work` describing what to run,
     /// or return the one an earlier request with the same key created
     /// (`true`).
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn submit(&self, new: NewOperation, work: Value) -> Result<(Operation, bool), ApiError> {
         if let Some(idem) = &new.idempotency {
             if let Some(existing) = self.replay(idem, &new.principal.tenant)? {
@@ -557,6 +558,7 @@ impl Registry {
 
     /// Claim and run queued operations until shutdown, renewing the
     /// claims of those running.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     fn dispatch(self: Arc<Self>) {
         let mut renewed = Instant::now();
         let renew_every = self.options.lease / 3;
@@ -894,6 +896,7 @@ impl Registry {
         self.wait(timeout, false)
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     fn wait(&self, timeout: Duration, queued_too: bool) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -941,7 +944,7 @@ impl Registry {
                 count += 1;
             }
         }
-        let _ = self.store.leave(&self.worker);
+        branchyard_support::best_effort("store.leave", self.store.leave(&self.worker));
         self.lock().closed = true;
         self.changed.notify_all();
         count

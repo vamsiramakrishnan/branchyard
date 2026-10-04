@@ -171,7 +171,6 @@ impl Hub {
 
     /// Record `name`'s running turn, starting the broker if needed, and
     /// return the broker's socket.
-    #[allow(clippy::expect_used)] // ratchet: branchyard
     fn register(&self, yard: &Yard, name: &str, context: Context) -> Result<PathBuf, Error> {
         let mut broker = lock(&self.broker);
         lock(&self.contexts).insert(name.to_owned(), context);
@@ -186,7 +185,10 @@ impl Hub {
                 }
             }
         }
-        Ok(broker.as_ref().expect("started above").path().to_path_buf())
+        broker
+            .as_ref()
+            .map(|started| started.path().to_path_buf())
+            .ok_or_else(|| Error::State("the delegation broker is not running".into()))
     }
 
     /// Revoke `name`'s context if it still holds `token`; stop the broker
@@ -430,13 +432,14 @@ fn prepend(dir: &Path, inherited: Option<std::ffi::OsString>) -> String {
 
 /// Write `content` to `path` unless it is already there, through a
 /// temporary file and a rename, so concurrent turns never see half a file.
-#[allow(clippy::expect_used)] // ratchet: branchyard
 fn install(path: &Path, content: &str) -> Result<(), Error> {
     if fs::read_to_string(path).is_ok_and(|current| current == content) {
         return Ok(());
     }
     let failed = |e: std::io::Error| Error::State(format!("install {}: {e}", path.display()));
-    let dir = path.parent().expect("installed files have a directory");
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::State(format!("install {}: it has no directory", path.display())))?;
     fs::create_dir_all(dir).map_err(failed)?;
     let temp = dir.join(format!(
         ".{}.{}.tmp",

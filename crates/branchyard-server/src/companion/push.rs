@@ -19,6 +19,7 @@
 //! service answers 404 or 410, or whose credential no longer verifies
 //! (revoked, expired, removed from the configuration), is dropped.
 
+use branchyard_support::best_effort;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -677,10 +678,12 @@ pub(crate) async fn fan_out(
     (delivered, failures)
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 async fn drop_subscription(companion: &super::Companion, endpoint: &str) {
     let (store, endpoint) = (companion.store.clone(), endpoint.to_owned());
-    let _ = tokio::task::spawn_blocking(move || store.unsubscribe(&endpoint, None)).await;
+    best_effort(
+        "unsubscribe.await",
+        tokio::task::spawn_blocking(move || store.unsubscribe(&endpoint, None)).await,
+    );
 }
 
 /// One notifier per served repository, following its feed.

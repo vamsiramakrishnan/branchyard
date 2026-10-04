@@ -140,7 +140,6 @@ fn owner(service: &Service) -> String {
     }
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn render(env: &Env, services: &[Service], now: u64) -> String {
     let columns = [
         Column {
@@ -205,8 +204,7 @@ fn render(env: &Env, services: &[Service], now: u64) -> String {
                 Cell::plain(
                     s.endpoints
                         .first()
-                        .map(|e| e.describe())
-                        .unwrap_or_else(|| "-".into()),
+                        .map_or_else(|| "-".into(), |e| e.describe()),
                 ),
                 Cell::plain(
                     s.capabilities

@@ -100,6 +100,27 @@ pub struct Resolved {
     pub file_secret: Option<&'static str>,
 }
 
+impl Resolved {
+    /// The secret an environment method reads. A method without one is
+    /// refused: the specs give every environment method a key.
+    pub fn env(&self) -> Result<&'static str, Refused> {
+        self.env_key.ok_or_else(|| {
+            Refused(format!(
+                "auth method {:?} names no environment key",
+                self.method
+            ))
+        })
+    }
+
+    /// The secret the method delivers, whether it is read from the
+    /// environment or from a file.
+    pub fn secret(&self) -> Result<&'static str, Refused> {
+        self.env_key
+            .or(self.file_secret)
+            .ok_or_else(|| Refused(format!("auth method {:?} names no secret", self.method)))
+    }
+}
+
 impl Spec {
     /// Every secret name any method reads.
     pub fn names(&self) -> Vec<&'static str> {

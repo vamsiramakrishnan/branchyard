@@ -29,6 +29,7 @@
 //! With `enforce = "required"`, anything but `Enforced` refuses the turn
 //! before the harness starts.
 
+use branchyard_support::best_effort;
 use std::net::TcpListener;
 
 use branchyard_provision::network::{Enforce, HostRule, Network};
@@ -357,7 +358,6 @@ pub(crate) fn prepare(
 }
 
 /// A proxy deciding by `network` and recording each decision on `branch`.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn proxy(yard: &Yard, branch: &str, network: Network) -> Proxy {
     let yard = yard.clone();
     let branch = branch.to_owned();
@@ -382,7 +382,7 @@ fn proxy(yard: &Yard, branch: &str, network: Network) -> Proxy {
                     reason: decision.reason.clone(),
                 })),
             };
-            let _ = yard.store().append(&branch, &event, None);
+            best_effort("store.append", yard.store().append(&branch, &event, None));
         },
     )
 }

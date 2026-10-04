@@ -15,6 +15,7 @@
 //! turns becomes one push, and the lag reported is from the oldest change
 //! not yet pushed.
 
+use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -350,22 +351,25 @@ impl UploadJournal for OutboxJournal {
             .flatten()
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn save(&self, key: &str, state: &str) {
-        let _ = self.0.with(|c| {
-            c.execute(
-                "INSERT INTO uploads (key, state) VALUES (?1, ?2)
+        best_effort(
+            "0.with",
+            self.0.with(|c| {
+                c.execute(
+                    "INSERT INTO uploads (key, state) VALUES (?1, ?2)
                  ON CONFLICT (key) DO UPDATE SET state = excluded.state",
-                params![key, state],
-            )
-        });
+                    params![key, state],
+                )
+            }),
+        );
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn clear(&self, key: &str) {
-        let _ = self
-            .0
-            .with(|c| c.execute("DELETE FROM uploads WHERE key = ?1", params![key]));
+        best_effort(
+            "0.with",
+            self.0
+                .with(|c| c.execute("DELETE FROM uploads WHERE key = ?1", params![key])),
+        );
     }
 }
 

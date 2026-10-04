@@ -648,7 +648,6 @@ fn last_turn(names: &[String]) -> u32 {
 /// checkpoint it came after (or the one a fork started from), with this
 /// turn's conversation added. Returns the commit; `None` for a branch that
 /// is no task's attempt.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn record_checkpoint(
     yard: &Yard,
     record: &Record,
@@ -668,8 +667,7 @@ pub(crate) fn record_checkpoint(
     // from.
     let offset = inherited
         .as_deref()
-        .map(|commit| last_turn(&conversation_in(root, commit)))
-        .unwrap_or(0);
+        .map_or(0, |commit| last_turn(&conversation_in(root, commit)));
     let turn = offset + checkpoint.turn;
     let events = crate::record::read(&yard.store(), &info.name)?;
     let blob = |bytes: Vec<u8>| -> Result<String, Error> {

@@ -40,7 +40,7 @@
 //!   and is removed. Recovery ([`crate::Yard::recover`]) does this, as
 //!   does every fill and drain.
 
-#![allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
+use branchyard_support::best_effort;
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -99,8 +99,7 @@ pub struct PoolSpec {
 impl PoolSpec {
     pub fn max_age(&self) -> Duration {
         self.max_age_secs
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_MAX_AGE)
+            .map_or(DEFAULT_MAX_AGE, Duration::from_secs)
     }
 
     pub fn max_behind(&self) -> u32 {
@@ -425,10 +424,13 @@ fn remove_files(root: &Path, path: &Path, shared: &[String]) {
     branchyard_workspace::materialize::remove_links(path, shared);
     if path.exists() {
         let _lock = crate::git::lock();
-        let _ = Git::new(root)
-            .args(["worktree", "remove", "--force"])
-            .arg(path)
-            .run();
+        best_effort(
+            "arg.run",
+            Git::new(root)
+                .args(["worktree", "remove", "--force"])
+                .arg(path)
+                .run(),
+        );
     }
     branchyard_support::cleanup_dir(path);
 }
@@ -437,7 +439,10 @@ fn remove_files(root: &Path, path: &Path, shared: &[String]) {
 /// removed without git).
 fn prune_worktrees(root: &Path) {
     let _lock = crate::git::lock();
-    let _ = Git::new(root).args(["worktree", "prune"]).run();
+    best_effort(
+        "git worktree prune",
+        Git::new(root).args(["worktree", "prune"]).run(),
+    );
 }
 
 /// Take a ready slot to remove it: compare-and-set to `claimed` by nobody,
@@ -465,7 +470,7 @@ fn take_for_removal(yard: &Yard, row: &SlotRow, why: &str) -> bool {
 /// files, then its row.
 fn discard(yard: &Yard, row: &SlotRow) {
     remove_files(&yard.root, Path::new(&row.path), &Detail::of(row).shared);
-    let _ = yard.store().pool().delete_slot(&row.id);
+    best_effort("pool.delete_slot", yard.store().pool().delete_slot(&row.id));
 }
 
 /// Remove what stopped processes left: rows filling or claiming whose
@@ -496,7 +501,7 @@ pub(crate) fn reclaim(yard: &Yard) -> Vec<(String, String)> {
         match row.state {
             SlotState::Ready => {
                 if !path.is_dir() && take_for_removal(yard, row, "its worktree is gone") {
-                    let _ = store.pool().delete_slot(&row.id);
+                    best_effort("pool.delete_slot", store.pool().delete_slot(&row.id));
                     pruned = true;
                     done.push((row.id.clone(), "its worktree is gone".into()));
                 }
@@ -520,10 +525,13 @@ pub(crate) fn reclaim(yard: &Yard) -> Vec<(String, String)> {
                     if target.is_dir() && on.as_deref() != Some(&format!("by/{branch}")) {
                         branchyard_workspace::materialize::remove_links(target, &detail.shared);
                         let _lock = crate::git::lock();
-                        let _ = Git::new(root)
-                            .args(["worktree", "remove", "--force"])
-                            .arg(target)
-                            .run();
+                        best_effort(
+                            "arg.run",
+                            Git::new(root)
+                                .args(["worktree", "remove", "--force"])
+                                .arg(target)
+                                .run(),
+                        );
                     }
                 }
                 if store.pool().delete_slot(&row.id).unwrap_or(false) {
@@ -763,7 +771,10 @@ pub(crate) fn take(yard: &Yard, record: &Record, base: &str) -> Result<Taken, St
 
 /// The claim is done: the slot is the branch's worktree now.
 pub(crate) fn settle(yard: &Yard, taken: &Taken) {
-    let _ = yard.store().pool().delete_slot(&taken.row.id);
+    best_effort(
+        "pool.delete_slot",
+        yard.store().pool().delete_slot(&taken.row.id),
+    );
     wake(&yard.root);
 }
 
@@ -1002,11 +1013,14 @@ fn environment(yard: &Yard, spec: &WorkspaceSpec, path: &Path) -> Result<Detail,
             // Copied files are the branch's to copy, fresh, when it starts.
             for rel in &built.copied {
                 let target = path.join(rel);
-                let _ = match fs::symlink_metadata(&target).map(|m| m.is_dir()) {
-                    Ok(true) => fs::remove_dir_all(&target),
-                    Ok(false) => fs::remove_file(&target),
-                    Err(_) => Ok(()),
-                };
+                best_effort(
+                    "symlink_metadata.map",
+                    match fs::symlink_metadata(&target).map(|m| m.is_dir()) {
+                        Ok(true) => fs::remove_dir_all(&target),
+                        Ok(false) => fs::remove_file(&target),
+                        Err(_) => Ok(()),
+                    },
+                );
             }
             match built.environment {
                 Some(info) => {

@@ -8,6 +8,7 @@
 //! for it, nothing else. On a network file system it is only as good as the
 //! file system's own locking.
 
+use branchyard_support::best_effort;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -85,10 +86,10 @@ impl DirLock {
         }
         // Who holds it, for the next process's error; the lock itself does
         // not depend on this.
-        let _ = file.set_len(0);
-        let _ = file.seek(SeekFrom::Start(0));
+        best_effort("file.set_len", file.set_len(0));
+        best_effort("file.seek", file.seek(SeekFrom::Start(0)));
         let _ = writeln!(file, "{what} (pid {})", std::process::id());
-        let _ = file.sync_data();
+        best_effort("file.sync_data", file.sync_data());
         Ok(DirLock { path, _file: file })
     }
 

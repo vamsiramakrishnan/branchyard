@@ -345,7 +345,6 @@ impl Session {
     /// Like [`Session::start`], but confined to its own network namespace
     /// with one listener on `127.0.0.1:port` inside it, which is returned
     /// for the caller to serve ([`LocalProvider::spawn_confined`]).
-    #[allow(clippy::expect_used)] // ratchet: branchyard-runtime
     pub fn start_confined(
         driver: Box<dyn Driver>,
         open: Open,
@@ -359,7 +358,10 @@ impl Session {
             listener = Some(bound);
             Ok(Box::new(process) as Box<dyn Process>)
         })?;
-        let listener = listener.expect("a started confined process has its listener");
+        let listener = listener.ok_or_else(|| RuntimeError::Io {
+            context: "the confined listener",
+            source: io::Error::other("the confined process did not hand back its listener"),
+        })?;
         Ok((session, listener))
     }
 

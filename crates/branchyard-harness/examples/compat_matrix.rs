@@ -9,7 +9,7 @@
 //! from the reports in `docs/qualification/`. A test in
 //! `tests/compatibility.rs` fails when the committed file is stale.
 
-#![allow(clippy::map_unwrap_or, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -189,8 +189,10 @@ pub fn render() -> String {
             let reason = NOT_IMPLEMENTED
                 .iter()
                 .find(|(id, _)| *id == target.id)
-                .map(|(_, reason)| *reason)
-                .unwrap_or_else(|| panic!("{} is neither implemented nor explained", target.id));
+                .map_or_else(
+                    || panic!("{} is neither implemented nor explained", target.id),
+                    |(_, reason)| *reason,
+                );
             out += &format!(
                 "| {name} | — | — | — | — | — | — | — | — | — | — | — | not implemented: {} | — |\n",
                 reason.replace('|', "\\|")

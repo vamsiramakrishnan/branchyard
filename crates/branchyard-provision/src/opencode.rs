@@ -51,7 +51,6 @@ impl Provisioner for OpenCode {
         Some("opencode")
     }
 
-    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         let why = "Scion's OpenCode provisioner has no verified setting for it";
         if context.model.is_some() {
@@ -70,7 +69,7 @@ impl Provisioner for OpenCode {
             plan.auth = Some(resolved.method.to_owned());
             match resolved.method {
                 "api-key" => {
-                    let key = resolved.env_key.expect("an env method has a key");
+                    let key = resolved.env()?;
                     plan.secret_env(key, key, context.secret(key).unwrap_or_default(), true);
                 }
                 "auth-file" => {

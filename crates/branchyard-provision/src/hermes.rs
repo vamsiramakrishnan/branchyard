@@ -71,7 +71,6 @@ impl Provisioner for Hermes {
         Some("hermes")
     }
 
-    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         let why = "Scion's Hermes provisioner has no setting for it";
         if context.effort.is_some() {
@@ -88,7 +87,7 @@ impl Provisioner for Hermes {
         if let Some(resolved) = resolved {
             needs_private_home(context, "Hermes's .env")?;
             plan.auth = Some(resolved.method.to_owned());
-            let key = resolved.env_key.expect("an env method has a key");
+            let key = resolved.env()?;
             // Hermes reads `~/.hermes/.env` into its own environment
             // (python-dotenv); whether its terminal tool filters it could
             // not be checked offline, so it is taken to reach tool

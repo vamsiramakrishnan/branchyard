@@ -59,7 +59,6 @@ fn read_answers(source: &str) -> Result<BTreeMap<String, Value>, String> {
 }
 
 /// `by init`, its flags already checked by clap (`crate::args::InitFlags`).
-#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn main(env: &Env, init: &InitArgs) -> Outcome {
     let Some(step) = init.step else {
         if init.json {
@@ -82,7 +81,9 @@ pub fn main(env: &Env, init: &InitArgs) -> Outcome {
         }
         return crate::wizard::run(init.topic, init.defaults);
     };
-    let topic = init.topic.expect("clap requires a topic with a step");
+    let Some(topic) = init.topic else {
+        return Err(Failure::Message("a step needs a topic".into()));
+    };
     let raw = match &init.answers {
         Some(source) => match read_answers(source) {
             Ok(raw) => raw,

@@ -71,7 +71,6 @@ impl Provisioner for Antigravity {
         Some("antigravity")
     }
 
-    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         let why = "Branchyard's translation of Scion's Antigravity provisioner has no setting \
                    for it";
@@ -86,7 +85,7 @@ impl Provisioner for Antigravity {
         let given: Vec<&str> = context.secrets.iter().map(|s| s.name.as_str()).collect();
         if let Some(resolved) = AUTH.select(&given, context.auth.as_deref())? {
             plan.auth = Some(resolved.method.to_owned());
-            let key = resolved.env_key.expect("an env method has a key");
+            let key = resolved.env()?;
             plan.secret_env(key, key, context.secret(key).unwrap_or_default(), true);
         }
         plan.unused_secrets = unused(context, &AUTH.names());

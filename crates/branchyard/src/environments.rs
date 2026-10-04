@@ -33,7 +33,7 @@
 //! rows: whoever shares the checkout (a server and its workers on one
 //! host) shares them, and the key's lock is an advisory `flock`.
 
-#![allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
+use branchyard_support::best_effort;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -228,7 +228,7 @@ impl EnvironmentUse {
     /// One line for a log.
     pub fn describe(&self) -> String {
         let key = short(&self.key);
-        let used = self.used.as_deref().map(short).unwrap_or(key);
+        let used = self.used.as_deref().map_or(key, short);
         let how = self
             .method
             .as_deref()
@@ -413,6 +413,7 @@ pub fn list(root: &Path) -> Vec<EnvironmentInfo> {
 }
 
 /// Note that `info` was used now.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn touch(root: &Path, info: &EnvironmentInfo) {
     let mut info = info.clone();
     info.last_used_ms = now_ms();
@@ -555,6 +556,7 @@ pub(crate) struct Failed<'a> {
 
 /// Record that `key`'s build by `branch` failed because `reason`. A good
 /// environment of the key, if any, is left alone.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn record_failure(root: &Path, spec: &WorkspaceSpec, failed: Failed<'_>) {
     let Failed {
         key,
@@ -689,11 +691,14 @@ pub(crate) fn clear_failed(worktree: &Path, produced: &[String], keep: &[String]
             continue;
         }
         let target = worktree.join(rel);
-        let _ = match fs::symlink_metadata(&target).map(|m| m.is_dir()) {
-            Ok(true) => fs::remove_dir_all(&target),
-            Ok(false) => fs::remove_file(&target),
-            Err(_) => Ok(()),
-        };
+        best_effort(
+            "symlink_metadata.map",
+            match fs::symlink_metadata(&target).map(|m| m.is_dir()) {
+                Ok(true) => fs::remove_dir_all(&target),
+                Ok(false) => fs::remove_file(&target),
+                Err(_) => Ok(()),
+            },
+        );
     }
 }
 
@@ -761,9 +766,12 @@ pub(crate) fn capture(
             Ok(_) => json!({ "key": capture.key }),
             Err((error, _)) => json!({ "error": error }),
         };
-        let _ = store
-            .backend()
-            .finish_step(fence, fence.turn, STEP_ENVIRONMENT, &outcome);
+        best_effort(
+            "backend.finish_step",
+            store
+                .backend()
+                .finish_step(fence, fence.turn, STEP_ENVIRONMENT, &outcome),
+        );
     }
     result
 }
@@ -775,7 +783,7 @@ fn stage(capture: &Capture<'_>, staging: &Path) -> Result<EnvironmentInfo, Strin
     let undo = |moved: &[String]| {
         if let Some(worktree) = capture.worktree {
             for rel in moved {
-                let _ = fs::rename(into.join(rel), worktree.join(rel));
+                best_effort("fs.rename", fs::rename(into.join(rel), worktree.join(rel)));
             }
         }
         branchyard_support::cleanup_dir(staging);
@@ -844,7 +852,7 @@ fn stage(capture: &Capture<'_>, staging: &Path) -> Result<EnvironmentInfo, Strin
     }
     if let Err(e) = fs::rename(staging, &target) {
         if replaced {
-            let _ = fs::rename(&old, &target);
+            best_effort("fs.rename", fs::rename(&old, &target));
         }
         undo(&moved);
         return Err(format!("could not keep the environment: {e}"));
@@ -992,14 +1000,17 @@ pub(crate) fn prune(yard: &Yard, keep: usize, max_age: Duration, only: &[String]
                     .is_some_and(|age| age > LOCK_WAIT + Duration::from_secs(60));
                 if stale {
                     let _lock = crate::git::lock();
-                    let _ = crate::git::run(
-                        root,
-                        &[
-                            "worktree",
-                            "remove",
-                            "--force",
-                            &entry.path().display().to_string(),
-                        ],
+                    best_effort(
+                        "git.run",
+                        crate::git::run(
+                            root,
+                            &[
+                                "worktree",
+                                "remove",
+                                "--force",
+                                &entry.path().display().to_string(),
+                            ],
+                        ),
                     );
                     branchyard_support::cleanup_dir(entry.path());
                 }
@@ -1079,9 +1090,12 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
     }
     let cleanup = || {
         let _lock = crate::git::lock();
-        let _ = crate::git::run(
-            root,
-            &["worktree", "remove", "--force", &work.display().to_string()],
+        best_effort(
+            "git.run",
+            crate::git::run(
+                root,
+                &["worktree", "remove", "--force", &work.display().to_string()],
+            ),
         );
         branchyard_support::cleanup_dir(&work);
     };
@@ -1409,7 +1423,10 @@ pub(crate) fn after_sandbox_setup(
         }
         Err((why, taken)) => {
             if let Some(taken) = taken {
-                let _ = crate::snapshots::release_environment(*provider, &taken);
+                best_effort(
+                    "snapshots.release_environment",
+                    crate::snapshots::release_environment(*provider, &taken),
+                );
             }
             not_kept(report, used, why)
         }

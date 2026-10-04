@@ -15,6 +15,7 @@
 mod actions;
 mod tui;
 
+use branchyard_support::best_effort;
 use branchyard_support::time::now_ms;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -482,12 +483,11 @@ impl Source {
             .map_err(|e| e.to_string())
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn branches(&self) -> Result<Vec<BranchInfo>, Failure> {
         Ok(match self {
             Source::Local { yard, .. } => {
                 // The gateway's newest calls, as connector_call events.
-                let _ = yard.ingest_connector_audit();
+                best_effort("yard.ingest_connector_audit", yard.ingest_connector_audit());
                 yard.branches()?
             }
             Source::Remote { repo, .. } => repo.branches()?,

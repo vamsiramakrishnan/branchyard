@@ -1,5 +1,6 @@
 //! Repositories, branch workspaces, and candidates.
 
+use branchyard_support::best_effort;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -135,7 +136,6 @@ impl Repository {
     ///
     /// Fails with [`GitError::BranchExists`] rather than reusing a branch.
     /// A relative `dir` is taken relative to the current process directory.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     pub fn create_branch(
         &self,
         name: &BranchName,
@@ -163,7 +163,10 @@ impl Repository {
             .arg(base.as_str())
             .run();
         if let Err(e) = added {
-            let _ = Git::new(&self.root).args(["config", "--unset", &key]).run();
+            best_effort(
+                "git config --unset",
+                Git::new(&self.root).args(["config", "--unset", &key]).run(),
+            );
             return Err(e);
         }
         Ok(Workspace {
@@ -184,7 +187,6 @@ impl Repository {
     /// collide. An existing branch is refused before `from` is touched;
     /// a later failure removes the worktree wherever it is, and leaves
     /// neither the branch nor its base record behind.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     pub fn adopt_worktree(
         &self,
         name: &BranchName,
@@ -205,12 +207,18 @@ impl Repository {
             .args(["config", &key, base.as_str()])
             .run()?;
         let undo = |at: &Path| {
-            let _ = Git::new(&self.root)
-                .args(["worktree", "remove", "--force"])
-                .arg(at)
-                .run();
+            best_effort(
+                "arg.run",
+                Git::new(&self.root)
+                    .args(["worktree", "remove", "--force"])
+                    .arg(at)
+                    .run(),
+            );
             branchyard_support::cleanup_dir(at);
-            let _ = Git::new(&self.root).args(["config", "--unset", &key]).run();
+            best_effort(
+                "git config --unset",
+                Git::new(&self.root).args(["config", "--unset", &key]).run(),
+            );
         };
         let moved = Git::new(&self.root)
             .no_hooks()
@@ -229,9 +237,12 @@ impl Repository {
             .run();
         if let Err(e) = switched {
             undo(&dir);
-            let _ = Git::new(&self.root)
-                .args(["branch", "-D", &name.branch()])
-                .run();
+            best_effort(
+                "branch.run",
+                Git::new(&self.root)
+                    .args(["branch", "-D", &name.branch()])
+                    .run(),
+            );
             return Err(e);
         }
         Ok(Workspace {

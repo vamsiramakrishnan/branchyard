@@ -276,13 +276,11 @@ impl Engine {
     }
 
     /// Fire a claimed run, record what happened, and return it.
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
     pub fn fire(&self, mut run: TriggerRun, fence: i64) -> io::Result<TriggerRun> {
         let trigger = self.store.get(&run.trigger)?;
         let pause_after = trigger
             .as_ref()
-            .map(|t| t.spec.policy.pause_after_failures)
-            .unwrap_or(0);
+            .map_or(0, |t| t.spec.policy.pause_after_failures);
         match trigger {
             None => {
                 run.state = RunState::SkippedDisabled;
@@ -332,7 +330,6 @@ impl Engine {
         Ok(request)
     }
 
-    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     fn attempt(&self, trigger: &StoredTrigger, run: &mut TriggerRun) {
         let fail = |run: &mut TriggerRun, why: String| {
             run.state = RunState::Failed;
@@ -347,11 +344,11 @@ impl Engine {
             Err(e) => return fail(run, format!("rendering the task: {e}")),
         };
         if trigger.spec.route.is_some() {
-            let seed = u64::from_be_bytes(
-                sha2::Sha256::digest(run.key.as_bytes())[..8]
-                    .try_into()
-                    .expect("eight bytes"),
-            );
+            let digest = sha2::Sha256::digest(run.key.as_bytes());
+            let seed = digest
+                .first_chunk::<8>()
+                .copied()
+                .map_or(0, u64::from_be_bytes);
             request = match self.sink.route(trigger, request, seed) {
                 Ok(request) => request,
                 Err(e) => return fail(run, format!("routing: {e}")),
@@ -396,7 +393,6 @@ impl Engine {
     }
 
     /// Record how fired runs' tasks ended, for those that have.
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
     pub fn settle(&self) -> io::Result<usize> {
         let mut settled = 0;
         for run in self.store.unsettled(&self.repo_names())? {
@@ -412,8 +408,7 @@ impl Engine {
             let pause_after = self
                 .store
                 .get(&run.trigger)?
-                .map(|t| t.spec.policy.pause_after_failures)
-                .unwrap_or(0);
+                .map_or(0, |t| t.spec.policy.pause_after_failures);
             let accounted = self.store.settle(&run.id, &outcome, pause_after)?;
             if let Some(why) = &accounted.paused {
                 tracing::warn!(trigger = %run.trigger, reason = %why, "trigger paused");

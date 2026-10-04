@@ -835,12 +835,13 @@ impl EventStream {
     /// Read a snapshot (such as [`Repo::branches`]) after this, then apply
     /// the entries that follow, and nothing recorded in between is missed.
     /// Call it before the first `next`; it does not retry.
-    #[allow(clippy::expect_used)] // ratchet: branchyard-client
     pub fn open(&mut self) -> Result<u64, Error> {
         if self.reader.is_none() {
             self.connect()?;
         }
-        let reader = self.reader.as_mut().expect("connected above");
+        let Some(reader) = self.reader.as_mut() else {
+            return Err(Error::Protocol("the stream is not connected".into()));
+        };
         match reader.next_event() {
             Ok(Some(event)) if event.event == "open" => {
                 let id = event
@@ -889,7 +890,6 @@ impl EventStream {
 impl Iterator for EventStream {
     type Item = Result<FeedEntry, Error>;
 
-    #[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-client
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.done {
@@ -922,7 +922,10 @@ impl Iterator for EventStream {
                     }
                 }
             }
-            let reader = self.reader.as_mut().expect("connected above");
+            let Some(reader) = self.reader.as_mut() else {
+                self.done = true;
+                return Some(Err(Error::Protocol("the stream is not connected".into())));
+            };
             match reader.next_event() {
                 Ok(Some(event)) => match event.event.as_str() {
                     "open" => {

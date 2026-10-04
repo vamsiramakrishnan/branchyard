@@ -517,10 +517,11 @@ fn short(commit: &str) -> &str {
     commit.get(..10).unwrap_or(commit)
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn age(now_ms: u64, at: Option<u64>) -> String {
-    at.map(|at| crate::render::age_text(now_ms.saturating_sub(at) / 1000))
-        .unwrap_or_else(|| "-".into())
+    at.map_or_else(
+        || "-".into(),
+        |at| crate::render::age_text(now_ms.saturating_sub(at) / 1000),
+    )
 }
 
 /// What `by adopt` was asked.
@@ -582,7 +583,6 @@ pub fn main(env: &Env, target: &Target, asked: &Asked<'_>) -> Outcome {
     }
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn list_text(env: &Env, yard: &Yard, shown: &[&Session], now: u64) -> Outcome {
     if shown.is_empty() {
         return print(&format!(
@@ -598,18 +598,17 @@ fn list_text(env: &Env, yard: &Yard, shown: &[&Session], now: u64) -> Outcome {
         "SESSION   HARNESS      AGE  TURNS  WHERE  TASK\n",
     );
     for s in shown {
-        let cwd = s
-            .cwd
-            .as_deref()
-            .map(|c| {
+        let cwd = s.cwd.as_deref().map_or_else(
+            || "-".into(),
+            |c| {
                 let rel = canonical(Path::new(c));
                 match rel.strip_prefix(&root) {
                     Ok(p) if p.as_os_str().is_empty() => ".".to_owned(),
                     Ok(p) => p.display().to_string(),
                     Err(_) => c.to_owned(),
                 }
-            })
-            .unwrap_or_else(|| "-".into());
+            },
+        );
         out.push_str(&format!(
             "{:<9} {:<12} {:>3}  {:>5}  {cwd:<5}  {}\n",
             s.id.get(..8).unwrap_or(&s.id),

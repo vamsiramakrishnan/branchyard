@@ -70,7 +70,6 @@ impl Provisioner for Gemini {
         Some("gemini-cli")
     }
 
-    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         if context.effort.is_some() {
             return Err(unsupported(
@@ -88,7 +87,7 @@ impl Provisioner for Gemini {
             let secret = |name: &str| context.secret(name).unwrap_or_default().to_owned();
             match resolved.method {
                 "api-key" => {
-                    let key = resolved.env_key.expect("an env method has a key");
+                    let key = resolved.env()?;
                     // Not verified offline whether Gemini CLI's shell
                     // tool filters it: assumed to pass it on.
                     plan.secret_env(key, key, &secret(key), true);
@@ -124,7 +123,12 @@ impl Provisioner for Gemini {
                 }
                 _ => unreachable!("every method of AUTH is handled"),
             }
-            let selected = selected_type(resolved.method).expect("every method maps");
+            let selected = selected_type(resolved.method).ok_or_else(|| {
+                Refused(format!(
+                    "auth method {:?} has no Gemini auth type",
+                    resolved.method
+                ))
+            })?;
             settings.push(JsonEdit::Set(
                 path(&["security", "auth", "selectedType"]),
                 json!(selected),

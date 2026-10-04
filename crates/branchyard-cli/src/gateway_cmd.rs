@@ -9,6 +9,7 @@
 //! gateway (a `file:` URL), and reads the gateway's audit log from
 //! `audit.jsonl` there.
 
+use branchyard_support::best_effort;
 use branchyard_support::time::now_ms;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -235,7 +236,6 @@ fn gateway_command(
 /// How often the gateway's supervisor reconciles the effect ledger.
 const RECONCILE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn main(target: &Target, action: &GatewayAction, as_json: bool) -> Outcome {
     local_only(target, "by gateway")?;
     let yard = commands::open()?;
@@ -247,8 +247,8 @@ pub fn main(target: &Target, action: &GatewayAction, as_json: bool) -> Outcome {
                 running.stop(&dir)?;
                 // What it wrote before it stopped, and its record (a
                 // supervisor stopped by a signal leaves it live).
-                let _ = yard.ingest_connector_audit();
-                let _ = yard.reclaim_services();
+                best_effort("yard.ingest_connector_audit", yard.ingest_connector_audit());
+                best_effort("yard.reclaim_services", yard.reclaim_services());
                 say(
                     as_json,
                     json!({"stopped": true, "pid": running.pid}),
@@ -462,7 +462,6 @@ fn reclaim_of(pid: Option<u32>) -> Option<Reclaim> {
 /// until interrupted, registered in the repository's service registry
 /// with the gateway process to reclaim should this process stop without
 /// stopping it.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn supervise(
     yard: &Yard,
     config: &Connectors,
@@ -473,7 +472,7 @@ fn supervise(
     let dir = connectors::local_dir(yard.root());
     Background::this_process(&gw.url, log).save(&dir)?;
     // A record a stopped supervisor left, and its gateway with it.
-    let _ = yard.reclaim_services();
+    best_effort("yard.reclaim_services", yard.reclaim_services());
     let reader = yard.clone();
     // The effect ledger is reconciled on this timer too (docs/effects.md):
     // unknown outcomes looked up through the gateway it supervises.
@@ -482,12 +481,15 @@ fn supervise(
         command,
         log.to_path_buf(),
         Box::new(move || {
-            let _ = reader.ingest_connector_audit();
+            best_effort(
+                "reader.ingest_connector_audit",
+                reader.ingest_connector_audit(),
+            );
             let now = branchyard_support::time::now_ms() / 1000;
             let last = reconciled.load(std::sync::atomic::Ordering::Relaxed);
             if now.saturating_sub(last) >= RECONCILE_EVERY.as_secs() {
                 reconciled.store(now, std::sync::atomic::Ordering::Relaxed);
-                let _ = reader.reconcile_effects();
+                best_effort("reader.reconcile_effects", reader.reconcile_effects());
             }
         }),
     )?;

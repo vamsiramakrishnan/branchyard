@@ -185,7 +185,6 @@ pub fn parse_object(text: &str, comment_lines: bool) -> Result<Map<String, Value
     }
 }
 
-#[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn json(current: Option<&str>, edits: &[JsonEdit], comment_lines: bool) -> Result<String, String> {
     let before = parse_object(current.unwrap_or(""), comment_lines)?;
     let mut root = Value::Object(before.clone());
@@ -203,9 +202,10 @@ fn json(current: Option<&str>, edits: &[JsonEdit], comment_lines: bool) -> Resul
                 if !slot.is_array() {
                     *slot = Value::Array(Vec::new());
                 }
-                let items = slot.as_array_mut().expect("made an array");
-                if !items.contains(value) {
-                    items.push(value.clone());
+                if let Some(items) = slot.as_array_mut() {
+                    if !items.contains(value) {
+                        items.push(value.clone());
+                    }
                 }
             }
             JsonEdit::Remove(path) => remove(&mut root, path),

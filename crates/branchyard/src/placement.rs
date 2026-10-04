@@ -103,7 +103,6 @@ pub(crate) fn fan_spec(yard: &Yard, record: &Record) -> Result<Option<Planned>, 
 /// Journal `record`'s turn's `sandbox` step for a sandbox made for it
 /// before its turn (a fan's), so recovery destroys it if this engine stops
 /// first.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn journal_handed(
     yard: &Yard,
     record: &Record,
@@ -113,8 +112,7 @@ pub(crate) fn journal_handed(
     let provider = record
         .provider
         .as_ref()
-        .map(snapshots::provider_name)
-        .unwrap_or("");
+        .map_or("", snapshots::provider_name);
     journal_sandbox(yard, fence, name, json!({ "provider": provider }))
 }
 
@@ -510,7 +508,6 @@ impl Placement {
 
     /// A sandbox the worktree and home are copied into, and back from when
     /// the turn ends.
-    #[allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
     fn copied(
         yard: &Yard,
         record: &Record,
@@ -570,8 +567,7 @@ impl Placement {
         };
         let name = acquired
             .as_ref()
-            .map(|a| a.name.clone())
-            .unwrap_or_else(|_| spec.name.clone());
+            .map_or_else(|_| spec.name.clone(), |a| a.name.clone());
         let finished = match &remote {
             Remote::Substrate(provider) => json!({
                 "uid": provider
@@ -583,9 +579,12 @@ impl Placement {
             }),
             Remote::Recipe(_) => json!({ "created": acquired.is_ok(), "sandbox": name }),
         };
-        let _ = store
-            .backend()
-            .finish_step(fence, fence.turn, STEP_SANDBOX, &finished);
+        branchyard_support::best_effort(
+            "backend.finish_step",
+            store
+                .backend()
+                .finish_step(fence, fence.turn, STEP_SANDBOX, &finished),
+        );
         let mut actor = Box::new(Actor {
             provider: remote,
             name: name.clone(),
@@ -897,7 +896,6 @@ pub(crate) fn staging(yard: &Yard, actor: &str) -> PathBuf {
 /// step finished with it kept) stays, recorded for the next turn; a kept
 /// record for one destroyed here is removed. Returns what recovery should
 /// report, if anything.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn recover(
     yard: &Yard,
     record: &Record,
@@ -915,10 +913,12 @@ pub(crate) fn recover(
         ));
     }
     let said = providers::of(record.provider.as_ref()).recover(yard, record, &name)?;
-    let _ = yard
-        .store()
-        .sandboxes()
-        .take_sandbox(&record.info.name, SandboxKind::Kept, &name);
+    branchyard_support::best_effort(
+        "sandboxes.take_sandbox",
+        yard.store()
+            .sandboxes()
+            .take_sandbox(&record.info.name, SandboxKind::Kept, &name),
+    );
     Some(said)
 }
 

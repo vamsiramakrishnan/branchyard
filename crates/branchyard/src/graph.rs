@@ -28,6 +28,7 @@
 //! denials; one started by [`crate::Yard::resume_graph`] runs under the
 //! options passed there.
 
+use branchyard_support::best_effort;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
@@ -553,12 +554,11 @@ fn dependents_of(store: &Store, name: &str) -> Vec<String> {
 
 /// `name`'s turn or state changed: look at what waits for it. Errors are
 /// not the finished turn's; they leave the dependents to the next look.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
     let store = yard.store();
     let dependents = dependents_of(&store, name);
     if !dependents.is_empty() {
-        let _ = advance(yard, &dependents, options);
+        best_effort("advance", advance(yard, &dependents, options));
     }
 }
 
@@ -737,7 +737,6 @@ pub(crate) fn check_bindings(
 /// Take what `record`'s bindings need for a turn: check each read-only
 /// area is still readable and take each exclusive area's writer lock. On
 /// failure, the locks taken are released and the reason returned.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn bind(yard: &Yard, record: &Record) -> Result<(), String> {
     let name = &record.info.name;
     let mut taken = Vec::new();
@@ -753,7 +752,10 @@ pub(crate) fn bind(yard: &Yard, record: &Record) -> Result<(), String> {
             Ok(()) => {}
             Err(error) => {
                 for scratch in taken {
-                    let _ = crate::storage::unlock_scratch(yard, name, scratch);
+                    best_effort(
+                        "storage.unlock_scratch",
+                        crate::storage::unlock_scratch(yard, name, scratch),
+                    );
                 }
                 return Err(format!(
                     "its {} binding to scratch area {} could not be honored: {error}",
@@ -766,24 +768,28 @@ pub(crate) fn bind(yard: &Yard, record: &Record) -> Result<(), String> {
 }
 
 /// Release the writer locks `record`'s exclusive bindings took.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn unbind(yard: &Yard, record: &Record) {
     for binding in &record.bindings {
         if binding.access == Access::ExclusiveWrite {
-            let _ = crate::storage::unlock_scratch(yard, &record.info.name, &binding.scratch);
+            best_effort(
+                "storage.unlock_scratch",
+                crate::storage::unlock_scratch(yard, &record.info.name, &binding.scratch),
+            );
         }
     }
 }
 
 /// Record on `name`'s log that it was cancelled before it started.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn cancel_unstarted(store: &Store, record: &Record, by: &str) -> Result<bool, Error> {
     let done = settle_unstarted(store, record, BranchStatus::Interrupted)?;
     if done {
         if let Ok(mut recorder) = Recorder::open(store, &record.info.name, None) {
-            let _ = recorder.record(Activity::Warning(format!(
-                "cancelled by {by} before its prerequisites settled; it never ran"
-            )));
+            best_effort(
+                "recorder.record",
+                recorder.record(Activity::Warning(format!(
+                    "cancelled by {by} before its prerequisites settled; it never ran"
+                ))),
+            );
         }
     }
     Ok(done)

@@ -42,7 +42,6 @@
 //! reached over ssh). The second needs `sh`, `cat`, `tar` and `mkdir`
 //! there too, and `tar` on this host.
 
-#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
@@ -200,6 +199,7 @@ impl<'a> Exec<'a> {
 
 /// Wait for `process`, whose stdin and stdout are already taken; its
 /// stderr joins the error. Exit 3 of [`GET_TREE`] is `NotFound`.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
 fn finish(mut process: Box<dyn Process>, what: &str) -> io::Result<()> {
     let errors = process.take_stderr().map(|mut stderr| {
         thread::spawn(move || {
@@ -286,7 +286,11 @@ impl Guest for Exec<'_> {
                 return Err(error);
             }
         };
-        let mut stream = tar.stdout.take().expect("piped");
+        let Some(mut stream) = tar.stdout.take() else {
+            branchyard_support::best_effort("kill tar", tar.kill());
+            branchyard_support::best_effort("reap tar", tar.wait());
+            return Err(io::Error::other("tar's stdout is not piped"));
+        };
         let sent = pump(&mut stream, process.take_stdin());
         drop(stream);
         drop(process.take_stdout());
@@ -322,7 +326,10 @@ impl Guest for Exec<'_> {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .and_then(|mut tar| {
-                let mut sink = tar.stdin.take().expect("piped");
+                let mut sink = tar
+                    .stdin
+                    .take()
+                    .ok_or_else(|| io::Error::other("tar's stdin is not piped"))?;
                 let copied = io::copy(&mut stdout, &mut sink).map(|_| ());
                 drop(sink);
                 let out = tar.wait_with_output()?;
@@ -506,6 +513,7 @@ fn snapshot_host(dir: &Path, env: &[(OsString, OsString)], message: &str) -> Res
 }
 
 /// Run git in the actor in `cwd` and return stdout.
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
 fn guest(
     endpoint: &dyn Guest,
     cwd: &Path,
@@ -868,10 +876,13 @@ pub fn pull(endpoint: &dyn Guest, pushed: &Pushed, worktree: &Path) -> Result<Pu
             // Put the files back as they were, so nothing half-applied is
             // left for the engine to record.
             if changed {
-                let _ = host(
-                    worktree,
-                    &["read-tree", "-m", "-u", after.trim(), before.trim()],
-                    &env,
+                branchyard_support::best_effort(
+                    "host",
+                    host(
+                        worktree,
+                        &["read-tree", "-m", "-u", after.trim(), before.trim()],
+                        &env,
+                    ),
                 );
             }
             return Err(error);
@@ -934,7 +945,10 @@ fn advance(worktree: &Path, base: &str, head: &str) -> Result<(), Error> {
     host(worktree, &["read-tree", head], &[])?;
     // Refresh stat information; files that differ from `head` are the
     // uncommitted changes, so a non-zero exit is expected.
-    let _ = host_output(worktree, &["update-index", "-q", "--refresh"], &[]);
+    branchyard_support::best_effort(
+        "host_output",
+        host_output(worktree, &["update-index", "-q", "--refresh"], &[]),
+    );
     Ok(())
 }
 
@@ -970,6 +984,7 @@ pub fn clear_previous_push(endpoint: &dyn Guest, workdir: &Path) -> Result<(), E
     clear(endpoint, &script, workdir, "")
 }
 
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
 fn clear(endpoint: &dyn Guest, script: &str, workdir: &Path, home: &str) -> Result<(), Error> {
     let spec = ExecSpec {
         argv: vec![
@@ -1037,7 +1052,7 @@ pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Err
         fs::rename(to, &old)?;
     }
     if let Err(error) = fs::rename(&incoming, to) {
-        let _ = fs::rename(&old, to);
+        branchyard_support::best_effort("fs.rename", fs::rename(&old, to));
         return Err(error.into());
     }
     branchyard_support::cleanup_dir(&old);

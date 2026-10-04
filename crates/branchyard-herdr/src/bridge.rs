@@ -9,6 +9,7 @@
 //! entries, and reports at most once per debounce interval, only the
 //! branches whose report changed.
 
+use branchyard_support::best_effort;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -61,11 +62,13 @@ impl PaneMap {
             .unwrap_or_default()
     }
 
-    #[allow(clippy::expect_used)] // ratchet: branchyard-herdr
     fn save(&self, config: &Config) {
         let path = PaneMap::path(config);
         let write = || -> std::io::Result<()> {
-            std::fs::create_dir_all(path.parent().expect("a file in a directory"))?;
+            let dir = path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("the pane map path has no directory"))?;
+            std::fs::create_dir_all(dir)?;
             let temp = path.with_extension("json.tmp");
             std::fs::write(&temp, serde_json::to_vec_pretty(self)?)?;
             std::fs::rename(temp, &path)
@@ -356,7 +359,6 @@ impl<'a> Bridge<'a> {
     }
 
     /// A new tab running `by log --follow <branch>`, named after the branch.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
     fn open(&self, branch: &str) -> Result<Opened, String> {
         let mut env = vec![("BRANCHYARD_HERDR_BRANCH".to_owned(), branch.to_owned())];
         env.extend(self.config.remote_env());
@@ -370,16 +372,21 @@ impl<'a> Bridge<'a> {
             )
             .map_err(|e| e.to_string())?;
         let label = format!("by: {branch}");
-        let _ = self.herdr.call(&[
-            "pane".into(),
-            "rename".into(),
-            opened.pane_id.clone(),
-            label.clone(),
-        ]);
+        best_effort(
+            "herdr.call",
+            self.herdr.call(&[
+                "pane".into(),
+                "rename".into(),
+                opened.pane_id.clone(),
+                label.clone(),
+            ]),
+        );
         if let Some(tab) = &opened.tab_id {
-            let _ = self
-                .herdr
-                .call(&["tab".into(), "rename".into(), tab.clone(), label]);
+            best_effort(
+                "herdr.call",
+                self.herdr
+                    .call(&["tab".into(), "rename".into(), tab.clone(), label]),
+            );
         }
         Ok(opened)
     }

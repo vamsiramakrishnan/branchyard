@@ -54,15 +54,13 @@ fn max_attempts() -> u32 {
 }
 
 /// Overridable with `BY_TEST_WEBHOOK_RETRY_MS`; see [`max_attempts`].
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 fn retry_base() -> Duration {
     static V: OnceLock<Duration> = OnceLock::new();
     *V.get_or_init(|| {
         std::env::var("BY_TEST_WEBHOOK_RETRY_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(RETRY_BASE)
+            .map_or(RETRY_BASE, Duration::from_millis)
     })
 }
 

@@ -694,7 +694,6 @@ pub fn confirmed(tool: Option<&Value>, arguments: &Value) -> Value {
 }
 
 /// A `tools/call` answer from its HTTP response.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub fn called(response: &upstream::Response, body: &[u8], id: &Value) -> Called {
     let answer = rpc_answer(response.header("content-type"), body, id);
     let result = answer.as_ref().and_then(|a| a.get("result")).cloned();
@@ -704,8 +703,7 @@ pub fn called(response: &upstream::Response, body: &[u8], id: &Value) -> Called 
             Some(e) => e
                 .get("message")
                 .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| e.to_string()),
+                .map_or_else(|| e.to_string(), str::to_owned),
             None => "an answer with neither a result nor an error".to_owned(),
         }),
         (None, None) => Some(format!(

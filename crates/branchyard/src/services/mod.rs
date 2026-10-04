@@ -42,6 +42,7 @@ pub mod pg;
 pub(crate) mod reclaim;
 pub mod sqlite;
 
+use branchyard_support::best_effort;
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -727,7 +728,6 @@ pub trait ServiceStore: Send + Sync {
     /// a replacement of one its owner holds, or of one no live owner
     /// holds. Refused (`AlreadyExists`) while another owner's lease on the
     /// ID lasts.
-    #[allow(clippy::expect_used)] // ratchet: branchyard
     fn register(&self, service: &Service, now_ms: u64) -> io::Result<Service> {
         service
             .check()
@@ -762,7 +762,7 @@ pub trait ServiceStore: Send + Sync {
             out = Some(next);
             Ok(())
         })?;
-        Ok(out.expect("set by the transaction"))
+        out.ok_or_else(|| io::Error::other("the registration transaction did not run"))
     }
 
     /// Extend the lease of `id`, which `owner` holds, to `lease_until_ms`,
@@ -1212,16 +1212,17 @@ impl Registration {
 }
 
 impl Drop for Registration {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn drop(&mut self) {
         if self.thread.is_none() {
             return;
         }
         self.halt();
         let service = lock(&self.service).clone();
-        let _ = self
-            .store
-            .deregister(&service.id, &service.owner.id, self.clock.now());
+        best_effort(
+            "store.deregister",
+            self.store
+                .deregister(&service.id, &service.owner.id, self.clock.now()),
+        );
     }
 }
 
@@ -1251,7 +1252,6 @@ fn renew_once(
     Ok(())
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn renew_loop(
     store: &dyn ServiceStore,
     service: &Mutex<Service>,
@@ -1271,7 +1271,7 @@ fn renew_loop(
             return;
         }
         drop(stop);
-        let _ = renew_once(store, service, ttl, clock);
+        best_effort("renew_once", renew_once(store, service, ttl, clock));
         stop = renewal.stop.lock_recovering("stop");
     }
 }

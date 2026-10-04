@@ -110,9 +110,10 @@ fn names() -> String {
 
 /// Start `plan`'s editor and wait for its command to return (a GUI
 /// editor's returns at once). A missing command is refused by name.
-#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn launch(plan: &Plan) -> Outcome {
-    let (program, rest) = plan.argv.split_first().expect("a plan has a command");
+    let Some((program, rest)) = plan.argv.split_first() else {
+        return Err(Failure::Message("the editor plan has no command".into()));
+    };
     let status = match Command::new(program).args(rest).status() {
         Ok(status) => status,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

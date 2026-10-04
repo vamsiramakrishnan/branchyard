@@ -958,7 +958,6 @@ impl Remote {
         result
     }
 
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sync
     fn sync_inner(&self, source: &dyn SyncSource, state: &mut TaskState) -> Result<SyncReport> {
         let task = source.task_id().to_owned();
         check_task_id(&task)?;
@@ -1137,7 +1136,7 @@ impl Remote {
                     }
                 }
                 next.ledger_watermark = watermark;
-                next.seq = remote.as_ref().map(|m| m.seq).unwrap_or(0) + 1;
+                next.seq = remote.as_ref().map_or(0, |m| m.seq) + 1;
                 next.writer = Writer {
                     device: self.settings.device.clone(),
                     commit: commit.clone(),

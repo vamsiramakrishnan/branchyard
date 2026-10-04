@@ -75,18 +75,12 @@ struct Tail {
 }
 
 impl Tail {
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
     fn append(&mut self, chunk: &str) {
         self.content.push_str(chunk);
         let chars = self.content.chars().count();
         if chars > MAX_OUTPUT_CHARS {
             let skip = chars - MAX_OUTPUT_CHARS;
-            let at = self
-                .content
-                .char_indices()
-                .nth(skip)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            let at = self.content.char_indices().nth(skip).map_or(0, |(i, _)| i);
             self.content.drain(..at);
             self.truncated = true;
         }

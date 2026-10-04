@@ -30,7 +30,7 @@
 //!   can reach the network is the caller's business: see
 //!   [`crate::LocalProvider::spawn_confined`].
 
-#![allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard-runtime
+use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -171,9 +171,15 @@ impl Drop for Proxy {
 /// socket down does that on Linux; connecting to it does it anywhere this
 /// host can reach it.
 fn wake(listener: &Listening) {
-    let _ = rustix::net::shutdown(&listener.socket, rustix::net::Shutdown::Both);
+    best_effort(
+        "net.shutdown",
+        rustix::net::shutdown(&listener.socket, rustix::net::Shutdown::Both),
+    );
     if let Some(local) = listener.local {
-        let _ = TcpStream::connect_timeout(&local, Duration::from_secs(1));
+        best_effort(
+            "TcpStream.connect_timeout",
+            TcpStream::connect_timeout(&local, Duration::from_secs(1)),
+        );
     }
 }
 
@@ -186,9 +192,12 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
         match accepted {
             Ok((stream, _)) => {
                 let shared = shared.clone();
-                let _ = thread::Builder::new()
-                    .name("by-egress-conn".into())
-                    .spawn(move || handle(stream, &shared));
+                best_effort(
+                    "into.spawn",
+                    thread::Builder::new()
+                        .name("by-egress-conn".into())
+                        .spawn(move || handle(stream, &shared)),
+                );
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if is_transient(&error) => {}
@@ -213,8 +222,12 @@ struct Head {
     headers: Vec<(String, String)>,
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn handle(stream: TcpStream, shared: &Shared) {
-    let _ = stream.set_read_timeout(Some(HEAD_TIMEOUT));
+    best_effort(
+        "stream.set_read_timeout",
+        stream.set_read_timeout(Some(HEAD_TIMEOUT)),
+    );
     let Ok(writer) = stream.try_clone() else {
         return;
     };
@@ -281,7 +294,10 @@ fn handle(stream: TcpStream, shared: &Shared) {
         }
     };
     (shared.report)(&decision);
-    let _ = client.get_ref().set_read_timeout(None);
+    best_effort(
+        "get_ref.set_read_timeout",
+        client.get_ref().set_read_timeout(None),
+    );
     let mut upstream_writer = match upstream.try_clone() {
         Ok(writer) => writer,
         Err(_) => return,
@@ -324,6 +340,7 @@ fn handle(stream: TcpStream, shared: &Shared) {
 }
 
 /// Copy both ways until the upstream is done, then close both.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn relay(
     mut client_read: TcpStream,
     mut client_write: TcpStream,
@@ -338,7 +355,10 @@ fn relay(
         });
     let _ = io::copy(&mut upstream_read, &mut client_write);
     let _ = client_write.shutdown(Shutdown::Both);
-    let _ = upstream_read.shutdown(Shutdown::Both);
+    best_effort(
+        "upstream_read.shutdown",
+        upstream_read.shutdown(Shutdown::Both),
+    );
     if let Ok(up) = up {
         branchyard_support::join_reporting("egress upstream relay", up);
     }
@@ -388,10 +408,7 @@ fn connect(host: &str, port: u16, loopback: bool) -> Result<TcpStream, Refused> 
 /// Loopback and unspecified addresses: this host's own services.
 fn local_only(ip: IpAddr) -> bool {
     let ip = match ip {
-        IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(v6)),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
         v4 => v4,
     };
     ip.is_loopback() || ip.is_unspecified()
@@ -532,6 +549,7 @@ fn split_authority(authority: &str) -> Result<(String, Option<u16>), String> {
     Ok((host, port))
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn respond(out: &mut TcpStream, code: u16, reason: &str, body: &str) -> io::Result<()> {
     let body = format!("{body}\n");
     let denied = match code {

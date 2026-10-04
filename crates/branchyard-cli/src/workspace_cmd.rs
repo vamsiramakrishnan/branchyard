@@ -753,7 +753,6 @@ struct Started {
 /// process group, at once, the first with the branch's port and each next
 /// with the next free one (as `BRANCHYARD_PORT`; the branch's own is
 /// `BRANCHYARD_BRANCH_PORT` for all of them). Each start is a `run` event.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn run_many(env: &Env, yard: &Yard, branch: &str, names: &[String], json: bool) -> Outcome {
     use std::os::unix::process::CommandExt;
     let info = yard.workspace(branch)?;
@@ -849,9 +848,7 @@ fn run_many(env: &Env, yard: &Yard, branch: &str, names: &[String], json: bool) 
             "started {} in {branch} (pid {}, port {}); output in {}\n",
             s.script,
             s.pid,
-            s.port
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "none".into()),
+            s.port.map_or_else(|| "none".into(), |p| p.to_string()),
             s.log.display()
         ));
     }

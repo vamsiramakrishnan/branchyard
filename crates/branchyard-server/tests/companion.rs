@@ -3,12 +3,7 @@
 //! limit, scopes, revocation), and Web Push to a mock push service that
 //! checks the VAPID signature and decrypts the message as a browser would.
 
-#![allow(
-    clippy::let_underscore_must_use,
-    clippy::map_unwrap_or,
-    clippy::panic,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -76,10 +71,10 @@ fn token_command(f: &Fixture, args: &[&str]) -> (String, String, bool) {
 
 /// The code in a pairing link's fragment.
 fn code_of(link: &str) -> String {
-    link.trim()
-        .split_once("#pair=")
-        .map(|(_, code)| code.to_owned())
-        .unwrap_or_else(|| panic!("no code in {link:?}"))
+    link.trim().split_once("#pair=").map_or_else(
+        || panic!("no code in {link:?}"),
+        |(_, code)| code.to_owned(),
+    )
 }
 
 fn redeem(server: &Server, code: &str) -> (u16, String, String) {

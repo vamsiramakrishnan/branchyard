@@ -210,7 +210,6 @@ pub fn clone_or_copy(source: &Path, target: &Path) -> io::Result<Method> {
     }
 }
 
-#[allow(clippy::expect_used)] // ratchet: branchyard-workspace
 fn copy_dir(source: &Path, target: &Path, method: &mut Method) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::metadata(source)?.permissions().mode();
@@ -221,7 +220,12 @@ fn copy_dir(source: &Path, target: &Path, method: &mut Method) -> io::Result<()>
         .collect::<io::Result<_>>()?;
     entries.sort();
     for entry in entries {
-        let name = entry.file_name().expect("a directory entry has a name");
+        let name = entry.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} has no file name", entry.display()),
+            )
+        })?;
         let to = target.join(name);
         let meta = fs::symlink_metadata(&entry)?;
         if meta.is_dir() {

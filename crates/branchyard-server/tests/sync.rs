@@ -5,11 +5,7 @@
 //! sync series in `/metrics`; and a run whose lease is taken over
 //! cancelled, failed with `sync_lease_lost` and no longer pushed.
 
-#![allow(
-    clippy::let_underscore_must_use,
-    clippy::map_unwrap_or,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;
@@ -155,8 +151,7 @@ fn a_server_pulls_runs_under_the_lease_and_pushes() {
     let swaps = text
         .lines()
         .find_map(|l| l.strip_prefix(r#"branchyard_sync_swaps_total{repo="app"} "#))
-        .map(|v| v.parse::<f64>().unwrap())
-        .unwrap_or(0.0);
+        .map_or(0.0, |v| v.parse::<f64>().unwrap());
     assert!(swaps >= 2.0, "{text}");
     assert!(
         text.contains(r#"branchyard_sync_bytes_total{direction="up",repo="app"}"#)

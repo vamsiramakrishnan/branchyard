@@ -14,6 +14,7 @@
 //!   `profile=`, and `part_size=` in bytes (at least 5 MiB on S3; default
 //!   8 MiB).
 
+use branchyard_support::best_effort;
 use std::sync::Arc;
 
 use crate::auth::aws::AwsCredentials;
@@ -174,12 +175,14 @@ impl S3Store {
         }
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn abort(&self, key: &str, upload: &str) {
-        let _ = self.call(Request::new(
-            "DELETE",
-            self.object_url(key, &format!("uploadId={}", uri_encode(upload, false))),
-        ));
+        best_effort(
+            "self.call",
+            self.call(Request::new(
+                "DELETE",
+                self.object_url(key, &format!("uploadId={}", uri_encode(upload, false))),
+            )),
+        );
     }
 
     fn multipart(&self, key: &str, data: &[u8], journal: &dyn UploadJournal) -> Result<Generation> {

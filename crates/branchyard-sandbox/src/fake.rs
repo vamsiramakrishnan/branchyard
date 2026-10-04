@@ -342,7 +342,6 @@ impl SandboxProvider for FakeProvider {
         }))
     }
 
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sandbox
     fn exec(&self, name: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
         let (mapped, rootfs) = {
             let mut state = self.lock();
@@ -379,8 +378,7 @@ impl SandboxProvider for FakeProvider {
             .map(|(name, value)| {
                 let value = mapped
                     .host_path(Path::new(value))
-                    .map(OsString::from)
-                    .unwrap_or_else(|| value.clone());
+                    .map_or_else(|| value.clone(), OsString::from);
                 (name.clone(), value)
             })
             .collect();

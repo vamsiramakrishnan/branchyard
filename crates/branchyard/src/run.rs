@@ -734,7 +734,6 @@ pub(crate) fn run_attempts(
 /// prepared sandbox is destroyed. Anything that does not work leaves the
 /// branch on the ordinary path, with the reason recorded when its sandbox
 /// starts. See `docs/sandbox-snapshots.md`.
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
 fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease)]) {
     use crate::placement::SandboxPlan;
     use crate::snapshots::{SandboxOrigin, SnapshotMethod};
@@ -824,7 +823,7 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     }
     // Paused, every child is captured at the same point.
     if capabilities.has(branchyard_sandbox::PAUSE) {
-        let _ = provider.pause(&spec.name);
+        branchyard_support::best_effort("provider.pause", provider.pause(&spec.name));
     }
     let mut children = Vec::new();
     for (turn, lease) in turns.iter() {
@@ -840,7 +839,10 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
             },
             _ => SandboxSpec::new(format!("{}-unplaced", turn.record.info.name)),
         };
-        let _ = crate::placement::journal_handed(yard, &turn.record, lease.fence(), &child.name);
+        branchyard_support::best_effort(
+            "placement.journal_handed",
+            crate::placement::journal_handed(yard, &turn.record, lease.fence(), &child.name),
+        );
         children.push(child);
     }
     let made = provider.branch_live(&spec.name, &children);
@@ -861,7 +863,9 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     }
     // Every other branch inherits the first one's setup now, before any
     // harness runs: what it produced is copied into each worktree.
-    let (source, rest) = turns.split_first_mut().expect("at least two");
+    let Some((source, rest)) = turns.split_first_mut() else {
+        return;
+    };
     let produced = source
         .0
         .record
@@ -887,14 +891,17 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
         };
         let mut recorder =
             crate::record::Recorder::fenced(&store, lease.fence(), turn.options.observer.clone());
-        let _ = crate::workspace::prepare(
-            yard,
-            &mut turn.record,
-            lease.fence(),
-            &mut recorder,
-            &|| lease.lost(),
-            &runner,
-            Some(&inherit),
+        branchyard_support::best_effort(
+            "workspace.prepare",
+            crate::workspace::prepare(
+                yard,
+                &mut turn.record,
+                lease.fence(),
+                &mut recorder,
+                &|| lease.lost(),
+                &runner,
+                Some(&inherit),
+            ),
         );
     }
 }

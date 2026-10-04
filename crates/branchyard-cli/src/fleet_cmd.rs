@@ -127,7 +127,6 @@ pub fn routed(
 
 /// The judge for `names`: `--harness`, else the [fleet] entry's for their
 /// kind, else none.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn chosen_judge(
     yard: &Yard,
     names: &[String],
@@ -143,8 +142,7 @@ fn chosen_judge(
     };
     let branch = yard.branch(first)?;
     let kind = recorded_route(&branch.events()?)
-        .map(|d| d.kind)
-        .unwrap_or_else(|| classify(&branch.info().prompt).kind);
+        .map_or_else(|| classify(&branch.info().prompt).kind, |d| d.kind);
     Ok(fleet.entry(kind).and_then(|(_, e)| e.judge.clone()))
 }
 

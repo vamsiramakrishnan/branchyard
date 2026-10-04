@@ -48,7 +48,7 @@ fn rows(target: &Target) -> Vec<Row> {
 }
 
 /// `by harnesses --all`.
-#[allow(clippy::expect_used, clippy::map_unwrap_or)] // ratchet: branchyard-cli
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
     let rows = rows(target);
     if as_json {
@@ -111,7 +111,7 @@ pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
                     Some(false) => Cell::toned("no", Tone::Dim),
                     None => Cell::toned("-", Tone::Dim),
                 },
-                Cell::plain(e.install.first().map(String::as_str).unwrap_or("-")),
+                Cell::plain(e.install.first().map_or("-", String::as_str)),
                 Cell::plain(e.login.as_deref().unwrap_or("-")),
                 Cell::plain(match e.auth_env.is_empty() {
                     true => "-".to_owned(),

@@ -27,6 +27,7 @@
 //! The index is never written: it stays at `HEAD` throughout, so `git
 //! status` shows the tried changes as unstaged, and once restored, nothing.
 
+use branchyard_support::best_effort;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -382,7 +383,6 @@ fn off_locked(yard: &Yard, force: bool) -> Result<Option<TryState>, Error> {
 }
 
 /// Put every path back as it was before the try, then forget it.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn restore(yard: &Yard, mut state: TryState) -> Result<(), Error> {
     let root = &yard.root;
     if state.phase != RESTORING {
@@ -397,10 +397,13 @@ fn restore(yard: &Yard, mut state: TryState) -> Result<(), Error> {
     }
     for dir in state.created_dirs.iter().rev() {
         // Only if empty: anything else in it is not the try's.
-        let _ = fs::remove_dir(root.join(dir));
+        best_effort("fs.remove_dir", fs::remove_dir(root.join(dir)));
     }
     // The index keeps HEAD's entries; refresh their stat data.
-    let _ = git::run(root, &["update-index", "-q", "--refresh"]);
+    best_effort(
+        "git.run",
+        git::run(root, &["update-index", "-q", "--refresh"]),
+    );
     clear(yard)
 }
 

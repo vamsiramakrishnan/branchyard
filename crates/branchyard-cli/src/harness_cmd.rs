@@ -4,7 +4,6 @@
 //! policy are the SDK's (`branchyard::inventory`); this picks the machine,
 //! asks, renders and records. See docs/harness-lifecycle.md.
 
-#![allow(clippy::expect_used, clippy::map_unwrap_or, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -246,14 +245,14 @@ fn attach_quota(found: &mut Inventory) {
             continue;
         };
         let windows = [&login.five_hour, &login.weekly];
-        let fuller = windows
-            .iter()
-            .max_by(|a, b| {
-                a.used_percent
-                    .unwrap_or(0.0)
-                    .total_cmp(&b.used_percent.unwrap_or(0.0))
-            })
-            .expect("two windows");
+        // The fuller window; the weekly one when they are level.
+        let used = |w: &crate::usage::Window| w.used_percent.unwrap_or(0.0);
+        let [five, weekly] = windows;
+        let fuller = if used(five) > used(weekly) {
+            five
+        } else {
+            weekly
+        };
         state.quota = Some(Quota {
             five_hour_percent: login.five_hour.used_percent,
             weekly_percent: login.weekly.used_percent,
@@ -297,6 +296,7 @@ pub fn main(
     }
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 fn list(env: &Env, target: &Target, as_json: bool, refresh: bool, on: Option<&str>) -> Outcome {
     if let Target::Remote(remote) = target {
         let report = remote.client.inventory()?;
@@ -344,7 +344,7 @@ fn quota_text(quota: Option<&Quota>) -> String {
     let Some(q) = quota else {
         return "-".into();
     };
-    let percent = |p: Option<f64>| p.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "-".into());
+    let percent = |p: Option<f64>| p.map_or_else(|| "-".into(), |p| format!("{p:.0}%"));
     let mut text = format!(
         "5h {} · wk {}",
         percent(q.five_hour_percent),
@@ -461,6 +461,7 @@ fn inventory_text(found: &Inventory, style: Style) -> String {
     text
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 fn change_harness(
     env: &Env,
     target: &Target,
@@ -731,7 +732,7 @@ fn login(
             )));
         };
         if !state.on_path {
-            let rest = command.split_once(' ').map(|(_, r)| r).unwrap_or("");
+            let rest = command.split_once(' ').map_or("", |(_, r)| r);
             command = format!("{} {rest}", quote(&state.path))
                 .trim_end()
                 .to_owned();
@@ -1016,6 +1017,7 @@ fn name_secret(var: &str, path: &Path) -> Result<bool, Failure> {
     Ok(true)
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 fn show_log(env: &Env, as_json: bool) -> Outcome {
     let events = log().read()?;
     if as_json {

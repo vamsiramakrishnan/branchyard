@@ -1,5 +1,6 @@
 //! The `branchyard-server` command line, also run as `by serve`.
 
+use branchyard_support::best_effort;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -908,7 +909,6 @@ impl Signals {
     }
 
     /// The next SIGINT or SIGTERM (Ctrl-C where there are no signals).
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     async fn recv(&mut self) {
         #[cfg(unix)]
         if let Some((interrupt, terminate)) = &mut self.streams {
@@ -918,7 +918,7 @@ impl Signals {
             }
             return;
         }
-        let _ = tokio::signal::ctrl_c().await;
+        best_effort("ctrl_c.await", tokio::signal::ctrl_c().await);
     }
 }
 

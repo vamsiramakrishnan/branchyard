@@ -585,7 +585,6 @@ fn outcome_id(branch: &str, created_ms: u64) -> String {
 /// branches only, not a judge's scratch branch. `judged` sets the score
 /// and, when picked, `judged_best`. Best-effort for callers: it never
 /// changes what happened to the branch.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn observe(
     yard: &Yard,
     name: &str,
@@ -610,8 +609,7 @@ pub(crate) fn observe(
     let route = recorded_route(&events);
     let kind = route
         .as_ref()
-        .map(|d| d.kind)
-        .unwrap_or_else(|| classify(&record.info.prompt).kind);
+        .map_or_else(|| classify(&record.info.prompt).kind, |d| d.kind);
     let mut score = previous.as_ref().and_then(|p| p.score);
     if let Some((judge_score, picked)) = judged {
         score = Some(judge_score);
@@ -856,7 +854,6 @@ pub(crate) type Availability<'a> = &'a dyn Fn(&FleetCandidate) -> Result<(), Str
 /// outcomes for this kind, ties going to the earlier candidate. Each round
 /// picks without replacement; more attempts than candidates start another
 /// round.
-#[allow(clippy::expect_used)] // ratchet: branchyard
 #[allow(clippy::too_many_arguments)] // ratchet: branchyard
 pub(crate) fn plan(
     kind: TaskKind,
@@ -933,7 +930,9 @@ pub(crate) fn plan(
                     best = Some((at, draw));
                 }
             }
-            let (at, draw) = best.expect("the pool is not empty");
+            let Some((at, draw)) = best else {
+                return Err(Error::State("the candidate pool is empty".into()));
+            };
             let stats = find(&entry.candidates[pool[at]]);
             let history = match stats {
                 Some(s) if s.runs > 0 => format!(

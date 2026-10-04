@@ -22,6 +22,7 @@
 //!
 //! Each repository has its own outbox, `<data_dir>/sync/<repo>.db`.
 
+use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -211,14 +212,13 @@ impl ServerSync {
     }
 
     /// Queue an operation's branches and wake the replicator.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     pub fn end(&self, repo: &str, branches: &[String]) {
         let Some(r) = self.repos.get(repo) else {
             return;
         };
         for branch in branches {
             if let Ok(task) = r.tasks.task_id(branch) {
-                let _ = r.replicator.enqueue(&task);
+                best_effort("replicator.enqueue", r.replicator.enqueue(&task));
             }
         }
         for handle in self.handles.lock_recovering("handles").iter() {

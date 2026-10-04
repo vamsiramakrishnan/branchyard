@@ -273,14 +273,12 @@ impl WorkspaceReport {
     }
 
     /// One line on why it failed, for a branch's status.
-    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard
     pub fn failure(&self) -> String {
         let what = match self.phase {
             WorkspacePhase::Copy => "copying files".to_owned(),
-            WorkspacePhase::Setup | WorkspacePhase::Teardown | WorkspacePhase::Run => format!(
-                "`{}`",
-                self.commands.last().map(String::as_str).unwrap_or("")
-            ),
+            WorkspacePhase::Setup | WorkspacePhase::Teardown | WorkspacePhase::Run => {
+                format!("`{}`", self.commands.last().map_or("", String::as_str))
+            }
         };
         let how = match (&self.error, self.exit_code) {
             (Some(error), _) => error.clone(),
@@ -1311,8 +1309,8 @@ fn copy_one(root: &Path, worktree: &Path, rel: &str) -> Result<(), String> {
 
 /// Run `commands` in order with `sh -c` in `cwd`, stopping at the first
 /// that fails, into `report`. Each leads its own process group, which is
-/// killed at `timeout` or when `cancel` returns a reason.
 #[allow(clippy::too_many_arguments)] // ratchet: branchyard
+/// killed at `timeout` or when `cancel` returns a reason.
 pub(crate) fn run_commands(
     report: &mut WorkspaceReport,
     commands: &[String],

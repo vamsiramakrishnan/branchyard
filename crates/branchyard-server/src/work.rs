@@ -13,6 +13,7 @@
 //! `Work::run` is the executor: it rebuilds the engine's options with
 //! the same rules the handlers check at admission, and calls the SDK.
 
+use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;
 use std::sync::Arc;
 
@@ -401,7 +402,6 @@ const LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// is cancelled, naming the loss, and cancelled again each poll while the
 /// run lasts, so a turn starting after the loss stops too. Returns the
 /// run's result and, when a lease was lost, why.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 fn run_under_leases<T>(
     app: &App,
     repo: &RepoState,
@@ -435,7 +435,7 @@ fn run_under_leases<T>(
                 let reason = lost.lock_recovering("lost").clone();
                 if let Some(reason) = reason {
                     for branch in branches.iter().chain(leases.iter().map(|h| &h.branch)) {
-                        let _ = repo.yard.cancel_as(branch, &reason);
+                        best_effort("yard.cancel_as", repo.yard.cancel_as(branch, &reason));
                     }
                 }
                 match finished.recv_timeout(LEASE_POLL) {
@@ -466,7 +466,6 @@ const OBSERVED_ENTRIES: usize = 100_000;
 /// Count and trace what an operation did: its branches' cost, and the
 /// turns, tool calls and connector calls its events record between its
 /// admission and its end (see [`crate::observe`]).
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 fn observe_run(
     app: &App,
     repo: &RepoState,
@@ -502,7 +501,7 @@ fn observe_run(
         match repo.feed.read_after(cursor, 1000) {
             Ok(page) if page.is_empty() => break,
             Ok(page) => {
-                cursor = page.last().map(|e| e.seq).unwrap_or(end);
+                cursor = page.last().map_or(end, |e| e.seq);
                 entries.extend(page.into_iter().filter(|e| e.seq <= end));
             }
             Err(e) => {

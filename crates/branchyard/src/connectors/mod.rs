@@ -19,6 +19,7 @@ pub mod gateway;
 pub mod keys;
 pub mod packager;
 
+use branchyard_support::best_effort;
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -620,7 +621,6 @@ impl AuditTail {
     /// How often the log is read.
     const EVERY: Duration = Duration::from_millis(250);
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn start(yard: &Yard) -> AuditTail {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread = {
@@ -629,7 +629,7 @@ impl AuditTail {
                 .name("by-audit".into())
                 .spawn(move || {
                     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = ingest(&yard);
+                        best_effort("ingest", ingest(&yard));
                         std::thread::sleep(AuditTail::EVERY);
                     }
                 })
@@ -644,13 +644,12 @@ impl AuditTail {
 }
 
 impl Drop for AuditTail {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             branchyard_support::join_reporting("connector supervisor", thread);
         }
-        let _ = ingest(&self.yard);
+        best_effort("ingest", ingest(&self.yard));
     }
 }
 

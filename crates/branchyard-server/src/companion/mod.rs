@@ -140,7 +140,6 @@ impl Companion {
     }
 
     /// Count a redemption attempt; false when over the limit.
-    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     fn attempt(&self, now: Instant) -> Result<(), Duration> {
         let mut attempts = self.attempts.lock_recovering("attempts");
         while attempts
@@ -150,8 +149,9 @@ impl Companion {
             attempts.pop_front();
         }
         if attempts.len() >= PAIR_ATTEMPTS {
-            let oldest = *attempts.front().expect("full");
-            return Err(PAIR_WINDOW.saturating_sub(now.duration_since(oldest)));
+            if let Some(&oldest) = attempts.front() {
+                return Err(PAIR_WINDOW.saturating_sub(now.duration_since(oldest)));
+            }
         }
         attempts.push_back(now);
         Ok(())

@@ -57,7 +57,6 @@ fn pool_spec(yard: &Yard) -> Result<(WorkspaceSpec, workspace_cmd::Resolved), Fa
     }
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn slot_line(slot: &branchyard::PoolSlot) -> String {
     let state = match slot.state {
         branchyard::PoolSlotState::Filling => "filling",
@@ -71,8 +70,7 @@ fn slot_line(slot: &branchyard::PoolSlot) -> String {
         short(&slot.base),
         slot.environment
             .as_deref()
-            .map(short)
-            .unwrap_or_else(|| "-".into()),
+            .map_or_else(|| "-".into(), short),
         age(slot.changed_ms),
     );
     if let Some(ms) = slot.fill_ms {
@@ -85,7 +83,6 @@ fn slot_line(slot: &branchyard::PoolSlot) -> String {
     line
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn pool(env: &Env, yard: &Yard, action: &PoolAction, json: bool) -> Outcome {
     match action {
         PoolAction::Status => {
@@ -100,8 +97,7 @@ fn pool(env: &Env, yard: &Yard, action: &PoolAction, json: bool) -> Outcome {
                 status
                     .base
                     .as_deref()
-                    .map(|b| &b[..b.len().min(12)])
-                    .unwrap_or("?"),
+                    .map_or("?", |b| &b[..b.len().min(12)]),
                 status.ready(),
                 status.size
             );
@@ -371,7 +367,6 @@ fn rebuild(env: &Env, yard: &Yard, json: bool) -> Outcome {
     }
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn prune(
     yard: &Yard,
     keys: &[String],
@@ -381,13 +376,13 @@ fn prune(
 ) -> Outcome {
     let only: Vec<String> = keys
         .iter()
-        .map(|k| find(yard, k).map(|i| i.key).unwrap_or_else(|| k.clone()))
+        .map(|k| find(yard, k).map_or_else(|| k.clone(), |i| i.key))
         .collect();
     let pruned = yard.prune_environments(
         keep.unwrap_or(branchyard::ENVIRONMENT_DEFAULT_KEEP),
-        older_than
-            .map(|days| Duration::from_secs(days * 86400))
-            .unwrap_or(branchyard::ENVIRONMENT_DEFAULT_MAX_AGE),
+        older_than.map_or(branchyard::ENVIRONMENT_DEFAULT_MAX_AGE, |days| {
+            Duration::from_secs(days * 86400)
+        }),
         &only,
     );
     if json {

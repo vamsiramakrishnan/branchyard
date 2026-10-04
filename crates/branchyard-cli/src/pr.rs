@@ -1323,7 +1323,6 @@ pub struct Observed {
 
 /// Ask `gh` about `pr`: its state, checks, reviews, comments and review
 /// threads, and the feedback among them.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
     let number = pr.number.to_string();
     let view: Value = gh.json(
@@ -1397,7 +1396,7 @@ pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
                 ci.failing.push(name.clone());
                 if check["bucket"] == "fail" {
                     let workflow = text(&check["workflow"]);
-                    let on = head_commit.as_deref().map(short).unwrap_or("its head");
+                    let on = head_commit.as_deref().map_or("its head", short);
                     let key = format!("ci:{name}:{}", head_commit.as_deref().unwrap_or("unknown"));
                     let link = text(&check["link"]);
                     let about = match workflow.is_empty() {

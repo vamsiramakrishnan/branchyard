@@ -262,13 +262,12 @@ impl Process for BridgedProcess {
 }
 
 impl Drop for BridgedProcess {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-microsandbox
     fn drop(&mut self) {
         if self.exit.get().is_none() {
             branchyard_support::best_effort("kill control", self.control.kill());
         }
         if !self.torn_down {
-            let _ = self.control.teardown(self.pid);
+            branchyard_support::best_effort("control.teardown", self.control.teardown(self.pid));
         }
     }
 }

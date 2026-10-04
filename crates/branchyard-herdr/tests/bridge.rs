@@ -2,12 +2,7 @@
 //! fake `herdr` on `PATH` that records every call and hands out pane IDs.
 //! Hermetic; requires `git`, `sh`, `mkdir`, `sleep` and `kill`.
 
-#![allow(
-    clippy::let_underscore_must_use,
-    clippy::map_unwrap_or,
-    clippy::panic,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_testkit::{wait, Scratch};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -594,8 +589,10 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
             l.split_whitespace()
                 .find_map(|word| word.strip_prefix("cursor="))
         })
-        .map(|c| c.parse::<u64>().unwrap())
-        .unwrap_or_else(|| panic!("no reconnect in\n{}", log()));
+        .map_or_else(
+            || panic!("no reconnect in\n{}", log()),
+            |c| c.parse::<u64>().unwrap(),
+        );
     assert!(resumed > 0);
     assert_eq!(fake.reports(&early), reports_before);
     let after = fake.opened();

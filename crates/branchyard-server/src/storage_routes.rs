@@ -39,6 +39,7 @@ use branchyard_client::storage_api::{
     Ack, ArtifactList, CreateScratchRequest, Empty, LockState, ScratchList, ShareRequest,
     DIGEST_HEADER,
 };
+use branchyard_support::LockExt as _;
 
 use crate::api::{blocking, Caller, JsonBody, Shared};
 use crate::error::{self, ApiError};
@@ -145,14 +146,13 @@ type IdemEntry = (String, StatusCode, serde_json::Value);
 pub struct StorageIdem(Mutex<HashMap<(String, String), IdemEntry>>);
 
 impl StorageIdem {
-    #[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-server
     fn get(
         &self,
         caller: &str,
         key: &str,
         fingerprint: &str,
     ) -> Result<Option<(StatusCode, serde_json::Value)>, ApiError> {
-        let map = self.0.lock().expect("not poisoned");
+        let map = self.0.lock_recovering("idempotency");
         match map.get(&(caller.to_owned(), key.to_owned())) {
             Some((stored, status, value)) if stored == fingerprint => {
                 Ok(Some((*status, value.clone())))
@@ -166,7 +166,6 @@ impl StorageIdem {
         }
     }
 
-    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     fn put(
         &self,
         caller: &str,
@@ -176,7 +175,7 @@ impl StorageIdem {
         value: &ArtifactRef,
     ) {
         let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        self.0.lock().expect("not poisoned").insert(
+        self.0.lock_recovering("idempotency").insert(
             (caller.to_owned(), key.to_owned()),
             (fingerprint.to_owned(), status, value),
         );

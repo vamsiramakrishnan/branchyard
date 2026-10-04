@@ -170,14 +170,12 @@ enum Progress {
 }
 
 /// Bytes a session holds, from a 308's `Range: bytes=0-N`.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sync
 fn persisted(response: &Response) -> usize {
     response
         .header("range")
         .and_then(|r| r.rsplit('-').next())
         .and_then(|n| n.trim().parse::<usize>().ok())
-        .map(|n| n + 1)
-        .unwrap_or(0)
+        .map_or(0, |n| n + 1)
 }
 
 fn generation_of(value: &serde_json::Value) -> Result<Generation> {

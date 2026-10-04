@@ -31,7 +31,6 @@ fn target(facts: &Facts, answers: &Answers) -> (String, Option<ProjectConfig>) {
     }
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
     let (_, existing) = target(facts, answers);
     let current = existing.clone().unwrap_or_default();
@@ -200,7 +199,7 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
                 "--check: by merge runs it on the exact merge result and refuses a failure.",
             )
             .optional()
-            .default(suggested.map(Value::from).unwrap_or(Value::Null))
+            .default(suggested.map_or(Value::Null, Value::from))
             .choices(choices)
             .rule(Rule::CommandLine)
         },
@@ -408,7 +407,6 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
 /// `[workspace]`, for the project file only: detected install commands,
 /// `.env` files, a dev server on the branch's port, and a Compose stack's
 /// teardown, each a default the person confirms.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Question>) {
     let detected = &facts.workspace;
     let existing = current.workspace.as_ref();
@@ -418,19 +416,19 @@ fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Ques
         true => None,
         false => Some(commands.join(" && ")),
     };
-    let setup = existing
-        .map(|w| joined(w.setup.commands()))
-        .unwrap_or_else(|| joined(detected.setup.clone()));
-    let teardown = existing
-        .map(|w| joined(w.teardown.commands()))
-        .unwrap_or_else(|| joined(detected.teardown.clone()));
+    let setup = existing.map_or_else(
+        || joined(detected.setup.clone()),
+        |w| joined(w.setup.commands()),
+    );
+    let teardown = existing.map_or_else(
+        || joined(detected.teardown.clone()),
+        |w| joined(w.teardown.commands()),
+    );
     let run = match existing {
         Some(w) => w.run_script(None).ok().and_then(|(_, c)| joined(c)),
         None => detected.run.clone(),
     };
-    let copy: Vec<String> = existing
-        .map(|w| w.copy.clone())
-        .unwrap_or_else(|| detected.copy.clone());
+    let copy: Vec<String> = existing.map_or_else(|| detected.copy.clone(), |w| w.copy.clone());
     qs.push(
         Question::new(
             "workspace",
@@ -488,7 +486,7 @@ fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Ques
             choices.push(Choice::new(Value::Null, none, "nothing runs"));
             Question::new(id, Kind::Text, header, prompt, why)
                 .optional()
-                .default(value.map(Value::from).unwrap_or(Value::Null))
+                .default(value.map_or(Value::Null, Value::from))
                 .choices(choices)
                 .allow_other(true)
                 .rule(Rule::CommandLine)
@@ -520,7 +518,6 @@ fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Ques
     ));
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
     let (path, existing) = target(facts, answers);
     let mut flat = existing.clone().unwrap_or_default().flatten();
@@ -605,8 +602,7 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
             let name = runs
                 .iter()
                 .find(|(_, r)| r.default)
-                .map(|(name, _)| name.clone())
-                .unwrap_or_else(|| "dev".into());
+                .map_or_else(|| "dev".into(), |(name, _)| name.clone());
             match text(answers, "workspace.run") {
                 Some(command) => {
                     runs.insert(

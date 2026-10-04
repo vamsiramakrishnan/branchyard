@@ -20,6 +20,7 @@
 //! turn in the managed instructions block, most specific first, within a
 //! token budget; the `provisioned` event lists their ids.
 
+use branchyard_support::best_effort;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -648,11 +649,8 @@ pub(crate) fn brief(
 }
 
 /// The kind a branch's task has: its route's, else the classifier's.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn kind_of(record: &Record, events: &[RecordedEvent]) -> TaskKind {
-    recorded_route(events)
-        .map(|d| d.kind)
-        .unwrap_or_else(|| classify(&record.info.prompt).kind)
+    recorded_route(events).map_or_else(|| classify(&record.info.prompt).kind, |d| d.kind)
 }
 
 /// The files a branch's task is known to touch: those its candidate
@@ -1178,7 +1176,6 @@ pub(crate) fn distill(
 /// Distill `name` when the yard's settings ask for it on `trigger`:
 /// top-level branches only, never a judge's scratch branch. Best-effort:
 /// it never changes what happened to the branch.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn on_end(yard: &Yard, name: &str, trigger: DistillTrigger) {
     let settings = yard.knowledge_settings();
     if !settings.distill_on.contains(&trigger) {
@@ -1197,7 +1194,10 @@ pub(crate) fn on_end(yard: &Yard, name: &str, trigger: DistillTrigger) {
     if is_scratch(&events) {
         return;
     }
-    let _ = distill(yard, name, settings.distiller.as_ref(), trigger.as_str());
+    best_effort(
+        "distill",
+        distill(yard, name, settings.distiller.as_ref(), trigger.as_str()),
+    );
 }
 
 #[cfg(test)]

@@ -149,7 +149,6 @@ enum Stop {
 /// become the branch's status; errors are state errors, after which the
 /// record says `Failed` if it could still be written. A lost lease is
 /// [`Error::Fenced`], and nothing more is written.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     let store = turn.yard.store();
     let fence = lease.fence().clone();
@@ -239,7 +238,10 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     // The outcome store learns how the turn ended; best-effort, it never
     // changes what happened.
     if result.is_ok() {
-        let _ = crate::fleet::observe(turn.yard, &fence.branch, None);
+        branchyard_support::best_effort(
+            "fleet.observe",
+            crate::fleet::observe(turn.yard, &fence.branch, None),
+        );
         // A delegated child's plan awaiting approval goes to its parent.
         crate::plan::settled(turn.yard, &fence.branch);
         if matches!(&result, Ok(b) if b.info.status == BranchStatus::Ready) {
@@ -325,7 +327,6 @@ fn drive(
     Ok(driven)
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 fn run(
     recorder: &mut Recorder,
     turn: &Turn<'_>,
@@ -711,8 +712,7 @@ fn run(
                 record.info.worktree.display(),
                 turn.fork_source
                     .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "another worktree".into()),
+                    .map_or_else(|| "another worktree".into(), |p| p.display().to_string()),
                 turn.profile.harness,
             ),
         })

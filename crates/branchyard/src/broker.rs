@@ -16,6 +16,7 @@
 //! with a running turn: in local mode, tokens stop mistakes, not a hostile
 //! harness.
 
+use branchyard_support::best_effort;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -45,7 +46,6 @@ pub(crate) struct Broker {
 }
 
 impl Broker {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn start(yard: Yard) -> io::Result<Broker> {
         let file = format!(
             "broker-{}-{}.sock",
@@ -72,9 +72,12 @@ impl Broker {
                     }
                     let Ok(stream) = stream else { continue };
                     let yard = yard.clone();
-                    let _ = std::thread::Builder::new()
-                        .name("by-broker-conn".into())
-                        .spawn(move || serve(&yard, stream));
+                    best_effort(
+                        "into.spawn",
+                        std::thread::Builder::new()
+                            .name("by-broker-conn".into())
+                            .spawn(move || serve(&yard, stream)),
+                    );
                 }
             });
         let accept = match accept {
@@ -192,7 +195,6 @@ impl Remote {
     }
 
     /// Outer error: transport; inner: the engine's answer.
-    #[allow(clippy::expect_used)] // ratchet: branchyard
     fn exchange(&mut self, tool: &str, arguments: Value) -> Result<Result<Value, Error>, Error> {
         if self.connection.is_none() {
             let stream = UnixStream::connect(&self.socket).map_err(|e| {
@@ -206,7 +208,9 @@ impl Remote {
                 .map_err(|e| Error::State(format!("connection to the engine: {e}")))?;
             self.connection = Some((BufReader::new(stream), writer));
         }
-        let (reader, writer) = self.connection.as_mut().expect("connected above");
+        let Some((reader, writer)) = self.connection.as_mut() else {
+            return Err(Error::State("the engine connection is not open".into()));
+        };
         let request = json!({"token": self.token, "tool": tool, "arguments": arguments});
         let lost = |e: io::Error| Error::State(format!("lost the connection to the engine: {e}"));
         writeln!(writer, "{request}").map_err(lost)?;

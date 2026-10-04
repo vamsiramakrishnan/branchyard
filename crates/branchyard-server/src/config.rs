@@ -1491,7 +1491,6 @@ fn readable_by_others(_: &Path) -> Option<String> {
     None
 }
 
-#[allow(clippy::unwrap_used)] // ratchet: branchyard-server
 pub fn load_file(path: &Path) -> Result<Partial, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("config {}: {e}", path.display()))?;
     let file: FileConfig =
@@ -1504,9 +1503,9 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
     let mut inline = false;
     for token in file.tokens {
         let secret = match (&token.token, &token.token_file) {
-            (Some(_), None) => {
+            (Some(secret), None) => {
                 inline = true;
-                token.token.unwrap()
+                secret.clone()
             }
             (None, Some(file)) => read_token_file(&resolve(file.clone()), &mut warnings)?,
             _ => {

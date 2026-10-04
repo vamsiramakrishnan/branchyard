@@ -103,7 +103,6 @@ fn pad_right(text: &str, columns: usize) -> String {
 
 /// A tool invocation's input as one short line: the field a person would
 /// recognize (a command, a path) when there is one, else compact JSON.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn compact_input(input: &Value) -> String {
     const KEYS: [&str; 7] = [
         "command",
@@ -120,8 +119,7 @@ pub fn compact_input(input: &Value) -> String {
         Value::Object(map) => KEYS
             .iter()
             .find_map(|key| map.get(*key).and_then(Value::as_str))
-            .map(str::to_owned)
-            .unwrap_or_else(|| input.to_string()),
+            .map_or_else(|| input.to_string(), str::to_owned),
         other => other.to_string(),
     };
     truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 80)
@@ -241,7 +239,6 @@ pub fn decision_line(tool: &str, allowed: bool, message: Option<&str>, style: St
 
 /// A workspace lifecycle phase: one line, and when it failed the last
 /// lines of its output, indented.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn workspace_line(report: &branchyard::WorkspaceReport, style: Style) -> String {
     use branchyard::WorkspacePhase;
     let secs = report.duration_ms as f64 / 1000.0;
@@ -277,7 +274,7 @@ pub fn workspace_line(report: &branchyard::WorkspaceReport, style: Style) -> Str
                 (false, None, Some(code)) => format!("exit {code}"),
                 (false, None, None) => "failed".to_owned(),
             };
-            let last = report.commands.last().map(String::as_str).unwrap_or("");
+            let last = report.commands.last().map_or("", String::as_str);
             format!(
                 "workspace {phase}: {outcome} after {secs:.1}s{port} ({} command(s), last `{}`)",
                 report.commands.len(),
@@ -872,9 +869,8 @@ pub fn candidate_text(candidate: Option<&CandidateInfo>) -> String {
     }
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn cost_text(cost: Option<f64>) -> String {
-    cost.map(usd).unwrap_or_else(|| "-".into())
+    cost.map_or_else(|| "-".into(), usd)
 }
 
 pub fn age_text(seconds: u64) -> String {

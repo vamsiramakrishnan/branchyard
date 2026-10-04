@@ -227,9 +227,13 @@ fn read_regular(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text))
 }
 
-#[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn write_atomically(target: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-    let dir = target.parent().expect("a resolved path has a directory");
+    let dir = target.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} has no directory", target.display()),
+        )
+    })?;
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let temp = dir.join(format!(".{name}.{}.by-tmp", std::process::id()));
     branchyard_support::cleanup_file(&temp);

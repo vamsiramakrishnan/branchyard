@@ -67,7 +67,6 @@ fn tag(value: &impl serde::Serialize, key: &str) -> String {
 /// admission and its end) say happened on `branches`, whose harness
 /// `harness_of` names. Spans are children of `parent`, the operation's
 /// span, when the operation is traced.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 pub fn record_events(
     observability: &Observability,
     branches: &BTreeSet<String>,
@@ -139,9 +138,7 @@ pub fn record_events(
                     end_turn(open, branch, &harness, at, "unknown");
                 }
                 metrics.inc(metrics::TURNS_STARTED, &[("harness", &harness)]);
-                let context = parent
-                    .map(SpanContext::child)
-                    .unwrap_or_else(SpanContext::root);
+                let context = parent.map_or_else(SpanContext::root, SpanContext::child);
                 turns.insert(
                     branch,
                     Turn {
@@ -227,7 +224,7 @@ pub fn record_events(
                     &[("connector", &call.connector), ("decision", &call.decision)],
                 );
                 if let Some(parent) = traced {
-                    let within = turns.get(branch).map(|t| t.context).unwrap_or(*parent);
+                    let within = turns.get(branch).map_or(*parent, |t| t.context);
                     let start = at.saturating_sub(call.latency_ms.unwrap_or(0));
                     let mut span = SpanData::new(
                         format!("connector {}", call.operation),

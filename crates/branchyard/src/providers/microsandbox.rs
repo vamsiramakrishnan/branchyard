@@ -1,6 +1,7 @@
 //! [`crate::Provider::Microsandbox`]: a Microsandbox microVM per turn, with
 //! the worktree and the private home mounted into it.
 
+use branchyard_support::best_effort;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -83,7 +84,6 @@ impl ProviderKind for SandboxOptions {
 /// The spec of a Microsandbox branch's sandbox, and its harness's
 /// variables: the worktree at [`WORKSPACE`], the private home at [`HOME`],
 /// the git directory read-only, and every scratch area it may reach.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn spec(
     yard: &Yard,
     record: &Record,
@@ -108,7 +108,7 @@ pub(crate) fn spec(
     if let Ok(areas) = crate::storage::authorized_scratch(yard, &record.info.name) {
         for area in &areas {
             let host = crate::storage::scratch_dir(&yard.store(), &area.name);
-            let _ = std::fs::create_dir_all(&host);
+            best_effort("fs.create_dir_all", std::fs::create_dir_all(&host));
             let guest = format!("{SCRATCH_MOUNT_BASE}/{}", area.name);
             mounts.push(Mount::writable(&host, &guest));
             env.insert(

@@ -215,7 +215,6 @@ pub(crate) fn rewind_in(
 }
 
 /// `by try`, `by try --off` and `by try --status`.
-#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn try_branch(
     _env: &Env,
     target: &Target,
@@ -256,7 +255,11 @@ pub fn try_branch(
             ),
         });
     }
-    let branch = branch.expect("clap requires a branch without --off or --status");
+    let Some(branch) = branch else {
+        return Err(Failure::Message(
+            "name a branch, or pass --off or --status".into(),
+        ));
+    };
     let previous = yard.try_status()?;
     let state = yard.try_on(branch)?;
     if as_json {
@@ -468,7 +471,6 @@ pub fn duration_text(ms: Option<u64>) -> String {
 }
 
 /// `by compare`'s table: one row per attempt.
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn compare_table(attempts: &[Attempt], style: Style) -> String {
     let column = |header, max, right| Column { header, max, right };
     let columns = [
@@ -507,7 +509,7 @@ pub fn compare_table(attempts: &[Attempt], style: Style) -> String {
                 Cell::toned(status, tone),
                 Cell::plain(a.turns.to_string()),
                 Cell::plain(render::cost_text(a.cost_usd)),
-                Cell::plain(a.tokens.map(render::tokens).unwrap_or_else(|| "-".into())),
+                Cell::plain(a.tokens.map_or_else(|| "-".into(), render::tokens)),
                 Cell::plain(duration_text(a.duration_ms)),
                 Cell {
                     text: a.check.word().to_owned(),

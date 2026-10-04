@@ -22,6 +22,7 @@
 //! ([`HarnessLog`]). The router consults the inventory through
 //! [`HarnessGate`].
 
+use branchyard_support::best_effort;
 use branchyard_support::time::now_ms;
 use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
@@ -388,13 +389,11 @@ fn login_check(id: &str) -> Option<&'static LoginCheck> {
     LOGIN_CHECKS.iter().find(|c| c.harness == id)
 }
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 fn version_args(id: &str) -> &'static [&'static str] {
     VERSION_ARGS
         .iter()
         .find(|(h, _)| *h == id)
-        .map(|(_, a)| *a)
-        .unwrap_or(&["--version"])
+        .map_or(&["--version"], |(_, a)| *a)
 }
 
 /// The key variables a harness reads instead of a login: the catalog's
@@ -946,7 +945,6 @@ impl InventoryCache {
 
     /// The cached inventory when fresh, else a new detection here, kept.
     /// Only a detection of every harness is kept.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn local(&self, options: &DetectOptions, refresh: bool) -> Result<Inventory, String> {
         if !refresh && options.only.is_none() {
             if let Some(inventory) = self.get(options) {
@@ -955,7 +953,7 @@ impl InventoryCache {
         }
         let inventory = detect_local(options)?;
         if options.only.is_none() {
-            let _ = self.put(options, &inventory);
+            best_effort("self.put", self.put(options, &inventory));
         }
         Ok(inventory)
     }
@@ -1437,7 +1435,6 @@ impl LocalGate {
 }
 
 impl HarnessGate for LocalGate {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn check(&self, harness: &str) -> Result<(), String> {
         let mut inventory = self.inventory.lock_recovering("inventory");
         if catalog::harness(harness).is_none() || !inventory.checked(harness) {
@@ -1479,21 +1476,24 @@ impl HarnessGate for LocalGate {
             &mut |_| detect_local(&options),
         );
         if let Some(log) = &self.log {
-            let _ = log.append(&HarnessEvent {
-                at_ms: now_ms(),
-                on: "local".into(),
-                harness: harness.to_owned(),
-                action: InstallAction::Install,
-                by: "router".into(),
-                command: Some(plan.command.clone()),
-                outcome: match result.verified {
-                    true => "verified".into(),
-                    false => "failed".into(),
-                },
-                version_before: None,
-                version_after: result.after.as_ref().and_then(|a| a.version.clone()),
-                detail: result.problem.clone(),
-            });
+            best_effort(
+                "log.append",
+                log.append(&HarnessEvent {
+                    at_ms: now_ms(),
+                    on: "local".into(),
+                    harness: harness.to_owned(),
+                    action: InstallAction::Install,
+                    by: "router".into(),
+                    command: Some(plan.command.clone()),
+                    outcome: match result.verified {
+                        true => "verified".into(),
+                        false => "failed".into(),
+                    },
+                    version_before: None,
+                    version_after: result.after.as_ref().and_then(|a| a.version.clone()),
+                    detail: result.problem.clone(),
+                }),
+            );
         }
         if let Some(cache) = &self.cache {
             cache.clear();

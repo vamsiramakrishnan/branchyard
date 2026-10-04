@@ -17,6 +17,7 @@
 //! `rounds` times and within its budget; met, it stays ready with the
 //! evidence recorded. Every verdict is an [`Activity::Goal`] event.
 
+use branchyard_support::best_effort;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -540,7 +541,6 @@ fn tail(output: &str) -> String {
 /// undecided goal, verify it, and send a follow-up turn with what is
 /// missing, until it is met, the rounds run out, or a turn ends otherwise.
 /// Returns the branch as it ends.
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn pursue(yard: &Yard, branch: Branch, options: &TaskOptions) -> Result<Branch, Error> {
     let name = branch.info().name.clone();
     let custom = options.goal.as_ref().and_then(|g| g.custom.clone());
@@ -566,7 +566,9 @@ pub(crate) fn pursue(yard: &Yard, branch: Branch, options: &TaskOptions) -> Resu
             deterministic: check,
             by,
         })))?;
-        let goal = record.goal.as_mut().expect("read above");
+        let Some(goal) = record.goal.as_mut() else {
+            return Ok(branch);
+        };
         if verdict.met {
             goal.met = Some(true);
             store.write_fenced(&record, lease.fence())?;
@@ -587,7 +589,7 @@ pub(crate) fn pursue(yard: &Yard, branch: Branch, options: &TaskOptions) -> Resu
                 ),
             };
             recorder.finish(lease, &record)?;
-            let _ = crate::fleet::observe(yard, &name, None);
+            best_effort("fleet.observe", crate::fleet::observe(yard, &name, None));
             return yard.branch(&name);
         }
         goal.used += 1;

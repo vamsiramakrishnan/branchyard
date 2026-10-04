@@ -29,7 +29,6 @@
 #![allow(
     clippy::expect_used,
     clippy::let_underscore_must_use,
-    clippy::map_unwrap_or,
     clippy::panic,
     clippy::unwrap_in_result,
     clippy::unwrap_used
@@ -79,9 +78,8 @@ print("RESULT " + json.dumps({"issues": len(issues), "refused": refused, "connec
 "#;
 
 fn anvil_bin() -> Option<PathBuf> {
-    let path = std::env::var_os("ANVIL_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_ANVIL));
+    let path =
+        std::env::var_os("ANVIL_BIN").map_or_else(|| PathBuf::from(DEFAULT_ANVIL), PathBuf::from);
     path.is_file().then_some(path)
 }
 

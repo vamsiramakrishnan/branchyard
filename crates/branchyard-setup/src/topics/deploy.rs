@@ -9,7 +9,6 @@ use crate::plan::{ArtifactKind, Plan, PlannedFile};
 use crate::probe::{Entropy, Facts, Probe};
 use crate::Topic;
 
-#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 pub fn questions(facts: &Facts, _answers: &Answers) -> Vec<Question> {
     vec![
         Question::new(
@@ -28,7 +27,7 @@ pub fn questions(facts: &Facts, _answers: &Answers) -> Vec<Question> {
             "Which repository should the server serve (an absolute path on the Docker host)?",
             "Mounted into the container at /repos/NAME.",
         )
-        .default(facts.git.as_ref().map(|g| g.root.clone()).unwrap_or_else(|| facts.root.clone()))
+        .default(facts.git.as_ref().map_or_else(|| facts.root.clone(), |g| g.root.clone()))
         .choices(vec![Choice::new(facts.root.as_str(), "This repository", facts.root.as_str())]),
         Question::new(
             "image",

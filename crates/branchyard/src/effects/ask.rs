@@ -3,6 +3,7 @@
 //! the turn's budget. Every surface answers through
 //! [`crate::Yard::answer_approval`], which writes the answer once.
 
+use branchyard_support::best_effort;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -25,13 +26,12 @@ pub(crate) struct AskSpec {
 
 /// Record `activity` on `branch`, best effort: the ledger and the asks are
 /// the record of truth, the event is how `by log` and `by watch` see it.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn note(yard: &Yard, branch: &str, activity: EffectActivity) {
     let event = RecordedEvent {
         at_ms: now_ms(),
         activity: Activity::Effect(Box::new(activity)),
     };
-    let _ = yard.store().append(branch, &event, None);
+    best_effort("store.append", yard.store().append(branch, &event, None));
 }
 
 /// Store the ask, record it on the branch, and escalate it to a delegating
@@ -68,7 +68,6 @@ pub(crate) fn open(yard: &Yard, spec: AskSpec) -> Result<ApprovalAsk, Error> {
 /// A delegated child's ask goes to its parent's inbox too, which may
 /// answer it (`by approvals allow ID` in its shell, or the
 /// `answer_approval` tool).
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn escalate(yard: &Yard, ask: &ApprovalAsk) {
     let Ok(record) = yard.store().read(&ask.branch) else {
         return;
@@ -85,7 +84,7 @@ fn escalate(yard: &Yard, ask: &ApprovalAsk) {
         ask.id
     );
     if let Ok(delegate) = crate::delegation::trusted(yard, &ask.branch, TaskOptions::default()) {
-        let _ = delegate.escalate(&text);
+        best_effort("delegate.escalate", delegate.escalate(&text));
     }
 }
 

@@ -300,7 +300,7 @@ impl Scheduling {
 
     /// Milliseconds per step of aging; 0 when off.
     fn aging_ms(&self) -> i64 {
-        self.aging.map(ms).unwrap_or(0)
+        self.aging.map_or(0, ms)
     }
 
     /// `used` claims recorded at `at_ms`, decayed to now.

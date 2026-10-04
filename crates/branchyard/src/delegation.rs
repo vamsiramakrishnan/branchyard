@@ -1207,7 +1207,6 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
 
 /// Run a turn on a thread of this process, joined by a wait for its
 /// subtree.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn start_turn(
     yard: &Yard,
     prepared: Prepared,
@@ -1246,20 +1245,23 @@ pub(crate) fn start_turn(
         },
         move || {
             // The outcome is the branch's status; errors are recorded there.
-            let _ = engine::execute(
-                Turn {
-                    yard: &thread_yard,
-                    record,
-                    profile,
-                    command,
-                    mode,
-                    prompt: &prompt,
-                    options: &options,
-                    fork_source: None,
-                    note,
-                    sandbox: Default::default(),
-                },
-                lease,
+            branchyard_support::best_effort(
+                "engine.execute",
+                engine::execute(
+                    Turn {
+                        yard: &thread_yard,
+                        record,
+                        profile,
+                        command,
+                        mode,
+                        prompt: &prompt,
+                        options: &options,
+                        fork_source: None,
+                        note,
+                        sandbox: Default::default(),
+                    },
+                    lease,
+                ),
             );
         },
     );
@@ -1375,7 +1377,6 @@ impl Local {
     }
 
     /// Record a delegation operation on this branch's event log.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn note<T>(
         &self,
         tool: &str,
@@ -1392,12 +1393,15 @@ impl Local {
             Ok(value) => (done(value), false),
             Err(error) => (error.to_string(), true),
         };
-        let _ = recorder.record(Activity::Delegation {
-            tool: tool.to_owned(),
-            branch: branch.to_owned(),
-            outcome,
-            refused,
-        });
+        branchyard_support::best_effort(
+            "recorder.record",
+            recorder.record(Activity::Delegation {
+                tool: tool.to_owned(),
+                branch: branch.to_owned(),
+                outcome,
+                refused,
+            }),
+        );
     }
 
     fn spawn(&self, request: &Spawn) -> Result<Spawned, Error> {
@@ -2416,7 +2420,6 @@ impl Local {
         result
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn try_send_message(
         &self,
         kind: MessageKind,
@@ -2456,7 +2459,10 @@ impl Local {
         for branch in [self.branch.as_str(), to] {
             if let Ok(mut recorder) = Recorder::open(&store, branch, self.options.observer.clone())
             {
-                let _ = recorder.record(Activity::Message(message.clone()));
+                branchyard_support::best_effort(
+                    "recorder.record",
+                    recorder.record(Activity::Message(message.clone())),
+                );
             }
         }
         // The one call site a delivery hook (by default, steering `to`'s

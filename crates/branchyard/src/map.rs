@@ -630,7 +630,6 @@ impl Run<'_> {
         }
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn attempt(&self, base: &str, prompt: &str, seed_offset: u64) -> Attempt {
         let (branch, earlier) = match self.start(base, prompt, seed_offset) {
             Ok(started) => started,
@@ -650,7 +649,7 @@ impl Run<'_> {
         }
         branches.push(branch.info().name.clone());
         // Children it delegated to end before its answer is read.
-        let _ = branch.wait_subtree();
+        branchyard_support::best_effort("branch.wait_subtree", branch.wait_subtree());
         let mut current = branch;
         let first = self.answer(&current);
         let mut answer = first.clone().map_err(|errors| errors.join("; "));
@@ -663,7 +662,10 @@ impl Run<'_> {
                 answer =
                     match crate::run::send(self.yard, &current.info().name, &follow_up, &options) {
                         Ok(next) => {
-                            let _ = next.wait_subtree();
+                            branchyard_support::best_effort(
+                                "next.wait_subtree",
+                                next.wait_subtree(),
+                            );
                             current = next;
                             self.answer(&current).map_err(|errors| {
                                 format!("after one follow-up turn: {}", errors.join("; "))
@@ -772,7 +774,6 @@ impl Run<'_> {
         Ok(())
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn reduce(&self, reduce: &str, dir: &Path, rows: &[MapRow]) -> Result<MapReduce, Error> {
         let prompt = reduce_prompt(reduce, &self.spec.name, rows);
         let digest = blake3::hash(prompt.as_bytes()).to_hex()[..16].to_owned();
@@ -793,7 +794,7 @@ impl Run<'_> {
         };
         match self.start(&base, &prompt, u64::MAX >> 1) {
             Ok((branch, _)) => {
-                let _ = branch.wait_subtree();
+                branchyard_support::best_effort("branch.wait_subtree", branch.wait_subtree());
                 outcome.branch = Some(branch.info().name.clone());
                 outcome.cost_usd = branch.info().cost_usd;
                 match settled(branch.info()) {
